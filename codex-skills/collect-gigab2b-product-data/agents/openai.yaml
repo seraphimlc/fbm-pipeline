@@ -1,0 +1,4 @@
+interface:
+  display_name: "Collect GIGAB2B Product Data"
+  short_description: "从大建云仓商品页批量补齐Excel规格和亚马逊字段"
+  default_prompt: "Use $collect-gigab2b-product-data to collect GIGAB2B product specs from URLs in my spreadsheet and append Amazon-ready fields."

@@ -1,0 +1,6 @@
+{
+  "api_key": "YOUR_API_KEY_HERE",
+  "base_url": "https://ai.t8star.cn",
+  "model": "gpt-image-2",
+  "default_size": "2048x1152"
+}

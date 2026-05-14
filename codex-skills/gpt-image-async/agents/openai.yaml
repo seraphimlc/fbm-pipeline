@@ -1,0 +1,4 @@
+interface:
+  display_name: "GPT Image Async"
+  short_description: "异步生图（GPT-Image-2），支持提交+查询+一键等待"
+  default_prompt: "Use $gpt-image-async to generate an image."
