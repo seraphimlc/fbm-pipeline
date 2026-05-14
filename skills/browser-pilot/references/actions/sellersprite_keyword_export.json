@@ -1,0 +1,113 @@
+{
+  "id": "sellersprite_keyword_export",
+  "name": "卖家精灵关键词反查导出",
+  "site": "sellersprite.com",
+  "description": "输入ASIN，导出关键词反查Excel文件",
+  "auth": {
+    "type": "cookie",
+    "required_cookies": [
+      "Sprite-X-Token"
+    ],
+    "token_lifetime_hours": 24,
+    "refresh_method": "chrome_cookie"
+  },
+  "layers": {
+    "api": {
+      "method": "POST",
+      "url": "https://www.sellersprite.com/v3/api/relation/ta/export-keyword-new",
+      "params": {
+        "market": "1",
+        "exportVariations": "false",
+        "exportGkImages": "false"
+      },
+      "body_template": {
+        "asin": "{ASIN}"
+      },
+      "headers": {
+        "Content-Type": "application/json;charset=UTF-8",
+        "Referer": "https://www.sellersprite.com/v3/keyword-reverse"
+      },
+      "response_type": "blob",
+      "verify": {
+        "http_status": 200,
+        "content_type": "application/octet-stream"
+      },
+      "verified_date": "2026-05-01",
+      "note": "前端拦截器将export-keyword改写为export-keyword-new，API调用时直接用-new后缀"
+    },
+    "page": {
+      "url_template": "https://www.sellersprite.com/v3/keyword-reverse?q={ASIN}&marketId=1",
+      "steps": [
+        {
+          "action": "navigate",
+          "url_template": "https://www.sellersprite.com/v3/keyword-reverse?q={ASIN}&marketId=1",
+          "verify": {
+            "title_contains": "关键词反查"
+          }
+        },
+        {
+          "action": "wait",
+          "seconds": 5
+        },
+        {
+          "action": "click",
+          "selectors": [
+            {
+              "type": "css",
+              "value": "button.el-button.my-btn.success-border"
+            },
+            {
+              "type": "text",
+              "value": "导出",
+              "exclude": "导出明细"
+            },
+            {
+              "type": "aria",
+              "value": "导出"
+            }
+          ],
+          "verify": {
+            "download_started": "ReverseASIN-US-{ASIN}"
+          }
+        },
+        {
+          "action": "wait",
+          "seconds": 3
+        }
+      ]
+    },
+    "multimodal": {
+      "steps": [
+        {
+          "action": "screenshot"
+        },
+        {
+          "action": "vlm_identify",
+          "prompt": "找到'导出'按钮的位置（注意排除'导出明细'按钮）"
+        },
+        {
+          "action": "mouse_click",
+          "position": "vlm_result"
+        },
+        {
+          "action": "wait",
+          "seconds": 2
+        },
+        {
+          "action": "screenshot"
+        },
+        {
+          "action": "vlm_verify",
+          "prompt": "是否出现了下载提示或文件已开始下载？"
+        }
+      ]
+    }
+  },
+  "fallback_order": [
+    "api",
+    "page",
+    "multimodal"
+  ],
+  "last_used_layer": "api",
+  "last_success_date": "2026-05-01"
+}

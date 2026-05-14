@@ -1,0 +1,3 @@
+display_name: "Amazon A+ GPT Image Generator"
+short_description: "Generate Amazon A+ images from Scriptwriter prompts with mandatory reference images and final-size post-processing."
+default_prompt: "Generate one Amazon A+ image from a product folder's gpt_image_scripts.json using its reference images, save raw and final outputs, and update the workbook when requested."

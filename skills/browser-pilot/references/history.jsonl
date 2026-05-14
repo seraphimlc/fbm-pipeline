@@ -1,0 +1,3 @@
+{"timestamp": "2026-05-01T14:32:46.566546", "action_id": "sellersprite_keyword_export", "layer": "api", "success": false, "params": {"ASIN": "B0FT8SYRMK"}, "detail": "{'success': False, 'status_code': 400, 'path': '/Users/jiyuhang/Documents/F/亚马逊工作目录/亚马逊商品/export_B0FT8SYRMK_1777617165.xlsx'}"}
+{"timestamp": "2026-05-01T14:33:00.986559", "action_id": "sellersprite_keyword_export", "layer": "page", "success": true, "params": {"ASIN": "B0FT8SYRMK"}, "detail": "所有步骤完成"}
+{"timestamp": "2026-05-01T14:34:26.633038", "action_id": "sellersprite_keyword_export", "layer": "api", "success": true, "params": {"ASIN": "B0FT8SYRMK"}, "detail": "{'success': True, 'status_code': 200, 'path': '/Users/jiyuhang/Documents/F/亚马逊工作目录/亚马逊商品/ReverseASIN-US-B0FT8SYRMK-Keywords.xlsx'}"}

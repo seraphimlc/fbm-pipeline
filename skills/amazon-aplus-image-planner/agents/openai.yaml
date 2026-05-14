@@ -1,0 +1,4 @@
+interface:
+  display_name: "Amazon A+ Image Planner"
+  short_description: "Plan five Amazon A+ images from listing copy and product-folder image analysis."
+  default_prompt: "根据 Amazon Listing Copywriter 的标题/五点，以及商品 ID 文件夹里的 image analysis/aplus_planner_input，规划五张 Amazon A+ 图片并输出到同一商品文件夹。"

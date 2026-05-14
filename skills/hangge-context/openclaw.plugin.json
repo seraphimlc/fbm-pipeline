@@ -1,0 +1,54 @@
+{
+  "id": "hangge-context",
+  "name": "Hangge Context Engine",
+  "description": "Context engine plugin integrating Hangge Assistant memory system + skill auto-generation",
+  "version": "4.0.0",
+  "kind": "context-engine",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "apiUrl": {
+        "type": "string",
+        "default": "http://localhost:8000",
+        "description": "Hangge Assistant API base URL"
+      },
+      "maxMemories": {
+        "type": "number",
+        "default": 5,
+        "description": "Maximum number of memories to inject"
+      },
+      "minRelevance": {
+        "type": "number",
+        "default": 0.3,
+        "description": "Minimum relevance score for memory recall"
+      },
+      "skillMonitorEnabled": {
+        "type": "boolean",
+        "default": true,
+        "description": "Enable tool call monitoring and skill auto-generation"
+      }
+    }
+  },
+  "uiHints": {
+    "apiUrl": {
+      "label": "API URL",
+      "placeholder": "http://localhost:8000",
+      "help": "Hangge Assistant backend API address"
+    },
+    "maxMemories": {
+      "label": "Max Memories",
+      "placeholder": "5",
+      "help": "Maximum number of memories to inject per turn"
+    },
+    "minRelevance": {
+      "label": "Min Relevance",
+      "placeholder": "0.3",
+      "help": "Minimum cosine similarity score for memory recall"
+    },
+    "skillMonitorEnabled": {
+      "label": "Skill Monitor",
+      "help": "Monitor tool calls and auto-generate skills when patterns are detected"
+    }
+  }
+}

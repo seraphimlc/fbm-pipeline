@@ -1,0 +1,87 @@
+{
+  "version": 4,
+  "last_updated": "2026-05-01",
+  "verified_date": "2026-05-01",
+
+  "api": {
+    "name": "直接API导出（龙虾路线）",
+    "description": "0浏览器0多模态，直接调用卖家精灵后端API导出Excel",
+    "discovery": "从JS源码 chunk-01ccfd8e 逆向",
+
+    "endpoints": {
+      "export_keyword": {
+        "url": "/v3/api/relation/ta/export-keyword-new",
+        "method": "POST",
+        "content_type": "application/json;charset=UTF-8",
+        "response_type": "blob (xlsx)",
+        "params": {
+          "market": "市场ID (1=美国, 2=英国, 3=德国, 4=法国, 5=意大利, 6=西班牙, 7=日本)",
+          "exportVariations": "是否导出变体 (true/false)",
+          "exportGkImages": "是否导出广告图片 (true/false)"
+        },
+        "body": {"asin": "B0GMWKDNBC"},
+        "auth": "Cookie中的 Sprite-X-Token (JWT, 约24h有效)",
+        "note": "前端拦截器会将 export-keyword 改写为 export-keyword-new，API调用时直接用 -new 后缀",
+        "verified": true,
+        "verified_note": "2026-05-01 B0GMWKDNBC 验证通过，509KB Excel，2000条关键词"
+      },
+      "async_export_keyword": {
+        "url": "/v3/api/relation/async-export-keyword-new",
+        "method": "POST",
+        "params": {
+          "market": "市场ID",
+          "exportVariations": "是否导出变体"
+        },
+        "body": {"asin": "B0GMWKDNBC"},
+        "note": "大数据量时使用异步导出",
+        "verified": false
+      },
+      "monthly": {
+        "url": "/v3/api/relation/ta/monthly",
+        "method": "GET",
+        "params": {
+          "asin": "ASIN",
+          "station": "市场代码 (COM=美国)",
+          "month": "月份(可选)"
+        },
+        "note": "获取商品月度概览数据（关键词数、BSR等），无需登录即可调用",
+        "verified": true,
+        "verified_note": "2026-05-01 B0GMWKDNBC 验证通过，返回 keywords:2025, BSR:12731"
+      }
+    },
+
+    "auth": {
+      "type": "Cookie",
+      "required_cookies": ["Sprite-X-Token"],
+      "optional_cookies": ["ecookie", "current_guest", "rank-login-user"],
+      "token_lifetime": "~24h",
+      "auto_refresh": "从Chrome document.cookie 读取"
+    }
+  },
+
+  "download": {
+    "file_pattern": "ReverseASIN-US-{ASIN}",
+    "file_regex": "ReverseASIN-US-(B0[A-Z0-9]{8})",
+    "default_output_dir": "~/Documents/F/亚马逊工作目录/亚马逊商品/",
+    "content_disposition_format": "attachment; filename=ReverseASIN-US-{ASIN}-Keywords({count})_.xlsx"
+  },
+
+  "legacy_routes": {
+    "_comment": "以下为旧路线（v1），已废弃，保留仅供参考",
+    "route_a": {
+      "name": "URL直连（已废弃）",
+      "url_template": "https://www.sellersprite.com/v3/keyword-reverse?q={ASIN}&marketId=1",
+      "selectors": {
+        "export_button": "button.el-button.my-btn.success-border"
+      }
+    },
+    "route_b": {
+      "name": "Amazon页面+扩展（已废弃）",
+      "url_template": "https://www.amazon.com/dp/{ASIN}",
+      "selectors": {
+        "keyword_reverse_tag": ".bottom-first-line-btn",
+        "export_button": "button.btn-ext-green"
+      }
+    }
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Amazon Main Image Curator"
+  short_description: "Curate Amazon galleries and export image analysis to product folders."
+  default_prompt: "Analyze my workbook and ID-named image folders, select compliant Amazon MAIN and supporting gallery images, export full image analysis into each product folder, and keep Excel lightweight with paths and summaries."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Amazon Listing Copywriter"
+  short_description: "Rewrite Amazon titles, bullets, and keywords"
+  default_prompt: "Use $amazon-listing-copywriter to rewrite my Amazon title, bullets, and search terms from the listing materials I provide."

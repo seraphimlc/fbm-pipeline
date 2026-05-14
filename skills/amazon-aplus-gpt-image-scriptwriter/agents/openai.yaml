@@ -1,0 +1,4 @@
+interface:
+  display_name: "Amazon A+ GPT Image Scriptwriter"
+  short_description: "Turn Amazon A+ image plans into GPT Image generation scripts."
+  default_prompt: "读取商品 ID 文件夹里的 image analysis/aplus_image_plan，把五张 A+ 图规划转换成可直接用于 GPT Image 生图的脚本，并输出 gpt_image_scripts.md 和 gpt_image_scripts.json。"
