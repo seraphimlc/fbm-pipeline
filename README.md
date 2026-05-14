@@ -1,0 +1,70 @@
+# FBM Pipeline
+
+亚马逊 FBM 铺货自动化管线系统
+
+## 快速开始
+
+```bash
+# 一键启动（后端 8190 + 前端 3190）
+./scripts/start.sh
+
+# 或分别启动
+cd backend && source .venv/bin/activate && uvicorn app.main:app --port 8190
+cd frontend && npm run dev
+```
+
+## 端口
+
+| 服务 | 端口 |
+|------|------|
+| 后端 API | http://localhost:8190 |
+| API 文档 | http://localhost:8190/docs |
+| 前端 | http://localhost:3190 |
+
+## 技术栈
+
+- **后端**: FastAPI + SQLAlchemy (async) + SQLite
+- **前端**: React + TypeScript + Ant Design + Vite
+- **AI**: GPT-5.5 (LLM) + Qwen3.6-plus (VLM) + GPT Image
+
+## Pipeline 10步流程
+
+```
+0. created → 1. 商品采集 → 2. 利润计算 → 3. 关键词(卖家精灵) → 4. 类目获取
+→ 5. Listing构建 → 6. 主图分析 → 7. A+规划 → 8. A+脚本 → 9. A+出图 → completed
+```
+
+## 项目结构
+
+```
+fbm-pipeline/
+├── backend/
+│   ├── app/
+│   │   ├── main.py          # FastAPI 入口
+│   │   ├── config.py        # 配置管理
+│   │   ├── database.py      # 数据库连接
+│   │   ├── models/          # SQLAlchemy 模型
+│   │   │   ├── models.py    # 4表: products, product_data, product_images, product_aplus
+│   │   │   └── status.py    # Pipeline 步骤定义
+│   │   └── api/
+│   │       ├── products.py  # 商品 CRUD + Pipeline 控制
+│   │       ├── config_api.py # 系统配置
+│   │       └── schemas.py   # Pydantic 模型
+│   ├── data/                # SQLite 数据库文件
+│   └── requirements.txt
+├── frontend/
+│   ├── src/
+│   │   ├── App.tsx
+│   │   ├── api/index.ts     # API 客户端 + 类型定义
+│   │   ├── components/
+│   │   │   └── MainLayout.tsx
+│   │   └── pages/
+│   │       ├── ProductList.tsx    # 商品列表
+│   │       ├── CreateProduct.tsx  # 创建任务
+│   │       └── ProductDetail.tsx  # 商品详情 + Pipeline 进度
+│   ├── index.html
+│   └── package.json
+├── data/                    # 商品数据目录
+├── docs/                    # 设计文档
+└── scripts/start.sh         # 一键启动
+```
