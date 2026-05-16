@@ -15,11 +15,15 @@
 | 商品 | GET | `/api/products/{id}` | 商品详情（含子表） |
 | 商品 | PATCH | `/api/products/{id}` | 更新商品信息 |
 | 商品 | DELETE | `/api/products/{id}` | 删除商品 |
+| 商品 | GET | `/api/products/import/template` | 下载批量导入模板 |
+| 商品 | POST | `/api/products/import` | 批量导入任务 |
 | Pipeline | POST | `/api/products/{id}/start` | 启动 Pipeline |
+| Pipeline | POST | `/api/products/bulk-start` | 批量启动待处理任务 |
 | Pipeline | POST | `/api/products/{id}/pause` | 暂停 Pipeline |
 | Pipeline | POST | `/api/products/{id}/retry` | 重试失败步骤 |
 | Pipeline | POST | `/api/products/{id}/step/{step}` | 单独执行某步 |
 | 配置 | GET | `/api/config` | 获取系统配置（脱敏） |
+| 配置 | PATCH | `/api/config` | 保存系统配置到 `.env`，重启后生效 |
 | 配置 | GET | `/api/config/status` | 系统健康检查 |
 | 图片 | GET | `/api/images/{path}` | 本地图片代理 |
 | 健康 | GET | `/api/health` | 健康检查 |
@@ -39,7 +43,8 @@ POST /api/products
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | gigab2b_url | string | ✅ | — | 大健云仓商品链接 |
-| competitor_asin | string \| null | ❌ | null | 竞品 ASIN（用于关键词反查） |
+| competitor_asin | string \| null | 前端必填 | null | 竞品 ASIN（用于关键词反查） |
+| upc | string \| null | 前端必填 | null | UPC，用于后续导入模板和 ASIN 同步 |
 | brand | string | ❌ | "Vindhvisk" | 品牌 |
 
 **请求示例**：
@@ -47,6 +52,7 @@ POST /api/products
 {
   "gigab2b_url": "https://www.gigab2b.com/product/detail/W3327A001065",
   "competitor_asin": "B0GMWKDNBC",
+  "upc": "714532191586",
   "brand": "Vindhvisk"
 }
 ```
@@ -56,6 +62,7 @@ POST /api/products
 **逻辑**：
 1. 创建 `Product` 记录，状态为 `created`
 2. 自动创建3张空子表（`ProductData`、`ProductImage`、`ProductAplus`）
+3. 同步创建一条未确认的商品资料记录，待 Pipeline 完成并人工确认后进入商品资料库
 
 ---
 
@@ -147,7 +154,35 @@ POST /api/products/{product_id}/start
 
 ---
 
-### 2.2 暂停 Pipeline
+### 2.2 批量启动 Pipeline
+
+```
+POST /api/products/bulk-start
+```
+
+**请求体**：
+```json
+{
+  "product_ids": [1, 2, 3]
+}
+```
+
+**逻辑**：只启动 `created` 状态的任务，其他状态会被跳过并返回原因。单次最多 100 个任务。
+
+**响应**：
+```json
+{
+  "requested": 3,
+  "started": 2,
+  "skipped": 1,
+  "errors": ["任务 3 当前状态为 failed，已跳过"],
+  "started_ids": [1, 2]
+}
+```
+
+---
+
+### 2.3 暂停 Pipeline
 
 ```
 POST /api/products/{product_id}/pause
@@ -162,7 +197,7 @@ POST /api/products/{product_id}/pause
 
 ---
 
-### 2.3 重试失败步骤
+### 2.4 重试失败步骤
 
 ```
 POST /api/products/{product_id}/retry
@@ -183,7 +218,7 @@ POST /api/products/{product_id}/retry
 
 ---
 
-### 2.4 单独执行某步
+### 2.5 单独执行某步
 
 ```
 POST /api/products/{product_id}/step/{step}
@@ -191,7 +226,7 @@ POST /api/products/{product_id}/step/{step}
 
 **路径参数**：
 - `product_id` (int) — 商品 ID
-- `step` (int) — 步骤编号（1~9）
+- `step` (int) — 步骤编号（1~10）
 
 **用途**：调试或重跑某个特定步骤（不改变商品主状态）
 
@@ -205,7 +240,7 @@ POST /api/products/{product_id}/step/{step}
 ```
 
 **错误**：
-- `400` — step 不在 1~9 范围内
+- `400` — step 不在 1~10 范围内
 - `500` — 步骤执行失败
 
 ---
@@ -230,9 +265,24 @@ GET /api/config
   "vlm_model": "qwen3.6-plus",
   "gpt_image_model": "gpt-image-2",
   "product_base_dir": "/Users/.../大健云仓",
-  "aplus_concurrency": 5,
+  "pipeline_max_concurrency": 3,
+  "browser_workflow_concurrency": 1,
+  "bulk_start_max_tasks": 100,
+  "aplus_concurrency": 2,
   "poll_interval": 3,
   "step3_4_parallel": true,
+  "step1_extract_retry_attempts": 5,
+  "step1_extract_retry_delay_seconds": 3,
+  "step1_download_timeout_seconds": 300,
+  "step1_material_package_priority": "To B素材包,Retail Ready素材包,Information",
+  "step1_price_missing_policy": "manual_review",
+  "step1_material_missing_policy": "manual_review",
+  "step1_allow_existing_materials": true,
+  "pricing_net_revenue_rate": 0.685,
+  "pricing_target_margin_rate": 0.05,
+  "pricing_min_profit": 10,
+  "pricing_fixed_cost": 9,
+  "pricing_return_credit_rate": 0.06,
   "llm_api_configured": true,
   "vlm_api_configured": true,
   "gpt_image_api_configured": true,
@@ -244,7 +294,45 @@ GET /api/config
 
 ---
 
-### 3.2 系统健康检查
+### 3.2 保存系统配置
+
+```
+PATCH /api/config
+```
+
+**说明**：写入 `backend/.env`，当前运行中的后端不会热更新；重启后端后生效。
+
+**请求示例**：
+```json
+{
+  "pipeline_max_concurrency": 3,
+  "browser_workflow_concurrency": 1,
+  "bulk_start_max_tasks": 100,
+  "aplus_concurrency": 2,
+  "poll_interval": 3,
+  "step1_download_timeout_seconds": 300,
+  "step1_material_package_priority": "To B素材包,Retail Ready素材包,Information",
+  "step1_price_missing_policy": "manual_review",
+  "step1_material_missing_policy": "manual_review",
+  "step1_allow_existing_materials": true,
+  "pricing_target_margin_rate": 0.05,
+  "pricing_min_profit": 10
+}
+```
+
+**响应**：
+```json
+{
+  "status": "saved",
+  "restart_required": true,
+  "env_file": "/Users/.../fbm-pipeline/backend/.env",
+  "updated_fields": ["pipeline_max_concurrency"]
+}
+```
+
+---
+
+### 3.3 系统健康检查
 
 ```
 GET /api/config/status
@@ -349,7 +437,7 @@ GET /api/images/~/Documents/F/亚马逊工作目录/亚马逊商品/大健云仓
 | **基础** | id, product_id | int | 系统 |
 | **Step1采集** | item_code, title, color, material, filler, product_type, dimension_*, weight, packages, features (JSON), variants (JSON), stock, seller, origin, image_count, material_dir | Step 1 |
 | **Step1价格** | value_total, estimated_total | Step 1 |
-| **Step2定价** | suggested_price, cost_total, profit, profit_rate | Step 2 |
+| **Step2定价** | suggested_price, cost_total, profit, profit_rate, pricing_detail | Step 2 |
 | **Step3关键词** | keywords_top (JSON), keyword_excel_path | Step 3 |
 | **Step4类目** | categories (JSON), leaf_category | Step 4 |
 | **Step5 Listing** | listing_title, listing_bullets (JSON), listing_search_terms, listing_check (JSON), listing_primary_keyword, listing_removed_keywords (JSON) | Step 5 |
@@ -372,7 +460,7 @@ GET /api/images/~/Documents/F/亚马逊工作目录/亚马逊商品/大健云仓
 | image_selling_points | string (JSON) \| null | 图片卖点 |
 | category_style | string \| null | 类目视觉风格 |
 | main_image_path | string \| null | 选定的主图路径 |
-| main_image_source | string \| null | 主图来源（original/generated） |
+| main_image_source | string \| null | 主图来源（`vlm_selected`/`fallback_substitute`） |
 | gallery_images | string (JSON) \| null | 副图列表 |
 | gallery_order | string (JSON) \| null | 副图排列顺序 |
 | main_image_summary | string \| null | 主图摘要 |

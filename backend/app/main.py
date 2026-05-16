@@ -1,4 +1,5 @@
 import os
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -10,6 +11,13 @@ from app.database import init_db
 from app.api.products import router as products_router
 from app.api.config_api import router as config_router
 from app.config import settings
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
 
 @asynccontextmanager
@@ -64,6 +72,8 @@ async def serve_image(file_path: str):
         file_path = str(Path.home() / file_path[2:])
     elif file_path.startswith("~"):
         file_path = str(Path.home() / file_path[1:])
+    elif file_path.startswith("Users/"):
+        file_path = "/" + file_path
 
     abs_path = str(Path(file_path).resolve())
 

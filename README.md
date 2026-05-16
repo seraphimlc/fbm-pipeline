@@ -31,7 +31,8 @@ cd frontend && npm run dev
 
 ```
 0. created → 1. 商品采集 → 2. 利润计算 → 3. 关键词(卖家精灵) → 4. 类目获取
-→ 5. Listing构建 → 6. 主图分析 → 7. A+规划 → 8. A+脚本 → 9. A+出图 → completed
+→ 5. Listing构建 → 6. 主图分析 → 7. A+规划 → 8. A+脚本 → 9. A+出图
+→ 10. Amazon导入表格 → pending_review → completed
 ```
 
 ## 项目结构

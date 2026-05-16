@@ -19,7 +19,11 @@ STEP8_APLUS_SCRIPT = "step8_aplus_script"
 STEP8_DONE = "step8_done"
 STEP9_APLUS_IMAGE = "step9_aplus_image"
 STEP9_DONE = "step9_done"
+STEP10_AMAZON_TEMPLATE = "step10_amazon_template"
+STEP10_DONE = "step10_done"
+PENDING_REVIEW = "pending_review"
 COMPLETED = "completed"
+UNAVAILABLE = "unavailable"
 FAILED = "failed"
 PAUSED = "paused"
 
@@ -34,7 +38,10 @@ STEP_ORDER = [
     STEP7_APLUS_PLAN, STEP7_DONE,
     STEP8_APLUS_SCRIPT, STEP8_DONE,
     STEP9_APLUS_IMAGE, STEP9_DONE,
+    STEP10_AMAZON_TEMPLATE, STEP10_DONE,
+    PENDING_REVIEW,
     COMPLETED,
+    UNAVAILABLE,
 ]
 
 # Step number → display name
@@ -49,6 +56,7 @@ STEP_LABELS = {
     7: "A+规划",
     8: "A+脚本",
     9: "A+出图",
+    10: "导入表格",
 }
 
 # Step number → status prefix
@@ -63,4 +71,5 @@ STEP_STATUS_MAP = {
     7: STEP7_APLUS_PLAN,
     8: STEP8_APLUS_SCRIPT,
     9: STEP9_APLUS_IMAGE,
+    10: STEP10_AMAZON_TEMPLATE,
 }

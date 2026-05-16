@@ -4,16 +4,19 @@
 公式：
     T = 预估总额含运费（大健云仓成本）
     G = 货值总计
-    C = T + 9 - 0.06G  (综合成本)
-    P1 = (T + 9 - 0.06G) ÷ 0.635  (5%利润率)
-    P2 = (T + 19 - 0.06G) ÷ 0.685 (保底$10利润)
+    C = T + 固定成本 - 退货保险抵扣率×G  (综合成本)
+    P1 = C ÷ (净收入比例 - 目标净利率)
+    P2 = (C + 最低利润) ÷ 净收入比例
     P = MAX(P1, P2)
-    利润 = P × 0.685 - T - 9 + 0.06G
+    利润 = P × 净收入比例 - C
+    净利率 = 利润 ÷ P
 """
 
 import logging
+import json
 from datetime import datetime
 
+from app.config import settings
 from app.database import async_session
 from app.models import Product, ProductData
 from sqlalchemy import select
@@ -36,31 +39,42 @@ def calculate_price(T: float, G: float) -> dict:
     if not T or not G or T <= 0 or G <= 0:
         return None
 
-    # 综合成本
-    cost = T + 9 - 0.06 * G
+    net_revenue_rate = settings.PRICING_NET_REVENUE_RATE
+    target_margin_rate = settings.PRICING_TARGET_MARGIN_RATE
+    min_profit = settings.PRICING_MIN_PROFIT
+    fixed_cost = settings.PRICING_FIXED_COST
+    return_credit_rate = settings.PRICING_RETURN_CREDIT_RATE
+    if net_revenue_rate <= 0 or target_margin_rate < 0 or net_revenue_rate <= target_margin_rate:
+        raise ValueError("定价配置无效：净收入比例必须大于目标净利率")
 
-    # 公式一：5%利润率
-    P1 = (T + 9 - 0.06 * G) / 0.635
+    # 综合成本：大健含运费成本 + 固定成本预留 - 退货保险抵扣。
+    cost = T + fixed_cost - return_credit_rate * G
 
-    # 公式二：保底$10利润
-    P2 = (T + 19 - 0.06 * G) / 0.685
+    # 公式一：确保目标净利率（利润/售价）。
+    P1 = cost / (net_revenue_rate - target_margin_rate)
+
+    # 公式二：确保单件最低利润。
+    P2 = (cost + min_profit) / net_revenue_rate
 
     # 取较大值
     P = max(P1, P2)
+    selected_rule = "target_margin" if P1 >= P2 else "min_profit"
 
-    # 利润
-    profit = P * 0.685 - T - 9 + 0.06 * G
+    # 利润率按“利润 / 建议售价”计算，存储为百分数数值：5.0 表示 5%。
+    profit = P * net_revenue_rate - cost
     profit_rate = profit / P * 100 if P > 0 else 0
 
     # 费用明细
     breakdown = {
-        "effective_sales": round(P * 0.90, 2),       # 有效成交额
-        "commission": round(P * 0.90 * 0.10, 2),     # 佣金
-        "coupon_discount": round(P * 0.10, 2),       # 优惠券折扣
-        "coupon_clawback": round(P * 0.025, 2),      # 优惠券扣点
-        "insurance": 7,                                # 保险费
-        "ad_fee": 2,                                   # 广告费
-        "return_insurance": round(0.10 * 0.60 * G, 2), # 退货保险赔偿
+        "net_revenue": round(P * net_revenue_rate, 2),
+        "variable_fee": round(P * (1 - net_revenue_rate), 2),
+        "fixed_cost": round(fixed_cost, 2),
+        "return_credit": round(return_credit_rate * G, 2),
+        "target_margin_rate": round(target_margin_rate * 100, 2),
+        "min_profit": round(min_profit, 2),
+        "price_for_margin": round(P1, 2),
+        "price_for_min_profit": round(P2, 2),
+        "selected_rule": selected_rule,
     }
 
     return {
@@ -94,12 +108,11 @@ async def run_pricing(product_id: int) -> dict:
         G = pd.value_total
 
         if not T or not G:
-            logger.warning(
-                f"[Step2] 跳过利润计算（缺少成本数据）: "
+            raise ValueError(
+                "缺少成本数据，停止后续步骤: "
                 f"estimated_total={T}, value_total={G}。"
-                f"请确保已登录大健云仓并重新采集商品。"
+                "请确认大健云仓页面已展示价格/成本字段后重新开始。"
             )
-            return {"skipped": True, "reason": "missing_cost_data"}
 
         logger.info(f"[Step2] 计算利润: T=${T}, G=${G}")
 
@@ -112,6 +125,7 @@ async def run_pricing(product_id: int) -> dict:
         pd.cost_total = calc["cost_total"]
         pd.profit = calc["profit"]
         pd.profit_rate = calc["profit_rate"]
+        pd.pricing_detail = json.dumps(calc["breakdown"], ensure_ascii=False)
         await db.commit()
 
         logger.info(

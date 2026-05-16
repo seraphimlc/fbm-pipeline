@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Card, Form, Input, Button, Typography, message } from 'antd';
+import { Card, Form, Input, Button, Typography, message, Select } from 'antd';
 import { createProduct } from '../api';
 
 const { Title } = Typography;
@@ -10,7 +10,7 @@ const CreateProduct: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [form] = Form.useForm();
 
-  const handleSubmit = async (values: { gigab2b_url: string; competitor_asin?: string; brand?: string }) => {
+  const handleSubmit = async (values: { gigab2b_url: string; competitor_asin?: string; upc?: string; brand?: string }) => {
     setLoading(true);
     try {
       const { data } = await createProduct(values);
@@ -33,11 +33,11 @@ const CreateProduct: React.FC = () => {
           initialValues={{ brand: 'Vindhvisk' }}
         >
           <Form.Item
-            label="大健云仓商品链接"
+            label="原始数据链接"
             name="gigab2b_url"
             rules={[{ required: true, message: '请输入商品链接' }]}
           >
-            <Input placeholder="https://www.gigab2b.com/product-detail/xxxxx" />
+            <Input placeholder="粘贴供应商商品页链接，例如 GIGAB2B 商品链接" />
           </Form.Item>
 
           <Form.Item
@@ -48,8 +48,20 @@ const CreateProduct: React.FC = () => {
             <Input placeholder="B0GMWKDNBC" />
           </Form.Item>
 
+          <Form.Item
+            label="UPC"
+            name="upc"
+            rules={[{ required: true, message: '请输入UPC码' }]}
+          >
+            <Input placeholder="714532191586" />
+          </Form.Item>
+
           <Form.Item label="品牌名" name="brand">
-            <Input placeholder="Vindhvisk" />
+            <Select
+              options={[
+                { label: 'Vindhvisk', value: 'Vindhvisk' },
+              ]}
+            />
           </Form.Item>
 
           <Form.Item>

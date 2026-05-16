@@ -9,14 +9,13 @@ import io
 import json
 import logging
 import httpx
-from datetime import datetime
 from pathlib import Path
 
 import openpyxl
 
 from app.config import settings
 from app.database import async_session
-from app.models import Product, ProductData
+from app.models import Product
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -33,23 +32,76 @@ HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Content-Type": "application/json;charset=UTF-8",
     "Origin": "https://www.sellersprite.com",
-    "Referer": "https://www.sellersprite.com/keyword-reverse-search",
+    "Referer": "https://www.sellersprite.com/v3/keyword-reverse",
 }
+
+PLACEHOLDER_TOKENS = {"", "xxx", "token", "your_token"}
+SELLERSPRITE_LOGIN_URL = "https://www.sellersprite.com/v3/keyword-reverse"
+
+
+class Step3NeedsLogin(RuntimeError):
+    """卖家精灵需要人工登录后才能继续。"""
+
+
+async def _request_manual_sellersprite_login(reason: str) -> None:
+    if settings.STEP3_MANUAL_LOGIN_ON_AUTH_FAILURE:
+        try:
+            from app.pipeline.chrome_ctrl import chrome_open_url_for_user
+
+            opened = await chrome_open_url_for_user(SELLERSPRITE_LOGIN_URL)
+            if opened:
+                logger.warning(f"[Step3] 已打开卖家精灵登录页面，等待人工登录: {reason}")
+        except Exception as e:
+            logger.warning(f"[Step3] 打开卖家精灵登录页面失败: {e}")
+    raise Step3NeedsLogin(f"{reason}。请在 Chrome 登录卖家精灵后点击继续。")
 
 
 async def _get_sellersprite_cookie() -> str:
     """从Chrome获取卖家精灵的完整Cookie"""
     try:
-        from app.pipeline.chrome_ctrl import chrome_execute_js
-        js_result = await chrome_execute_js('document.cookie')
-        if js_result and 'Sprite-X-Token' in js_result:
-            return js_result
+        from app.pipeline.chrome_ctrl import chrome_get_cookie_for_domain, chrome_navigate, chrome_workflow
+
+        async with chrome_workflow("step3_sellersprite_cookie"):
+            cookie = await chrome_get_cookie_for_domain("sellersprite.com")
+            if cookie and "Sprite-X-Token" in cookie:
+                return cookie
+
+            # 如果用户已登录但没有打开卖家精灵标签页，先在专用标签页打开一次页面再读 cookie。
+            await chrome_navigate(SELLERSPRITE_LOGIN_URL, wait=5.0)
+            cookie = await chrome_get_cookie_for_domain("sellersprite.com")
+            if cookie and "Sprite-X-Token" in cookie:
+                return cookie
     except Exception as e:
+        if isinstance(e, Step3NeedsLogin):
+            raise
         logger.debug(f"从Chrome获取cookie失败: {e}")
-    raise RuntimeError("未找到Sprite-X-Token，请先在Chrome登录卖家精灵")
+    await _request_manual_sellersprite_login("未找到卖家精灵登录态")
 
 
-async def fetch_keywords(asin: str) -> list[dict]:
+def _configured_cookie() -> str | None:
+    token = (settings.SELLERSPRITE_TOKEN or "").strip()
+    if token.lower() in PLACEHOLDER_TOKENS:
+        return None
+    return f"Sprite-X-Token={token}"
+
+
+def _is_excel_response(content: bytes) -> bool:
+    return content.startswith(b"PK\x03\x04")
+
+
+def _describe_non_excel_response(content: bytes) -> str:
+    text = content[:500].decode("utf-8", errors="replace").strip()
+    try:
+        data = json.loads(text)
+    except Exception:
+        return text[:300] or "空响应"
+    code = data.get("code")
+    if code == "ERR_GLOBAL_SESSION_EXPIRED":
+        return "卖家精灵登录已失效，请重新登录卖家精灵后继续"
+    return f"卖家精灵返回非Excel数据: {data}"
+
+
+async def fetch_keywords(asin: str) -> tuple[list[dict], bytes]:
     """
     通过卖家精灵API获取ASIN的关键词反查数据
     
@@ -57,13 +109,10 @@ async def fetch_keywords(asin: str) -> list[dict]:
         asin: 亚马逊ASIN
     
     Returns:
-        list[dict]: 关键词列表，每个包含 keyword, search_volume, position 等
+        (关键词列表, 原始Excel bytes)
     """
-    # 优先用配置的token，否则从Chrome获取
-    if settings.SELLERSPRITE_TOKEN:
-        cookie = f"Sprite-X-Token={settings.SELLERSPRITE_TOKEN}"
-    else:
-        cookie = await _get_sellersprite_cookie()
+    # 优先用配置的token，否则从Chrome登录态获取完整Cookie。
+    cookie = _configured_cookie() or await _get_sellersprite_cookie()
 
     headers = {**HEADERS, "Cookie": cookie}
 
@@ -85,59 +134,65 @@ async def fetch_keywords(asin: str) -> list[dict]:
         )
 
         if resp.status_code == 401:
-            raise RuntimeError("卖家精灵 Token 已过期，请重新获取")
+            await _request_manual_sellersprite_login("卖家精灵登录已失效")
+        if resp.status_code == 403:
+            raise RuntimeError("卖家精灵没有导出权限，请确认账号已登录且有对应会员权限")
         if resp.status_code == 429:
             raise RuntimeError("卖家精灵 API 限流，请稍后重试")
         if resp.status_code != 200:
             raise RuntimeError(f"卖家精灵 API 错误: {resp.status_code} {resp.text[:200]}")
 
-        # 返回的是 Excel 文件
+        # 成功时返回 Excel；异常时可能仍是 200 + JSON/HTML。
         content_type = resp.headers.get("content-type", "")
         if "json" in content_type:
-            # 可能返回了错误JSON
             data = resp.json()
+            if data.get("code") == "ERR_GLOBAL_SESSION_EXPIRED":
+                await _request_manual_sellersprite_login("卖家精灵登录已失效")
             if data.get("code") != 0:
                 raise RuntimeError(f"卖家精灵 API 返回错误: {data}")
+        if not _is_excel_response(resp.content):
+            reason = _describe_non_excel_response(resp.content)
+            if "登录已失效" in reason:
+                await _request_manual_sellersprite_login("卖家精灵登录已失效")
+            raise RuntimeError(reason)
 
         # 解析 Excel
         keywords = _parse_excel(resp.content)
         logger.info(f"[Step3] 获取到 {len(keywords)} 个关键词")
-        return keywords
+        return keywords, resp.content
 
 
 def _parse_excel(content: bytes) -> list[dict]:
     """解析卖家精灵导出的 Excel"""
-    wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    except Exception as e:
+        raise RuntimeError(f"卖家精灵Excel解析失败: {e}; {_describe_non_excel_response(content)}") from e
     ws = wb.active
 
     rows = list(ws.iter_rows(values_only=True))
     if not rows:
         return []
 
-    # 第一行是表头
-    headers = [str(h or "").strip() for h in rows[0]]
-    
-    # 标准化列名映射（卖家精灵可能的列名）
+    header_idx = None
     col_map = {}
-    for i, h in enumerate(headers):
-        h_lower = h.lower()
-        if "keyword" in h_lower or "搜索词" in h or "关键词" in h:
-            col_map["keyword"] = i
-        elif "search volume" in h_lower or "搜索量" in h or "搜索热度" in h:
-            col_map["search_volume"] = i
-        elif "position" in h_lower or "排名" in h:
-            col_map["position"] = i
-        elif "page" in h_lower or "页码" in h:
-            col_map["page"] = i
-        elif "product count" in h_lower or "商品数" in h or "竞品数" in h:
-            col_map["product_count"] = i
-        elif "asin" in h_lower:
-            col_map["asin"] = i
-        elif "月搜索量" in h:
-            col_map["monthly_volume"] = i
+    for r_idx, row in enumerate(rows[:10]):
+        candidate_headers = [str(h or "").strip() for h in row]
+        candidate_map = _build_col_map(candidate_headers)
+        if "keyword" in candidate_map:
+            header_idx = r_idx
+            col_map = candidate_map
+            logger.info(f"[Step3] Excel表头行={header_idx + 1}, headers={candidate_headers}")
+            break
+
+    if header_idx is None:
+        preview = [[str(c or "").strip() for c in row[:8]] for row in rows[:5]]
+        logger.warning(f"[Step3] 未识别到关键词表头，前5行预览: {preview}")
+        wb.close()
+        return []
 
     keywords = []
-    for row in rows[1:]:
+    for row in rows[header_idx + 1:]:
         entry = {}
         for field, idx in col_map.items():
             entry[field] = row[idx] if idx < len(row) else None
@@ -148,11 +203,45 @@ def _parse_excel(content: bytes) -> list[dict]:
     return keywords
 
 
+def _build_col_map(headers: list[str]) -> dict:
+    """标准化列名映射（卖家精灵可能的列名）"""
+    col_map = {}
+    for i, h in enumerate(headers):
+        h = h.strip()
+        h_lower = h.lower()
+        if "keyword" not in col_map and (h_lower == "keyword" or h in {"关键词", "搜索词"}):
+            col_map["keyword"] = i
+        elif "search_volume" not in col_map and ("search volume" in h_lower or h in {"搜索量", "搜索热度"}):
+            col_map["search_volume"] = i
+        elif "position" not in col_map and (
+            h_lower == "position" or h in {"自然排名", "排名"}
+        ):
+            col_map["position"] = i
+        elif "page" not in col_map and (
+            h_lower == "page" or h in {"自然排名页码", "页码"}
+        ):
+            col_map["page"] = i
+        elif "product_count" not in col_map and ("product count" in h_lower or h in {"商品数", "竞品数"}):
+            col_map["product_count"] = i
+        elif "asin" not in col_map and h_lower == "asin":
+            col_map["asin"] = i
+        elif "monthly_volume" not in col_map and h == "月搜索量":
+            col_map["monthly_volume"] = i
+    return col_map
+
+
 def _top_keywords(keywords: list[dict], limit: int = 20) -> list[dict]:
     """取搜索量最高的 top N 关键词"""
+    def volume_value(item: dict) -> int:
+        raw = item.get("search_volume") or item.get("monthly_volume") or 0
+        try:
+            return int(float(str(raw).replace(",", "").strip()))
+        except (TypeError, ValueError):
+            return 0
+
     sorted_kw = sorted(
         keywords,
-        key=lambda x: int(x.get("search_volume") or x.get("monthly_volume") or 0),
+        key=volume_value,
         reverse=True,
     )
     return sorted_kw[:limit]
@@ -176,19 +265,12 @@ async def run_keywords(product_id: int) -> dict:
 
         asin = product.competitor_asin
         if not asin:
-            logger.warning("[Step3] 跳过关键词获取：未设置竞品ASIN")
-            return {"skipped": True, "reason": "no_competitor_asin"}
-
-        # 检查是否有卖家精灵 Token
-        if not settings.SELLERSPRITE_TOKEN:
-            logger.warning(
-                "[Step3] 跳过关键词获取：未配置卖家精灵Token。"
-                "请在 .env 设置 SELLERSPRITE_TOKEN 或在Chrome登录卖家精灵。"
-            )
-            return {"skipped": True, "reason": "no_sellersprite_token"}
+            raise ValueError("未设置竞品ASIN，无法获取关键词")
 
         # 调用API
-        keywords = await fetch_keywords(asin)
+        keywords, excel_bytes = await fetch_keywords(asin)
+        if not keywords:
+            raise RuntimeError(f"卖家精灵未返回关键词数据: ASIN={asin}")
 
         # 取 Top 20
         top = _top_keywords(keywords, 20)
@@ -200,8 +282,7 @@ async def run_keywords(product_id: int) -> dict:
         if keyword_dir:
             keyword_dir.mkdir(parents=True, exist_ok=True)
             excel_path = keyword_dir / f"keywords_{asin}.xlsx"
-            # 将原始Excel保存（如果有）
-            # TODO: 如果需要保存原始Excel，需要在fetch_keywords中返回原始bytes
+            excel_path.write_bytes(excel_bytes)
 
         # 保存到数据库
         if pd:

@@ -75,8 +75,19 @@
     result.weight = productDimensions['Product Weight (lbs.)'] || productDimensions['产品重量 (磅)'] || productInfo['产品重量 (磅)'] || null;
 
     // ===== 价格 =====
-    var valueMatch = fullText.match(/货值总计[^$]*\$?([0-9,.]+)/);
-    result.valueTotal = valueMatch ? valueMatch[1] : null;
+    function findMoneyNear(labelRegex) {
+        for (var mi = 0; mi < lines.length; mi++) {
+            if (labelRegex.test(lines[mi])) {
+                var windowText = lines.slice(mi, Math.min(lines.length, mi + 6)).join(' ');
+                var moneyMatch = windowText.match(/\$?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)/);
+                if (moneyMatch) return moneyMatch[1];
+            }
+        }
+        return null;
+    }
+
+    var valueMatch = fullText.match(/货值总计[^$0-9]*\$?\s*([0-9,.]+)/);
+    result.valueTotal = valueMatch ? valueMatch[1] : findMoneyNear(/货值总计|Total\s+Value/i);
     var priceMatch = fullText.match(/\$([0-9,.]+)\s*-\s*\$([0-9,.]+)/);
     if (priceMatch) {
         result.priceMin = priceMatch[1];
@@ -88,17 +99,49 @@
 
     // ===== 预估总额（含物流费）=====
     // 匹配 "预估总额" 后面跟着 "$xxx.xx /件"
-    var estimatedMatch = fullText.match(/预估总额[^$]*\$([0-9,.]+)\s*\/\s*件/);
-    result.estimatedTotal = estimatedMatch ? estimatedMatch[1] : null;
+    var estimatedMatch = fullText.match(/预估总额[^$0-9]*\$?\s*([0-9,.]+)\s*\/?\s*(?:件|Piece|pcs)?/);
+    result.estimatedTotal = estimatedMatch ? estimatedMatch[1] : findMoneyNear(/预估总额|Estimated\s+Total/i);
 
     // ===== 物流费 =====
     // 一件代发: "预估物流费: $xx.xx /件"
-    var shippingMatch = fullText.match(/预估物流费:\s*\$([0-9,.]+)\s*\/件/);
-    result.shippingCost = shippingMatch ? shippingMatch[1] : null;
+    var shippingMatch = fullText.match(/预估物流费[：:]?\s*\$([0-9,.]+)\s*\/?\s*(?:件|Piece|pcs)?/);
+    result.shippingCost = shippingMatch ? shippingMatch[1] : findMoneyNear(/预估物流费|Estimated\s+Shipping/i);
     // 云送仓范围: "$xx.xx~$xx.xx /件"
     var shippingRangeMatch = fullText.match(/预估物流费:\s*\$([0-9,.]+)~\$([0-9,.]+)\s*\/件/);
     result.shippingCostMin = shippingRangeMatch ? shippingRangeMatch[1] : null;
     result.shippingCostMax = shippingRangeMatch ? shippingRangeMatch[2] : null;
+
+    // ===== 库存 =====
+    function findStock() {
+        var stockLabels = [
+            /^(?:库存|可售库存|现货库存|Stock|Available Stock|Inventory|Qty Available)$/i,
+            /(?:库存|可售库存|现货库存|Stock|Available Stock|Inventory|Qty Available)[：:]\s*([0-9,]+)\s*(?:件|pcs?|pieces?|units?)?/i
+        ];
+        for (var si = 0; si < lines.length; si++) {
+            var line = lines[si];
+            if (/Package Quantity|包裹数量/i.test(line)) continue;
+            var inlineMatch = line.match(stockLabels[1]);
+            if (inlineMatch) return inlineMatch[1];
+            if (stockLabels[0].test(line)) {
+                var next = lines[si + 1] || '';
+                if (/Package Quantity|包裹数量/i.test(next)) continue;
+                var nextMatch = next.match(/([0-9,]+)\s*(?:件|pcs?|pieces?|units?)?/i);
+                if (nextMatch) return nextMatch[1];
+            }
+        }
+        return null;
+    }
+    result.stock = findStock();
+
+    // ===== 可售状态 =====
+    var unavailableLine = lines.find(function(line) {
+        return /^(商品已下架|已下架|下架|已售罄|售罄|Sold Out|Out of Stock|Unavailable|Discontinued)$/i.test(line);
+    });
+    if (!unavailableLine && /(商品已下架|This product is no longer available|Product not found|Sold Out|Out of Stock|Currently unavailable)/i.test(fullText)) {
+        unavailableLine = '页面显示商品不可售';
+    }
+    result.availabilityStatus = unavailableLine ? 'offline' : 'available';
+    result.availabilityReason = unavailableLine || null;
 
     // ===== 变体 =====
     var variants = [];
@@ -118,6 +161,7 @@
     // ===== 包装信息 =====
     var packages = [];
     var currentSubItem = null;
+    var packageSection = {};
     for (var i = 0; i < lines.length; i++) {
         var subMatch = lines[i].match(/(?:子产品|Sub-item)\s*\d+[：:]\s*(W[0-9A-Z]+)/i);
         if (subMatch) {
@@ -136,6 +180,35 @@
                 currentSubItem = null;
             }
         }
+
+        if (/^(?:包装尺寸|Package Size)$/.test(lines[i])) {
+            for (var pi = i + 1; pi < Math.min(lines.length, i + 16); pi++) {
+                var keyLine = lines[pi].replace(/[：:]$/, '').trim();
+                var valueLine = lines[pi + 1] ? lines[pi + 1].trim() : '';
+                if (/^(?:产品特点|Features?|产品信息|Product Information|产品尺寸|Product Dimensions)$/.test(keyLine)) break;
+                if (/^(?:长度 \(英寸\)|Length \(in\.\)|Package Length \(in\.\))$/.test(keyLine)) {
+                    packageSection.length = valueLine;
+                    pi += 1;
+                } else if (/^(?:宽度 \(英寸\)|Width \(in\.\)|Package Width \(in\.\))$/.test(keyLine)) {
+                    packageSection.width = valueLine;
+                    pi += 1;
+                } else if (/^(?:高度 \(英寸\)|Height \(in\.\)|Package Height \(in\.\))$/.test(keyLine)) {
+                    packageSection.height = valueLine;
+                    pi += 1;
+                } else if (/^(?:重量 \(磅\)|Weight \(lbs\.\)|Package Weight \(lbs\.\))$/.test(keyLine)) {
+                    packageSection.weight = valueLine;
+                    pi += 1;
+                }
+            }
+        }
+    }
+    if (packages.length === 0 && packageSection.length && packageSection.width && packageSection.height && packageSection.weight) {
+        packages.push({
+            code: result.itemCode || '',
+            qty: '1',
+            dimensions: packageSection.length + ' * ' + packageSection.width + ' * ' + packageSection.height + ' in. ' + packageSection.weight + ' lbs.',
+            weight: packageSection.weight + ' lbs'
+        });
     }
     result.packages = packages;
 
@@ -227,6 +300,21 @@
         descText = preText.innerText.trim();
     }
     result.descriptionText = descText || null;
+
+    // ===== 原始压缩包/附件链接 =====
+    var fileUrls = [];
+    var fileExtRe = /\.(zip|rar|7z|pdf|xlsx?|docx?|csv)(\?|#|$)/i;
+    document.querySelectorAll('a[href]').forEach(function(a) {
+        var href = a.getAttribute('href') || '';
+        if (!href || href.indexOf('javascript:') === 0) return;
+        if (fileExtRe.test(href) || /download|attachment|file/i.test(href)) {
+            try {
+                href = new URL(href, location.href).href;
+            } catch(e) {}
+            if (fileUrls.indexOf(href) === -1) fileUrls.push(href);
+        }
+    });
+    result.fileUrls = fileUrls;
 
     return JSON.stringify(result);
 })()

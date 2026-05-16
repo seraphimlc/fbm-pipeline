@@ -1,13 +1,16 @@
 import React from 'react';
-import { useNavigate, useLocation, Outlet } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { Layout, Menu, Typography } from 'antd';
 import {
   ShoppingOutlined,
+  SyncOutlined,
+  PictureOutlined,
   PlusCircleOutlined,
   SettingOutlined,
+  UnorderedListOutlined,
 } from '@ant-design/icons';
 
-const { Header, Content } = Layout;
+const { Sider, Content } = Layout;
 const { Title } = Typography;
 
 const MainLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -15,7 +18,10 @@ const MainLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const location = useLocation();
 
   const menuItems = [
-    { key: '/products', icon: <ShoppingOutlined />, label: '商品列表' },
+    { key: '/products', icon: <UnorderedListOutlined />, label: '商品生成任务' },
+    { key: '/catalog', icon: <ShoppingOutlined />, label: '商品列表' },
+    { key: '/asin-sync', icon: <SyncOutlined />, label: 'ASIN同步' },
+    { key: '/aplus-upload', icon: <PictureOutlined />, label: 'A+上传' },
     { key: '/products/new', icon: <PlusCircleOutlined />, label: '创建任务' },
     { key: '/config', icon: <SettingOutlined />, label: '系统配置' },
   ];
@@ -29,22 +35,37 @@ const MainLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
         : location.pathname;
 
   return (
-    <Layout style={{ minHeight: '100vh' }}>
-      <Header style={{ display: 'flex', alignItems: 'center', background: '#fff', padding: '0 24px', borderBottom: '1px solid #f0f0f0' }}>
-        <Title level={4} style={{ margin: 0, marginRight: 40, whiteSpace: 'nowrap' }}>
-          📦 FBM 铺货自动化
-        </Title>
+    <Layout style={{ minHeight: '100vh', background: '#f5f7fb' }}>
+      <Sider
+        width={220}
+        theme="light"
+        style={{
+          borderRight: '1px solid #f0f0f0',
+          minHeight: '100vh',
+          position: 'sticky',
+          top: 0,
+          alignSelf: 'flex-start',
+        }}
+      >
+        <div style={{ padding: '18px 20px 14px', borderBottom: '1px solid #f0f0f0' }}>
+          <Title level={4} style={{ margin: 0, lineHeight: 1.25 }}>
+            FBM铺货
+          </Title>
+          <Typography.Text type="secondary" style={{ fontSize: 12 }}>自动化工作台</Typography.Text>
+        </div>
         <Menu
-          mode="horizontal"
+          mode="inline"
           selectedKeys={[selectedKey]}
           items={menuItems}
           onClick={({ key }) => navigate(key)}
-          style={{ flex: 1, border: 'none' }}
+          style={{ border: 'none', paddingTop: 8 }}
         />
-      </Header>
-      <Content style={{ padding: '24px', maxWidth: 1400, margin: '0 auto', width: '100%' }}>
-        {children}
-      </Content>
+      </Sider>
+      <Layout style={{ background: '#f5f7fb' }}>
+        <Content style={{ padding: '24px', maxWidth: 1440, margin: '0 auto', width: '100%' }}>
+          {children}
+        </Content>
+      </Layout>
     </Layout>
   );
 };
