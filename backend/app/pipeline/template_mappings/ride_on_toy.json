@@ -4,6 +4,13 @@
   "category_type": "ride_on_toy",
   "template_path": "/Users/jiyuhang/Documents/F/重要模板备份/商品导入模板/andy店/RIDE_ON_TOY.xlsm",
   "output_filename": "{item_code}_amazon_ride_on_toy_import.xlsm",
+  "item_type_keyword_options": [
+    "玩具和游戏 > 婴幼玩具 > 摇摆木马和动物 (childrens-rocking-horses-and-animals)",
+    "玩具和游戏 > 童车、助步、轮滑 > 儿童电瓶车 (childrens-powered-ride-ons)",
+    "玩具和游戏 > 童车、助步、轮滑 > 儿童推车 (childrens-push-ride-ons)",
+    "玩具和游戏 > 童车、助步、轮滑 > 三轮车 (childrens-tricycles)",
+    "玩具和游戏 > 童车、助步、轮滑 > 儿童踏板车 (childrens-pedal-ride-ons)"
+  ],
   "data_row": 8,
   "fixed_values": {
     "product_type#1.value": "RIDE_ON_TOY",

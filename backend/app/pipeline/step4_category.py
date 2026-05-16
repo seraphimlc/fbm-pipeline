@@ -13,6 +13,7 @@ from app.config import settings
 from app.database import async_session
 from app.models import Product, ProductData
 from app.pipeline.chrome_ctrl import chrome_navigate, chrome_execute_js, chrome_get_page_info, chrome_workflow
+from app.pipeline.ride_on_category import select_ride_on_category
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -55,6 +56,11 @@ def _handle_category_issue(issue: str, policy: str, pd: ProductData | None) -> d
             "leafCategory": existing_leaf,
         }
 
+    fallback = _ride_on_category_fallback(pd)
+    if fallback:
+        logger.warning(f"[Step4] {issue}，使用 RIDE_ON_TOY 模板类目兜底: {fallback['leafCategory']}")
+        return fallback
+
     policy = _policy_value(policy)
     if policy == "fail":
         raise RuntimeError(issue)
@@ -63,6 +69,34 @@ def _handle_category_issue(issue: str, policy: str, pd: ProductData | None) -> d
 
     logger.warning(f"[Step4] 按配置继续执行，忽略问题: {issue}")
     return {"skipped": True, "reason": issue, "categories": [], "leafCategory": None}
+
+
+def _ride_on_category_fallback(pd: ProductData | None) -> dict | None:
+    if not pd:
+        return None
+    text = " ".join(
+        str(value or "")
+        for value in (
+            pd.leaf_category,
+            pd.categories,
+            pd.product_type,
+            pd.title,
+            pd.description,
+            pd.features,
+            pd.variants,
+        )
+    )
+    option = select_ride_on_category(text)
+    if not option:
+        return None
+    return {
+        "skipped": True,
+        "reason": "使用 RIDE_ON_TOY 模板类目兜底",
+        "used_template_category": True,
+        "categories": option.categories,
+        "leafCategory": option.leaf_category,
+        "itemTypeKeyword": option.item_type_keyword,
+    }
 
 # 亚马逊商品页面类目提取 JS
 CATEGORY_EXTRACT_JS = '''(function() {
@@ -238,6 +272,10 @@ async def run_category(product_id: int) -> dict:
                 pd,
             )
             if result is not None:
+                if pd and result.get("used_template_category"):
+                    pd.categories = json.dumps(result.get("categories") or [], ensure_ascii=False)
+                    pd.leaf_category = result.get("leafCategory")
+                    await db.commit()
                 return result
 
         # 获取类目
@@ -250,6 +288,10 @@ async def run_category(product_id: int) -> dict:
                 pd,
             )
             if result is not None:
+                if pd and result.get("used_template_category"):
+                    pd.categories = json.dumps(result.get("categories") or [], ensure_ascii=False)
+                    pd.leaf_category = result.get("leafCategory")
+                    await db.commit()
                 return result
 
         categories = cat_data.get("categories", [])
@@ -262,6 +304,10 @@ async def run_category(product_id: int) -> dict:
                 pd,
             )
             if result is not None:
+                if pd and result.get("used_template_category"):
+                    pd.categories = json.dumps(result.get("categories") or [], ensure_ascii=False)
+                    pd.leaf_category = result.get("leafCategory")
+                    await db.commit()
                 return result
 
         # 保存

@@ -432,7 +432,13 @@ const ProductDetail: React.FC = () => {
       label: '📋 基本信息',
       children: (
         <div>
-          <Descriptions bordered column={2} size="small" style={{ marginBottom: 16 }}>
+          <Descriptions
+            bordered
+            className="basic-info-descriptions"
+            column={{ xs: 1, sm: 1, md: 2 }}
+            size="small"
+            style={{ marginBottom: 16 }}
+          >
             <Descriptions.Item label="来源商品ID">{product.source_item_id || product.gigab2b_product_id || '-'}</Descriptions.Item>
             <Descriptions.Item label="商品Code">{data?.item_code || '-'}</Descriptions.Item>
             <Descriptions.Item label="原始数据链接" span={2}>

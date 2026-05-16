@@ -2,7 +2,15 @@
 // 匹配 Vue + Element UI 页面结构
 (function() {
     var result = {};
-    var fullText = document.body.innerText;
+    var body = document.body;
+    var fullText = body ? (body.innerText || body.textContent || '') : '';
+    if (!body || !fullText.trim()) {
+        result.readyState = document.readyState;
+        result.url = location.href;
+        result.title = document.title || '';
+        result.loadStatus = body ? 'body_empty' : 'body_missing';
+        return JSON.stringify(result);
+    }
     var lines = fullText.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
 
     // ===== Item Code =====

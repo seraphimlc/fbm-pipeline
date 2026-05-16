@@ -16,3 +16,27 @@ body {
 #root {
   min-height: 100vh;
 }
+
+.basic-info-descriptions .ant-descriptions-view table {
+  width: 100%;
+  table-layout: fixed;
+}
+
+.basic-info-descriptions .ant-descriptions-item-label {
+  width: 132px;
+  white-space: nowrap;
+  vertical-align: top;
+}
+
+.basic-info-descriptions .ant-descriptions-item-content {
+  min-width: 0;
+  vertical-align: top;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.basic-info-descriptions .ant-typography,
+.basic-info-descriptions .ant-space {
+  max-width: 100%;
+}

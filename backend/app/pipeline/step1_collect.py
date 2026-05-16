@@ -427,6 +427,37 @@ def _parse_extract_json(js_result: str | None) -> dict | None:
     return json.loads(text)
 
 
+async def _wait_for_gigab2b_page_ready(gigab2b_pid: str, timeout_seconds: float = 20.0) -> dict | None:
+    """等待 Chrome 标签页至少加载出 body，避免在空 DOM 上执行完整提取脚本。"""
+    started_at = time.monotonic()
+    last_probe = None
+    probe_js = r'''JSON.stringify({
+        readyState: document.readyState,
+        url: location.href,
+        title: document.title || '',
+        hasBody: !!document.body,
+        bodyTextLength: document.body ? (document.body.innerText || document.body.textContent || '').trim().length : 0,
+        bodyText: document.body ? (document.body.innerText || document.body.textContent || '').slice(0, 180) : ''
+    })'''
+
+    while time.monotonic() - started_at < timeout_seconds:
+        raw = await chrome_execute_js(probe_js, timeout=10)
+        try:
+            last_probe = json.loads(raw) if raw else None
+        except json.JSONDecodeError:
+            last_probe = {"raw": _preview_js_result(raw)}
+
+        if isinstance(last_probe, dict):
+            has_body = bool(last_probe.get("hasBody"))
+            text_length = int(last_probe.get("bodyTextLength") or 0)
+            if has_body and text_length > 0:
+                return last_probe
+
+        await asyncio.sleep(1)
+
+    return last_probe
+
+
 async def collect_product(product_id: int) -> dict:
     async with chrome_workflow(f"step1_collect product={product_id}"):
         return await _collect_product_locked(product_id)
@@ -470,6 +501,8 @@ async def _collect_product_locked(product_id: int) -> dict:
         success = await chrome_navigate(url, wait=4.0)
         if not success:
             raise RuntimeError("Chrome 导航失败，请确认 Chrome 已开启 JS 权限")
+        ready_probe = await _wait_for_gigab2b_page_ready(gigab2b_pid)
+        logger.info(f"[Step1] GigaB2B 页面加载探测: {ready_probe}")
 
         # 执行 JS 提取。页面偶尔还在异步加载，核心字段为空时重试几次。
         logger.info("[Step1] 执行 JS 提取商品数据...")

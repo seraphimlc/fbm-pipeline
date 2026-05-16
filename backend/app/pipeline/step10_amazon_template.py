@@ -18,6 +18,7 @@ from openpyxl import load_workbook
 from app.config import settings
 from app.database import async_session
 from app.models import Product, ProductData, ProductFile
+from app.pipeline.ride_on_category import RIDE_ON_CATEGORY_MARKERS, select_ride_on_category
 from app.services.oss_uploader import oss_configured, upload_private_image
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -30,17 +31,7 @@ BRAND_TEMPLATE_MAPPINGS = {
     ("Vindhvisk", "Sofas & Couches"): MAPPING_DIR / "vindhvisk_sofa.json",
 }
 RIDE_ON_TOY_MAPPING = MAPPING_DIR / "ride_on_toy.json"
-RIDE_ON_TOY_CATEGORY_MARKERS = (
-    "ride-on",
-    "ride on",
-    "powered ride",
-    "childrens-powered-ride-ons",
-    "children's powered ride",
-    "kids' electric vehicles",
-    "kids electric vehicles",
-    "ride_on_toy",
-    "儿童电瓶车",
-)
+RIDE_ON_TOY_CATEGORY_MARKERS = RIDE_ON_CATEGORY_MARKERS
 
 
 def _load_template_mapping(product: Product, pd: ProductData) -> dict:
@@ -860,6 +851,11 @@ async def run_amazon_template(product_id: int) -> dict:
         })
 
         if mapping.get("category_type") == "ride_on_toy":
+            item_type_option = select_ride_on_category(_facts_text(pd))
+            if item_type_option:
+                fill["item_type_keyword[marketplace_id=ATVPDKIKX0DER]#1.value"] = item_type_option.item_type_keyword
+            else:
+                warnings.append("未能匹配 RIDE_ON_TOY 细分类目，沿用模板默认儿童电瓶车类目。")
             warnings.extend(_apply_ride_on_toy_fill(fill, fields, product, pd))
         else:
             seating = _seating_capacity(pd)
