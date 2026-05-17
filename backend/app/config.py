@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     STEP3_4_PARALLEL: bool = True  # Step3/4是否并行
     STEP1_EXTRACT_RETRY_ATTEMPTS: int = 5  # Step1页面信息提取重试次数
     STEP1_EXTRACT_RETRY_DELAY_SECONDS: int = 3  # Step1页面信息提取重试间隔
+    STEP1_AFTER_READY_WAIT_SECONDS: float = 1.0  # 页面有内容后再等价格/规格等异步区渲染
     STEP1_DOWNLOAD_TIMEOUT_SECONDS: int = 300  # Step1素材包下载超时时间
     STEP1_MATERIAL_PACKAGE_PRIORITY: str = "To B素材包,Retail Ready素材包,Information"
     STEP1_PRICE_MISSING_POLICY: str = "manual_review"  # fail/manual_review/continue

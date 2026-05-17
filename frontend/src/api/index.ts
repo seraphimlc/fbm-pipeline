@@ -27,6 +27,7 @@ export interface Product {
   brand: string;
   status: string;
   current_step: number;
+  current_task_status?: string | null;
   error_message: string | null;
   leaf_category?: string | null;
   created_at: string;
@@ -140,6 +141,14 @@ export interface ProductDetail extends Product {
   generated_files: ProductGeneratedFile[];
   video_folder: ProductFolderEntry | null;
   aplus_folder: ProductFolderEntry | null;
+}
+
+export interface CategoryOption {
+  key: string;
+  label: string;
+  categories: string[];
+  leaf_category: string;
+  source: string;
 }
 
 export interface ProductFolderEntry {
@@ -423,6 +432,7 @@ export const STATUS_COLORS: Record<string, string> = {
   pending_review: 'warning',
   completed: 'success',
   unavailable: 'default',
+  source_unavailable: 'default',
   failed: 'error',
   paused: 'warning',
 };
@@ -453,6 +463,9 @@ export const bulkStartPipelines = (productIds: number[]) =>
 export const getWorkbenchOverview = () =>
   api.get<WorkbenchOverview>('/products/overview');
 
+export const listCategoryOptions = () =>
+  api.get<{ items: CategoryOption[] }>('/products/category-options');
+
 export const listCatalogProducts = (params?: {
   page?: number;
   page_size?: number;
@@ -469,7 +482,10 @@ export const listCatalogProducts = (params?: {
 }) => api.get<PaginatedCatalogProducts>('/products/catalog', { params });
 
 export const exportCatalogProducts = (ids: number[]) =>
-  api.post<Blob>('/products/catalog/export', ids, { responseType: 'blob', timeout: 120000 });
+  api.post<Blob>('/products/catalog/export', ids, { responseType: 'blob', timeout: 300000 });
+
+export const updateCatalogAsin = (catalogId: number, amazonAsin: string) =>
+  api.post<CatalogProduct>(`/products/catalog/${catalogId}/asin`, { amazon_asin: amazonAsin });
 
 export const createAsinSyncBatch = (catalogProductIds: number[], store = 'Andy店-US') =>
   api.post<AsinSyncBatch>('/products/catalog/asin-sync', { catalog_product_ids: catalogProductIds, store }, { timeout: 120000 });
@@ -536,7 +552,10 @@ export const extractProductZip = (id: number, path: string) =>
   api.post<{ status: string; extracted_dir: string; files: string[] }>(`/products/${id}/files/extract`, null, { params: { path } });
 
 export const regenerateAplusModule = (id: number, data: { module_position: number; reason: string }) =>
-  api.post<{ status: string; script: unknown; image: unknown }>(`/products/${id}/aplus/regenerate`, data, { timeout: 240000 });
+  api.post<{ status: string; message: string; module_position: number; task_id: number }>(`/products/${id}/aplus/regenerate`, data);
+
+export const retryAplusRegeneration = (id: number) =>
+  api.post<{ status: string; message: string; task_ids: number[]; module_positions: number[] }>(`/products/${id}/aplus/regenerate/retry`);
 
 export const getConfig = () =>
   api.get<SystemConfig>('/config');

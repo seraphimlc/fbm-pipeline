@@ -24,6 +24,7 @@ STEP10_DONE = "step10_done"
 PENDING_REVIEW = "pending_review"
 COMPLETED = "completed"
 UNAVAILABLE = "unavailable"
+SOURCE_UNAVAILABLE = "source_unavailable"
 FAILED = "failed"
 PAUSED = "paused"
 
@@ -42,6 +43,7 @@ STEP_ORDER = [
     PENDING_REVIEW,
     COMPLETED,
     UNAVAILABLE,
+    SOURCE_UNAVAILABLE,
 ]
 
 # Step number → display name

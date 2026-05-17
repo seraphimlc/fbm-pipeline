@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, DatePicker, Input, message, Select, Space, Table, Tag, Typography } from 'antd';
+import { Button, DatePicker, Input, message, Modal, Select, Space, Table, Tag, Typography } from 'antd';
 import { DownloadOutlined, HistoryOutlined, PictureOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { createAplusUploadBatch, createAsinSyncBatch, exportCatalogProducts, getWorkbenchOverview, listCatalogProducts } from '../api';
+import { createAplusUploadBatch, createAsinSyncBatch, exportCatalogProducts, getWorkbenchOverview, listCatalogProducts, updateCatalogAsin } from '../api';
 import type { CatalogProduct, WorkbenchOverview } from '../api';
 
 const { Title, Text } = Typography;
@@ -16,6 +16,10 @@ const CatalogList: React.FC = () => {
   const [exporting, setExporting] = useState(false);
   const [syncingAsin, setSyncingAsin] = useState(false);
   const [uploadingAplus, setUploadingAplus] = useState(false);
+  const [asinModalOpen, setAsinModalOpen] = useState(false);
+  const [asinSaving, setAsinSaving] = useState(false);
+  const [asinTarget, setAsinTarget] = useState<CatalogProduct | null>(null);
+  const [manualAsin, setManualAsin] = useState('');
   const [selectedIds, setSelectedIds] = useState<React.Key[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -116,11 +120,17 @@ const CatalogList: React.FC = () => {
       message.warning('请先选择商品');
       return;
     }
+    const selectedSet = new Set(selectedIds.map(Number));
+    const blocked = items.filter((item) => selectedSet.has(item.id) && item.amazon_asin);
+    if (blocked.length) {
+      message.warning(`已有关联真实 ASIN 的商品不能导出：${blocked.map((item) => item.item_code || item.id).slice(0, 5).join('、')}`);
+      return;
+    }
     setExporting(true);
     try {
       const { data } = await exportCatalogProducts(selectedIds.map(Number));
-      saveBlob(data, `catalog_products_${dayjs().format('YYYYMMDD_HHmmss')}.zip`);
-      message.success('已导出压缩包');
+      saveBlob(data, `amazon_import_templates_${dayjs().format('YYYYMMDD_HHmmss')}.zip`);
+      message.success('已导出 Amazon 导入表格压缩包');
     } catch (error: any) {
       message.error(error?.response?.data?.detail || '导出失败');
     } finally {
@@ -148,11 +158,13 @@ const CatalogList: React.FC = () => {
   };
 
   const asinStatusTag = (status?: string | null, asin?: string | null) => {
+    if (asin && status === 'manual_linked') return <Tag color="success">手动关联</Tag>;
     if (asin) return <Tag color="success">已同步</Tag>;
     if (status === 'pending' || status === 'running') return <Tag color="processing">同步中</Tag>;
     if (status === 'not_found') return <Tag color="warning">未查到</Tag>;
     if (status === 'multiple_found') return <Tag color="warning">多匹配</Tag>;
     if (status === 'failed') return <Tag color="error">失败</Tag>;
+    if (status === 'manual_linked') return <Tag color="success">手动关联</Tag>;
     if (status === 'skipped') return <Tag>跳过</Tag>;
     return <Tag>未同步</Tag>;
   };
@@ -210,6 +222,35 @@ const CatalogList: React.FC = () => {
       message.error(error?.response?.data?.detail || 'A+ 上传批次创建失败');
     } finally {
       setUploadingAplus(false);
+    }
+  };
+
+  const openAsinModal = (record: CatalogProduct) => {
+    setAsinTarget(record);
+    setManualAsin(record.amazon_asin || '');
+    setAsinModalOpen(true);
+  };
+
+  const saveManualAsin = async () => {
+    if (!asinTarget) return;
+    const asin = manualAsin.trim().toUpperCase();
+    if (!/^B0[A-Z0-9]{8}$/.test(asin)) {
+      message.warning('ASIN 格式不正确，应为 B0 开头的 10 位编码');
+      return;
+    }
+    setAsinSaving(true);
+    try {
+      await updateCatalogAsin(asinTarget.id, asin);
+      message.success('真实 ASIN 已更新');
+      setAsinModalOpen(false);
+      setAsinTarget(null);
+      setManualAsin('');
+      fetchItems();
+      fetchOverview();
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '更新 ASIN 失败');
+    } finally {
+      setAsinSaving(false);
     }
   };
 
@@ -303,9 +344,14 @@ const CatalogList: React.FC = () => {
     },
     {
       title: '操作',
-      width: 90,
+      width: 190,
       render: (_: unknown, record: CatalogProduct) => (
-        <Button size="small" onClick={() => navigate(`/products/${record.source_product_id}`)}>详情</Button>
+        <Space size="small">
+          <Button size="small" onClick={() => navigate(`/products/${record.source_product_id}`)}>详情</Button>
+          <Button size="small" onClick={() => openAsinModal(record)}>
+            {record.amazon_asin ? '重新关联ASIN' : '关联ASIN'}
+          </Button>
+        </Space>
       ),
     },
   ];
@@ -324,8 +370,8 @@ const CatalogList: React.FC = () => {
           <Button icon={<PictureOutlined />} loading={uploadingAplus} disabled={!selectedIds.length} onClick={uploadSelectedAplus}>
             上传A+{selectedIds.length ? `(${selectedIds.length})` : ''}
           </Button>
-          <Button type="primary" icon={<DownloadOutlined />} loading={exporting} onClick={exportSelected}>
-            批量导出
+          <Button type="primary" icon={<DownloadOutlined />} loading={exporting} disabled={!selectedIds.length} onClick={exportSelected}>
+            导出Amazon表格{selectedIds.length ? `(${selectedIds.length})` : ''}
           </Button>
         </Space>
       </div>
@@ -378,6 +424,7 @@ const CatalogList: React.FC = () => {
           options={[
             { value: 'synced', label: '已同步' },
             { value: 'not_synced', label: '未同步' },
+            { value: 'manual_linked', label: '手动关联' },
             { value: 'not_found', label: '未查到' },
             { value: 'multiple_found', label: '多匹配' },
             { value: 'failed', label: '失败' },
@@ -444,6 +491,9 @@ const CatalogList: React.FC = () => {
           selectedRowKeys: selectedIds,
           onChange: setSelectedIds,
           preserveSelectedRowKeys: true,
+          getCheckboxProps: (record) => ({
+            disabled: Boolean(record.amazon_asin),
+          }),
         }}
         pagination={{
           current: page,
@@ -457,6 +507,33 @@ const CatalogList: React.FC = () => {
           },
         }}
       />
+      <Modal
+        title={asinTarget?.amazon_asin ? '重新关联真实 ASIN' : '关联真实 ASIN'}
+        open={asinModalOpen}
+        okText="保存 ASIN"
+        cancelText="取消"
+        confirmLoading={asinSaving}
+        onOk={saveManualAsin}
+        onCancel={() => {
+          if (!asinSaving) {
+            setAsinModalOpen(false);
+            setAsinTarget(null);
+            setManualAsin('');
+          }
+        }}
+      >
+        <Space direction="vertical" style={{ width: '100%' }}>
+          <Text type="secondary">
+            这会直接替换真实 ASIN，不会创建同步任务。已有真实 ASIN 的商品不会再参与 Amazon 导入表格导出。
+          </Text>
+          <Input
+            value={manualAsin}
+            onChange={(event) => setManualAsin(event.target.value.toUpperCase())}
+            placeholder="B0XXXXXXXX"
+            maxLength={10}
+          />
+        </Space>
+      </Modal>
     </div>
   );
 };

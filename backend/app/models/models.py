@@ -276,6 +276,23 @@ class ProductAplus(Base):
     product: Mapped["Product"] = relationship("Product", back_populates="aplus")
 
 
+class AplusRegenerateTask(Base):
+    __tablename__ = "aplus_regenerate_tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    product_id: Mapped[int] = mapped_column(Integer, ForeignKey("products.id"))
+    module_position: Mapped[int] = mapped_column(Integer)
+    reason: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(30), default="queued")
+    stage: Mapped[str | None] = mapped_column(String(30))
+    error_message: Mapped[str | None] = mapped_column(Text)
+    result_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
 class ProductFile(Base):
     __tablename__ = "product_files"
 

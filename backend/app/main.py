@@ -11,6 +11,8 @@ from app.database import init_db
 from app.api.products import router as products_router
 from app.api.config_api import router as config_router
 from app.config import settings
+from app.pipeline.engine import cancel_all_pipelines, recover_interrupted_pipelines
+from app.services.aplus_regenerate import cancel_active_regenerate_tasks, recover_regenerate_tasks
 
 
 logging.basicConfig(
@@ -24,8 +26,12 @@ logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 async def lifespan(app: FastAPI):
     # Startup
     await init_db()
+    await recover_interrupted_pipelines()
+    await recover_regenerate_tasks()
     yield
     # Shutdown
+    await cancel_all_pipelines()
+    await cancel_active_regenerate_tasks()
 
 
 app = FastAPI(

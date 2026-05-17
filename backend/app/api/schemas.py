@@ -54,6 +54,7 @@ class ProductResponse(BaseModel):
     brand: str = "Vindhvisk"
     status: str
     current_step: int = 0
+    current_task_status: str | None = None
     error_message: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -242,6 +243,10 @@ class CatalogProductResponse(BaseModel):
     template_warnings_count: int | None = None
 
     model_config = {"from_attributes": True}
+
+
+class CatalogAsinUpdateRequest(BaseModel):
+    amazon_asin: str = Field(..., min_length=10, max_length=10)
 
 
 class PaginatedCatalogProducts(BaseModel):

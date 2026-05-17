@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Table, Button, Tag, Space, Typography, message, Popconfirm, Input, Modal, Upload, DatePicker, Checkbox, Select } from 'antd';
 import { PlusOutlined, ReloadOutlined, PlayCircleOutlined, RedoOutlined, DeleteOutlined, SearchOutlined, UploadOutlined, DownloadOutlined, CheckOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
@@ -8,29 +8,71 @@ import type { Product, WorkbenchOverview } from '../api';
 
 const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
+const PRODUCT_LIST_RETURN_KEY = 'fbm.productList.returnPath';
+
+const positiveIntParam = (value: string | null, fallback: number) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const parseDateRangeParams = (search: URLSearchParams) => {
+  const createdFrom = search.get('created_from');
+  const createdTo = search.get('created_to');
+  if (!createdFrom || !createdTo) return null;
+  const from = dayjs(createdFrom);
+  const to = dayjs(createdTo);
+  return from.isValid() && to.isValid() ? [from, to] as [dayjs.Dayjs, dayjs.Dayjs] : null;
+};
 
 const ProductList: React.FC = () => {
   const navigate = useNavigate();
+  const location = useLocation();
+  const initialSearch = new URLSearchParams(location.search);
+  const initialDateRange = parseDateRangeParams(initialSearch);
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(false);
   const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
-  const [itemIdInput, setItemIdInput] = useState('');
-  const [competitorAsinInput, setCompetitorAsinInput] = useState('');
-  const [upcInput, setUpcInput] = useState('');
-  const [itemId, setItemId] = useState('');
-  const [competitorAsin, setCompetitorAsin] = useState('');
-  const [upc, setUpc] = useState('');
-  const [dateRangeInput, setDateRangeInput] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
-  const [dateRange, setDateRange] = useState<[string, string] | null>(null);
+  const [page, setPage] = useState(positiveIntParam(initialSearch.get('page'), 1));
+  const [pageSize, setPageSize] = useState(positiveIntParam(initialSearch.get('page_size'), 20));
+  const [itemIdInput, setItemIdInput] = useState(initialSearch.get('item_id') || '');
+  const [competitorAsinInput, setCompetitorAsinInput] = useState(initialSearch.get('competitor_asin') || '');
+  const [upcInput, setUpcInput] = useState(initialSearch.get('upc') || '');
+  const [itemId, setItemId] = useState(initialSearch.get('item_id') || '');
+  const [competitorAsin, setCompetitorAsin] = useState(initialSearch.get('competitor_asin') || '');
+  const [upc, setUpc] = useState(initialSearch.get('upc') || '');
+  const [dateRangeInput, setDateRangeInput] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(initialDateRange);
+  const [dateRange, setDateRange] = useState<[string, string] | null>(
+    initialDateRange ? [initialDateRange[0].startOf('day').toISOString(), initialDateRange[1].endOf('day').toISOString()] : null
+  );
   const [importOpen, setImportOpen] = useState(false);
   const [importing, setImporting] = useState(false);
   const [selectedIds, setSelectedIds] = useState<React.Key[]>([]);
   const [bulkStarting, setBulkStarting] = useState(false);
   const [autoStartAfterImport, setAutoStartAfterImport] = useState(false);
-  const [statusFilter, setStatusFilter] = useState<string | undefined>();
+  const [statusFilter, setStatusFilter] = useState<string | undefined>(initialSearch.get('status') || undefined);
   const [overview, setOverview] = useState<WorkbenchOverview | null>(null);
+
+  const buildListPath = () => {
+    const params = new URLSearchParams();
+    if (page > 1) params.set('page', String(page));
+    if (pageSize !== 20) params.set('page_size', String(pageSize));
+    if (statusFilter) params.set('status', statusFilter);
+    if (itemId) params.set('item_id', itemId);
+    if (competitorAsin) params.set('competitor_asin', competitorAsin);
+    if (upc) params.set('upc', upc);
+    if (dateRange) {
+      params.set('created_from', dateRange[0]);
+      params.set('created_to', dateRange[1]);
+    }
+    const search = params.toString();
+    return `${location.pathname}${search ? `?${search}` : ''}`;
+  };
+
+  const openProductDetail = (productId: number) => {
+    const returnPath = buildListPath();
+    window.localStorage.setItem(PRODUCT_LIST_RETURN_KEY, returnPath);
+    navigate(`/products/${productId}`, { state: { from: returnPath } });
+  };
 
   const fetchProducts = async () => {
     setLoading(true);
@@ -64,6 +106,26 @@ const ProductList: React.FC = () => {
 
   useEffect(() => { fetchProducts(); }, [page, pageSize, itemId, competitorAsin, upc, statusFilter, dateRange]);
   useEffect(() => { fetchOverview(); }, []);
+  useEffect(() => {
+    const params = new URLSearchParams();
+    if (page > 1) params.set('page', String(page));
+    if (pageSize !== 20) params.set('page_size', String(pageSize));
+    if (statusFilter) params.set('status', statusFilter);
+    if (itemId) params.set('item_id', itemId);
+    if (competitorAsin) params.set('competitor_asin', competitorAsin);
+    if (upc) params.set('upc', upc);
+    if (dateRange) {
+      params.set('created_from', dateRange[0]);
+      params.set('created_to', dateRange[1]);
+    }
+    const nextSearch = params.toString();
+    const nextPath = `${location.pathname}${nextSearch ? `?${nextSearch}` : ''}`;
+    window.localStorage.setItem(PRODUCT_LIST_RETURN_KEY, nextPath);
+    const currentSearch = location.search.startsWith('?') ? location.search.slice(1) : location.search;
+    if (nextSearch !== currentSearch) {
+      navigate({ pathname: location.pathname, search: nextSearch ? `?${nextSearch}` : '' }, { replace: true });
+    }
+  }, [page, pageSize, itemId, competitorAsin, upc, statusFilter, dateRange, location.pathname, location.search, navigate]);
 
   const handleSearch = () => {
     setItemId(itemIdInput.trim());
@@ -150,6 +212,7 @@ const ProductList: React.FC = () => {
 
   const getStatusTag = (status: string, step: number) => {
     if (status === 'failed') return <Tag color="error">失败</Tag>;
+    if (status === 'source_unavailable') return <Tag color="default">原商品下架</Tag>;
     if (status === 'unavailable') return <Tag color="default">不可售</Tag>;
     if (status === 'completed') return <Tag color="success">✅ 完成</Tag>;
     if (status === 'pending_review') return <Tag color="warning">待人工确认</Tag>;
@@ -183,8 +246,18 @@ const ProductList: React.FC = () => {
     if (record.status === 'pending_review' && record.current_step < 10) return <Tag color="warning">处理后继续</Tag>;
     if (record.status === 'pending_review') return <Tag color="green">确认入库</Tag>;
     if (record.status === 'completed') return <Tag color="success">进入商品列表运营</Tag>;
+    if (record.status === 'source_unavailable') return <Tag>停止采集</Tag>;
     if (record.status === 'unavailable') return <Tag>不用处理</Tag>;
     return <Tag>查看详情</Tag>;
+  };
+
+  const currentTaskStatus = (record: Product) => {
+    if (record.current_task_status) return record.current_task_status;
+    if (record.status === 'failed' && record.error_message) return `失败：${record.error_message}`;
+    if (record.status === 'pending_review' && record.error_message) return `待人工处理：${record.error_message}`;
+    if (record.status === 'source_unavailable' && record.error_message) return `原商品下架停止采集：${record.error_message}`;
+    if (record.status === 'unavailable' && record.error_message) return `商品已下架：${record.error_message}`;
+    return STEP_LABELS[record.current_step] || record.status || '-';
   };
 
   const applyStatusQuickFilter = (status?: string) => {
@@ -197,23 +270,24 @@ const ProductList: React.FC = () => {
       title: '任务ID',
       dataIndex: 'id',
       width: 60,
-      render: (id: number) => <a onClick={() => navigate(`/products/${id}`)}>{id}</a>,
+      render: (id: number) => <a onClick={() => openProductDetail(id)}>{id}</a>,
     },
     {
       title: '来源商品ID',
       dataIndex: 'gigab2b_product_id',
       width: 120,
-      render: (v: string, record: Product) => (record.source_item_id || v) ? <a onClick={() => navigate(`/products/${record.id}`)}>{record.source_item_id || v}</a> : '-',
+      render: (v: string, record: Product) => (record.source_item_id || v) ? <a onClick={() => openProductDetail(record.id)}>{record.source_item_id || v}</a> : '-',
     },
     {
       title: '商品Code',
       dataIndex: 'item_code',
       width: 140,
-      render: (v: string, record: Product) => v ? <a onClick={() => navigate(`/products/${record.id}`)}>{v}</a> : '-',
+      render: (v: string, record: Product) => v ? <a onClick={() => openProductDetail(record.id)}>{v}</a> : '-',
     },
     {
       title: '标题',
       dataIndex: 'title',
+      width: 360,
       ellipsis: true,
       render: (v: string) => v || '-',
     },
@@ -236,6 +310,16 @@ const ProductList: React.FC = () => {
       render: (status: string, record: Product) => getStatusTag(status, record.current_step),
     },
     {
+      title: '当前任务状态',
+      dataIndex: 'current_task_status',
+      width: 260,
+      ellipsis: true,
+      render: (_: string | null, record: Product) => {
+        const text = currentTaskStatus(record);
+        return <Text title={text} style={{ maxWidth: 240, display: 'block' }} ellipsis>{text}</Text>;
+      },
+    },
+    {
       title: '下一步',
       width: 150,
       render: (_: unknown, record: Product) => nextAction(record),
@@ -254,9 +338,10 @@ const ProductList: React.FC = () => {
     {
       title: '操作',
       width: 280,
+      fixed: 'right' as const,
       render: (_: unknown, record: Product) => (
         <Space size="small">
-          <Button size="small" onClick={() => navigate(`/products/${record.id}`)}>详情</Button>
+          <Button size="small" onClick={() => openProductDetail(record.id)}>详情</Button>
           {record.status === 'created' && (
             <Button size="small" type="primary" icon={<PlayCircleOutlined />}
               onClick={async () => { await startPipeline(record.id); fetchProducts(); fetchOverview(); }}>
@@ -358,6 +443,7 @@ const ProductList: React.FC = () => {
             { value: 'failed', label: '失败' },
             { value: 'paused', label: '已暂停' },
             { value: 'completed', label: '已入库' },
+            { value: 'source_unavailable', label: '原商品下架' },
             { value: 'unavailable', label: '不可售' },
           ]}
         />
@@ -394,10 +480,12 @@ const ProductList: React.FC = () => {
         <Button onClick={handleReset}>重置</Button>
       </div>
       <Table
+        className="product-list-table"
         dataSource={products}
         columns={columns}
         rowKey="id"
         loading={loading}
+        scroll={{ x: 1980 }}
         rowSelection={{
           selectedRowKeys: selectedIds,
           onChange: setSelectedIds,

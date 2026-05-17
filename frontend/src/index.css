@@ -13,8 +13,18 @@ body {
   background: #f5f5f5;
 }
 
+html,
+body,
+#root {
+  width: 100%;
+}
+
 #root {
   min-height: 100vh;
+}
+
+.ant-layout {
+  min-width: 0;
 }
 
 .basic-info-descriptions .ant-descriptions-view table {
@@ -39,4 +49,16 @@ body {
 .basic-info-descriptions .ant-typography,
 .basic-info-descriptions .ant-space {
   max-width: 100%;
+}
+
+.product-list-table .ant-table {
+  max-width: 100%;
+}
+
+.product-list-table .ant-table-cell {
+  white-space: nowrap;
+}
+
+.product-list-table .ant-table-cell-ellipsis {
+  white-space: nowrap;
 }

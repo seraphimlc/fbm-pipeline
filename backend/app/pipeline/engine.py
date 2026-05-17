@@ -136,8 +136,8 @@ async def _run_pipeline(product_id: int, start_step: int = 1):
         await _update_status(product_id, PENDING_REVIEW, 1, error=f"Step1待人工处理: {e}")
         logger.warning(f"[Pipeline] Product {product_id} Step1 需要人工处理: {e}")
     except Step1ProductUnavailable as e:
-        await _update_status(product_id, UNAVAILABLE, 1, error=str(e))
-        logger.info(f"[Pipeline] Product {product_id} 商品不可售，停止Pipeline: {e}")
+        await _update_status(product_id, SOURCE_UNAVAILABLE, 1, error=str(e))
+        logger.info(f"[Pipeline] Product {product_id} 原商品下架，停止Pipeline: {e}")
     except Step3NeedsLogin as e:
         await _update_status(product_id, PENDING_REVIEW, 3, error=f"Step3待人工登录: {e}")
         logger.warning(f"[Pipeline] Product {product_id} Step3 需要人工登录: {e}")
@@ -222,3 +222,40 @@ def is_running(product_id: int) -> bool:
     """检查Pipeline是否在运行"""
     task = _running_tasks.get(product_id)
     return task is not None and not task.done()
+
+
+async def cancel_all_pipelines() -> None:
+    """服务关闭时取消内存中的 Pipeline，并让任务写入 paused 状态。"""
+    tasks = [task for task in _running_tasks.values() if not task.done()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def recover_interrupted_pipelines() -> None:
+    """服务启动时把上次遗留的运行中 Pipeline 标记为可继续。"""
+    running_statuses = {
+        STEP1_COLLECTING,
+        STEP2_PRICING,
+        STEP3_KEYWORDS,
+        STEP4_CATEGORY,
+        STEP5_LISTING,
+        STEP6_CURATING,
+        STEP7_APLUS_PLAN,
+        STEP8_APLUS_SCRIPT,
+        STEP9_APLUS_IMAGE,
+        STEP10_AMAZON_TEMPLATE,
+    }
+    async with async_session() as db:
+        from sqlalchemy import select
+        result = await db.execute(select(Product).where(Product.status.in_(running_statuses)))
+        products = result.scalars().all()
+        now = datetime.now()
+        for product in products:
+            product.status = PAUSED
+            product.error_message = "服务重启导致任务中断，可点击继续从当前步骤重试。"
+            product.updated_at = now
+        if products:
+            await db.commit()
+            logger.warning(f"[Pipeline] 启动恢复: {len(products)} 个运行中任务已标记为暂停")

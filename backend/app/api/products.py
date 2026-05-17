@@ -3,6 +3,7 @@ import shutil
 import zipfile
 import json
 import re
+from copy import copy
 from io import BytesIO
 from pathlib import Path
 
@@ -17,15 +18,15 @@ from datetime import datetime
 from app.database import get_db
 from app.config import settings
 from app.models import AplusUploadBatch, AsinSyncBatch, CatalogProduct, Product, ProductData, ProductImage, ProductAplus, ProductFile
-from app.models.status import COMPLETED, PENDING_REVIEW, STEP_STATUS_MAP
+from app.models.status import COMPLETED, PENDING_REVIEW, SOURCE_UNAVAILABLE, STEP_LABELS, STEP_STATUS_MAP
 from app.api.schemas import (
     ProductCreate, ProductUpdate, ProductResponse, ProductDetail,
     PaginatedResponse, ProductFileEntry, AplusRegenerateRequest,
     AsinSyncBatchDetail, AsinSyncBatchResponse, AsinSyncCreateRequest,
     AplusUploadBatchDetail, AplusUploadBatchResponse, AplusUploadCreateRequest,
     BulkImportResponse, BulkStartRequest, BulkStartResponse,
-    PaginatedAsinSyncBatches, PaginatedCatalogProducts,
-    PaginatedAplusUploadBatches, WorkbenchOverview,
+    PaginatedAsinSyncBatches, PaginatedCatalogProducts, CatalogProductResponse,
+    PaginatedAplusUploadBatches, WorkbenchOverview, CatalogAsinUpdateRequest,
 )
 from app.pipeline.engine import start_pipeline as enqueue_pipeline, cancel_pipeline, is_running
 from app.pipeline.step1_collect import collect_product
@@ -35,9 +36,16 @@ from app.pipeline.step4_category import run_category
 from app.pipeline.step5_listing import run_listing
 from app.pipeline.step6_image import run_image_analysis
 from app.pipeline.step7_aplus_plan import run_aplus_plan
-from app.pipeline.step8_aplus_script import run_aplus_script, regenerate_aplus_module_script
-from app.pipeline.step9_aplus_image import run_aplus_image, regenerate_aplus_module_image
-from app.pipeline.step10_amazon_template import run_amazon_template
+from app.pipeline.step8_aplus_script import run_aplus_script
+from app.pipeline.step9_aplus_image import run_aplus_image
+from app.pipeline.ride_on_category import RIDE_ON_CATEGORY_OPTIONS
+from app.pipeline.step10_amazon_template import (
+    AMAZON_TEMPLATE_LOGIC_VERSION,
+    DATA_ROW,
+    MAPPING_DIR,
+    _load_template_mapping,
+    run_amazon_template,
+)
 from app.services.material_assets import (
     IMAGE_EXTENSIONS,
     VIDEO_EXTENSIONS,
@@ -48,6 +56,7 @@ from app.services.material_assets import (
 )
 from app.services.asin_sync import build_sync_item, start_asin_sync_batch
 from app.services.aplus_upload import build_upload_item, start_aplus_upload_batch
+from app.services.aplus_regenerate import create_regenerate_task, retry_latest_regenerate_tasks
 
 # Step runners indexed by step number
 STEP_RUNNERS = {
@@ -80,6 +89,104 @@ RUNNING_STATUSES = {
     "step9_aplus_image",
     "step10_amazon_template",
 }
+
+
+def _compact_error_message(message: str | None) -> str | None:
+    if not message:
+        return None
+    return " ".join(message.strip().splitlines())[:120]
+
+
+def _current_task_status(product: Product) -> str:
+    aplus_status = product.aplus.aplus_status if product.aplus else None
+    aplus_status_labels = {
+        "regen_queued": "A+重新生图排队中",
+        "regen_script_running": "A+正在重写脚本",
+        "regen_image_running": "A+正在重新生图",
+        "regen_done": "A+重新生图完成",
+        "regen_failed": "A+重新生图失败",
+        "regen_interrupted": "A+重新生图被中断，可重试",
+    }
+    if aplus_status in aplus_status_labels:
+        return aplus_status_labels[aplus_status]
+
+    step_label = STEP_LABELS.get(product.current_step, f"Step {product.current_step}")
+    if product.status in RUNNING_STATUSES:
+        return f"运行中：{step_label}"
+    if product.status == "created":
+        return "待启动"
+    if product.status == "paused":
+        return f"已暂停：{step_label}"
+    if product.status == "pending_review":
+        detail = _compact_error_message(product.error_message)
+        return f"待人工处理：{detail or step_label}"
+    if product.status == "failed":
+        detail = _compact_error_message(product.error_message)
+        return f"失败：{detail or step_label}"
+    if product.status == SOURCE_UNAVAILABLE:
+        detail = _compact_error_message(product.error_message)
+        return f"原商品下架停止采集：{detail}" if detail else "原商品下架停止采集"
+    if product.status == "unavailable":
+        detail = _compact_error_message(product.error_message)
+        return f"商品已下架：{detail}" if detail else "商品已下架"
+    if product.status == COMPLETED:
+        return "已完成"
+    return product.status or "-"
+
+
+def _split_category_path(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [part.strip() for part in re.split(r"\s*>\s*|\s*›\s*", str(value)) if part.strip()]
+
+
+def _category_option_key(categories: list[str], leaf_category: str | None) -> str:
+    return " > ".join(categories) or (leaf_category or "")
+
+
+def _static_category_options() -> list[dict]:
+    options: dict[str, dict] = {}
+
+    for option in RIDE_ON_CATEGORY_OPTIONS:
+        categories = option.categories
+        key = _category_option_key(categories, option.leaf_category)
+        options[key] = {
+            "key": key,
+            "label": " > ".join(categories),
+            "categories": categories,
+            "leaf_category": option.leaf_category,
+            "source": "ride_on_toy",
+        }
+
+    # Deterministic override: when two mappings expose the same category key,
+    # the mapping loaded later wins.
+    for mapping_path in sorted(MAPPING_DIR.glob("*.json")):
+        try:
+            mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for item in mapping.get("browse_category_options") or []:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "").strip()
+            node = str(item.get("node") or "").strip()
+            categories = _split_category_path(path)
+            if not categories:
+                continue
+            leaf = f"{categories[-1]} ({node})" if node else categories[-1]
+            option_categories = [*categories[:-1], leaf]
+            key = _category_option_key(option_categories, leaf)
+            options[key] = {
+                "key": key,
+                "label": " > ".join(option_categories),
+                "categories": option_categories,
+                "leaf_category": leaf,
+                "source": mapping_path.stem,
+            }
+
+    return sorted(options.values(), key=lambda item: item["label"])
+
+
 IMPORT_TEMPLATE_HEADERS = ["原始数据链接", "竞品ASIN", "UPC"]
 HEADER_ALIASES = {
     "原始数据链接": "gigab2b_url",
@@ -197,6 +304,7 @@ def _build_list_item(product: Product) -> dict:
         "brand": product.brand,
         "status": product.status,
         "current_step": product.current_step,
+        "current_task_status": _current_task_status(product),
         "error_message": product.error_message,
         "created_at": product.created_at,
         "updated_at": product.updated_at,
@@ -222,6 +330,21 @@ def _template_risk_from_data(pd: ProductData | None) -> tuple[str | None, int | 
     risk = summary.get("risk_level") if isinstance(summary, dict) else None
     warning_count = len(warnings) if isinstance(warnings, list) else None
     return risk, warning_count
+
+
+def _amazon_template_cache_path(pd: ProductData | None) -> Path | None:
+    if not pd or not pd.amazon_template_path:
+        return None
+    source_path = Path(pd.amazon_template_path).expanduser()
+    if not source_path.is_file():
+        return None
+    try:
+        summary = json.loads(pd.amazon_template_fill_summary or "{}")
+    except Exception:
+        summary = {}
+    if not isinstance(summary, dict) or summary.get("logic_version") != AMAZON_TEMPLATE_LOGIC_VERSION:
+        return None
+    return source_path
 
 
 def _sync_catalog_item(product: Product, db: AsyncSession, confirm: bool = False) -> CatalogProduct:
@@ -299,6 +422,76 @@ def _catalog_export_row(product: Product) -> dict:
         "Listing标题": pd.listing_title if pd else None,
         "Search Terms": pd.listing_search_terms if pd else None,
     }
+
+
+def _safe_export_name(value: str | None, fallback: str = "未分类") -> str:
+    raw = (value or fallback).strip() or fallback
+    return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in raw)[:90] or fallback
+
+
+def _copy_row_format(ws, source_row: int, target_row: int) -> None:
+    if target_row == source_row:
+        return
+    ws.row_dimensions[target_row].height = ws.row_dimensions[source_row].height
+    for col in range(1, ws.max_column + 1):
+        source = ws.cell(source_row, col)
+        target = ws.cell(target_row, col)
+        if source.has_style:
+            target._style = copy(source._style)
+        if source.number_format:
+            target.number_format = source.number_format
+        if source.alignment:
+            target.alignment = copy(source.alignment)
+        if source.protection:
+            target.protection = copy(source.protection)
+
+
+def _clear_template_data_rows(ws, row_count: int) -> None:
+    max_row = max(ws.max_row, DATA_ROW + row_count + 2)
+    for row in range(DATA_ROW, max_row + 1):
+        if row > DATA_ROW:
+            _copy_row_format(ws, DATA_ROW, row)
+        for col in range(1, ws.max_column + 1):
+            ws.cell(row, col).value = None
+
+
+def _template_attribute_columns(ws) -> dict[str, int]:
+    return {
+        str(cell.value): cell.column
+        for cell in ws[5]
+        if cell.value not in (None, "")
+    }
+
+
+def _copy_import_data_row(source_path: Path, target_ws, target_row: int) -> None:
+    source_wb = load_workbook(source_path, keep_vba=True, data_only=False)
+    if "Template" not in source_wb.sheetnames:
+        raise ValueError(f"导入表格缺少 Template 工作表: {source_path}")
+    source_ws = source_wb["Template"]
+    _copy_row_format(target_ws, DATA_ROW, target_row)
+    source_columns = _template_attribute_columns(source_ws)
+    target_columns = _template_attribute_columns(target_ws)
+    for attr, source_col in source_columns.items():
+        target_col = target_columns.get(attr)
+        if target_col:
+            target_ws.cell(target_row, target_col).value = source_ws.cell(DATA_ROW, source_col).value
+
+
+def _summary_workbook(rows: list[dict]) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "导出报告"
+    headers = ["状态", "商品ID", "商品Code", "类目", "模板文件", "导出文件", "原因"]
+    ws.append(headers)
+    for row in rows:
+        ws.append([row.get(header) for header in headers])
+    for column_cells in ws.columns:
+        column_letter = column_cells[0].column_letter
+        max_length = max(len(str(cell.value or "")) for cell in column_cells[:80])
+        ws.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 60)
+    stream = BytesIO()
+    wb.save(stream)
+    return stream.getvalue()
 
 
 def _naive_datetime(value: datetime | None) -> datetime | None:
@@ -423,6 +616,46 @@ async def get_workbench_overview(db: AsyncSession = Depends(get_db)):
     )
 
 
+@router.get("/category-options")
+async def list_category_options(db: AsyncSession = Depends(get_db)):
+    """返回人工编辑 Amazon 类目时允许选择的已有类目。"""
+    options: dict[str, dict] = {item["key"]: item for item in _static_category_options()}
+    result = await db.execute(
+        select(ProductData.categories, ProductData.leaf_category)
+        .where((ProductData.categories.is_not(None)) | (ProductData.leaf_category.is_not(None)))
+    )
+    for categories_raw, leaf in result.all():
+        categories: list[str] = []
+        if categories_raw:
+            try:
+                parsed = json.loads(categories_raw)
+                if isinstance(parsed, list):
+                    categories = [str(item).strip() for item in parsed if str(item).strip()]
+                else:
+                    categories = _split_category_path(str(parsed))
+            except Exception:
+                categories = _split_category_path(str(categories_raw))
+        leaf = str(leaf or "").strip() or (categories[-1] if categories else "")
+        if not categories and leaf:
+            categories = [leaf]
+        if not categories:
+            continue
+        key = _category_option_key(categories, leaf)
+        options[key] = {
+            "key": key,
+            "label": " > ".join(categories),
+            "categories": categories,
+            "leaf_category": leaf,
+            "source": "history",
+        }
+    return {"items": sorted(options.values(), key=lambda item: item["label"])}
+
+
+async def _allowed_category_keys(db: AsyncSession) -> set[str]:
+    result = await list_category_options(db)
+    return {str(item.get("key") or "") for item in result.get("items", [])}
+
+
 @router.get("", response_model=PaginatedResponse)
 async def list_products(
     page: int = Query(1, ge=1),
@@ -436,7 +669,7 @@ async def list_products(
     db: AsyncSession = Depends(get_db),
 ):
     """商品任务列表（分页）"""
-    query = select(Product).options(selectinload(Product.data)).order_by(Product.created_at.desc())
+    query = select(Product).options(selectinload(Product.data), selectinload(Product.aplus)).order_by(Product.created_at.desc())
     count_query = select(func.count(Product.id))
 
     if status:
@@ -444,8 +677,12 @@ async def list_products(
         count_query = count_query.where(Product.status == status)
     if item_id:
         pattern = f"%{item_id.strip()}%"
-        query = query.where(Product.gigab2b_product_id.ilike(pattern))
-        count_query = count_query.where(Product.gigab2b_product_id.ilike(pattern))
+        query = query.join(ProductData, ProductData.product_id == Product.id, isouter=True).where(
+            (Product.gigab2b_product_id.ilike(pattern)) | (ProductData.item_code.ilike(pattern))
+        )
+        count_query = count_query.join(ProductData, ProductData.product_id == Product.id, isouter=True).where(
+            (Product.gigab2b_product_id.ilike(pattern)) | (ProductData.item_code.ilike(pattern))
+        )
     if competitor_asin:
         pattern = f"%{competitor_asin.strip()}%"
         query = query.where(Product.competitor_asin.ilike(pattern))
@@ -663,6 +900,9 @@ async def list_catalog_products(
         elif asin_sync_status == "not_synced":
             query = query.where(((Product.amazon_asin.is_(None)) | (Product.amazon_asin == "")) & ((CatalogProduct.amazon_asin.is_(None)) | (CatalogProduct.amazon_asin == "")))
             count_query = count_query.where(((Product.amazon_asin.is_(None)) | (Product.amazon_asin == "")) & ((CatalogProduct.amazon_asin.is_(None)) | (CatalogProduct.amazon_asin == "")))
+        elif asin_sync_status == "manual_linked":
+            query = query.where((Product.asin_sync_status == "manual_linked") | (CatalogProduct.asin_sync_status == "manual_linked"))
+            count_query = count_query.where((Product.asin_sync_status == "manual_linked") | (CatalogProduct.asin_sync_status == "manual_linked"))
         else:
             query = query.where((Product.asin_sync_status == asin_sync_status) | (CatalogProduct.asin_sync_status == asin_sync_status))
             count_query = count_query.where((Product.asin_sync_status == asin_sync_status) | (CatalogProduct.asin_sync_status == asin_sync_status))
@@ -724,63 +964,175 @@ async def list_catalog_products(
 
 @router.post("/catalog/export")
 async def export_catalog_products(ids: list[int], db: AsyncSession = Depends(get_db)):
-    """按类目拆分导出商品资料，同一类目每 500 个商品一个 Excel，整体打包 zip。"""
+    """按 Amazon 类目模板拆分导出可导入 Amazon 的 xlsm，同一类目多个商品写多行。"""
     if not ids:
         raise HTTPException(400, "请选择要导出的商品")
-    if len(ids) > 1000:
-        raise HTTPException(400, "单次最多导出 1000 个商品")
+    if len(ids) > 300:
+        raise HTTPException(400, "单次最多导出 300 个商品")
 
     catalog_result = await db.execute(select(CatalogProduct).where(CatalogProduct.id.in_(ids)))
     catalog_items = catalog_result.scalars().all()
     source_ids = [item.source_product_id for item in catalog_items]
     product_result = await db.execute(
         select(Product)
-        .options(selectinload(Product.data))
+        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
         .where(Product.id.in_(source_ids))
     )
     products_by_id = {product.id: product for product in product_result.scalars().all()}
 
-    grouped: dict[str, list[Product]] = {}
+    grouped: dict[tuple[str, str], dict] = {}
+    report_rows: list[dict] = []
     for item in catalog_items:
         product = products_by_id.get(item.source_product_id)
-        if not product:
+        pd = product.data if product else None
+        base_report = {
+            "商品ID": product.id if product else item.source_product_id,
+            "商品Code": pd.item_code if pd else item.item_code,
+            "类目": (pd.leaf_category if pd else None) or item.leaf_category or "未分类",
+        }
+        if not product or not pd:
+            report_rows.append({**base_report, "状态": "跳过", "原因": "商品资料不存在"})
             continue
-        category = (product.data.leaf_category if product.data else None) or item.leaf_category or "未分类"
-        grouped.setdefault(category, []).append(product)
+        existing_asin = (product.amazon_asin or item.amazon_asin or "").strip()
+        if existing_asin:
+            report_rows.append({
+                **base_report,
+                "状态": "跳过",
+                "模板文件": None,
+                "导出文件": None,
+                "原因": f"已有真实 ASIN {existing_asin}，不能再次导出 Amazon 导入表格",
+            })
+            continue
+        try:
+            mapping = _load_template_mapping(product, pd)
+            template_path = Path(mapping["template_path"]).expanduser()
+            if not template_path.is_file():
+                raise FileNotFoundError(f"模板文件不存在: {template_path}")
+            category = pd.leaf_category or mapping.get("category_type") or item.leaf_category or "未分类"
+            key = (str(template_path), str(category))
+            group = grouped.setdefault(key, {
+                "template_path": template_path,
+                "category": str(category),
+                "mapping": mapping,
+                "products": [],
+            })
+            group["products"].append(product)
+        except Exception as exc:
+            report_rows.append({
+                **base_report,
+                "状态": "跳过",
+                "模板文件": None,
+                "导出文件": None,
+                "原因": f"{type(exc).__name__}: {exc}",
+            })
 
     if not grouped:
-        raise HTTPException(400, "没有可导出的商品数据")
+        if report_rows and all("已有真实 ASIN" in str(row.get("原因") or "") for row in report_rows):
+            raise HTTPException(400, "选中的商品都已有真实 ASIN，不能再次导出 Amazon 导入表格")
+        raise HTTPException(400, "没有可导出的 Amazon 导入表格数据")
 
     zip_stream = BytesIO()
     with zipfile.ZipFile(zip_stream, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for category, products in grouped.items():
-            safe_category = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in category)[:80] or "未分类"
+        for (_, category), group in grouped.items():
+            products = group["products"]
+            template_path: Path = group["template_path"]
+            safe_category = _safe_export_name(category)
+            template_stem = _safe_export_name(template_path.stem, "amazon_template")
             for chunk_index in range(0, len(products), 500):
                 chunk = products[chunk_index:chunk_index + 500]
-                wb = Workbook()
-                ws = wb.active
-                ws.title = "商品数据"
-                rows = [_catalog_export_row(product) for product in chunk]
-                headers = list(rows[0].keys())
-                ws.append(headers)
-                for row in rows:
-                    ws.append([row.get(header) for header in headers])
-                for column_cells in ws.columns:
-                    column_letter = column_cells[0].column_letter
-                    max_length = max(len(str(cell.value or "")) for cell in column_cells[:50])
-                    ws.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 42)
-                workbook_stream = BytesIO()
-                wb.save(workbook_stream)
+                wb = load_workbook(template_path, keep_vba=True, data_only=False)
+                if "Template" not in wb.sheetnames:
+                    raise HTTPException(400, f"模板缺少 Template 工作表: {template_path}")
+                ws = wb["Template"]
+                _clear_template_data_rows(ws, len(chunk))
                 part = chunk_index // 500 + 1
-                archive.writestr(f"{safe_category}_{part}.xlsx", workbook_stream.getvalue())
+                export_name = f"{safe_category}_{template_stem}_{part}.xlsm"
+                exported_in_workbook = 0
+
+                for offset, product in enumerate(chunk):
+                    pd = product.data
+                    row_number = DATA_ROW + offset
+                    report_base = {
+                        "商品ID": product.id,
+                        "商品Code": pd.item_code if pd else None,
+                        "类目": category,
+                        "模板文件": str(template_path),
+                        "导出文件": export_name,
+                    }
+                    try:
+                        if not pd:
+                            raise ValueError("商品资料不存在")
+                        source_path = _amazon_template_cache_path(pd)
+                        template_result = None
+                        if not source_path:
+                            template_result = await run_amazon_template(product.id)
+                            source_path = Path(template_result["path"]).expanduser()
+                        _copy_import_data_row(source_path, ws, row_number)
+                        exported_in_workbook += 1
+                        report_rows.append({
+                            **report_base,
+                            "状态": "已导出",
+                            "原因": "使用已生成表格" if template_result is None else "现场重新生成表格",
+                        })
+                    except Exception as exc:
+                        report_rows.append({
+                            **report_base,
+                            "状态": "跳过",
+                            "原因": f"{type(exc).__name__}: {exc}",
+                        })
+
+                if exported_in_workbook:
+                    workbook_stream = BytesIO()
+                    wb.save(workbook_stream)
+                    archive.writestr(export_name, workbook_stream.getvalue())
+
+        archive.writestr("导出报告.xlsx", _summary_workbook(report_rows))
+
+    if not any(row.get("状态") == "已导出" for row in report_rows):
+        raise HTTPException(400, "选中的商品没有成功生成 Amazon 导入表格，请查看商品详情中的导入表格检查。")
 
     zip_stream.seek(0)
-    filename = f"catalog_products_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+    filename = f"amazon_import_templates_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
     return StreamingResponse(
         zip_stream,
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.post("/catalog/{catalog_id}/asin", response_model=CatalogProductResponse)
+async def update_catalog_asin(catalog_id: int, body: CatalogAsinUpdateRequest, db: AsyncSession = Depends(get_db)):
+    """手动重新关联真实 ASIN，不创建领星同步任务。"""
+    asin = body.amazon_asin.strip().upper()
+    if not re.fullmatch(r"B0[A-Z0-9]{8}", asin):
+        raise HTTPException(400, "ASIN 格式不正确，应为 B0 开头的 10 位编码")
+
+    result = await db.execute(
+        select(CatalogProduct)
+        .options(selectinload(CatalogProduct.source_product).selectinload(Product.data))
+        .where(CatalogProduct.id == catalog_id)
+    )
+    catalog = result.scalar_one_or_none()
+    if not catalog:
+        raise HTTPException(404, "商品资料不存在")
+
+    catalog.amazon_asin = asin
+    catalog.asin_sync_status = "manual_linked"
+    catalog.asin_sync_error = None
+    catalog.asin_synced_at = datetime.now()
+    catalog.updated_at = datetime.now()
+
+    product = catalog.source_product
+    if product:
+        product.amazon_asin = asin
+        product.asin_sync_status = "manual_linked"
+        product.asin_sync_error = None
+        product.asin_synced_at = catalog.asin_synced_at
+        product.updated_at = datetime.now()
+
+    await db.commit()
+    await db.refresh(catalog)
+    return catalog
 
 
 @router.post("/catalog/asin-sync", response_model=AsinSyncBatchResponse)
@@ -980,6 +1332,7 @@ async def get_product(product_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "Product not found")
 
     detail = ProductDetail.model_validate(product)
+    detail.current_task_status = _current_task_status(product)
     if product.data and product.data.material_dir:
         material_dir = Path(product.data.material_dir).expanduser()
         if material_dir.is_dir():
@@ -1113,6 +1466,9 @@ async def update_product(
                     for part in re.split(r"\s*>\s*|\s*›\s*", str(categories_value))
                     if part.strip()
                 ]
+            category_key = _category_option_key(categories, leaf_category_value or (categories[-1] if categories else None))
+            if category_key and category_key not in await _allowed_category_keys(db):
+                raise HTTPException(400, "Amazon 类目只能从已有类目列表中选择")
             product.data.categories = json.dumps(categories, ensure_ascii=False) if categories else None
             if categories and leaf_category_value is None:
                 product.data.leaf_category = categories[-1]
@@ -1302,16 +1658,58 @@ async def run_single_step(product_id: int, step: int, db: AsyncSession = Depends
 
 
 @router.post("/{product_id}/aplus/regenerate")
-async def regenerate_aplus_module(product_id: int, body: AplusRegenerateRequest):
-    """根据反馈重新生成单个 A+ 模块脚本和图片。"""
+async def regenerate_aplus_module(product_id: int, body: AplusRegenerateRequest, db: AsyncSession = Depends(get_db)):
+    """提交单个 A+ 模块重新生成任务，写入数据库队列后后台执行。"""
+    result = await db.execute(
+        select(Product)
+        .options(selectinload(Product.aplus))
+        .where(Product.id == product_id)
+    )
+    product = result.scalar_one_or_none()
+    if not product:
+        raise HTTPException(404, "Product not found")
+    if not product.aplus or not product.aplus.aplus_plan or not product.aplus.aplus_scripts:
+        raise HTTPException(400, "未找到A+规划/脚本，请先执行Step7/Step8")
     try:
-        script = await regenerate_aplus_module_script(product_id, body.module_position, body.reason)
-        image = await regenerate_aplus_module_image(product_id, body.module_position)
-        return {"status": "ok", "script": script, "image": image}
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    except Exception as e:
-        raise HTTPException(500, f"A+重新生成失败: {e}")
+        scripts_data = json.loads(product.aplus.aplus_scripts)
+    except json.JSONDecodeError:
+        raise HTTPException(400, "A+脚本数据损坏")
+    scripts = scripts_data.get("scripts") if isinstance(scripts_data, dict) else None
+    if not isinstance(scripts, list) or not any(item.get("module_position") == body.module_position for item in scripts if isinstance(item, dict)):
+        raise HTTPException(400, f"未找到模块 {body.module_position} 的A+脚本")
+
+    task = await create_regenerate_task(product_id, body.module_position, body.reason.strip())
+    return {
+        "status": task.status,
+        "message": "已提交后台重新生成" if task.status == "queued" else "该模块正在后台重新生成",
+        "module_position": body.module_position,
+        "task_id": task.id,
+    }
+
+
+@router.post("/{product_id}/aplus/regenerate/retry")
+async def retry_aplus_regenerate_tasks(product_id: int, db: AsyncSession = Depends(get_db)):
+    """重试该商品最新一批失败/中断的 A+ 重新生图任务。"""
+    result = await db.execute(
+        select(Product)
+        .options(selectinload(Product.aplus))
+        .where(Product.id == product_id)
+    )
+    product = result.scalar_one_or_none()
+    if not product:
+        raise HTTPException(404, "Product not found")
+    if not product.aplus or not product.aplus.aplus_scripts:
+        raise HTTPException(400, "未找到A+脚本，不能重试重新生图")
+
+    tasks = await retry_latest_regenerate_tasks(product_id)
+    if not tasks:
+        raise HTTPException(400, "没有找到可重试的 A+ 重新生图任务，请在对应模块手动重新生成")
+    return {
+        "status": "queued",
+        "message": f"已重新排队 {len(tasks)} 个 A+ 重新生图任务",
+        "task_ids": [task.id for task in tasks],
+        "module_positions": [task.module_position for task in tasks],
+    }
 
 
 @router.post("/{product_id}/pause", response_model=ProductResponse)

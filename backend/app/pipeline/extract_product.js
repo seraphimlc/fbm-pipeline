@@ -12,6 +12,8 @@
         return JSON.stringify(result);
     }
     var lines = fullText.split('\n').map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
+    var loginRequired = /(请先登录|登录后查看|Sign\s*In|Log\s*In|Login\s+to|Please\s+login)/i.test(fullText);
+    result.loginStatus = loginRequired ? 'not_logged_in' : 'logged_in_or_unknown';
 
     // ===== Item Code =====
     var codeMatch = fullText.match(/Item Code:\s*\n?\s*(W[0-9A-Z]+)/i);
@@ -122,8 +124,8 @@
     // ===== 库存 =====
     function findStock() {
         var stockLabels = [
-            /^(?:库存|可售库存|现货库存|Stock|Available Stock|Inventory|Qty Available)$/i,
-            /(?:库存|可售库存|现货库存|Stock|Available Stock|Inventory|Qty Available)[：:]\s*([0-9,]+)\s*(?:件|pcs?|pieces?|units?)?/i
+            /^(?:库存|可售库存|现货库存|可用库存|可售数量|Available Qty|Stock|Available Stock|Inventory|Qty Available)$/i,
+            /(?:库存|可售库存|现货库存|可用库存|可售数量|Available Qty|Stock|Available Stock|Inventory|Qty Available)[：:：]?\s*([0-9,]+)\s*(?:件|pcs?|pieces?|units?)?/i
         ];
         for (var si = 0; si < lines.length; si++) {
             var line = lines[si];
@@ -137,16 +139,39 @@
                 if (nextMatch) return nextMatch[1];
             }
         }
+        if (/(无库存|暂无库存|库存不足|已售罄|售罄|Out of Stock|Sold Out)/i.test(fullText)) return '0';
         return null;
     }
     result.stock = findStock();
 
     // ===== 可售状态 =====
+    var unavailablePattern = /(商品已下架|该商品已下架|已下架|下架商品|已停售|已失效|商品不存在|页面不存在|已售罄|售罄|无库存|暂无库存|This product is no longer available|Product not found|No longer available|Currently unavailable|Out of Stock|Sold Out|Unavailable|Discontinued|Removed from sale)/i;
     var unavailableLine = lines.find(function(line) {
-        return /^(商品已下架|已下架|下架|已售罄|售罄|Sold Out|Out of Stock|Unavailable|Discontinued)$/i.test(line);
+        return unavailablePattern.test(line) && line.length < 120;
     });
-    if (!unavailableLine && /(商品已下架|This product is no longer available|Product not found|Sold Out|Out of Stock|Currently unavailable)/i.test(fullText)) {
+    if (!unavailableLine && unavailablePattern.test(fullText)) {
         unavailableLine = '页面显示商品不可售';
+    }
+
+    var actionText = lines.filter(function(line) {
+        return /(加入购物车|立即购买|下载素材包|Download|Add to Cart|Buy Now|Dropship|Add to Quote|Inquiry|询价)/i.test(line);
+    }).join(' | ');
+    result.hasCommerceAction = !!actionText;
+    result.commerceActionText = actionText.slice(0, 180) || null;
+    var commerceValues = [
+        result.valueTotal,
+        result.estimatedTotal,
+        result.shippingCost,
+        result.shippingCostMin,
+        result.shippingCostMax,
+        result.priceMin,
+        result.priceMax,
+        result.unitPrice,
+        result.stock
+    ].filter(function(value) { return value !== null && value !== undefined && String(value).trim() !== ''; });
+    result.commerceFieldsPresent = commerceValues.length;
+    if (!unavailableLine && !loginRequired && (result.itemCode || result.title) && commerceValues.length === 0 && !result.hasCommerceAction) {
+        unavailableLine = '页面缺少价格、库存和购买/下载入口，疑似原商品已下架';
     }
     result.availabilityStatus = unavailableLine ? 'offline' : 'available';
     result.availabilityReason = unavailableLine || null;

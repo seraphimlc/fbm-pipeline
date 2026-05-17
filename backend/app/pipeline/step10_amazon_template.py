@@ -9,8 +9,10 @@ import json
 import logging
 import re
 import shutil
+import asyncio
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from openpyxl import load_workbook
@@ -26,12 +28,29 @@ from sqlalchemy.orm import selectinload
 logger = logging.getLogger(__name__)
 
 DATA_ROW = 8
-MAPPING_DIR = Path(__file__).parent / "template_mappings"
+AMAZON_TEMPLATE_LOGIC_VERSION = "2026-05-17-project-templates-v5"
+SOFA_ITEM_DIMENSION_MAX_WIDTH_INCHES = 82
+PIPELINE_DIR = Path(__file__).parent
+MAPPING_DIR = PIPELINE_DIR / "template_mappings"
+TEMPLATE_DIR = PIPELINE_DIR / "templates"
 BRAND_TEMPLATE_MAPPINGS = {
     ("Vindhvisk", "Sofas & Couches"): MAPPING_DIR / "vindhvisk_sofa.json",
 }
 RIDE_ON_TOY_MAPPING = MAPPING_DIR / "ride_on_toy.json"
 RIDE_ON_TOY_CATEGORY_MARKERS = RIDE_ON_CATEGORY_MARKERS
+
+
+def _snapshot_model(obj):
+    if obj is None:
+        return None
+    return SimpleNamespace(**{column.name: getattr(obj, column.name) for column in obj.__table__.columns})
+
+
+def _resolve_template_path(template_path: str | Path) -> Path:
+    path = Path(template_path).expanduser()
+    if path.is_absolute():
+        return path
+    return (PIPELINE_DIR / path).resolve()
 
 
 def _load_template_mapping(product: Product, pd: ProductData) -> dict:
@@ -48,10 +67,31 @@ def _load_template_mapping(product: Product, pd: ProductData) -> dict:
     ).lower()
     if not mapping_path and any(marker in category_text for marker in RIDE_ON_TOY_CATEGORY_MARKERS):
         mapping_path = RIDE_ON_TOY_MAPPING
+    if not mapping_path and (product.brand or "") == "Vindhvisk":
+        sofa_mapping_path = MAPPING_DIR / "vindhvisk_sofa.json"
+        if sofa_mapping_path.exists():
+            try:
+                sofa_mapping = json.loads(sofa_mapping_path.read_text(encoding="utf-8"))
+            except Exception:
+                sofa_mapping = {}
+            for option in sofa_mapping.get("browse_category_options") or []:
+                if not isinstance(option, dict):
+                    continue
+                candidates = [
+                    option.get("node"),
+                    option.get("path"),
+                    *(option.get("markers") or []),
+                ]
+                if any(str(candidate or "").lower() in category_text for candidate in candidates if candidate):
+                    mapping_path = sofa_mapping_path
+                    break
     if not mapping_path:
         raise ValueError(f"未配置品牌/类目导入模板映射: brand={product.brand or '未知'}, leaf_category={pd.leaf_category or '未知'}")
     with mapping_path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+        mapping = json.load(f)
+    if mapping.get("template_path"):
+        mapping["template_path"] = str(_resolve_template_path(mapping["template_path"]))
+    return mapping
 
 
 def _json_loads(value: str | None, fallback: Any) -> Any:
@@ -270,14 +310,7 @@ def _pricing_template_warnings(pd: ProductData) -> list[str]:
 
 
 def _inventory_template_warnings(pd: ProductData) -> list[str]:
-    stock = _stock_value(pd)
-    if stock is None:
-        return ["库存未确认，导入模板库存数量需要人工复核。"]
-    if stock <= 0:
-        return ["库存为 0，导入模板不可直接上传。"]
-    if stock < 5:
-        return [f"库存仅 {stock} 件，上传前建议确认是否继续销售。"]
-    return []
+    return ["导入表格按系统策略不提交库存数量，后续需通过库存同步功能更新可售库存。"]
 
 
 def _aplus_template_warnings(product: Product) -> list[str]:
@@ -290,7 +323,7 @@ def _aplus_template_warnings(product: Product) -> list[str]:
     warnings: list[str] = []
     if done_count < 5:
         warnings.append(f"A+ 图片仅完成 {done_count}/5 张，发布前需要人工补齐或确认。")
-    if product.aplus.aplus_status and product.aplus.aplus_status != "done":
+    if product.aplus.aplus_status and product.aplus.aplus_status not in {"done", "regen_done"}:
         warnings.append(f"A+ 状态为 {product.aplus.aplus_status}，发布前建议复核。")
     return warnings
 
@@ -306,7 +339,7 @@ def _step6_main_image_warnings(product: Product) -> list[str]:
 def _template_risk_level(warnings: list[str], missing_required: list[str], main_image_url_filled: bool) -> str:
     if missing_required or not main_image_url_filled:
         return "high_risk"
-    high_keywords = ("库存为 0", "主图上传失败", "缺少Step6选定主图", "OSS 未配置", "利润数据为空", "低于系统最低利润")
+    high_keywords = ("主图上传失败", "缺少Step6选定主图", "OSS 未配置", "利润数据为空", "低于系统最低利润")
     if any(any(keyword in warning for keyword in high_keywords) for warning in warnings):
         return "high_risk"
     return "warning" if warnings else "pass"
@@ -327,6 +360,7 @@ def _build_fill_summary(
     image_field_names = set(_flatten_mapping_values(mapping.get("image_fields", {})))
     image_url_count = len([field for field in image_field_names if _nonempty(fill.get(field))])
     return {
+        "logic_version": AMAZON_TEMPLATE_LOGIC_VERSION,
         "risk_level": _template_risk_level(warnings, missing_required, main_image_url_filled),
         "filled_count": len(filled_fields),
         "attempted_count": len([value for value in fill.values() if _nonempty(value)]),
@@ -462,17 +496,40 @@ def _stock_value(pd: ProductData) -> int | None:
 
 def _material_value(pd: ProductData) -> str:
     raw = " ".join([pd.material or "", pd.filler or "", pd.description or ""]).lower()
-    if "wood" in raw:
-        return "Engineered Wood"
-    if "metal" in raw or "steel" in raw:
-        return "Metal"
-    if "foam" in raw:
+    if "foam" in raw or "all-foam" in raw or "boneless" in raw or "frameless" in raw:
         return "Polyurethane (PU)"
+    if re.search(r"\b(?:metal|steel|iron)\s+frame\b|\bframe\s+(?:made\s+of\s+)?(?:metal|steel|iron)\b", raw):
+        return "Metal"
+    if re.search(r"\b(?:wood|wooden|engineered wood)\s+frame\b|\bframe\s+(?:made\s+of\s+)?(?:wood|wooden|engineered wood)\b", raw):
+        return "Engineered Wood"
     return "Polyurethane (PU)"
+
+
+def _frame_material_value(pd: ProductData) -> str:
+    raw = " ".join([pd.material or "", pd.filler or "", pd.description or "", pd.title or ""]).lower()
+    def has_positive_frame(pattern: str) -> bool:
+        for match in re.finditer(pattern, raw):
+            prefix = raw[max(0, match.start() - 45):match.start()]
+            if re.search(r"\b(?:no|without|not|free of|unlike)\b", prefix):
+                continue
+            return True
+        return False
+
+    if "all-foam" in raw or "boneless" in raw or "frameless" in raw:
+        return "Engineered Wood"
+    if has_positive_frame(r"\b(?:metal|steel|iron)\s+frame\b|\bframe\s+(?:made\s+of\s+)?(?:metal|steel|iron)\b"):
+        return "Metal"
+    if has_positive_frame(r"\bbamboo\s+frame\b|\bframe\s+(?:made\s+of\s+)?bamboo\b"):
+        return "Bamboo"
+    if has_positive_frame(r"\bplastic\s+frame\b|\bframe\s+(?:made\s+of\s+)?plastic\b"):
+        return "Plastic"
+    return "Engineered Wood"
 
 
 def _fabric_value(pd: ProductData) -> str:
     raw = " ".join([pd.material or "", pd.description or "", pd.title or ""]).lower()
+    if "corduroy" in raw:
+        return "Corduroy"
     if "chenille" in raw:
         return "Chenille"
     if "velvet" in raw:
@@ -574,6 +631,175 @@ def _seat_depth(pd: ProductData) -> float | None:
 
 def _weight_capacity_maximum(seating: int | None) -> int:
     return max(seating or 3, 1) * 250
+
+
+def _omit_fields(fill: dict[str, Any], fields: dict[str, str], keys: tuple[str, ...]) -> None:
+    for key in keys:
+        attr = fields.get(key)
+        if attr:
+            fill.pop(attr, None)
+
+
+def _sofa_dimension_warnings(pd: ProductData, fill: dict[str, Any], fields: dict[str, str]) -> list[str]:
+    width = pd.dimension_length
+    if width is None or width <= SOFA_ITEM_DIMENSION_MAX_WIDTH_INCHES:
+        return []
+
+    _omit_fields(fill, fields, (
+        "depth_value",
+        "depth_unit",
+        "height_value",
+        "height_unit",
+        "width_value",
+        "width_unit",
+    ))
+    return [
+        f"SOFA Item Dimensions D x W x H 的 width={width:g} inches 超过 Amazon 允许的 "
+        f"{SOFA_ITEM_DIMENSION_MAX_WIDTH_INCHES:g} inches，已跳过该字段组；普通 Item Width/Length 仍保留。"
+    ]
+
+
+def _amazon_item_type_keyword(option: dict[str, Any]) -> str:
+    return f"{option['path']} ({option['node']})"
+
+
+def _furniture_match_text(pd: ProductData) -> str:
+    text_values = [
+        pd.leaf_category,
+        pd.categories,
+        pd.product_type,
+        pd.title,
+        pd.listing_title,
+        pd.description,
+        pd.features,
+        pd.variants,
+    ]
+    return " ".join(str(value or "") for value in text_values).lower()
+
+
+def _find_browse_option(options: list[Any], node: str) -> dict[str, Any] | None:
+    for option in options:
+        if isinstance(option, dict) and option.get("node") == node:
+            return option
+    return None
+
+
+def _looks_like_sofa(pd: ProductData) -> bool:
+    text = _furniture_match_text(pd)
+    sofa_markers = (
+        "sofa",
+        "couch",
+        "loveseat",
+        "love seat",
+        "futon",
+        "sleeper",
+        "settee",
+        "sectional",
+        "chaise sofa",
+        "1-2 seater",
+        "2 seater",
+        "two seater",
+        "多人沙发",
+        "双人沙发",
+        "沙发",
+    )
+    if any(marker in text for marker in sofa_markers):
+        return True
+    # Amazon returned CHAIR dimension warnings for 62.6 x 48.23 in. Sofa-like
+    # furniture should not be squeezed into living-room-chairs just because the
+    # supplier leaf category says so.
+    longest_side = max((pd.dimension_length or 0), (pd.dimension_width or 0))
+    depth_side = min((pd.dimension_length or 0), (pd.dimension_width or 0))
+    return longest_side > 40 or depth_side > 35.04
+
+
+def _preferred_sofa_node(pd: ProductData) -> str:
+    text = _furniture_match_text(pd)
+    if "futon" in text:
+        return "futon-sets"
+    if any(marker in text for marker in ("patio loveseat", "outdoor loveseat", "庭院双人沙发")):
+        return "patio-loveseats"
+    if any(marker in text for marker in ("patio sofa", "outdoor sofa", "户外沙发")):
+        return "patio-sofas"
+    if any(marker in text for marker in ("children sofa", "kids sofa", "儿童沙发")):
+        return "childrens-sofas"
+    return "sofas"
+
+
+def _sofa_type_value(pd: ProductData) -> str:
+    text = _furniture_match_text(pd)
+    if "sofa bed" in text:
+        return "Sofa Bed"
+    if "chaise" in text or "lounge chair" in text:
+        return "Sofa Chaise"
+    if "sleeper" in text:
+        return "Sleeper"
+    if "futon" in text:
+        return "Futon"
+    if "loveseat" in text or "love seat" in text:
+        return "Loveseat"
+    if "sectional" in text:
+        return "Sectional"
+    if "settee" in text:
+        return "Settee"
+    if "convertible" in text:
+        return "Convertible"
+    return "Standard"
+
+
+def _select_furniture_category_option(mapping: dict, pd: ProductData) -> dict[str, Any] | None:
+    options = mapping.get("browse_category_options") or []
+    if not isinstance(options, list):
+        return None
+
+    if _looks_like_sofa(pd):
+        preferred = _find_browse_option(options, _preferred_sofa_node(pd))
+        if preferred:
+            return preferred
+
+    haystack = _furniture_match_text(pd)
+    best: tuple[int, int, dict[str, Any]] | None = None
+    for index, option in enumerate(options):
+        if not isinstance(option, dict):
+            continue
+        score = 0
+        node = str(option.get("node") or "").lower()
+        path = str(option.get("path") or "").lower()
+        if node and node in haystack:
+            score += 40
+        if path and path in haystack:
+            score += 40
+        for marker in option.get("markers") or []:
+            marker_text = str(marker or "").lower().strip()
+            if marker_text and marker_text in haystack:
+                score += 20 + min(len(marker_text), 30)
+        if score and (best is None or score > best[0]):
+            best = (score, index, option)
+
+    if best:
+        return best[2]
+
+    for option in options:
+        if isinstance(option, dict) and option.get("node") == "sofas":
+            return option
+    return None
+
+
+def _apply_furniture_category_fill(fill: dict[str, Any], mapping: dict, pd: ProductData) -> tuple[dict[str, Any] | None, list[str]]:
+    warnings: list[str] = []
+    option = _select_furniture_category_option(mapping, pd)
+    if not option:
+        warnings.append("SOFA/CHAIR 模板未匹配到细分类目，沿用映射默认类目。")
+        return None, warnings
+
+    fill["product_type#1.value"] = option.get("product_type") or "SOFA"
+    fill["item_type_keyword[marketplace_id=ATVPDKIKX0DER]#1.value"] = _amazon_item_type_keyword(option)
+
+    if option.get("product_type") == "CHAIR":
+        fill.pop("sofa_type[marketplace_id=ATVPDKIKX0DER]#1.value", None)
+    else:
+        fill["sofa_type[marketplace_id=ATVPDKIKX0DER]#1.value"] = _sofa_type_value(pd)
+    return option, warnings
 
 
 def _ride_on_material(pd: ProductData) -> str:
@@ -704,6 +930,8 @@ def _apply_ride_on_toy_fill(fill: dict[str, Any], fields: dict[str, str], produc
         age_description = f"{age_min // 12}-{age_max // 12} years"
     assembly_required, assembly_time, assembly_time_unit = _ride_on_assembly(pd)
 
+    ships_globally = str(fill.get(fields.get("ships_globally", ""), "No") or "No").strip().lower() == "yes"
+
     fill.update({
         fields["target_audience_1"]: "Children",
         fields["target_audience_2"]: "Kids",
@@ -737,11 +965,7 @@ def _apply_ride_on_toy_fill(fill: dict[str, Any], fields: dict[str, str], produc
         fields["pesticide_marking_type_1"]: "EPA Establishment Number",
         fields["pesticide_registration_status_1"]: "This product is not a pesticide or pesticide device, as defined under the U.S. Federal Insecticide, Fungicide, and Rodenticide Act.",
         fields["has_multiple_battery_powered_components"]: "No",
-        fields["compliance_toy_voltage"]: "Up to 12 Volts" if voltage <= 12 else "More than 12 Volts",
-        fields["compliance_toy_type"]: "Cars",
         fields["contains_battery_or_cell"]: "Battery",
-        fields["compliance_recommended_age"]: "Over 3 Years of Age" if age_min >= 36 else "Under 3 Years of Age",
-        fields["compliance_operation_mode"]: "Electronic - Battery",
         fields["battery_contains_free_unabsorbed_liquid"]: "No",
         fields["is_battery_non_spillable"]: "Yes" if battery["composition"] in ("Lead Acid", "Wet Alkali") else None,
         fields["non_lithium_battery_packaging"]: "Batteries contained in equipment" if not battery["composition"].startswith("Lithium") else None,
@@ -753,6 +977,16 @@ def _apply_ride_on_toy_fill(fill: dict[str, Any], fields: dict[str, str], produc
         fields["num_batteries_quantity"]: battery["quantity"],
         fields["num_batteries_type"]: battery["type"],
     })
+
+    if ships_globally:
+        fill.update({
+            fields["compliance_toy_voltage"]: "Up to 12 Volts" if voltage <= 12 else "More than 12 Volts",
+            fields["compliance_toy_type"]: "Cars",
+            fields["compliance_recommended_age"]: "Over 3 Years of Age" if age_min >= 36 else "Under 3 Years of Age",
+            fields["compliance_operation_mode"]: "Electronic - Battery",
+        })
+    else:
+        warnings.append("RIDE_ON_TOY 默认按美国 FBM 非全球配送生成，已跳过 Ships Globally 条件下才允许的 Toy Compliance 字段。")
 
     if battery.get("energy_content") and not battery["composition"].startswith("Lithium"):
         fill[fields["non_lithium_battery_energy_content"]] = battery["energy_content"]
@@ -774,6 +1008,183 @@ def _apply_ride_on_toy_fill(fill: dict[str, Any], fields: dict[str, str], produc
         fill[field] = component
 
     return warnings
+
+
+def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict) -> dict:
+    """同步生成 Excel 文件。调用方应放到线程中执行，避免阻塞 API 事件循环。"""
+    template_path = Path(mapping["template_path"])
+    material_dir = Path(pd.material_dir) if pd.material_dir else Path.cwd() / "outputs"
+    output_dir = material_dir / "amazon import"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_name = str(mapping.get("output_filename") or "{item_code}_amazon_import.xlsm").format(item_code=pd.item_code)
+    output_path = output_dir / output_name
+    shutil.copy2(template_path, output_path)
+
+    wb = load_workbook(output_path, keep_vba=True, data_only=False)
+    ws = wb["Template"]
+    columns = _index_template_columns(ws)
+    warnings: list[str] = []
+
+    # 清空模板第8行的示例/偏好默认值，保留表头和验证规则。
+    for cell in ws[DATA_ROW]:
+        cell.value = None
+
+    brand_col = columns.get("brand[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value")
+    if brand_col:
+        _remove_column_validations(ws, brand_col)
+
+    package, package_warnings = _representative_package(pd)
+    warnings.extend(package_warnings)
+    bullets = _json_loads(pd.listing_bullets, [])
+    bullets = bullets if isinstance(bullets, list) else []
+
+    fields = mapping["dynamic_fields"]
+    fill = dict(mapping.get("fixed_values", {}))
+    shipping_template = _first_template_value(wb, fields["shipping_template"])
+    if not shipping_template:
+        warnings.append("模板未找到 Shipping Template 下拉值，配送模板未填写。")
+    stock_quantity = None
+    inventory_available = "Disabled"
+
+    fill.update({
+        fields["sku"]: pd.item_code,
+        fields["title"]: pd.listing_title,
+        fields["brand"]: product.brand,
+        fields["product_id_type"]: "UPC" if product.upc else "GTIN Exempt",
+        fields["product_id_value"]: product.upc,
+        fields["model_number"]: pd.item_code,
+        fields["model_name"]: pd.item_code,
+        fields["manufacturer"]: product.brand,
+        fields["description"]: _description(pd),
+        fields["search_terms"]: pd.listing_search_terms,
+        fields["list_price"]: pd.suggested_price,
+        fields["fulfillment_channel"]: "Fulfillment by Merchant (Default)",
+        fields["quantity"]: stock_quantity,
+        fields["inventory_available"]: inventory_available,
+        fields["price"]: pd.suggested_price,
+        fields["country_of_origin"]: pd.origin or "China",
+        fields["shipping_template"]: shipping_template,
+    })
+
+    if mapping.get("category_type") == "ride_on_toy":
+        item_type_option = select_ride_on_category(_facts_text(pd))
+        if item_type_option:
+            fill["item_type_keyword[marketplace_id=ATVPDKIKX0DER]#1.value"] = item_type_option.item_type_keyword
+        else:
+            warnings.append("未能匹配 RIDE_ON_TOY 细分类目，沿用模板默认儿童电瓶车类目。")
+        warnings.extend(_apply_ride_on_toy_fill(fill, fields, product, pd))
+    else:
+        category_option, category_warnings = _apply_furniture_category_fill(fill, mapping, pd)
+        warnings.extend(category_warnings)
+        seating = _seating_capacity(pd)
+        if category_option and category_option.get("product_type") == "CHAIR" and not seating:
+            seating = 1
+        if seating is None:
+            warnings.append("未能从标题/描述识别座位数，Seating Capacity 暂未填写。")
+        product_type = (category_option or {}).get("product_type")
+        material = _material_value(pd)
+        frame_material = _frame_material_value(pd)
+        fill.update({
+            fields["material"]: material,
+            fields["fabric_type"]: _fabric_value(pd),
+            fields["color"]: pd.color,
+            fields["size"]: f'{pd.dimension_length:g}" x {pd.dimension_width:g}" x {pd.dimension_height:g}"' if pd.dimension_length and pd.dimension_width and pd.dimension_height else None,
+            fields["number_of_pieces"]: 1,
+            fields["item_shape"]: "Rectangular",
+            fields["part_number"]: pd.item_code,
+            fields["included_components"]: _included_components(pd, seating),
+            fields["is_fragile"]: "No",
+            fields["frame_material"]: frame_material,
+            fields["frame_material_structured"]: frame_material,
+            fields["unit_count"]: 1,
+            fields["unit_count_type"]: "Count",
+            fields["seat_depth"]: _seat_depth(pd),
+            fields["seat_depth_unit"]: "Inches",
+            fields["seat_height"]: 16,
+            fields["seat_height_unit"]: "Inches",
+            fields["weight_capacity_maximum"]: _weight_capacity_maximum(seating),
+            fields["weight_capacity_maximum_unit"]: "Pounds",
+            fields["maximum_weight_recommendation"]: _weight_capacity_maximum(seating),
+            fields["maximum_weight_recommendation_unit"]: "Pounds",
+            fields["depth_value"]: pd.dimension_width,
+            fields["depth_unit"]: "Inches",
+            fields["height_value"]: pd.dimension_height,
+            fields["height_unit"]: "Inches",
+            fields["width_value"]: pd.dimension_length,
+            fields["width_unit"]: "Inches",
+            fields["item_width_value"]: pd.dimension_length,
+            fields["item_width_unit"]: "Inches",
+            fields["item_length_value"]: pd.dimension_width,
+            fields["item_length_unit"]: "Inches",
+        })
+        if seating:
+            fill[fields["seating_capacity"]] = seating
+        if product_type == "SOFA":
+            _omit_fields(fill, fields, (
+                "maximum_weight_recommendation",
+                "maximum_weight_recommendation_unit",
+            ))
+            warnings.extend(_sofa_dimension_warnings(pd, fill, fields))
+        if product_type == "CHAIR":
+            fill[fields["included_components"]] = "Chair"
+            _omit_fields(fill, fields, (
+                "number_of_pieces",
+                "seating_capacity",
+                "weight_capacity_maximum",
+                "weight_capacity_maximum_unit",
+                "maximum_weight_recommendation",
+                "maximum_weight_recommendation_unit",
+                "item_length_value",
+                "item_length_unit",
+            ))
+        if pd.weight:
+            fill[fields["item_weight_value"]] = pd.weight
+            fill[fields["item_weight_unit"]] = "Pounds"
+
+    image_fill, image_warnings, uploaded_images = _upload_listing_images(product, pd, mapping)
+    fill.update(image_fill)
+    warnings.extend(image_warnings)
+    if package:
+        package_fields = mapping["package_fields"]
+        fill.update({
+            package_fields["length_value"]: package["length"],
+            package_fields["length_unit"]: "Inches",
+            package_fields["width_value"]: package["width"],
+            package_fields["width_unit"]: "Inches",
+            package_fields["height_value"]: package["height"],
+            package_fields["height_unit"]: "Inches",
+            package_fields["weight_value"]: package["weight"],
+            package_fields["weight_unit"]: "Pounds",
+        })
+
+    for field, bullet in zip(mapping.get("bullet_fields", []), bullets[:5]):
+        fill[field] = bullet
+
+    missing_columns = []
+    for attr, value in fill.items():
+        if attr not in columns:
+            missing_columns.append(attr)
+            continue
+        _set(ws, columns, attr, value)
+    if missing_columns:
+        warnings.append(f"模板中未找到 {len(missing_columns)} 个预期字段: {', '.join(missing_columns[:5])}")
+    warnings.extend(_listing_template_warnings(pd))
+    warnings.extend(_pricing_template_warnings(pd))
+    warnings.extend(_inventory_template_warnings(pd))
+    warnings.extend(_aplus_template_warnings(product))
+    warnings.extend(_step6_main_image_warnings(product))
+    warnings = list(dict.fromkeys(warnings))
+    fill_summary = _build_fill_summary(mapping, fill, columns, warnings, missing_columns, uploaded_images)
+
+    wb.save(output_path)
+
+    return {
+        "path": str(output_path),
+        "warnings": warnings,
+        "uploaded_images": uploaded_images,
+        "fill_summary": fill_summary,
+        "filled_fields": fill_summary["filled_count"],
+    }
 
 
 async def run_amazon_template(product_id: int) -> dict:
@@ -798,153 +1209,38 @@ async def run_amazon_template(product_id: int) -> dict:
         if not pd.listing_title or not pd.listing_bullets:
             raise ValueError("缺少Listing文案，请先执行Step5")
 
-        material_dir = Path(pd.material_dir) if pd.material_dir else Path.cwd() / "outputs"
-        output_dir = material_dir / "amazon import"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_name = str(mapping.get("output_filename") or "{item_code}_amazon_import.xlsm").format(item_code=pd.item_code)
-        output_path = output_dir / output_name
-        shutil.copy2(template_path, output_path)
+        product_snapshot = _snapshot_model(product)
+        product_snapshot.data = _snapshot_model(product.data)
+        product_snapshot.images = _snapshot_model(product.images)
+        product_snapshot.aplus = _snapshot_model(product.aplus)
+        pd_snapshot = product_snapshot.data
 
-        wb = load_workbook(output_path, keep_vba=True, data_only=False)
-        ws = wb["Template"]
-        columns = _index_template_columns(ws)
-        warnings: list[str] = []
+    template_result = await asyncio.to_thread(_build_amazon_template_file, product_snapshot, pd_snapshot, mapping)
+    output_path = Path(template_result["path"])
 
-        # 清空模板第8行的示例/偏好默认值，保留表头和验证规则。
-        for cell in ws[DATA_ROW]:
-            cell.value = None
-
-        brand_col = columns.get("brand[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value")
-        if brand_col:
-            _remove_column_validations(ws, brand_col)
-
-        package, package_warnings = _representative_package(pd)
-        warnings.extend(package_warnings)
-        bullets = _json_loads(pd.listing_bullets, [])
-        bullets = bullets if isinstance(bullets, list) else []
-
-        fields = mapping["dynamic_fields"]
-        fill = dict(mapping.get("fixed_values", {}))
-        shipping_template = _first_template_value(wb, fields["shipping_template"])
-        if not shipping_template:
-            warnings.append("模板未找到 Shipping Template 下拉值，配送模板未填写。")
-        stock_quantity = _stock_value(pd)
-
-        fill.update({
-            fields["sku"]: pd.item_code,
-            fields["title"]: pd.listing_title,
-            fields["brand"]: product.brand,
-            fields["product_id_type"]: "UPC" if product.upc else "GTIN Exempt",
-            fields["product_id_value"]: product.upc,
-            fields["model_number"]: pd.item_code,
-            fields["model_name"]: pd.item_code,
-            fields["manufacturer"]: product.brand,
-            fields["description"]: _description(pd),
-            fields["search_terms"]: pd.listing_search_terms,
-            fields["list_price"]: pd.suggested_price,
-            fields["fulfillment_channel"]: "Fulfillment by Merchant (Default)",
-            fields["quantity"]: stock_quantity,
-            fields["inventory_available"]: "Enabled" if stock_quantity and stock_quantity > 0 else ("Disabled" if stock_quantity == 0 else None),
-            fields["price"]: pd.suggested_price,
-            fields["country_of_origin"]: pd.origin or "China",
-            fields["shipping_template"]: shipping_template,
-        })
-
-        if mapping.get("category_type") == "ride_on_toy":
-            item_type_option = select_ride_on_category(_facts_text(pd))
-            if item_type_option:
-                fill["item_type_keyword[marketplace_id=ATVPDKIKX0DER]#1.value"] = item_type_option.item_type_keyword
-            else:
-                warnings.append("未能匹配 RIDE_ON_TOY 细分类目，沿用模板默认儿童电瓶车类目。")
-            warnings.extend(_apply_ride_on_toy_fill(fill, fields, product, pd))
-        else:
-            seating = _seating_capacity(pd)
-            if seating is None:
-                warnings.append("未能从标题/描述识别座位数，Seating Capacity 暂未填写。")
-            fill.update({
-                fields["material"]: _material_value(pd),
-                fields["fabric_type"]: _fabric_value(pd),
-                fields["color"]: pd.color,
-                fields["part_number"]: pd.item_code,
-                fields["included_components"]: _included_components(pd, seating),
-                fields["is_fragile"]: "No",
-                fields["seat_depth"]: _seat_depth(pd),
-                fields["seat_depth_unit"]: "Inches",
-                fields["seat_height"]: 16,
-                fields["seat_height_unit"]: "Inches",
-                fields["weight_capacity_maximum"]: _weight_capacity_maximum(seating),
-                fields["weight_capacity_maximum_unit"]: "Pounds",
-                fields["depth_value"]: pd.dimension_width,
-                fields["depth_unit"]: "Inches",
-                fields["height_value"]: pd.dimension_height,
-                fields["height_unit"]: "Inches",
-                fields["width_value"]: pd.dimension_length,
-                fields["width_unit"]: "Inches",
-                fields["item_width_value"]: pd.dimension_length,
-                fields["item_width_unit"]: "Inches",
-                fields["item_length_value"]: pd.dimension_width,
-                fields["item_length_unit"]: "Inches",
-            })
-            if seating:
-                fill[fields["seating_capacity"]] = seating
-            if pd.weight:
-                fill[fields["item_weight_value"]] = pd.weight
-                fill[fields["item_weight_unit"]] = "Pounds"
-
-        image_fill, image_warnings, uploaded_images = _upload_listing_images(product, pd, mapping)
-        fill.update(image_fill)
-        warnings.extend(image_warnings)
-        if package:
-            package_fields = mapping["package_fields"]
-            fill.update({
-                package_fields["length_value"]: package["length"],
-                package_fields["length_unit"]: "Inches",
-                package_fields["width_value"]: package["width"],
-                package_fields["width_unit"]: "Inches",
-                package_fields["height_value"]: package["height"],
-                package_fields["height_unit"]: "Inches",
-                package_fields["weight_value"]: package["weight"],
-                package_fields["weight_unit"]: "Pounds",
-            })
-
-        for field, bullet in zip(mapping.get("bullet_fields", []), bullets[:5]):
-            fill[field] = bullet
-
-        missing_columns = []
-        for attr, value in fill.items():
-            if attr not in columns:
-                missing_columns.append(attr)
-                continue
-            _set(ws, columns, attr, value)
-        if missing_columns:
-            warnings.append(f"模板中未找到 {len(missing_columns)} 个预期字段: {', '.join(missing_columns[:5])}")
-        warnings.extend(_listing_template_warnings(pd))
-        warnings.extend(_pricing_template_warnings(pd))
-        warnings.extend(_inventory_template_warnings(pd))
-        warnings.extend(_aplus_template_warnings(product))
-        warnings.extend(_step6_main_image_warnings(product))
-        warnings = list(dict.fromkeys(warnings))
-        fill_summary = _build_fill_summary(mapping, fill, columns, warnings, missing_columns, uploaded_images)
-
-        wb.save(output_path)
-
-        pd.amazon_template_path = str(output_path)
-        pd.amazon_template_warnings = json.dumps(warnings, ensure_ascii=False)
-        pd.amazon_template_fill_summary = json.dumps(fill_summary, ensure_ascii=False)
+    async with async_session() as db:
+        result = await db.execute(select(Product).options(selectinload(Product.data)).where(Product.id == product_id))
+        product = result.scalar_one_or_none()
+        if not product or not product.data:
+            raise ValueError(f"Product {product_id} not found or no data")
+        pd = product.data
+        pd.amazon_template_path = template_result["path"]
+        pd.amazon_template_warnings = json.dumps(template_result["warnings"], ensure_ascii=False)
+        pd.amazon_template_fill_summary = json.dumps(template_result["fill_summary"], ensure_ascii=False)
         pd.amazon_template_generated_at = datetime.now()
         file_result = await db.execute(
             select(ProductFile).where(
                 ProductFile.product_id == product.id,
                 ProductFile.file_type == "amazon_import_template",
-                ProductFile.path == str(output_path),
+                ProductFile.path == template_result["path"],
             )
         )
         product_file = file_result.scalar_one_or_none()
         metadata_json = json.dumps({
-            "warnings": warnings,
-            "uploaded_images": uploaded_images,
-            "fill_summary": fill_summary,
-            "filled_fields": fill_summary["filled_count"],
+            "warnings": template_result["warnings"],
+            "uploaded_images": template_result["uploaded_images"],
+            "fill_summary": template_result["fill_summary"],
+            "filled_fields": template_result["filled_fields"],
         }, ensure_ascii=False)
         if product_file:
             product_file.label = "Amazon导入表格"
@@ -956,7 +1252,7 @@ async def run_amazon_template(product_id: int) -> dict:
                 product_id=product.id,
                 file_type="amazon_import_template",
                 label="Amazon导入表格",
-                path=str(output_path),
+                path=template_result["path"],
                 directory=str(output_path.parent),
                 metadata_json=metadata_json,
                 created_at=datetime.now(),
@@ -965,10 +1261,4 @@ async def run_amazon_template(product_id: int) -> dict:
         await db.commit()
 
         logger.info(f"[Step10] Amazon导入模板已生成: {output_path}")
-        return {
-            "path": str(output_path),
-            "warnings": warnings,
-            "uploaded_images": uploaded_images,
-            "fill_summary": fill_summary,
-            "filled_fields": fill_summary["filled_count"],
-        }
+        return template_result

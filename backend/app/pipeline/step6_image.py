@@ -51,7 +51,7 @@ Supporting images slots 02-09 should answer buyer doubts: exact set/variant, alt
 Use a clear conversion_role for each image. Prefer one of:
 exact_set, alternate_angle, size_scale, material_detail, function_use, lifestyle, setup_storage, package_contents, proof, exclude.
 
-When there are not enough distinct image types, still fill remaining gallery slots with the best usable images up to 9. Do not include weak, blurry, wrong-variant, watermarked, or obviously duplicate images just to fill space.
+When there are not enough distinct image types, still rank every remaining image honestly so the system can fill slots with the best available data up to 9. Mark weak, blurry, wrong-variant, watermarked, duplicate, or risky images clearly in risk_flags and decision_reason instead of omitting them silently.
 
 Do not invent material, certification, capacity, waterproofing, safety, or included accessories unless visible or supported by the product facts. Mark uncertainty.
 Output valid JSON only, no markdown fences."""
@@ -425,11 +425,66 @@ def _normalize_sheet_reviews(analysis: dict, batch_records: list[dict], sheet_re
     return reviews
 
 
+def _is_data_inspection_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return (
+        "data_inspection_failed" in text
+        or "datainspectionfailed" in text
+        or "input image data may contain inappropriate content" in text
+    )
+
+
+async def _analyze_contact_sheet(client, image_analysis_model: str, sheet: dict, batch_records: list[dict], prompt: str) -> tuple[dict, list[dict]]:
+    sheet_path = Path(sheet["sheet_path"])
+    image_url = _image_data_url(sheet_path)
+
+    logger.info(
+        f"[Step6] 调用VLM分析图片: model={image_analysis_model}, "
+        f"provider={'LLM_API' if settings.VLM_USE_LLM_API else 'VLM_API'}, "
+        f"sheet={sheet_path.name}, page={sheet['sheet_page']}, "
+        f"images={len(batch_records)}, bytes={sheet_path.stat().st_size}"
+    )
+    response = await client.chat.completions.create(
+        model=image_analysis_model,
+        messages=[
+            {"role": "system", "content": VLM_SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "text", "text": prompt},
+                ],
+            },
+        ],
+        max_tokens=4000,
+        temperature=0.2,
+    )
+
+    content = response.choices[0].message.content
+    if not content:
+        raise RuntimeError(f"VLM 返回空结果: contact_sheet={sheet_path.name}")
+
+    try:
+        sheet_analysis = json.loads(_clean_json_content(content))
+    except json.JSONDecodeError as e:
+        logger.warning(f"VLM JSON解析失败，保存原始内容: {e}")
+        sheet_analysis = {"raw": content, "images": []}
+
+    reviews = _normalize_sheet_reviews(sheet_analysis, batch_records, sheet)
+    return sheet_analysis, reviews
+
+
 def _score(value) -> float:
     try:
         return float(value or 0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _ensure_list(value) -> list:
+    if value is None:
+        return []
+    return value if isinstance(value, list) else [value]
 
 
 def _image_strategy(category: str, pd: ProductData) -> dict:
@@ -690,6 +745,32 @@ def _is_usable_gallery_item(item: dict) -> bool:
     return _score(item.get("gallery_score")) >= 5
 
 
+def _gallery_fallback_score(item: dict) -> float:
+    score = _score(item.get("gallery_score"))
+    text = _image_text(item)
+    role = _selection_role(item)
+    if role == "exclude":
+        score -= 6
+    penalties = {
+        "wrong variant": 8,
+        "wrong color": 8,
+        "mismatched": 8,
+        "unclear product": 6,
+        "blur": 5,
+        "blurry": 5,
+        "cropped product": 4,
+        "watermark": 4,
+        "logo": 4,
+        "low resolution": 3,
+    }
+    for marker, penalty in penalties.items():
+        if marker in text:
+            score -= penalty
+    if any(word in text for word in ("product shot", "front", "side", "back", "detail", "dimension", "lifestyle", "room")):
+        score += 1
+    return score
+
+
 def _duplicate_reason(item: dict, selected_items: list[dict]) -> str | None:
     role = _selection_role(item)
     text = _image_text(item)
@@ -892,6 +973,7 @@ def _image_health(diagnostics: dict) -> dict:
     gallery_count = int(diagnostics.get("gallery_count") or 0)
     missing_roles = diagnostics.get("missing_gallery_roles") or []
     duplicate_backfill = diagnostics.get("duplicate_backfill") or []
+    best_available_backfill = diagnostics.get("best_available_backfill") or []
     alignment = diagnostics.get("listing_image_alignment") or {}
     missing_evidence = alignment.get("missing_evidence") or []
 
@@ -938,6 +1020,11 @@ def _image_health(diagnostics: dict) -> dict:
             "severity": "warning",
             "message": f"有 {len(duplicate_backfill)} 张重复图片被兜底使用，图库信息密度偏低。",
         })
+    if best_available_backfill:
+        issues.append({
+            "severity": "review",
+            "message": f"有 {len(best_available_backfill)} 张图片因数量不足按现有素材最优兜底选择，需要人工复核。",
+        })
 
     severities = {item["severity"] for item in issues}
     if "review" in severities:
@@ -973,18 +1060,20 @@ def _select_gallery(reviews: list[dict], strategy: dict) -> tuple[dict | None, l
     role_counts: dict[str, int] = {}
     duplicate_suppressed: list[dict] = []
     duplicate_backfill: list[dict] = []
+    best_available_backfill: list[dict] = []
     if main:
         gallery.append({**main, "slot": "01", "selection_role": "identity"})
         selected_ids.add(main.get("image_id"))
 
+    all_remaining = [item for item in reviews if item.get("image_id") not in selected_ids]
     candidates = sorted(
-        [item for item in reviews if item.get("image_id") not in selected_ids and _is_usable_gallery_item(item)],
+        [item for item in all_remaining if _is_usable_gallery_item(item)],
         key=lambda item: _score(item.get("gallery_score")),
         reverse=True,
     )
-    max_gallery_slots = min(9, len(candidates) + len(gallery))
+    max_gallery_slots = min(9, len(reviews))
 
-    def add_item(item: dict, role: str, allow_duplicate: bool = False) -> bool:
+    def add_item(item: dict, role: str, allow_duplicate: bool = False, backfill_reason: str | None = None) -> bool:
         if len(gallery) >= max_gallery_slots:
             return False
         image_id = item.get("image_id")
@@ -1003,6 +1092,20 @@ def _select_gallery(reviews: list[dict], strategy: dict) -> tuple[dict | None, l
         selected_ids.add(image_id)
         role_counts[role] = role_counts.get(role, 0) + 1
         selected_item = {**item, "slot": f"{len(gallery) + 1:02d}", "selection_role": role}
+        if backfill_reason:
+            selected_item["best_available_backfill"] = True
+            selected_item["backfill_reason"] = backfill_reason
+            selected_item["selection_warnings"] = [
+                *(_ensure_list(selected_item.get("selection_warnings"))),
+                backfill_reason,
+            ]
+            best_available_backfill.append({
+                "image_id": item.get("image_id"),
+                "filename": item.get("filename"),
+                "role": role,
+                "role_label": ROLE_LABELS.get(role, role),
+                "reason": backfill_reason,
+            })
         if duplicate_reason:
             selected_item["duplicate_backfill"] = True
             selected_item["duplicate_reason"] = duplicate_reason
@@ -1043,8 +1146,8 @@ def _select_gallery(reviews: list[dict], strategy: dict) -> tuple[dict | None, l
         if len(gallery) >= max_gallery_slots:
             break
 
-    # If distinct roles run out, use a few duplicate backups only to keep a workable gallery.
-    duplicate_backfill_target = min(6, max_gallery_slots)
+    # If distinct roles run out, use duplicate backups to keep a workable gallery.
+    duplicate_backfill_target = max_gallery_slots
     for item in candidates:
         if len(gallery) >= duplicate_backfill_target:
             break
@@ -1052,6 +1155,23 @@ def _select_gallery(reviews: list[dict], strategy: dict) -> tuple[dict | None, l
         if role == "exclude":
             continue
         add_item(item, role, allow_duplicate=True)
+
+    # 最后兜底：如果合规图片不够，使用现有分析图片里评分最高、风险最低的素材补齐。
+    fallback_candidates = sorted(
+        [item for item in all_remaining if item.get("image_id") not in selected_ids],
+        key=_gallery_fallback_score,
+        reverse=True,
+    )
+    for item in fallback_candidates:
+        if len(gallery) >= max_gallery_slots:
+            break
+        role = _selection_role(item)
+        fallback_score = _gallery_fallback_score(item)
+        reason = (
+            "合规副图数量不足，已按现有素材中相对最优图片补齐；"
+            f"需人工复核风险，fallback_score={fallback_score:.1f}"
+        )
+        add_item(item, role if role != "exclude" else "proof", allow_duplicate=True, backfill_reason=reason)
 
     for item in candidates:
         if item.get("image_id") in selected_ids:
@@ -1072,6 +1192,8 @@ def _select_gallery(reviews: list[dict], strategy: dict) -> tuple[dict | None, l
     diagnostics["missing_gallery_roles"] = _missing_gallery_roles(gallery, strategy)
     diagnostics["duplicate_suppressed"] = _dedupe_diagnostic_items(duplicate_suppressed)
     diagnostics["duplicate_backfill"] = _dedupe_diagnostic_items(duplicate_backfill)
+    diagnostics["best_available_backfill"] = _dedupe_diagnostic_items(best_available_backfill)
+    diagnostics["target_gallery_count"] = max_gallery_slots
     return main, gallery, diagnostics
 
 
@@ -1118,6 +1240,10 @@ def _write_image_analysis_files(
     if diagnostics and diagnostics.get("duplicate_suppressed"):
         lines.extend(["", "## 重复图片压制"])
         for item in diagnostics.get("duplicate_suppressed") or []:
+            lines.append(f"- {item.get('image_id')} {item.get('filename')}: {item.get('reason')}")
+    if diagnostics and diagnostics.get("best_available_backfill"):
+        lines.extend(["", "## 数量不足兜底图片"])
+        for item in diagnostics.get("best_available_backfill") or []:
             lines.append(f"- {item.get('image_id')} {item.get('filename')}: {item.get('reason')}")
     alignment = (diagnostics or {}).get("listing_image_alignment") or {}
     if alignment.get("missing_evidence"):
@@ -1199,8 +1325,9 @@ async def run_image_analysis(product_id: int) -> dict:
         gallery_strategy = _gallery_strategy_prompt(strategy)
         all_reviews: list[dict] = []
         sheet_payloads: list[dict] = []
+        analysis_contact_sheets = list(contact_sheets)
+        analysis_warnings: list[str] = []
         for sheet in contact_sheets:
-            sheet_path = Path(sheet["sheet_path"])
             batch_records = [record for record in image_records if record["image_id"] in set(sheet["image_ids"])]
             prompt = VLM_ANALYSIS_PROMPT.format(
                 title=pd.title or "Unknown",
@@ -1209,41 +1336,68 @@ async def run_image_analysis(product_id: int) -> dict:
                 facts=facts,
                 gallery_strategy=gallery_strategy,
             )
-            image_url = _image_data_url(sheet_path)
-
-            logger.info(
-                f"[Step6] 调用VLM分析图片: model={image_analysis_model}, "
-                f"provider={'LLM_API' if settings.VLM_USE_LLM_API else 'VLM_API'}, "
-                f"sheet={sheet_path.name}, page={sheet['sheet_page']}/{len(contact_sheets)}, "
-                f"images={len(batch_records)}, bytes={sheet_path.stat().st_size}"
-            )
-            response = await client.chat.completions.create(
-                model=image_analysis_model,
-                messages=[
-                    {"role": "system", "content": VLM_SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "image_url", "image_url": {"url": image_url}},
-                            {"type": "text", "text": prompt},
-                        ],
-                    },
-                ],
-                max_tokens=4000,
-                temperature=0.2,
-            )
-
-            content = response.choices[0].message.content
-            if not content:
-                raise RuntimeError(f"VLM 返回空结果: contact_sheet={sheet_path.name}")
-
             try:
-                sheet_analysis = json.loads(_clean_json_content(content))
-            except json.JSONDecodeError as e:
-                logger.warning(f"VLM JSON解析失败，保存原始内容: {e}")
-                sheet_analysis = {"raw": content, "images": []}
+                sheet_analysis, reviews = await _analyze_contact_sheet(client, image_analysis_model, sheet, batch_records, prompt)
+            except Exception as exc:
+                if not _is_data_inspection_error(exc):
+                    raise
 
-            reviews = _normalize_sheet_reviews(sheet_analysis, batch_records, sheet)
+                warning = (
+                    f"Contact Sheet {sheet['sheet_page']} 被VLM内容安全检查拦截，"
+                    "已改为逐张图片重试分析。"
+                )
+                logger.warning(f"[Step6] {warning} error={exc}")
+                analysis_warnings.append(warning)
+                sheet_payloads.append({
+                    **sheet,
+                    "analysis": {"images": []},
+                    "reviews": [],
+                    "status": "data_inspection_failed",
+                    "error": str(exc),
+                })
+
+                for record in batch_records:
+                    fallback_dir = contact_sheet_dir / f"fallback_sheet_{sheet['sheet_page']:02d}"
+                    fallback_key = f"{product_key}_sheet_{sheet['sheet_page']:02d}_{record['image_id'].lstrip('#')}"
+                    fallback_sheets = _build_contact_sheets([record], fallback_dir, fallback_key)
+                    if not fallback_sheets:
+                        continue
+                    fallback_sheet = fallback_sheets[0]
+                    analysis_contact_sheets.append(fallback_sheet)
+                    try:
+                        single_analysis, single_reviews = await _analyze_contact_sheet(
+                            client,
+                            image_analysis_model,
+                            fallback_sheet,
+                            [record],
+                            prompt,
+                        )
+                    except Exception as single_exc:
+                        if not _is_data_inspection_error(single_exc):
+                            raise
+                        image_warning = (
+                            f"图片 {record['image_id']} {record['filename']} 被VLM内容安全检查拦截，"
+                            "已跳过该图继续流程。"
+                        )
+                        logger.warning(f"[Step6] {image_warning} error={single_exc}")
+                        analysis_warnings.append(image_warning)
+                        sheet_payloads.append({
+                            **fallback_sheet,
+                            "analysis": {"images": []},
+                            "reviews": [],
+                            "status": "data_inspection_failed",
+                            "error": str(single_exc),
+                        })
+                        continue
+                    all_reviews.extend(single_reviews)
+                    sheet_payloads.append({
+                        **fallback_sheet,
+                        "analysis": single_analysis,
+                        "reviews": single_reviews,
+                        "fallback_from_sheet_page": sheet["sheet_page"],
+                    })
+                continue
+
             all_reviews.extend(reviews)
             sheet_payloads.append({
                 **sheet,
@@ -1255,6 +1409,8 @@ async def run_image_analysis(product_id: int) -> dict:
             raise RuntimeError("VLM 未返回任何图片分析结果")
 
         main_review, gallery_selection, selection_diagnostics = _select_gallery(all_reviews, strategy)
+        if analysis_warnings:
+            selection_diagnostics["analysis_warnings"] = analysis_warnings
         selection_diagnostics["listing_image_alignment"] = _listing_image_alignment(pd, gallery_selection)
         selection_diagnostics["image_health"] = _image_health(selection_diagnostics)
         main_image_path = main_review.get("path") if main_review else None
@@ -1275,11 +1431,12 @@ async def run_image_analysis(product_id: int) -> dict:
                 selling_points.append(mm.get("aplus_reference_value"))
         selling_points = list(dict.fromkeys(selling_points))[:15]  # 去重取前15
 
-        _write_image_analysis_files(material_dir, contact_sheets, all_reviews, gallery_selection, selection_diagnostics)
+        _write_image_analysis_files(material_dir, analysis_contact_sheets, all_reviews, gallery_selection, selection_diagnostics)
 
         # 保存到数据库
         pi.image_analysis = json.dumps({
-            "contact_sheets": contact_sheets,
+            "contact_sheets": analysis_contact_sheets,
+            "sheet_payloads": sheet_payloads,
             "images": all_reviews,
             "gallery_selection": gallery_selection,
             "selection_diagnostics": selection_diagnostics,
@@ -1292,7 +1449,7 @@ async def run_image_analysis(product_id: int) -> dict:
         pi.gallery_images = json.dumps(gallery_paths, ensure_ascii=False)
         pi.gallery_order = json.dumps(gallery_order, ensure_ascii=False)
         pi.main_image_summary = (
-            f"分析 {len(images)} 张图片，生成 {len(contact_sheets)} 张 contact sheet，"
+            f"分析 {len(all_reviews)}/{len(images)} 张图片，生成 {len(analysis_contact_sheets)} 张 contact sheet，"
             f"选择 {len(gallery_selection)} 张主/副图。"
             + f" 图片健康等级: {selection_diagnostics.get('image_health', {}).get('label', '未知')}。"
             + (
@@ -1305,17 +1462,23 @@ async def run_image_analysis(product_id: int) -> dict:
                 if selection_diagnostics.get("main_image_status") == "fallback_substitute"
                 else ""
             )
+            + (
+                f" VLM安全检查跳过/降级 {len(analysis_warnings)} 项。"
+                if analysis_warnings
+                else ""
+            )
         )
         pi.analyzed_at = datetime.now()
         pi.vlm_model = image_analysis_model
         await db.commit()
 
         logger.info(
-            f"[Step6] 图片分析完成: {len(all_reviews)}/{len(images)} 张图, sheets={len(contact_sheets)}, "
+            f"[Step6] 图片分析完成: {len(all_reviews)}/{len(images)} 张图, sheets={len(analysis_contact_sheets)}, "
             f"主图={main_image_path}, 副图={len(gallery_paths)} 张"
         )
         return {
-            "contact_sheets": contact_sheets,
+            "contact_sheets": analysis_contact_sheets,
+            "sheet_payloads": sheet_payloads,
             "images": all_reviews,
             "gallery_selection": gallery_selection,
             "main_image_path": main_image_path,

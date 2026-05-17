@@ -1,17 +1,31 @@
 // @ts-nocheck
 import React, { useEffect, useState, useRef } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
-import { Alert, Card, Descriptions, Tag, Steps, Tabs, Button, Space, Typography, Spin, message, Popconfirm, Image, Table, List, Modal, Input } from 'antd';
+import { useLocation, useParams, useNavigate } from 'react-router-dom';
+import { Alert, Card, Descriptions, Tag, Steps, Tabs, Button, Space, Typography, Spin, message, Popconfirm, Image, Table, List, Modal, Input, Select } from 'antd';
 import {
   ArrowLeftOutlined, PlayCircleOutlined, RedoOutlined,
   PauseOutlined, ReloadOutlined, DeleteOutlined,
   FolderOpenOutlined, FileZipOutlined, InboxOutlined, FileExcelOutlined,
   CheckOutlined,
 } from '@ant-design/icons';
-import { getProduct, startPipeline, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, runPipelineStep, updateProduct, confirmProduct, STEP_LABELS } from '../api';
-import type { ProductDetail } from '../api';
+import { getProduct, startPipeline, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, runPipelineStep, updateProduct, confirmProduct, listCategoryOptions, STEP_LABELS } from '../api';
+import type { CategoryOption, ProductDetail } from '../api';
 
 const { Title, Text } = Typography;
+const PRODUCT_LIST_RETURN_KEY = 'fbm.productList.returnPath';
+
+const APLUS_REGEN_ACTIVE_STATUSES = ['regen_queued', 'regen_script_running', 'regen_image_running'];
+const APLUS_REGEN_RETRYABLE_STATUSES = ['regen_failed', 'regen_interrupted'];
+const APLUS_STATUS_LABELS: Record<string, { color: string; text: string }> = {
+  done: { color: 'success', text: 'A+已完成' },
+  partial: { color: 'warning', text: 'A+部分完成' },
+  regen_queued: { color: 'processing', text: '重新生图排队中' },
+  regen_script_running: { color: 'processing', text: '正在重写脚本' },
+  regen_image_running: { color: 'processing', text: '正在重新生图' },
+  regen_done: { color: 'success', text: '重新生图完成' },
+  regen_failed: { color: 'error', text: '重新生图失败' },
+  regen_interrupted: { color: 'warning', text: '重新生图被中断' },
+};
 
 /** 将本地文件路径转为后端图片代理URL */
 const imgUrl = (localPath: string | null | undefined) => {
@@ -39,17 +53,21 @@ const fileSize = (bytes: number | null | undefined) => {
 const ProductDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
+  const backTarget = (location.state as any)?.from || window.localStorage.getItem(PRODUCT_LIST_RETURN_KEY) || '/products';
   const [product, setProduct] = useState<ProductDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [regenTarget, setRegenTarget] = useState<any | null>(null);
   const [regenReason, setRegenReason] = useState('');
   const [regenLoading, setRegenLoading] = useState(false);
+  const [regenRetryLoading, setRegenRetryLoading] = useState(false);
   const [restartUpcOpen, setRestartUpcOpen] = useState(false);
   const [restartUpc, setRestartUpc] = useState('');
   const [restartLoading, setRestartLoading] = useState(false);
   const [categoryEditOpen, setCategoryEditOpen] = useState(false);
-  const [categoryPathInput, setCategoryPathInput] = useState('');
-  const [leafCategoryInput, setLeafCategoryInput] = useState('');
+  const [categoryOptions, setCategoryOptions] = useState<CategoryOption[]>([]);
+  const [selectedCategoryKey, setSelectedCategoryKey] = useState<string | undefined>();
+  const [categoryOptionsLoading, setCategoryOptionsLoading] = useState(false);
   const [categorySaving, setCategorySaving] = useState(false);
   const [listingEditOpen, setListingEditOpen] = useState(false);
   const [listingTitleInput, setListingTitleInput] = useState('');
@@ -60,6 +78,7 @@ const ProductDetail: React.FC = () => {
   const [listingSearchTermsZhInput, setListingSearchTermsZhInput] = useState('');
   const [listingPrimaryKeywordInput, setListingPrimaryKeywordInput] = useState('');
   const [listingSaving, setListingSaving] = useState(false);
+  const [amazonTemplateLoading, setAmazonTemplateLoading] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchDetail = async () => {
@@ -81,14 +100,15 @@ const ProductDetail: React.FC = () => {
   // 自动轮询：任务运行中时每3秒刷新
   useEffect(() => {
     if (!product) return;
-    const isRunning = !['completed', 'pending_review', 'failed', 'paused', 'created'].includes(product.status);
+    const isRunning = !['completed', 'pending_review', 'failed', 'paused', 'created', 'unavailable', 'source_unavailable'].includes(product.status)
+      || APLUS_REGEN_ACTIVE_STATUSES.includes(product.aplus?.aplus_status || '');
     if (isRunning) {
       pollRef.current = setInterval(fetchDetail, 3000);
     } else {
       if (pollRef.current) clearInterval(pollRef.current);
     }
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [product?.status]);
+  }, [product?.status, product?.aplus?.aplus_status]);
 
   if (loading) return <Spin size="large" style={{ display: 'block', margin: '100px auto' }} />;
   if (!product) return <div>商品不存在</div>;
@@ -96,6 +116,8 @@ const ProductDetail: React.FC = () => {
   const data = product.data;
   const images = product.images;
   const aplus = product.aplus;
+  const aplusStatus = aplus?.aplus_status ? APLUS_STATUS_LABELS[aplus.aplus_status] : null;
+  const canRetryAplusRegeneration = APLUS_REGEN_RETRYABLE_STATUSES.includes(aplus?.aplus_status || '');
   const videoFolder = product.video_folder;
   const aplusFolder = product.aplus_folder;
   const packages = parseJson(data?.packages, []);
@@ -188,6 +210,65 @@ const ProductDetail: React.FC = () => {
   const keywordPlan = listingCheck?.keyword_plan || {};
   const positioning = listingCheck?.positioning || {};
   const removedKeywords = parseJson(data?.listing_removed_keywords, []);
+  const folderRows = [
+    data?.material_dir && {
+      key: 'material',
+      kind: '素材目录',
+      label: '商品素材根目录',
+      path: data.material_dir,
+      meta: '原始素材、解压文件、生成结果归档',
+      directory: true,
+    },
+    videoFolder?.exists && {
+      key: 'video',
+      kind: '视频',
+      label: '视频素材目录',
+      path: videoFolder.path,
+      meta: `${videoFolder.file_count} 个视频`,
+      directory: true,
+    },
+    aplusFolder?.exists && {
+      key: 'aplus-folder',
+      kind: 'A+图片',
+      label: 'new a plus',
+      path: aplusFolder.path,
+      meta: `${aplusFolder.file_count} 张图片`,
+      directory: true,
+    },
+  ].filter(Boolean);
+  const imageFileRows = [
+    images?.main_image_path && {
+      key: 'main-image',
+      kind: '主图',
+      label: '选定主图',
+      path: images.main_image_path,
+      meta: images?.main_image_source || 'main image',
+    },
+    ...galleryOnlyImages.map((item, index) => {
+      const path = typeof item === 'string' ? item : item?.path;
+      return path && {
+        key: `gallery-${index}-${path}`,
+        kind: '副图',
+        label: `副图 ${index + 1}`,
+        path,
+        meta: typeof item === 'string' ? 'gallery image' : (item?.role || item?.label || 'gallery image'),
+      };
+    }),
+    ...contactSheets.map((sheet, index) => sheet?.sheet_path && {
+      key: `contact-sheet-${index}-${sheet.sheet_path}`,
+      kind: '分析图',
+      label: `Contact Sheet ${sheet.sheet_page || index + 1}`,
+      path: sheet.sheet_path,
+      meta: `${sheet.image_ids?.length || 0} 张图`,
+    }),
+    ...(Array.isArray(aplusGeneratedImages) ? aplusGeneratedImages.map((item, index) => item?.path && {
+      key: `aplus-image-${index}-${item.path}`,
+      kind: 'A+图片',
+      label: `A+ 模块 ${item.position || index + 1}`,
+      path: item.path,
+      meta: item.status || fileSize(item.size),
+    }) : []),
+  ].filter(Boolean);
 
   const openPath = async (path?: string, directory = false) => {
     try {
@@ -217,14 +298,14 @@ const ProductDetail: React.FC = () => {
     }
     setRegenLoading(true);
     try {
-      await regenerateAplusModule(product.id, {
+      const { data: result } = await regenerateAplusModule(product.id, {
         module_position: regenTarget.module_position,
         reason,
       });
-      message.success('A+脚本和图片已重新生成');
+      message.success(result?.message || '已提交后台重新生成');
       setRegenTarget(null);
       setRegenReason('');
-      await fetchDetail();
+      fetchDetail();
     } catch (e: any) {
       message.error(e?.response?.data?.detail || 'A+重新生成失败');
     } finally {
@@ -232,34 +313,64 @@ const ProductDetail: React.FC = () => {
     }
   };
 
-  const generateAmazonTemplate = async () => {
+  const retryInterruptedAplus = async () => {
+    setRegenRetryLoading(true);
     try {
-      await runPipelineStep(product.id, 10);
-      message.success('导入表格已生成');
+      const { data: result } = await retryAplusRegeneration(product.id);
+      message.success(result?.message || '已重新排队 A+ 重新生图任务');
       await fetchDetail();
     } catch (e: any) {
-      message.error(e?.response?.data?.detail || '导入表格生成失败');
+      message.error(e?.response?.data?.detail || 'A+重新生图重试失败');
+    } finally {
+      setRegenRetryLoading(false);
     }
   };
 
-  const openCategoryEditor = () => {
-    setCategoryPathInput(categoryPath || '');
-    setLeafCategoryInput(data?.leaf_category || '');
+  const generateAmazonTemplate = async () => {
+    setAmazonTemplateLoading(true);
+    try {
+      await runPipelineStep(product.id, 10);
+      message.success(data?.amazon_template_path ? '导入表格已重新生成' : '导入表格已生成');
+      await fetchDetail();
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '导入表格生成失败');
+    } finally {
+      setAmazonTemplateLoading(false);
+    }
+  };
+
+  const openCategoryEditor = async () => {
+    setSelectedCategoryKey(undefined);
     setCategoryEditOpen(true);
+    setCategoryOptionsLoading(true);
+    try {
+      const { data: result } = await listCategoryOptions();
+      const items = result.items || [];
+      setCategoryOptions(items);
+      const currentCategories = Array.isArray(categories) ? categories : [];
+      const currentKey = currentCategories.join(' > ') || data?.leaf_category || '';
+      const matched = items.find((item) => item.key === currentKey || item.label === categoryPath || item.leaf_category === data?.leaf_category);
+      if (matched) {
+        setSelectedCategoryKey(matched.key);
+      }
+    } catch {
+      message.error('类目列表加载失败');
+    } finally {
+      setCategoryOptionsLoading(false);
+    }
   };
 
   const saveCategory = async () => {
-    const path = categoryPathInput.trim();
-    const leaf = leafCategoryInput.trim();
-    if (!path && !leaf) {
-      message.warning('请填写 Amazon 类目或叶子类目');
+    const selected = categoryOptions.find((item) => item.key === selectedCategoryKey);
+    if (!selected) {
+      message.warning('请从已有类目列表中选择 Amazon 类目');
       return;
     }
     setCategorySaving(true);
     try {
       await updateProduct(product.id, {
-        categories: path,
-        leaf_category: leaf || undefined,
+        categories: selected.categories,
+        leaf_category: selected.leaf_category,
       });
       message.success('类目已保存');
       setCategoryEditOpen(false);
@@ -386,12 +497,37 @@ const ProductDetail: React.FC = () => {
     ) },
     { title: '类型', dataIndex: 'file_type', width: 160, render: (value) => <Tag>{value}</Tag> },
     { title: '更新时间', dataIndex: 'updated_at', width: 180, render: (value) => value ? new Date(value).toLocaleString('zh-CN') : '-' },
-    { title: '操作', width: 220, render: (_, record) => (
+    { title: '操作', width: 320, render: (_, record) => (
       <Space size="small">
         <Button size="small" icon={<FileExcelOutlined />} onClick={() => openPath(record.path)}>打开文件</Button>
         <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(record.path, true)}>打开文件夹</Button>
+        {record.file_type === 'amazon_import_template' && (
+          <Button size="small" icon={<ReloadOutlined />} loading={amazonTemplateLoading} onClick={generateAmazonTemplate}>重新生成</Button>
+        )}
       </Space>
     ) },
+  ];
+
+  const fileIndexColumns = [
+    { title: '分类', dataIndex: 'kind', width: 110, render: (value) => <Tag>{value}</Tag> },
+    { title: '名称', dataIndex: 'label', width: 180, render: (value) => <Text strong>{value}</Text> },
+    {
+      title: '路径',
+      dataIndex: 'path',
+      ellipsis: true,
+      render: (value) => <Text copyable style={{ maxWidth: '100%' }}>{value || '-'}</Text>,
+    },
+    { title: '说明', dataIndex: 'meta', width: 180, render: (value) => value || '-' },
+    {
+      title: '操作',
+      width: 220,
+      render: (_, record) => (
+        <Space size="small">
+          <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(record.path, record.directory)}>打开</Button>
+          {!record.directory && <Button size="small" onClick={() => openPath(record.path, true)}>文件夹</Button>}
+        </Space>
+      ),
+    },
   ];
 
   // Pipeline Steps
@@ -422,8 +558,9 @@ const ProductDetail: React.FC = () => {
     return 8; // completed
   })();
 
-  const stepStatus = ['failed', 'unavailable'].includes(product.status) ? 'error' : ['completed', 'pending_review'].includes(product.status) ? 'finish' : 'process';
-  const isPipelineRunning = !['completed', 'pending_review', 'failed', 'unavailable', 'created', 'paused'].includes(product.status);
+  const stoppedStatuses = ['failed', 'unavailable', 'source_unavailable'];
+  const stepStatus = stoppedStatuses.includes(product.status) ? 'error' : ['completed', 'pending_review'].includes(product.status) ? 'finish' : 'process';
+  const isPipelineRunning = !['completed', 'pending_review', 'failed', 'unavailable', 'source_unavailable', 'created', 'paused'].includes(product.status);
 
   // 安全解析JSON
   const tabItems = [
@@ -554,75 +691,6 @@ const ProductDetail: React.FC = () => {
             ) : <Text type="secondary">暂无变体</Text>}
           </Card>
 
-          <Card title="压缩包文件" size="small">
-            <Table
-              size="small"
-              columns={zipColumns}
-              dataSource={product.zip_files || []}
-              rowKey="path"
-              pagination={false}
-              locale={{ emptyText: '素材目录内未发现 zip 压缩包' }}
-            />
-          </Card>
-
-          <Card
-            title="各种文件"
-            size="small"
-            style={{ marginTop: 16 }}
-            extra={<Button size="small" icon={<FileExcelOutlined />} onClick={generateAmazonTemplate}>生成导入表格</Button>}
-          >
-            <Table
-              size="small"
-              columns={generatedFileColumns}
-              dataSource={generatedFiles}
-              rowKey="id"
-              pagination={false}
-              locale={{ emptyText: '暂无文件' }}
-            />
-            {amazonTemplateFillSummary && (
-              <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid #f0f0f0' }}>
-                <Text strong>导入表格检查</Text>
-                <Descriptions bordered size="small" column={3}>
-                  <Descriptions.Item label="风险等级">
-                    <Tag color={amazonTemplateRiskDisplay.color}>{amazonTemplateRiskDisplay.label}</Tag>
-                  </Descriptions.Item>
-                  <Descriptions.Item label="已填字段">{amazonTemplateFillSummary.filled_count ?? '-'}</Descriptions.Item>
-                  <Descriptions.Item label="图片URL">{amazonTemplateFillSummary.image_url_count ?? '-'}</Descriptions.Item>
-                  <Descriptions.Item label="缺关键字段">{amazonTemplateFillSummary.missing_required_count ?? 0}</Descriptions.Item>
-                  <Descriptions.Item label="未映射字段">{amazonTemplateFillSummary.unmapped_count ?? 0}</Descriptions.Item>
-                  <Descriptions.Item label="提醒数量">{amazonTemplateFillSummary.warnings_count ?? 0}</Descriptions.Item>
-                </Descriptions>
-                {Array.isArray(amazonTemplateFillSummary.missing_required_fields) && amazonTemplateFillSummary.missing_required_fields.length > 0 && (
-                  <div style={{ marginTop: 12 }}>
-                    <Text type="danger">缺少关键字段</Text>
-                    <List
-                      size="small"
-                      dataSource={amazonTemplateFillSummary.missing_required_fields.slice(0, 8)}
-                      renderItem={(item: string) => <List.Item><Text copyable>{item}</Text></List.Item>}
-                    />
-                  </div>
-                )}
-                {Array.isArray(amazonTemplateFillSummary.unmapped_fields) && amazonTemplateFillSummary.unmapped_fields.length > 0 && (
-                  <div style={{ marginTop: 12 }}>
-                    <Text type="secondary">模板未找到字段</Text>
-                    <List
-                      size="small"
-                      dataSource={amazonTemplateFillSummary.unmapped_fields.slice(0, 8)}
-                      renderItem={(item: string) => <List.Item><Text copyable>{item}</Text></List.Item>}
-                    />
-                  </div>
-                )}
-              </div>
-            )}
-            {Array.isArray(amazonTemplateWarnings) && amazonTemplateWarnings.length > 0 && (
-              <div style={{ marginTop: 12 }}>
-                <Text strong>上架前风险提醒</Text>
-                <div style={{ marginTop: 8 }}>
-                  {amazonTemplateWarnings.map((item, i) => <Tag color="warning" key={i}>{item}</Tag>)}
-                </div>
-              </div>
-            )}
-          </Card>
         </div>
       ),
     },
@@ -939,7 +1007,20 @@ const ProductDetail: React.FC = () => {
           <Card title="A+规划" size="small" style={{ marginBottom: 12 }}>
             <Text>{aplus?.aplus_plan_summary || '（未规划）'}</Text>
           </Card>
-          <Card title="A+图片" size="small">
+          <Card
+            title="A+图片"
+            size="small"
+            extra={(
+              <Space>
+                {aplusStatus && <Tag color={aplusStatus.color}>{aplusStatus.text}</Tag>}
+                {canRetryAplusRegeneration && (
+                  <Button size="small" icon={<RedoOutlined />} loading={regenRetryLoading} onClick={retryInterruptedAplus}>
+                    重试未完成生图
+                  </Button>
+                )}
+              </Space>
+            )}
+          >
             {aplusModules.length ? (
               <Space direction="vertical" style={{ width: '100%' }} size={16}>
                 {aplusModules.map(({ script, generated, references, plan }) => {
@@ -950,6 +1031,8 @@ const ProductDetail: React.FC = () => {
                   const galleryOverlapAvoidance = script.gallery_overlap_avoidance || plan.gallery_overlap_avoidance;
                   const riskGuardrails = script.risk_guardrails || plan.risk_guardrails || [];
                   const visualDoNotClaim = script.visual_do_not_claim || plan.visual_do_not_claim || [];
+                  const regenDiagnosis = script.regeneration_diagnosis || null;
+                  const feedbackAnalysis = regenDiagnosis?.user_feedback_analysis || script.user_feedback_analysis || {};
                   return (
                   <Card
                     key={script.module_position}
@@ -1003,6 +1086,23 @@ const ProductDetail: React.FC = () => {
                               </div>
                             )}
                           </Card>
+                        )}
+                        {regenDiagnosis && (
+                          <Alert
+                            type="info"
+                            showIcon
+                            style={{ marginBottom: 12 }}
+                            message={`重生成诊断：${regenDiagnosis.issue_type || '反馈分析'}`}
+                            description={[
+                              feedbackAnalysis.plain_language_intent ? `反馈理解：${feedbackAnalysis.plain_language_intent}` : null,
+                              Array.isArray(feedbackAnalysis.acceptance_criteria) && feedbackAnalysis.acceptance_criteria.length
+                                ? `处理要点：${feedbackAnalysis.acceptance_criteria.join('；')}`
+                                : null,
+                              regenDiagnosis.root_cause,
+                              regenDiagnosis.reference_action ? `参考图策略：${regenDiagnosis.reference_action}` : null,
+                              regenDiagnosis.reference_rationale,
+                            ].filter(Boolean).join('；')}
+                          />
                         )}
                         <Text strong>参考图</Text>
                         <div style={{ marginTop: 8 }}>
@@ -1102,13 +1202,120 @@ const ProductDetail: React.FC = () => {
         </div>
       ),
     },
+    {
+      key: 'files',
+      label: '📁 文件信息',
+      children: (
+        <div>
+          <Card
+            title="商品导入表格和生成文件"
+            size="small"
+            style={{ marginBottom: 16 }}
+            extra={
+              <Button size="small" icon={<FileExcelOutlined />} loading={amazonTemplateLoading} onClick={generateAmazonTemplate}>
+                {data?.amazon_template_path ? '重新生成导入表格' : '生成导入表格'}
+              </Button>
+            }
+          >
+            <Table
+              size="small"
+              columns={generatedFileColumns}
+              dataSource={generatedFiles}
+              rowKey="id"
+              pagination={false}
+              scroll={{ x: 920 }}
+              locale={{ emptyText: '暂无文件' }}
+            />
+            {amazonTemplateFillSummary && (
+              <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid #f0f0f0' }}>
+                <Text strong>导入表格检查</Text>
+                <Descriptions bordered size="small" column={3}>
+                  <Descriptions.Item label="风险等级">
+                    <Tag color={amazonTemplateRiskDisplay.color}>{amazonTemplateRiskDisplay.label}</Tag>
+                  </Descriptions.Item>
+                  <Descriptions.Item label="已填字段">{amazonTemplateFillSummary.filled_count ?? '-'}</Descriptions.Item>
+                  <Descriptions.Item label="图片URL">{amazonTemplateFillSummary.image_url_count ?? '-'}</Descriptions.Item>
+                  <Descriptions.Item label="缺关键字段">{amazonTemplateFillSummary.missing_required_count ?? 0}</Descriptions.Item>
+                  <Descriptions.Item label="未映射字段">{amazonTemplateFillSummary.unmapped_count ?? 0}</Descriptions.Item>
+                  <Descriptions.Item label="提醒数量">{amazonTemplateFillSummary.warnings_count ?? 0}</Descriptions.Item>
+                </Descriptions>
+                {Array.isArray(amazonTemplateFillSummary.missing_required_fields) && amazonTemplateFillSummary.missing_required_fields.length > 0 && (
+                  <div style={{ marginTop: 12 }}>
+                    <Text type="danger">缺少关键字段</Text>
+                    <List
+                      size="small"
+                      dataSource={amazonTemplateFillSummary.missing_required_fields.slice(0, 8)}
+                      renderItem={(item: string) => <List.Item><Text copyable>{item}</Text></List.Item>}
+                    />
+                  </div>
+                )}
+                {Array.isArray(amazonTemplateFillSummary.unmapped_fields) && amazonTemplateFillSummary.unmapped_fields.length > 0 && (
+                  <div style={{ marginTop: 12 }}>
+                    <Text type="secondary">模板未找到字段</Text>
+                    <List
+                      size="small"
+                      dataSource={amazonTemplateFillSummary.unmapped_fields.slice(0, 8)}
+                      renderItem={(item: string) => <List.Item><Text copyable>{item}</Text></List.Item>}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+            {Array.isArray(amazonTemplateWarnings) && amazonTemplateWarnings.length > 0 && (
+              <div style={{ marginTop: 12 }}>
+                <Text strong>上架前风险提醒</Text>
+                <div style={{ marginTop: 8 }}>
+                  {amazonTemplateWarnings.map((item, i) => <Tag color="warning" key={i}>{item}</Tag>)}
+                </div>
+              </div>
+            )}
+          </Card>
+
+          <Card title="文件夹入口" size="small" style={{ marginBottom: 16 }}>
+            <Table
+              size="small"
+              columns={fileIndexColumns}
+              dataSource={folderRows}
+              rowKey="key"
+              pagination={false}
+              scroll={{ x: 920 }}
+              locale={{ emptyText: '暂无文件夹信息' }}
+            />
+          </Card>
+
+          <Card title="图片 / 视频 / A+ 图片索引" size="small" style={{ marginBottom: 16 }}>
+            <Table
+              size="small"
+              columns={fileIndexColumns}
+              dataSource={imageFileRows}
+              rowKey="key"
+              pagination={false}
+              scroll={{ x: 920 }}
+              locale={{ emptyText: '暂无图片或视频文件' }}
+            />
+          </Card>
+
+          <Card title="压缩包文件" size="small">
+            <Table
+              size="small"
+              columns={zipColumns}
+              dataSource={product.zip_files || []}
+              rowKey="path"
+              pagination={false}
+              scroll={{ x: 980 }}
+              locale={{ emptyText: '素材目录内未发现 zip 压缩包' }}
+            />
+          </Card>
+        </div>
+      ),
+    },
   ];
 
   return (
     <>
     <div>
       <div style={{ display: 'flex', alignItems: 'center', marginBottom: 16 }}>
-        <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/products')} style={{ marginRight: 12 }}>
+        <Button icon={<ArrowLeftOutlined />} onClick={() => navigate(backTarget)} style={{ marginRight: 12 }}>
           返回
         </Button>
         <Title level={4} style={{ margin: 0, flex: 1 }}>
@@ -1147,6 +1354,11 @@ const ProductDetail: React.FC = () => {
               <Button type="primary" icon={<CheckOutlined />}>确认入库</Button>
             </Popconfirm>
           )}
+          {canRetryAplusRegeneration && (
+            <Button icon={<RedoOutlined />} loading={regenRetryLoading} onClick={retryInterruptedAplus}>
+              重试A+重新生图
+            </Button>
+          )}
           {isPipelineRunning && (
             <Button icon={<PauseOutlined />} onClick={async () => { await pausePipeline(product.id); fetchDetail(); }}>
               暂停
@@ -1163,7 +1375,7 @@ const ProductDetail: React.FC = () => {
               <Button icon={<RedoOutlined />}>重新开始</Button>
             </Popconfirm>
           )}
-          <Popconfirm title="确定删除此商品？" onConfirm={async () => { await deleteProduct(product.id); navigate('/products'); }}>
+          <Popconfirm title="确定删除此商品？" onConfirm={async () => { await deleteProduct(product.id); navigate(backTarget); }}>
             <Button danger icon={<DeleteOutlined />} />
           </Popconfirm>
         </Space>
@@ -1180,9 +1392,9 @@ const ProductDetail: React.FC = () => {
       </Card>
 
       {/* 状态信息 */}
-      {product.error_message && (
+          {product.error_message && (
         <Card size="small" style={{ marginBottom: 16, borderColor: '#ff4d4f' }}>
-          <Text type="danger">❌ {product.error_message}</Text>
+          <Text type="danger">{product.status === 'source_unavailable' ? '原商品下架停止采集：' : '❌ '}{product.error_message}</Text>
         </Card>
       )}
 
@@ -1203,7 +1415,7 @@ const ProductDetail: React.FC = () => {
         }
       }}
     >
-      <Text type="secondary">写清楚这张图哪里不行，例如商品变形、人物被裁切、文字不合适、场景不对。系统会重新生成脚本并重画这一张。</Text>
+      <Text type="secondary">写清楚这张图哪里不行。系统会把你的反馈作为必须满足的修改要求，先重新生成 prompt；如果当前参考图支撑不了这个修改目标，再从已分析过的图片里换参考图。</Text>
       <Input.TextArea
         value={regenReason}
         onChange={(event) => setRegenReason(event.target.value)}
@@ -1246,21 +1458,26 @@ const ProductDetail: React.FC = () => {
     >
       <Space direction="vertical" style={{ width: '100%' }}>
         <div>
-          <Text type="secondary">类目路径</Text>
-          <Input
-            value={categoryPathInput}
-            onChange={(event) => setCategoryPathInput(event.target.value)}
-            placeholder="Home & Kitchen > Furniture > Sofas & Couches"
+          <Text type="secondary">从已有 Amazon 类目中选择</Text>
+          <Select
+            showSearch
+            loading={categoryOptionsLoading}
+            value={selectedCategoryKey}
+            onChange={setSelectedCategoryKey}
+            placeholder="请选择已有类目"
+            style={{ width: '100%', marginTop: 6 }}
+            optionFilterProp="label"
+            options={categoryOptions.map((item) => ({
+              value: item.key,
+              label: item.label,
+            }))}
           />
         </div>
-        <div>
-          <Text type="secondary">叶子类目</Text>
-          <Input
-            value={leafCategoryInput}
-            onChange={(event) => setLeafCategoryInput(event.target.value)}
-            placeholder="Sofas & Couches"
-          />
-        </div>
+        {selectedCategoryKey && (
+          <Text type="secondary">
+            叶子类目：{categoryOptions.find((item) => item.key === selectedCategoryKey)?.leaf_category || '-'}
+          </Text>
+        )}
       </Space>
     </Modal>
     <Modal

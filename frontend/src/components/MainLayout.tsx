@@ -61,8 +61,15 @@ const MainLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
           style={{ border: 'none', paddingTop: 8 }}
         />
       </Sider>
-      <Layout style={{ background: '#f5f7fb' }}>
-        <Content style={{ padding: '24px', maxWidth: 1440, margin: '0 auto', width: '100%' }}>
+      <Layout style={{ background: '#f5f7fb', minWidth: 0 }}>
+        <Content
+          style={{
+            padding: '24px',
+            width: '100%',
+            maxWidth: 'calc(100vw - 220px)',
+            minWidth: 0,
+          }}
+        >
           {children}
         </Content>
       </Layout>

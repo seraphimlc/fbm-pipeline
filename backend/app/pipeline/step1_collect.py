@@ -369,15 +369,107 @@ def _has_core_product_data(data: dict) -> bool:
     return bool(data.get("title") or data.get("itemCode") or data.get("productType"))
 
 
+def _has_detail_product_data(data: dict) -> bool:
+    """页面主体已加载后，规格/价格区仍可能异步晚到，这里判断是否足够完整。"""
+    return any(
+        str(data.get(field) or "").strip()
+        for field in (
+            "productType",
+            "dimensionLength",
+            "dimensionWidth",
+            "dimensionHeight",
+            "valueTotal",
+            "estimatedTotal",
+            "shippingCost",
+            "shippingCostMin",
+            "shippingCostMax",
+            "stock",
+        )
+    )
+
+
+def _extract_ready_to_use(data: dict) -> bool:
+    if _is_offline_product(data):
+        return True
+    if not _has_core_product_data(data):
+        return False
+    if _looks_like_source_unavailable(data, _parse_int(data.get("stock"))):
+        return True
+    return _has_detail_product_data(data)
+
+
 def _is_offline_product(data: dict) -> bool:
     return data.get("availabilityStatus") == "offline"
 
 
+def _is_not_logged_in(data: dict) -> bool:
+    return data.get("loginStatus") == "not_logged_in"
+
+
+def _has_commerce_values(data: dict) -> bool:
+    fields = (
+        "valueTotal",
+        "estimatedTotal",
+        "shippingCost",
+        "shippingCostMin",
+        "shippingCostMax",
+        "priceMin",
+        "priceMax",
+        "unitPrice",
+        "stock",
+    )
+    return any(str(data.get(field) or "").strip() for field in fields)
+
+
+def _looks_like_source_unavailable(data: dict, stock: int | None = None) -> bool:
+    if _is_not_logged_in(data):
+        return False
+    if _is_offline_product(data) or stock == 0:
+        return True
+    has_identity = bool(data.get("itemCode") or data.get("title"))
+    if not has_identity:
+        return False
+    has_action = bool(data.get("hasCommerceAction"))
+    commerce_count = _parse_int(data.get("commerceFieldsPresent")) or 0
+    return commerce_count == 0 and not has_action and not _has_commerce_values(data)
+
+
 def _unavailable_reason(data: dict, stock: int | None = None) -> str | None:
     if _is_offline_product(data):
-        return f"商品已下架或页面显示不可售: {data.get('availabilityReason') or 'offline'}"
+        return data.get("availabilityReason") or "页面显示商品不可售"
     if stock == 0:
-        return "商品库存为 0，停止后续采集"
+        return "商品库存为 0"
+    if _looks_like_source_unavailable(data, stock):
+        return "页面缺少价格、库存和购买/下载入口，疑似原商品已下架"
+    return None
+
+
+def _price_missing_unavailable_reason(data: dict, stock: int | None = None) -> str | None:
+    value_total = _parse_float(data.get("valueTotal"))
+    estimated_total = _parse_float(data.get("estimatedTotal"))
+    shipping_cost = _parse_float(data.get("shippingCost"))
+    shipping_min = _parse_float(data.get("shippingCostMin"))
+    shipping_max = _parse_float(data.get("shippingCostMax"))
+
+    if stock == 0:
+        return "商品价格/成本信息缺失且库存为 0"
+    if value_total == 0 and any(value is not None and value > 0 for value in (estimated_total, shipping_cost, shipping_min, shipping_max)):
+        return (
+            "商品货值为 0 且仍返回物流/预估成本，通常表示无可售库存或已下架"
+        )
+    return None
+
+
+def _download_missing_unavailable_reason(data: dict, stock: int | None, error: Exception) -> str | None:
+    error_text = str(error)
+    if "未找到大健云仓“下载素材包”按钮" not in error_text:
+        return None
+    if _is_not_logged_in(data):
+        return None
+    if _looks_like_source_unavailable(data, stock):
+        return "页面缺少价格、库存和下载素材包入口"
+    if _has_core_product_data(data) and not _has_commerce_values(data):
+        return "商品基础信息仍可见，但价格/库存和下载素材包入口均不存在"
     return None
 
 
@@ -399,6 +491,9 @@ def _extract_summary(data: dict) -> dict:
         "stock": data.get("stock"),
         "availabilityStatus": data.get("availabilityStatus"),
         "availabilityReason": data.get("availabilityReason"),
+        "loginStatus": data.get("loginStatus"),
+        "hasCommerceAction": data.get("hasCommerceAction"),
+        "commerceFieldsPresent": data.get("commerceFieldsPresent"),
         "imageUrls": len(data.get("imageUrls") or []),
         "fileUrls": len(data.get("fileUrls") or []),
         "packages": len(data.get("packages") or []),
@@ -503,6 +598,10 @@ async def _collect_product_locked(product_id: int) -> dict:
             raise RuntimeError("Chrome 导航失败，请确认 Chrome 已开启 JS 权限")
         ready_probe = await _wait_for_gigab2b_page_ready(gigab2b_pid)
         logger.info(f"[Step1] GigaB2B 页面加载探测: {ready_probe}")
+        after_ready_wait = max(0.0, float(settings.STEP1_AFTER_READY_WAIT_SECONDS))
+        if after_ready_wait:
+            logger.info(f"[Step1] 页面已有内容，等待 {after_ready_wait:g}s 让价格/规格区完成渲染")
+            await asyncio.sleep(after_ready_wait)
 
         # 执行 JS 提取。页面偶尔还在异步加载，核心字段为空时重试几次。
         logger.info("[Step1] 执行 JS 提取商品数据...")
@@ -542,8 +641,11 @@ async def _collect_product_locked(product_id: int) -> dict:
                     data = {}
                 else:
                     logger.info(f"[Step1] 第 {attempt} 次提取摘要: {_extract_summary(data)}")
-                    if _has_core_product_data(data) or _is_offline_product(data):
+                    if _extract_ready_to_use(data):
                         break
+                    logger.warning(
+                        "[Step1] 商品标题已出现但价格/规格/库存区仍未完整，等待页面异步数据后重试..."
+                    )
 
             if attempt < retry_attempts:
                 logger.warning("[Step1] 核心商品字段为空或页面返回异常，等待页面继续加载后重试...")
@@ -620,6 +722,10 @@ async def _collect_product_locked(product_id: int) -> dict:
         review_reasons: list[str] = []
         price_issue = None
         if not pd.value_total or not pd.estimated_total:
+            price_unavailable_reason = _price_missing_unavailable_reason(data, pd.stock)
+            if price_unavailable_reason:
+                await db.commit()
+                raise Step1ProductUnavailable(price_unavailable_reason)
             price_issue = (
                 "大健云仓价格/成本信息未收集完整，请确认已登录且页面展示价格后继续："
                 f"valueTotal={data.get('valueTotal')}, estimatedTotal={data.get('estimatedTotal')}, "
@@ -638,6 +744,9 @@ async def _collect_product_locked(product_id: int) -> dict:
         try:
             downloaded_files = await _download_material_zips_via_chrome(raw_file_dir, pd.item_code)
         except Exception as e:
+            download_unavailable_reason = _download_missing_unavailable_reason(data, pd.stock, e)
+            if download_unavailable_reason:
+                raise Step1ProductUnavailable(download_unavailable_reason)
             existing_count = _existing_material_count(material_dir)
             if settings.STEP1_ALLOW_EXISTING_MATERIALS and existing_count > 0:
                 logger.warning(

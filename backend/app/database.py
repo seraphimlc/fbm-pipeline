@@ -177,6 +177,24 @@ async def init_db():
         """))
 
         await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS aplus_regenerate_tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id INTEGER NOT NULL,
+                module_position INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                status VARCHAR(30),
+                stage VARCHAR(30),
+                error_message TEXT,
+                result_json TEXT,
+                created_at DATETIME,
+                started_at DATETIME,
+                finished_at DATETIME,
+                updated_at DATETIME,
+                FOREIGN KEY(product_id) REFERENCES products(id)
+            )
+        """))
+
+        await conn.execute(text("""
             UPDATE products
             SET
                 aplus_upload_status = (

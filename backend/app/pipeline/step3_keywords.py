@@ -78,6 +78,54 @@ async def _get_sellersprite_cookie() -> str:
     await _request_manual_sellersprite_login("未找到卖家精灵登录态")
 
 
+async def _ensure_sellersprite_logged_in_for_empty_keywords(asin: str) -> None:
+    """空导出时复核登录态：未登录停人工，已登录则认为竞品暂无关键词数据。"""
+    try:
+        from app.pipeline.chrome_ctrl import chrome_execute_js, chrome_navigate, chrome_workflow
+
+        async with chrome_workflow("step3_sellersprite_empty_keywords_login_check"):
+            await chrome_navigate(SELLERSPRITE_LOGIN_URL, wait=5.0)
+            raw = await chrome_execute_js(
+                r"""(function() {
+    var text = (document.body && document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 3000);
+    var href = location.href || '';
+    var title = document.title || '';
+    var hasPasswordInput = !!document.querySelector('input[type="password"]');
+    var hasLoginUrl = /login|signin|passport/i.test(href);
+    var hasLoginForm = hasPasswordInput || !!document.querySelector('form[action*="login" i], input[name*="password" i]');
+    var hasLoggedInHint = /退出登录|个人中心|会员中心|我的账户|账号中心|用户中心|工作台/.test(text)
+        || !!document.querySelector('[class*="avatar" i], [class*="account" i], [class*="user" i]');
+    var loginTextOnly = /登录卖家精灵|账号登录|手机号登录|验证码登录|忘记密码|Login|Sign in/i.test(text) && !hasLoggedInHint;
+    return JSON.stringify({
+        href: href,
+        title: title,
+        hasLoginUrl: hasLoginUrl,
+        hasLoginForm: hasLoginForm,
+        hasLoggedInHint: hasLoggedInHint,
+        loginTextOnly: loginTextOnly
+    });
+})()""",
+                timeout=30,
+            )
+    except Exception as e:
+        if isinstance(e, Step3NeedsLogin):
+            raise
+        logger.warning(f"[Step3] 空关键词后检查卖家精灵登录态失败: ASIN={asin}, error={e}")
+        return
+
+    try:
+        state = json.loads(raw or "{}")
+    except Exception:
+        logger.warning(f"[Step3] 空关键词后登录态检查返回异常: ASIN={asin}, raw={raw}")
+        return
+
+    if state.get("hasLoginUrl") or state.get("hasLoginForm") or state.get("loginTextOnly"):
+        logger.warning(f"[Step3] 空关键词疑似卖家精灵未登录: ASIN={asin}, state={state}")
+        await _request_manual_sellersprite_login("卖家精灵未登录或登录态已失效，无法确认关键词为空")
+
+    logger.info(f"[Step3] 卖家精灵已登录但关键词为空，按竞品无数据继续: ASIN={asin}, state={state}")
+
+
 def _configured_cookie() -> str | None:
     token = (settings.SELLERSPRITE_TOKEN or "").strip()
     if token.lower() in PLACEHOLDER_TOKENS:
@@ -270,7 +318,7 @@ async def run_keywords(product_id: int) -> dict:
         # 调用API
         keywords, excel_bytes = await fetch_keywords(asin)
         if not keywords:
-            raise RuntimeError(f"卖家精灵未返回关键词数据: ASIN={asin}")
+            await _ensure_sellersprite_logged_in_for_empty_keywords(asin)
 
         # 取 Top 20
         top = _top_keywords(keywords, 20)

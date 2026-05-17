@@ -144,12 +144,23 @@ REGENERATE_SCRIPT_PROMPT = """Regenerate one A+ Content image generation script 
 ## Current Script
 {current_script_json}
 
+## Feedback Diagnosis and Revision Plan
+{diagnosis_json}
+
+## Available Reference Image Candidates from Step6 Analysis
+{reference_candidates_json}
+
 ## User Feedback / Reason To Regenerate
 {reason}
 
 ## Requirements
 - Regenerate ONLY module_position {module_position}.
+- Before writing the script, use the user_feedback_analysis and diagnosis as a decision brief. Interpret what the user really wants, then generate a fresh, coherent script that fits the product, module plan, current result, and available references.
+- Do not paste the analysis mechanically into the image prompt. Convert the useful parts into natural prompt changes, reference choices, negative constraints, and layout/color/product-fidelity instructions.
+- Rewrite the script appropriately every time. If the feedback asks to change references, analyze the candidate references and update reference_images with a clear rationale. If the feedback asks to adjust script/color/shape/scene/text, rewrite the prompt and negative_prompt to make that change concrete.
+- Treat concrete user feedback as acceptance criteria, but apply it in context: preserve the original module purpose unless the feedback intentionally changes it.
 - Keep the image useful for the same A+ module purpose unless the feedback says otherwise.
+- Follow the Feedback Diagnosis and Revision Plan as guidance. If it says to keep references, preserve them. If it says to add or reselect references, choose from the available candidates and update the prompt accordingly.
 - Adapt the regenerated visual strategy to the actual product category and product facts. Do not reuse category-specific assumptions from another product type.
 - On-image text must not include the brand name "{brand}" or any logo/wordmark.
 - If a lifestyle image includes people, require complete full-body people with natural anatomy and no cropped body parts.
@@ -164,6 +175,8 @@ REGENERATE_SCRIPT_PROMPT = """Regenerate one A+ Content image generation script 
 - Do not add, remove, or alter product parts, proportions, accessories, mechanisms, labels, packaging, material texture, surface finish, safety features, age cues, or visible construction details unless they are present in the selected references/product facts.
 - For child, baby, pet, medical, electrical, or safety-sensitive products, avoid unsupported certification, age, safety, health, durability, battery, waterproof, or performance claims; show only realistic compliant use supported by product facts and references.
 - Include a concise negative_prompt that blocks brand text/logos, cropped people, deformed product, wrong color, wrong product type, wrong scale, altered proportions, changed reference material, invented accessories, invented product features, unsupported safety/age claims, and changed product construction.
+- Add a "feedback_acceptance_checklist" array that rewrites the user's feedback into concrete visual requirements this new prompt satisfies.
+- Add a "feedback_application_notes" string explaining exactly how the prompt changed to satisfy the feedback.
 - Return valid JSON only.
 
 Output JSON:
@@ -181,10 +194,79 @@ Output JSON:
   "gallery_overlap_avoidance": "...",
   "risk_guardrails": [],
   "visual_do_not_claim": [],
+  "feedback_acceptance_checklist": [],
+  "feedback_application_notes": "...",
   "reference_images": [],
   "text_overlays": [
     {{"text": "...", "position": "top-center", "font_size": "large"}}
   ]
+}}"""
+
+REGENERATION_DIAGNOSIS_PROMPT = """Analyze why the current generated A+ image did not satisfy the user's feedback, then decide how to revise it.
+
+Use the already-analyzed Step6 image data. Do not blindly keep or change references: decide from the feedback.
+
+## Product
+- Title: {title}
+- Brand: {brand}
+- Color: {color}
+- Material: {material}
+- Category: {category}
+
+## Original A+ Module Plan
+{module_plan_json}
+
+## Current Script
+{current_script_json}
+
+## Current Generated Image Record
+{current_generated_image_json}
+
+## Current Reference Images
+{current_references_json}
+
+## Available Reference Image Candidates from Step6 Analysis
+{reference_candidates_json}
+
+## User Feedback
+{reason}
+
+First, analyze the user's words carefully, including Chinese feedback. Do not treat the feedback as a vague style hint. Convert it into edit intent, likely cause, reference-image implication, and practical script changes. Then classify the feedback and return a regeneration plan:
+- If the user says to rewrite/change the script/prompt, script_rewrite_required must be true and the prompt_revision_plan must describe concrete script changes.
+- If the user says the previous instruction was ignored, identify which instruction was ignored and make it an important acceptance criterion.
+- If the user asks to change a generated image but may need a different reference image, decide whether current references can support the requested change.
+- If this is only copy/layout/composition, keep current references unless a better support image is obvious.
+- If product shape, color, material, scale, feature, or authenticity is wrong, choose stronger identity/detail references from the candidate list.
+- If scene or selling point is wrong, keep an identity reference and add/select a candidate that supports the requested scenario or selling point.
+- If the current references are weak, misleading, too generic, or do not support the module purpose, reselect references.
+- Prefer 1-2 references total. Always include at least one product-identity reference when possible.
+
+Output valid JSON only:
+{{
+  "user_feedback_analysis": {{
+    "plain_language_intent": "what the user wants changed, in plain Chinese or English",
+    "requested_actions": ["explicit actions requested by the user"],
+    "target_objects": ["which image areas/modules/product parts/text/scenes the feedback refers to"],
+    "rejected_elements": ["what must not appear again"],
+    "preserve_elements": ["what must stay the same"],
+    "change_elements": ["what must visibly change"],
+    "acceptance_criteria": ["requirements derived from the user's words, applied in context"],
+    "reference_selection_implication": "keep current references|add support reference|reselect references|unclear, with reason",
+    "script_rewrite_required": true,
+    "image_regeneration_required": true
+  }},
+  "issue_type": "composition|product_fidelity|scene_mismatch|selling_point_mismatch|text_overlay|reference_mismatch|style_tone|other",
+  "root_cause": "short explanation",
+  "reference_action": "keep|add|reselect",
+  "selected_reference_paths": ["/absolute/path/from_candidates"],
+  "avoid_reference_paths": ["/absolute/path/to_avoid"],
+  "reference_rationale": "why these references fit the feedback and module",
+  "prompt_revision_plan": ["specific prompt changes to make"],
+  "composition_changes": ["specific visual/layout changes"],
+  "fidelity_rules": ["what product details must be preserved"],
+  "text_overlay_changes": ["text changes or placement changes"],
+  "acceptance_checklist": ["concrete visual requirements that must be satisfied in the regenerated image"],
+  "risk_notes": ["unsupported claims or visual risks to avoid"]
 }}"""
 
 
@@ -505,6 +587,58 @@ def _format_reference(candidate: dict, label: str, module: dict, script: dict) -
     }
 
 
+def _strip_previous_regeneration_sections(prompt: str | None) -> str:
+    """Remove old regeneration audit blocks before asking the LLM for a fresh rewrite."""
+    if not prompt:
+        return ""
+    cleaned = str(prompt)
+    leading_markers = (
+        "USER FEEDBACK DECISION BRIEF:",
+        "MANDATORY USER FEEDBACK REQUIREMENTS:",
+    )
+    if cleaned.lstrip().startswith(leading_markers):
+        lines = cleaned.splitlines()
+        end_index = None
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("Use this brief to rewrite") or stripped.startswith("The final generated image must visibly satisfy"):
+                end_index = index + 1
+                break
+        if end_index is not None:
+            while end_index < len(lines) and not lines[end_index].strip():
+                end_index += 1
+            cleaned = "\n".join(lines[end_index:]).strip()
+
+    trailing_markers = (
+        "Regeneration diagnosis and revision plan:",
+        "Selected reference images:",
+    )
+    while True:
+        positions = [cleaned.find(marker) for marker in trailing_markers if cleaned.find(marker) >= 0]
+        if not positions:
+            break
+        cleaned = cleaned[:min(positions)].rstrip()
+    return cleaned.strip()
+
+
+def _clean_script_for_regeneration(script: dict) -> dict:
+    """Keep useful module fields, but remove previous regen-specific baggage."""
+    cleaned = {
+        key: value
+        for key, value in script.items()
+        if key not in {
+            "regenerate_reason",
+            "regeneration_diagnosis",
+            "regenerated_at",
+            "feedback_acceptance_checklist",
+            "feedback_application_notes",
+            "user_feedback_analysis",
+        }
+    }
+    cleaned["prompt"] = _strip_previous_regeneration_sections(script.get("prompt"))
+    return cleaned
+
+
 def _list_value(value) -> list[str]:
     if isinstance(value, list):
         return [str(item) for item in value if item]
@@ -613,34 +747,147 @@ def _select_references_for_script(
     return [_format_reference(candidate, chr(65 + index), module, script) for index, candidate in enumerate(selected[:2])]
 
 
+def _select_references_for_regeneration(
+    candidates: list[dict],
+    module: dict,
+    script: dict,
+    position: int,
+    main_path: str | None,
+    diagnosis: dict | None,
+) -> list[dict]:
+    diagnosis = diagnosis or {}
+    by_path = {str(candidate.get("path")): candidate for candidate in candidates if candidate.get("path")}
+    selected: list[dict] = []
+    seen: set[str] = set()
+
+    def add_path(path: str | None) -> None:
+        if not path or path in seen:
+            return
+        candidate = by_path.get(path)
+        if candidate:
+            selected.append(candidate)
+            seen.add(path)
+
+    action = str(diagnosis.get("reference_action") or "").lower()
+    selected_paths = diagnosis.get("selected_reference_paths") if isinstance(diagnosis.get("selected_reference_paths"), list) else []
+    avoid_paths = {
+        str(path)
+        for path in (diagnosis.get("avoid_reference_paths") if isinstance(diagnosis.get("avoid_reference_paths"), list) else [])
+        if path
+    }
+
+    if action == "keep":
+        for ref in script.get("reference_images") or []:
+            add_path(ref if isinstance(ref, str) else ref.get("path") if isinstance(ref, dict) else None)
+
+    for path in selected_paths:
+        add_path(str(path) if path else None)
+        if len(selected) >= 2:
+            break
+
+    diagnosis_text_all = json.dumps(diagnosis, ensure_ascii=False).lower()
+    honor_single_reference = (
+        action == "reselect"
+        and len(selected) == 1
+        and (
+            len(selected_paths) == 1
+            or "single" in diagnosis_text_all
+            or "only" in diagnosis_text_all
+            or "唯一" in diagnosis_text_all
+            or "单一" in diagnosis_text_all
+            or "不再使用" in diagnosis_text_all
+            or "避免" in diagnosis_text_all
+        )
+    )
+    if honor_single_reference:
+        return [_format_reference(selected[0], "A", module, script)]
+
+    if action in {"add", "reselect"} and not any(main_path and item.get("path") == main_path for item in selected):
+        add_path(main_path)
+
+    if len(selected) < 2:
+        diagnosis_text = {
+            "issue_type": diagnosis.get("issue_type"),
+            "root_cause": diagnosis.get("root_cause"),
+            "reference_rationale": diagnosis.get("reference_rationale"),
+            "prompt_revision_plan": diagnosis.get("prompt_revision_plan"),
+            "composition_changes": diagnosis.get("composition_changes"),
+            "fidelity_rules": diagnosis.get("fidelity_rules"),
+        }
+        scored = sorted(
+            enumerate(candidates),
+            key=lambda pair: _score_reference_candidate(
+                pair[1],
+                {**module, "reference_strategy": json.dumps(diagnosis_text, ensure_ascii=False)},
+                script,
+                position,
+                pair[0],
+                main_path,
+            ),
+            reverse=True,
+        )
+        for _, candidate in scored:
+            path = candidate.get("path")
+            if not path or path in seen or (action == "reselect" and path in avoid_paths):
+                continue
+            selected.append(candidate)
+            seen.add(path)
+            if len(selected) >= 2:
+                break
+
+    if not selected:
+        return _select_references_for_script(candidates, module, script, position, main_path)
+    return [_format_reference(candidate, chr(65 + index), module, script) for index, candidate in enumerate(selected[:2])]
+
+
 def _append_reference_section(script: dict, refs: list[dict], brand: str) -> None:
     script["reference_images"] = refs
     if not refs:
         return
 
-    lines = ["Selected reference images:"]
-    for ref in refs:
-        lines.append(
-            f"- Reference {ref.get('label')}: {ref.get('filename')} ({ref.get('use_for')}) "
-            f"Visible selling point: {ref.get('visible_selling_point')}. Preserve: {ref.get('preserve')}"
-        )
-    lines.append(
-        "Material fidelity rule: preserve the exact material, texture, surface finish, packaging, and visible construction shown in the selected product references; do not replace them with another material or design."
-    )
-    lines.append(
-        "Selling-point rule: make this A+ image primarily express the visible selling point(s) in the selected references, and avoid generic product claims not supported by those references."
-    )
-    lines.append(
-        "Product-change rule: scene, people, lighting, camera framing, styling, and clean A+ layout may change; the product itself should stay as close as possible to the selected references with no added, removed, reshaped, recolored, resized, relabeled, or retextured parts, accessories, mechanisms, packaging, safety features, or construction details."
-    )
-    lines.append(
-        f"Do not render the brand name '{brand}' or any logo/wordmark as on-image text."
-    )
-    section = "\n".join(lines)
+    script["reference_guidance"] = {
+        "selected_reference_files": [ref.get("filename") for ref in refs if ref.get("filename")],
+        "material_fidelity_rule": "Preserve the exact material, texture, surface finish, color, and visible construction shown in the selected references.",
+        "product_change_rule": "Only scene, layout, lighting, framing, styling, and text placement may change; do not redesign the product itself.",
+        "brand_text_rule": f"Do not render the brand name '{brand}' or any logo/wordmark as on-image text.",
+    }
 
-    prompt = script.get("prompt") or ""
-    if "Selected reference images:" not in prompt:
-        script["prompt"] = f"{prompt.rstrip()}\n\n{section}".strip()
+
+def _append_regeneration_diagnosis_section(script: dict, diagnosis: dict | None) -> None:
+    if not diagnosis:
+        return
+    feedback_analysis = diagnosis.get("user_feedback_analysis") if isinstance(diagnosis.get("user_feedback_analysis"), dict) else {}
+    script["regeneration_decision_summary"] = {
+        "feedback_intent": feedback_analysis.get("plain_language_intent") or diagnosis.get("user_feedback"),
+        "issue_type": diagnosis.get("issue_type") or "other",
+        "root_cause": diagnosis.get("root_cause"),
+        "reference_action": diagnosis.get("reference_action"),
+        "reference_rationale": diagnosis.get("reference_rationale"),
+        "requested_actions": feedback_analysis.get("requested_actions"),
+        "acceptance_criteria": feedback_analysis.get("acceptance_criteria") or diagnosis.get("acceptance_checklist"),
+    }
+
+
+def _prepend_feedback_requirements(script: dict, reason: str, diagnosis: dict | None) -> None:
+    diagnosis = diagnosis or {}
+    feedback_analysis = diagnosis.get("user_feedback_analysis") if isinstance(diagnosis.get("user_feedback_analysis"), dict) else {}
+    checklist = diagnosis.get("acceptance_checklist")
+    if not isinstance(checklist, list) or not checklist:
+        checklist = [reason.strip()]
+    for key in ("acceptance_criteria", "requested_actions", "change_elements"):
+        values = feedback_analysis.get(key)
+        if isinstance(values, list):
+            checklist.extend(str(item).strip() for item in values if str(item).strip())
+    checklist = [str(item).strip() for item in checklist if str(item).strip()]
+    checklist = list(dict.fromkeys(checklist))
+    script["feedback_acceptance_checklist"] = checklist
+    script["user_feedback_analysis"] = feedback_analysis
+    script["feedback_application_notes"] = (
+        f"Feedback intent analyzed first: {feedback_analysis.get('plain_language_intent')}. "
+        "The prompt was then rewritten in context, with reference choices and visual instructions adjusted where useful."
+        if feedback_analysis.get("plain_language_intent")
+        else script.get("feedback_application_notes") or "The regenerated prompt was revised to directly satisfy the user's feedback and the diagnosis checklist."
+    )
 
 
 def _attach_reference_images(scripts_data: dict, product: Product, plan: dict, brand: str) -> dict:
@@ -843,7 +1090,111 @@ async def run_aplus_script(product_id: int) -> dict:
         return scripts_data
 
 
-async def regenerate_aplus_module_script(product_id: int, module_position: int, reason: str) -> dict:
+async def diagnose_aplus_regeneration_feedback(product_id: int, module_position: int, reason: str) -> dict:
+    """先分析用户反馈，判断是否需要重选参考图，并给出脚本修改方案。"""
+    async with async_session() as db:
+        result = await db.execute(
+            select(Product)
+            .options(
+                selectinload(Product.data),
+                selectinload(Product.images),
+                selectinload(Product.aplus),
+            )
+            .where(Product.id == product_id)
+        )
+        product = result.scalar_one_or_none()
+        if not product or not product.data:
+            raise ValueError(f"Product {product_id} not found or no data")
+
+        pd = product.data
+        pa = product.aplus
+        if not pa or not pa.aplus_plan or not pa.aplus_scripts:
+            raise ValueError("未找到A+规划/脚本，请先执行Step7/Step8")
+
+        try:
+            plan = json.loads(pa.aplus_plan)
+            scripts_data = json.loads(pa.aplus_scripts)
+        except json.JSONDecodeError:
+            raise ValueError("A+规划或脚本数据损坏")
+
+        modules = plan.get("modules", []) if isinstance(plan, dict) else []
+        scripts = scripts_data.get("scripts", []) if isinstance(scripts_data, dict) else []
+        current_script = next((item for item in scripts if item.get("module_position") == module_position), None)
+        if not current_script:
+            raise ValueError(f"未找到模块 {module_position} 的A+脚本")
+        clean_current_script = _clean_script_for_regeneration(current_script)
+        module_plan = next((item for item in modules if item.get("position") == module_position or item.get("module_position") == module_position), {})
+        current_generated = {}
+        if pa.aplus_images:
+            try:
+                image_items = json.loads(pa.aplus_images)
+                if isinstance(image_items, list):
+                    current_generated = next((item for item in image_items if item.get("position") == module_position), {}) or {}
+            except json.JSONDecodeError:
+                current_generated = {}
+        brand = product.brand or settings.DEFAULT_BRAND
+        candidates = _load_reference_candidates(product)
+
+        prompt = REGENERATION_DIAGNOSIS_PROMPT.format(
+            title=pd.listing_title or pd.title or "Unknown",
+            brand=brand,
+            color=pd.color or "N/A",
+            material=pd.material or "N/A",
+            category=pd.leaf_category or "General",
+            module_plan_json=json.dumps(module_plan, ensure_ascii=False, indent=2),
+            current_script_json=json.dumps(clean_current_script, ensure_ascii=False, indent=2),
+            current_generated_image_json=json.dumps(current_generated, ensure_ascii=False, indent=2),
+            current_references_json=json.dumps(current_script.get("reference_images") or [], ensure_ascii=False, indent=2),
+            reference_candidates_json=_reference_candidates_for_prompt(candidates),
+            reason=reason.strip(),
+        )
+
+    client = settings.get_llm_client()
+    logger.info(f"[Step8] 分析A+重新生成反馈: product={product_id}, module={module_position}")
+    response = await client.chat.completions.create(
+        model=settings.LLM_MODEL,
+        messages=[
+            {"role": "system", "content": "You diagnose Amazon A+ image regeneration feedback and choose reference images from analyzed candidates. Return valid JSON only."},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.2,
+        max_tokens=1600,
+        response_format={"type": "json_object"},
+    )
+    content = response.choices[0].message.content
+    if not content:
+        raise RuntimeError("反馈诊断返回空结果")
+    try:
+        diagnosis = json.loads(content)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"A+反馈诊断JSON解析失败: {e}")
+    if not isinstance(diagnosis, dict):
+        raise RuntimeError("A+反馈诊断返回格式错误")
+    feedback_analysis = diagnosis.get("user_feedback_analysis")
+    if not isinstance(feedback_analysis, dict):
+        feedback_analysis = {
+            "plain_language_intent": reason.strip(),
+            "requested_actions": [reason.strip()],
+            "acceptance_criteria": [reason.strip()],
+            "script_rewrite_required": True,
+            "image_regeneration_required": True,
+        }
+        diagnosis["user_feedback_analysis"] = feedback_analysis
+    feedback_analysis.setdefault("script_rewrite_required", True)
+    feedback_analysis.setdefault("image_regeneration_required", True)
+    if not isinstance(feedback_analysis.get("acceptance_criteria"), list) or not feedback_analysis.get("acceptance_criteria"):
+        legacy_requirements = feedback_analysis.get("non_negotiable_requirements")
+        feedback_analysis["acceptance_criteria"] = legacy_requirements if isinstance(legacy_requirements, list) and legacy_requirements else [reason.strip()]
+    diagnosis["user_feedback"] = reason.strip()
+    diagnosis["diagnosed_at"] = datetime.now().isoformat(timespec="seconds")
+    logger.info(
+        f"[Step8] A+反馈诊断完成: product={product_id}, module={module_position}, "
+        f"issue={diagnosis.get('issue_type')}, references={diagnosis.get('reference_action')}"
+    )
+    return diagnosis
+
+
+async def regenerate_aplus_module_script(product_id: int, module_position: int, reason: str, diagnosis: dict | None = None) -> dict:
     """按用户反馈重新生成单个 A+ 模块脚本，并写回原脚本列表。"""
     async with async_session() as db:
         result = await db.execute(
@@ -880,9 +1231,17 @@ async def regenerate_aplus_module_script(product_id: int, module_position: int, 
         current_script = next((item for item in scripts if item.get("module_position") == module_position), None)
         if not current_script:
             raise ValueError(f"未找到模块 {module_position} 的A+脚本")
+        clean_current_script = _clean_script_for_regeneration(current_script)
 
         module_plan = next((item for item in modules if item.get("position") == module_position or item.get("module_position") == module_position), {})
         brand = product.brand or settings.DEFAULT_BRAND
+        diagnosis = diagnosis or {
+            "issue_type": "other",
+            "root_cause": "Regenerate based on user feedback.",
+            "reference_action": "keep",
+            "prompt_revision_plan": [reason.strip()],
+        }
+        candidates = _load_reference_candidates(product)
         prompt = REGENERATE_SCRIPT_PROMPT.format(
             title=pd.listing_title or pd.title or "Unknown",
             brand=brand,
@@ -890,7 +1249,9 @@ async def regenerate_aplus_module_script(product_id: int, module_position: int, 
             material=pd.material or "N/A",
             category=pd.leaf_category or "General",
             module_plan_json=json.dumps(module_plan, ensure_ascii=False, indent=2),
-            current_script_json=json.dumps(current_script, ensure_ascii=False, indent=2),
+            current_script_json=json.dumps(clean_current_script, ensure_ascii=False, indent=2),
+            diagnosis_json=json.dumps(diagnosis, ensure_ascii=False, indent=2),
+            reference_candidates_json=_reference_candidates_for_prompt(candidates),
             reason=reason.strip(),
             module_position=module_position,
             output_width=settings.APLUS_IMAGE_WIDTH,
@@ -929,12 +1290,24 @@ async def regenerate_aplus_module_script(product_id: int, module_position: int, 
         regenerated["height"] = settings.APLUS_IMAGE_HEIGHT
         regenerated.setdefault("style", current_script.get("style", "photography"))
         regenerated["regenerate_reason"] = reason.strip()
+        regenerated["regeneration_diagnosis"] = diagnosis
         regenerated["regenerated_at"] = datetime.now().isoformat(timespec="seconds")
 
         sanitized = _sanitize_scripts({"scripts": [regenerated]}, brand)
         regenerated = sanitized["scripts"][0]
-        regenerated_with_refs = _attach_reference_images({"scripts": [regenerated]}, product, {"modules": [module_plan]}, brand)
-        regenerated = _sanitize_scripts(regenerated_with_refs, brand)["scripts"][0]
+        refs = _select_references_for_regeneration(
+            candidates,
+            module_plan,
+            regenerated,
+            module_position,
+            product.images.main_image_path if product.images else None,
+            diagnosis,
+        )
+        _attach_module_strategy_section(regenerated, module_plan)
+        _append_regeneration_diagnosis_section(regenerated, diagnosis)
+        _append_reference_section(regenerated, refs, brand)
+        _prepend_feedback_requirements(regenerated, reason, diagnosis)
+        regenerated = _sanitize_scripts({"scripts": [regenerated]}, brand)["scripts"][0]
 
         updated_scripts = [
             regenerated if item.get("module_position") == module_position else item
@@ -945,6 +1318,7 @@ async def regenerate_aplus_module_script(product_id: int, module_position: int, 
         scripts_data["summary"] = scripts_data.get("summary") or "A+ image scripts"
         scripts_data["last_regenerated_module"] = module_position
         scripts_data["last_regenerate_reason"] = reason.strip()
+        scripts_data["last_regeneration_diagnosis"] = diagnosis
 
         pa.aplus_scripts = json.dumps(scripts_data, ensure_ascii=False)
         pa.aplus_scripts_summary = scripts_data.get("summary")
