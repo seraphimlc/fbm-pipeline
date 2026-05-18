@@ -107,8 +107,9 @@ Output JSON:
 DEFAULT_IMAGE_STRATEGY = {
     "name": "general",
     "prompt": (
-        "Build a gallery that follows a buyer decision path: clean product identity, alternate view, "
-        "size/scale, material/detail, use/function, lifestyle scene, setup/storage/cleaning, package or included parts. "
+        "Build a gallery that follows a buyer decision path for this specific product and category: clean product identity, "
+        "alternate view, size/scale, material/detail, use/function, lifestyle scene, setup/storage/cleaning, "
+        "package or included parts. Treat size/scale and function/use as critical only when the product facts or category make them important. "
         "Do not give several images the same role unless the later image proves a clearly different buyer doubt. "
         "If distinct roles are not available, fill remaining slots with the strongest usable images up to 9."
     ),
@@ -142,6 +143,14 @@ DEFAULT_IMAGE_STRATEGY = {
         "package_contents": 1,
         "proof": 2,
     },
+    "critical_roles": ["alternate_angle"],
+    "high_risk_missing_roles": [],
+    "high_risk_claim_roles": ["function_use"],
+    "buyer_focus": [
+        "确认商品身份、款式、颜色和套装数量是否清楚",
+        "优先补齐当前类目最影响购买决策的尺寸、功能、材质或配件证据",
+        "避免多张图片承担同一个卖点导致图库信息重复",
+    ],
 }
 
 IMAGE_STRATEGIES = [
@@ -186,6 +195,61 @@ IMAGE_STRATEGIES = [
                 "package_contents": 1,
                 "proof": 2,
             },
+            "critical_roles": ["alternate_angle", "size_scale", "material_detail"],
+            "high_risk_missing_roles": ["size_scale", "material_detail"],
+            "high_risk_claim_roles": ["size_scale", "material_detail", "function_use", "setup_storage"],
+            "buyer_focus": [
+                "房间适配、整体尺寸、座深和比例是否能被图片证明",
+                "面料纹理、坐垫厚度、舒适感和做工细节是否清楚",
+                "组合方式、搬入安装、包装件数和到货内容是否降低大件购买顾虑",
+            ],
+        },
+    ),
+    (
+        ("ride on", "ride-on", "powered ride", "electric ride", "kids car", "childrens-powered-ride-ons", "children's powered ride"),
+        {
+            "name": "ride-on toys",
+            "prompt": (
+                "For kids ride-on toys, the gallery should prove safety-relevant identity and play value before repeating beauty shots: "
+                "alternate full-product angle, child/size scale, dashboard/control features, wheels/seat/belt or stability details, "
+                "battery/charging or remote-control proof if supported, outdoor/indoor use scene, and package/included parts. "
+                "Do not imply safety certifications, speed, battery capacity, or remote-control features unless visible or supported by facts."
+            ),
+            "role_order": [
+                "alternate_angle",
+                "size_scale",
+                "function_use",
+                "material_detail",
+                "lifestyle",
+                "package_contents",
+                "proof",
+            ],
+            "role_limits": {
+                "alternate_angle": 1,
+                "size_scale": 1,
+                "function_use": 2,
+                "material_detail": 1,
+                "lifestyle": 1,
+                "package_contents": 1,
+                "proof": 1,
+            },
+            "role_fill_limits": {
+                "alternate_angle": 2,
+                "size_scale": 1,
+                "function_use": 3,
+                "material_detail": 2,
+                "lifestyle": 2,
+                "package_contents": 1,
+                "proof": 2,
+            },
+            "critical_roles": ["alternate_angle", "size_scale", "function_use"],
+            "high_risk_missing_roles": ["size_scale", "function_use"],
+            "high_risk_claim_roles": ["size_scale", "function_use"],
+            "buyer_focus": [
+                "适龄/尺寸比例、孩子乘坐空间或承重相关证据是否清楚",
+                "驾驶功能、控制台、轮胎、座椅/安全带、电池或遥控等核心卖点是否有图",
+                "不要把未被图片或商品事实支持的安全认证、速度、电池容量写成确定卖点",
+            ],
         },
     ),
     (
@@ -224,6 +288,14 @@ IMAGE_STRATEGIES = [
                 "package_contents": 1,
                 "proof": 2,
             },
+            "critical_roles": ["alternate_angle", "function_use"],
+            "high_risk_missing_roles": ["function_use"],
+            "high_risk_claim_roles": ["function_use"],
+            "buyer_focus": [
+                "亮度、光束范围、夜间/应急使用效果是否有图片证据",
+                "电池、充电方式、防水防摔等承诺必须有可见证据或商品事实支持",
+                "尺寸握持、开关/接口、包装配件是否降低购买疑问",
+            ],
         },
     ),
 ]
@@ -502,9 +574,12 @@ def _image_strategy(category: str, pd: ProductData) -> dict:
 
 
 def _gallery_strategy_prompt(strategy: dict) -> str:
+    focus_lines = "\n".join(f"- {item}" for item in (strategy.get("buyer_focus") or []))
     return (
         f"{strategy.get('prompt', '')}\n"
         f"Preferred role order: {', '.join(strategy.get('role_order') or [])}.\n"
+        f"Category-specific buyer focus:\n{focus_lines or '- Use the product facts to decide which visual doubts matter most.'}\n"
+        f"Roles that become high-risk if missing for this category: {', '.join(strategy.get('high_risk_missing_roles') or []) or 'none'}.\n"
         "Use conversion_role consistently so selection can avoid repeated image types."
     )
 
@@ -864,6 +939,21 @@ def _listing_alignment_text(pd: ProductData) -> str:
 
 
 def _claim_terms_for_product(pd: ProductData) -> list[tuple[str, str, list[str]]]:
+    text = " ".join(str(part or "").lower() for part in (
+        pd.title,
+        pd.product_type,
+        pd.leaf_category,
+        pd.description,
+    ))
+    is_ride_on = any(
+        marker in text
+        for marker in ("ride on", "ride-on", "powered ride", "kids car", "electric ride", "toy car")
+    )
+    is_lighting = any(
+        marker in text
+        for marker in ("flashlight", "torch", "lantern", "headlamp", "work light")
+    )
+
     material_terms = [
         "fabric", "chenille", "linen", "velvet", "leather", "faux leather",
         "wood", "metal", "steel", "texture", "upholstery", "foam", "cushion",
@@ -872,18 +962,43 @@ def _claim_terms_for_product(pd: ProductData) -> list[tuple[str, str, list[str]]
         material_terms.extend(part.strip().lower() for part in re.split(r"[,;/|]+", pd.material) if len(part.strip()) > 2)
     if pd.filler:
         material_terms.extend(part.strip().lower() for part in re.split(r"[,;/|]+", pd.filler) if len(part.strip()) > 2)
+    size_terms = [
+        "small space", "apartment", "compact", "dimension", "dimensions", "inch",
+        "inches", "width", "depth", "height", "seat depth", "scale", "fit",
+        "spacious", "roomy",
+    ]
+    function_terms = [
+        "reversible", "modular", "chaise", "sleeper", "storage", "recliner",
+        "reclining", "adjustable", "convert", "convertible", "fold", "extendable",
+        "cup holder", "usb", "charging", "ottoman",
+    ]
+    lifestyle_terms = [
+        "living room", "bedroom", "office", "dorm", "studio", "patio", "home",
+        "family", "lounge",
+    ]
+    if is_ride_on:
+        size_terms.extend(["age", "ages", "kids", "children", "child", "toddler", "weight capacity", "capacity"])
+        function_terms.extend([
+            "remote", "remote control", "battery", "charging", "music", "lights", "horn",
+            "dashboard", "seat belt", "suspension", "speed", "wheel", "wheels", "ride",
+        ])
+        material_terms.extend(["plastic", "pp", "wheels", "seat", "belt"])
+        lifestyle_terms.extend(["outdoor", "driveway", "yard", "play", "ride"])
+    if is_lighting:
+        size_terms.extend(["pocket", "handheld", "compact", "portable", "lightweight"])
+        function_terms.extend([
+            "beam", "brightness", "lumen", "lumens", "rechargeable", "battery", "usb",
+            "waterproof", "weatherproof", "mode", "modes", "emergency", "magnetic",
+        ])
+        material_terms.extend(["aluminum", "abs", "rubber", "impact", "durable"])
+        lifestyle_terms.extend(["camping", "garage", "emergency", "night", "outdoor"])
+
     return [
         ("size_scale", "尺寸/空间适配", [
-            "small space", "apartment", "compact", "dimension", "dimensions", "inch",
-            "inches", "width", "depth", "height", "seat depth", "scale", "fit",
-            "spacious", "roomy",
+            *size_terms,
         ]),
         ("material_detail", "材质/细节", list(dict.fromkeys(material_terms))),
-        ("function_use", "功能/结构卖点", [
-            "reversible", "modular", "chaise", "sleeper", "storage", "recliner",
-            "reclining", "adjustable", "convert", "convertible", "fold", "extendable",
-            "cup holder", "usb", "charging", "ottoman",
-        ]),
+        ("function_use", "功能/结构卖点", list(dict.fromkeys(function_terms))),
         ("setup_storage", "安装/清洁/维护", [
             "assembly", "assemble", "install", "setup", "tool-free", "tool free",
             "easy to clean", "washable", "removable", "cleaning", "maintenance",
@@ -892,10 +1007,7 @@ def _claim_terms_for_product(pd: ProductData) -> list[tuple[str, str, list[str]]
             "package", "packages", "box", "boxes", "included", "includes", "parts",
             "hardware", "accessories",
         ]),
-        ("lifestyle", "使用场景", [
-            "living room", "bedroom", "office", "dorm", "studio", "patio", "home",
-            "family", "lounge",
-        ]),
+        ("lifestyle", "使用场景", list(dict.fromkeys(lifestyle_terms))),
     ]
 
 
@@ -965,7 +1077,8 @@ def _listing_image_alignment(pd: ProductData, gallery: list[dict]) -> dict:
     }
 
 
-def _image_health(diagnostics: dict) -> dict:
+def _image_health(diagnostics: dict, strategy: dict | None = None) -> dict:
+    strategy = strategy or DEFAULT_IMAGE_STRATEGY
     issues: list[dict] = []
     main_status = diagnostics.get("main_image_status")
     fallback_reasons = set(diagnostics.get("fallback_reasons") or [])
@@ -993,22 +1106,27 @@ def _image_health(diagnostics: dict) -> dict:
         issues.append({"severity": "warning", "message": f"图库仅选择 {gallery_count} 张图，建议补充更多转化证据。"})
 
     role_set = {item.get("role") for item in missing_roles}
-    for role in ("size_scale", "material_detail"):
+    high_risk_missing_roles = set(strategy.get("high_risk_missing_roles") or [])
+    critical_roles = set(strategy.get("critical_roles") or [])
+    for role in high_risk_missing_roles:
         if role in role_set:
             issues.append({
                 "severity": "high",
-                "message": f"缺少{ROLE_LABELS.get(role, role)}图片，高客单或大件商品转化风险较高。",
+                "message": f"缺少{ROLE_LABELS.get(role, role)}图片，{strategy.get('name', '当前类目')}转化风险较高。",
             })
     for item in missing_roles:
         role = item.get("role")
-        if role not in {"size_scale", "material_detail"}:
-            issues.append({
-                "severity": "warning",
-                "message": f"缺少{item.get('role_label') or role}图片。",
-            })
+        if role not in high_risk_missing_roles:
+            if role in critical_roles:
+                issues.append({
+                    "severity": "warning",
+                    "message": f"缺少{item.get('role_label') or role}图片。",
+                })
 
+    high_risk_claim_roles = set(strategy.get("high_risk_claim_roles") or [])
     for item in missing_evidence:
-        severity = "high" if item.get("role") in {"size_scale", "material_detail", "function_use", "setup_storage"} else "warning"
+        role = item.get("role")
+        severity = "high" if role in high_risk_claim_roles else "warning"
         issues.append({
             "severity": severity,
             "message": item.get("message") or f"Listing 卖点缺少图片证据: {item.get('claim_label')}",
@@ -1412,7 +1530,14 @@ async def run_image_analysis(product_id: int) -> dict:
         if analysis_warnings:
             selection_diagnostics["analysis_warnings"] = analysis_warnings
         selection_diagnostics["listing_image_alignment"] = _listing_image_alignment(pd, gallery_selection)
-        selection_diagnostics["image_health"] = _image_health(selection_diagnostics)
+        selection_diagnostics["image_strategy"] = {
+            "name": strategy.get("name"),
+            "buyer_focus": strategy.get("buyer_focus") or [],
+            "critical_roles": strategy.get("critical_roles") or [],
+            "high_risk_missing_roles": strategy.get("high_risk_missing_roles") or [],
+            "high_risk_claim_roles": strategy.get("high_risk_claim_roles") or [],
+        }
+        selection_diagnostics["image_health"] = _image_health(selection_diagnostics, strategy)
         main_image_path = main_review.get("path") if main_review else None
         gallery_items = [
             item for item in gallery_selection
