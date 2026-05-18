@@ -28,8 +28,7 @@ from sqlalchemy.orm import selectinload
 logger = logging.getLogger(__name__)
 
 DATA_ROW = 8
-AMAZON_TEMPLATE_LOGIC_VERSION = "2026-05-17-require-stock-v7"
-SOFA_ITEM_DIMENSION_MAX_WIDTH_INCHES = 82
+AMAZON_TEMPLATE_LOGIC_VERSION = "2026-05-18-sofa-dimensions-quantity-v8"
 PIPELINE_DIR = Path(__file__).parent
 MAPPING_DIR = PIPELINE_DIR / "template_mappings"
 TEMPLATE_DIR = PIPELINE_DIR / "templates"
@@ -650,25 +649,6 @@ def _omit_fields(fill: dict[str, Any], fields: dict[str, str], keys: tuple[str, 
             fill.pop(attr, None)
 
 
-def _sofa_dimension_warnings(pd: ProductData, fill: dict[str, Any], fields: dict[str, str]) -> list[str]:
-    width = pd.dimension_length
-    if width is None or width <= SOFA_ITEM_DIMENSION_MAX_WIDTH_INCHES:
-        return []
-
-    _omit_fields(fill, fields, (
-        "depth_value",
-        "depth_unit",
-        "height_value",
-        "height_unit",
-        "width_value",
-        "width_unit",
-    ))
-    return [
-        f"SOFA Item Dimensions D x W x H 的 width={width:g} inches 超过 Amazon 允许的 "
-        f"{SOFA_ITEM_DIMENSION_MAX_WIDTH_INCHES:g} inches，已跳过该字段组；普通 Item Width/Length 仍保留。"
-    ]
-
-
 def _amazon_item_type_keyword(option: dict[str, Any]) -> str:
     return f"{option['path']} ({option['node']})"
 
@@ -690,6 +670,31 @@ def _furniture_match_text(pd: ProductData) -> str:
 def _find_browse_option(options: list[Any], node: str) -> dict[str, Any] | None:
     for option in options:
         if isinstance(option, dict) and option.get("node") == node:
+            return option
+    return None
+
+
+def _source_category_text(pd: ProductData) -> str:
+    return " ".join(str(value or "") for value in (pd.leaf_category, pd.categories, pd.product_type)).lower()
+
+
+def _source_selected_furniture_option(options: list[Any], pd: ProductData) -> dict[str, Any] | None:
+    source_text = _source_category_text(pd)
+    if not source_text:
+        return None
+
+    high_confidence_nodes = {
+        "living-room-chaise-lounges",
+    }
+    for option in options:
+        if not isinstance(option, dict) or option.get("node") not in high_confidence_nodes:
+            continue
+        candidates = [
+            option.get("node"),
+            option.get("path"),
+            *(option.get("markers") or []),
+        ]
+        if any(str(candidate or "").lower() in source_text for candidate in candidates if candidate):
             return option
     return None
 
@@ -761,6 +766,10 @@ def _select_furniture_category_option(mapping: dict, pd: ProductData) -> dict[st
     options = mapping.get("browse_category_options") or []
     if not isinstance(options, list):
         return None
+
+    source_option = _source_selected_furniture_option(options, pd)
+    if source_option:
+        return source_option
 
     if _looks_like_sofa(pd):
         preferred = _find_browse_option(options, _preferred_sofa_node(pd))
@@ -1054,7 +1063,6 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
     if not shipping_template:
         warnings.append("模板未找到 Shipping Template 下拉值，配送模板未填写。")
     stock_quantity = _offer_quantity(pd)
-    inventory_available = "Disabled"
 
     fill.update({
         fields["sku"]: pd.item_code,
@@ -1070,7 +1078,6 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
         fields["list_price"]: pd.suggested_price,
         fields["fulfillment_channel"]: "Fulfillment by Merchant (Default)",
         fields["quantity"]: stock_quantity,
-        fields["inventory_available"]: inventory_available,
         fields["price"]: pd.suggested_price,
         fields["country_of_origin"]: pd.origin or "China",
         fields["shipping_template"]: shipping_template,
@@ -1134,7 +1141,6 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
                 "maximum_weight_recommendation",
                 "maximum_weight_recommendation_unit",
             ))
-            warnings.extend(_sofa_dimension_warnings(pd, fill, fields))
         if product_type == "CHAIR":
             fill[fields["included_components"]] = "Chair"
             _omit_fields(fill, fields, (
