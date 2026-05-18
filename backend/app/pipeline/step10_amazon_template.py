@@ -28,7 +28,7 @@ from sqlalchemy.orm import selectinload
 logger = logging.getLogger(__name__)
 
 DATA_ROW = 8
-AMAZON_TEMPLATE_LOGIC_VERSION = "2026-05-17-project-templates-v5"
+AMAZON_TEMPLATE_LOGIC_VERSION = "2026-05-17-require-stock-v7"
 SOFA_ITEM_DIMENSION_MAX_WIDTH_INCHES = 82
 PIPELINE_DIR = Path(__file__).parent
 MAPPING_DIR = PIPELINE_DIR / "template_mappings"
@@ -310,7 +310,8 @@ def _pricing_template_warnings(pd: ProductData) -> list[str]:
 
 
 def _inventory_template_warnings(pd: ProductData) -> list[str]:
-    return ["导入表格按系统策略不提交库存数量，后续需通过库存同步功能更新可售库存。"]
+    stock = _stock_value(pd)
+    return [f"Amazon报价数量按采集库存 {stock} 填写。"]
 
 
 def _aplus_template_warnings(product: Product) -> list[str]:
@@ -492,6 +493,15 @@ def _stock_value(pd: ProductData) -> int | None:
         return int(float(str(raw).replace(",", "")))
     except ValueError:
         return None
+
+
+def _offer_quantity(pd: ProductData) -> int:
+    stock = _stock_value(pd)
+    if stock is None:
+        raise ValueError("未解析到可售库存，已停止生成 Amazon 导入模板；请先采集/补充库存后再上传。")
+    if stock <= 0:
+        raise ValueError(f"采集库存为 {stock}，无可售库存，已停止生成 Amazon 导入模板。")
+    return stock
 
 
 def _material_value(pd: ProductData) -> str:
@@ -1043,7 +1053,7 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
     shipping_template = _first_template_value(wb, fields["shipping_template"])
     if not shipping_template:
         warnings.append("模板未找到 Shipping Template 下拉值，配送模板未填写。")
-    stock_quantity = None
+    stock_quantity = _offer_quantity(pd)
     inventory_available = "Disabled"
 
     fill.update({

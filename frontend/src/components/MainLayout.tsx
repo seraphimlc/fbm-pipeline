@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from 'react-router-dom';
 import { Layout, Menu, Typography } from 'antd';
 import {
   ShoppingOutlined,
+  CloudSyncOutlined,
   SyncOutlined,
   PictureOutlined,
   PlusCircleOutlined,
@@ -20,6 +21,7 @@ const MainLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const menuItems = [
     { key: '/products', icon: <UnorderedListOutlined />, label: '商品生成任务' },
     { key: '/catalog', icon: <ShoppingOutlined />, label: '商品列表' },
+    { key: '/inventory-sync', icon: <CloudSyncOutlined />, label: '库存同步' },
     { key: '/asin-sync', icon: <SyncOutlined />, label: 'ASIN同步' },
     { key: '/aplus-upload', icon: <PictureOutlined />, label: 'A+上传' },
     { key: '/products/new', icon: <PlusCircleOutlined />, label: '创建任务' },

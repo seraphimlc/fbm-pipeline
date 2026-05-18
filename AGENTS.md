@@ -1,0 +1,23 @@
+# 项目级规则
+
+## 工作方式
+
+- 先查看现有流程、映射 JSON、文档和配置，再修改代码。
+- 不要把用户已有商品数据、人工类目、真实 ASIN、已生成素材或模板输出整体覆盖掉；除非需求明确要求重建。
+- 涉及 Amazon 导入模板、类目、字段名、上架检查时，优先查看 `backend/app/pipeline/template_mappings/*.json`、`backend/app/pipeline/step10_amazon_template.py` 和 `docs/template-mapping-spec.md`。
+
+## 模板类目映射合并
+
+当导入、合并或维护模板类目映射时，如果多个来源映射到同一个类目 key，按导入顺序以后导入的映射为准。
+
+只覆盖发生冲突的类目映射；没有冲突的其他类目必须保留原有映射，不得因为一次导入而整体替换或清空。
+
+## Amazon 导入表格
+
+- 新增或修改类目模板时，必须同步维护 `template_mappings/*.json`，并跑模板映射校验。
+- 已有真实 Amazon ASIN 的商品，不允许再次导出 Amazon 导入表格。
+- Step 10 只负责生成导入表格和风险提示；任务完成后仍需人工确认，不能自动进入可运营商品列表。
+
+## 新增类目模板
+
+新增类目模板按 `docs/add-category-template-sop.md` 执行，至少包含模板文件、映射 JSON、类目匹配逻辑、校验结果和一个样例商品生成检查。

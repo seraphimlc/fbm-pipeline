@@ -235,6 +235,10 @@ class CatalogProductResponse(BaseModel):
     item_code: str | None = None
     title: str | None = None
     leaf_category: str | None = None
+    stock: int | None = None
+    stock_sync_status: str | None = None
+    stock_synced_at: datetime | None = None
+    stock_sync_error: str | None = None
     status: str
     confirmed_at: datetime | None = None
     imported_at: datetime | None = None
@@ -251,6 +255,55 @@ class CatalogAsinUpdateRequest(BaseModel):
 
 class PaginatedCatalogProducts(BaseModel):
     items: list[CatalogProductResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class InventorySyncCreateRequest(BaseModel):
+    catalog_product_ids: list[int] | None = Field(default=None, max_length=5000)
+
+
+class InventorySyncBatchResponse(BaseModel):
+    id: int
+    status: str
+    total_count: int = 0
+    success_count: int = 0
+    unavailable_count: int = 0
+    failed_count: int = 0
+    skipped_count: int = 0
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error_message: str | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class InventorySyncItemResponse(BaseModel):
+    id: int
+    batch_id: int
+    catalog_product_id: int
+    product_id: int
+    gigab2b_product_id: str | None = None
+    item_code: str | None = None
+    old_stock: int | None = None
+    new_stock: int | None = None
+    availability_status: str | None = None
+    status: str
+    error_message: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class InventorySyncBatchDetail(InventorySyncBatchResponse):
+    items: list[InventorySyncItemResponse] = Field(default_factory=list)
+
+
+class PaginatedInventorySyncBatches(BaseModel):
+    items: list[InventorySyncBatchResponse]
     total: int
     page: int
     page_size: int

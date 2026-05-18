@@ -11,13 +11,22 @@ import zipfile
 import glob
 import shutil
 import time
+import html
+import httpx
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote
 
 from app.config import settings
 from app.database import async_session
 from app.models import Product, ProductData
-from app.pipeline.chrome_ctrl import chrome_navigate, chrome_execute_js, chrome_get_page_info, chrome_workflow
+from app.pipeline.chrome_ctrl import (
+    chrome_navigate,
+    chrome_execute_js,
+    chrome_get_page_info,
+    chrome_get_cookie_for_domain,
+    chrome_workflow,
+)
 from app.services.material_assets import organize_video_files
 from app.services.product_duplicates import (
     extract_gigab2b_product_id,
@@ -40,6 +49,13 @@ DOWNLOAD_TYPE_DIRS = {
     "retail_ready": "Retail_Ready",
     "to_b": "To_B",
     "unknown": "Unknown",
+}
+
+GIGAB2B_BASE_URL = "https://www.gigab2b.com"
+GIGAB2B_API_TIMEOUT = httpx.Timeout(connect=20, read=180, write=30, pool=20)
+GIGAB2B_RESOURCE_TYPES = {
+    "To B素材包": 1,
+    "Retail Ready素材包": 2,
 }
 
 
@@ -252,6 +268,496 @@ def _store_and_extract_zips(zip_paths: list[Path], save_dir: Path) -> list[dict]
         )
 
     return results
+
+
+def _unique_target_path(directory: Path, filename: str) -> Path:
+    safe_name = Path(filename).name.strip() or "gigab2b_material.zip"
+    if not safe_name.lower().endswith(".zip"):
+        safe_name = f"{safe_name}.zip"
+    target = directory / safe_name
+    if not target.exists():
+        return target
+    stem, suffix = target.stem, target.suffix
+    index = 1
+    while target.exists():
+        target = directory / f"{stem}_{index}{suffix}"
+        index += 1
+    return target
+
+
+def _filename_from_content_disposition(value: str | None, fallback: str) -> str:
+    if value:
+        match = re.search(r"filename\*=UTF-8''([^;]+)", value, re.I)
+        if match:
+            return unquote(match.group(1).strip().strip('"'))
+        match = re.search(r'filename="?([^";]+)"?', value, re.I)
+        if match:
+            return unquote(match.group(1).strip())
+    return fallback
+
+
+def _store_and_extract_api_zip(zip_path: Path, type_key: str, save_dir: Path) -> dict:
+    extracted_root = save_dir / RAW_EXTRACTED_DIR
+    type_dir = DOWNLOAD_TYPE_DIRS.get(type_key, DOWNLOAD_TYPE_DIRS["unknown"])
+    output_dir = extracted_root / type_dir / zip_path.stem
+    extracted_count = _safe_extract_zip(zip_path, output_dir)
+    result = {
+        "path": str(zip_path),
+        "type": type_key,
+        "size": zip_path.stat().st_size,
+        "extracted_count": extracted_count,
+        "extracted_dir": str(output_dir),
+    }
+    logger.info(
+        f"[Step1] API 素材 ZIP 已保存并解压: {zip_path.name}, type={type_key}, "
+        f"files={extracted_count}, dir={output_dir}"
+    )
+    return result
+
+
+def _html_to_text(value: str | None) -> str | None:
+    if not value:
+        return None
+    text = re.sub(r"</(?:li|p|div|br)\s*>", "\n", str(value), flags=re.I)
+    text = re.sub(r"<[^>]+>", "", text)
+    lines = [html.unescape(line).strip() for line in text.splitlines()]
+    lines = [line for line in lines if line]
+    return "\n".join(lines) or None
+
+
+def _html_list_items(value: str | None) -> list[str]:
+    if not value:
+        return []
+    items = re.findall(r"<li\b[^>]*>(.*?)</li>", str(value), flags=re.I | re.S)
+    cleaned = [_html_to_text(item) for item in items]
+    return [item for item in cleaned if item]
+
+
+def _money_number(value) -> float | None:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if value is None:
+        return None
+    match = re.search(r"[0-9]+(?:\.[0-9]+)?", str(value).replace(",", ""))
+    return float(match.group(0)) if match else None
+
+
+def _text_value(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        for key in ("name", "title", "label", "value", "text", "show", "value_name"):
+            if value.get(key) not in (None, ""):
+                return str(value[key])
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _property_lookup(specification: dict) -> dict[str, str]:
+    props = {}
+    for item in specification.get("property_infos") or []:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("property_name") or item.get("name")
+        value = item.get("property_value_name") or item.get("value")
+        if name and value not in (None, ""):
+            props[str(name)] = str(value)
+    return props
+
+
+def _property_any(props: dict[str, str], names: tuple[str, ...]) -> str | None:
+    for name in names:
+        if props.get(name):
+            return props[name]
+    return None
+
+
+def _image_urls_from_api(product_info: dict) -> list[str]:
+    urls = []
+    for key in ("main_image",):
+        value = product_info.get(key)
+        if isinstance(value, dict):
+            for field in ("popup", "thumb", "url", "src"):
+                if value.get(field):
+                    urls.append(str(value[field]))
+    image_list = product_info.get("image_list") or []
+    if isinstance(image_list, dict):
+        image_list = list(image_list.values())
+    for item in image_list:
+        if isinstance(item, dict):
+            for field in ("popup", "thumb", "url", "src"):
+                if item.get(field):
+                    urls.append(str(item[field]))
+                    break
+        elif item:
+            urls.append(str(item))
+    return list(dict.fromkeys(urls))
+
+
+def _package_entries_from_api(specification: dict) -> list[dict]:
+    package_size = specification.get("package_size") or {}
+    raw_unit_length = str(package_size.get("simple_unit_length") or package_size.get("unit_length") or "in.")
+    raw_unit_weight = str(package_size.get("simple_unit_weight") or package_size.get("unit_weight") or "lbs.")
+    unit_length = "in." if "英寸" in raw_unit_length or raw_unit_length.lower().startswith("in") else raw_unit_length
+    unit_weight = "lbs." if "磅" in raw_unit_weight or raw_unit_weight.lower().startswith("lb") else raw_unit_weight
+
+    def build_entry(item: dict, fallback_code: str | None = None) -> dict | None:
+        length = item.get("length") or item.get("length_show")
+        width = item.get("width") or item.get("width_show")
+        height = item.get("height") or item.get("height_show")
+        weight = item.get("weight") or item.get("weight_show")
+        if not (length and width and height and weight):
+            return None
+        code = item.get("sku") or item.get("sub_sku") or item.get("code") or fallback_code or ""
+        qty = item.get("qty") or item.get("quantity") or item.get("package_quantity") or 1
+        dimensions = f"{length} * {width} * {height} {unit_length} {weight} {unit_weight}"
+        return {
+            "code": str(code),
+            "qty": str(qty),
+            "dimensions": dimensions,
+            "weight": f"{weight} {unit_weight}",
+        }
+
+    entries = []
+    general = package_size.get("general")
+    if isinstance(general, dict):
+        entry = build_entry(general, specification.get("sku"))
+        if entry:
+            entries.append(entry)
+    for item in package_size.get("combo") or []:
+        if isinstance(item, dict):
+            entry = build_entry(item, specification.get("sku"))
+            if entry:
+                entries.append(entry)
+    return entries
+
+
+def _api_headers(cookie: str | None, referer: str, *, ajax: bool = True) -> dict[str, str]:
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+        ),
+        "Accept": "application/json, text/plain, */*" if ajax else "application/octet-stream,*/*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": referer,
+    }
+    if ajax:
+        headers["X-Requested-With"] = "XMLHttpRequest"
+    if cookie:
+        headers["Cookie"] = cookie
+    return headers
+
+
+async def _get_gigab2b_cookie(product_url: str) -> str | None:
+    cookie = await chrome_get_cookie_for_domain("gigab2b.com")
+    if cookie:
+        return cookie
+    # 打开一次页面只为让 Chrome 暴露当前登录态，不等待完整渲染。
+    if await chrome_navigate(product_url, wait=1.0):
+        return await chrome_get_cookie_for_domain("gigab2b.com")
+    return None
+
+
+async def _gigab2b_get_json(client: httpx.AsyncClient, route: str, params: dict, headers: dict) -> dict:
+    response = await client.get(f"{GIGAB2B_BASE_URL}/index.php", params={"route": route, **params}, headers=headers)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict) or int(payload.get("code", 0)) != 200:
+        raise RuntimeError(f"GigaB2B API 返回异常: route={route}, payload={payload}")
+    return payload.get("data") or {}
+
+
+async def _gigab2b_post_json(client: httpx.AsyncClient, route: str, data: dict, headers: dict) -> dict:
+    response = await client.post(f"{GIGAB2B_BASE_URL}/index.php", params={"route": route}, data=data, headers=headers)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"GigaB2B API 返回非JSON对象: route={route}")
+    return payload
+
+
+def _normalize_gigab2b_api_data(gigab2b_pid: str, base_data: dict, price_data: dict) -> dict:
+    product_info = base_data.get("product_info") or {}
+    seller_info = base_data.get("seller_info") or {}
+    specification = product_info.get("specification") or {}
+    props = _property_lookup(specification)
+    dimensions = (specification.get("product_dimensions") or {}).get("assemble_info") or {}
+    package_entries = _package_entries_from_api(specification)
+    image_urls = _image_urls_from_api(product_info)
+
+    base_price = price_data.get("base_price_info") or {}
+    fulfillment = price_data.get("fulfillment_options") or {}
+    drop_ship = fulfillment.get("drop_ship") or {}
+    cloud = fulfillment.get("cloud") or {}
+    quantity = price_data.get("quantity") or {}
+
+    value_total = _money_number(base_price.get("price"))
+    shipping_cost = _money_number(drop_ship.get("amazon_total_amount") or drop_ship.get("total_amount"))
+    estimated_total = round(value_total + shipping_cost, 2) if value_total is not None and shipping_cost is not None else None
+    characteristic = product_info.get("characteristic")
+    feature_items = _html_list_items(characteristic)
+
+    data = {
+        "itemCode": product_info.get("sku") or specification.get("sku"),
+        "title": product_info.get("product_name") or specification.get("product_name"),
+        "color": _property_any(props, ("Main Color", "颜色", "Color")),
+        "material": _property_any(props, ("Main Material", "材质", "Material")),
+        "filler": _property_any(props, ("Filler", "填充物", "Fill Material")),
+        "productType": specification.get("product_type_name") or product_info.get("product_type_name"),
+        "origin": _text_value(specification.get("origin_place")) or _property_any(props, ("Place of Origin", "产地")),
+        "dimensionLength": dimensions.get("length_show"),
+        "dimensionWidth": dimensions.get("width_show"),
+        "dimensionHeight": dimensions.get("height_show"),
+        "weight": dimensions.get("weight_show"),
+        "packages": package_entries,
+        "valueTotal": value_total,
+        "unitPrice": value_total,
+        "estimatedTotal": estimated_total,
+        "shippingCost": shipping_cost,
+        "shippingCostMin": _money_number(cloud.get("min_total_amount")),
+        "shippingCostMax": _money_number(cloud.get("max_total_amount")),
+        "stock": quantity.get("quantity"),
+        "seller": seller_info.get("store_name") or seller_info.get("store_code"),
+        "features": feature_items,
+        "characteristic": _html_to_text(characteristic),
+        "variants": [],
+        "imageUrls": image_urls,
+        "imageCount": len(image_urls),
+        "fileUrls": [],
+        "loginStatus": "logged_in_or_unknown" if price_data.get("price_visible") else "not_logged_in",
+        "hasCommerceAction": bool(price_data.get("price_visible") or product_info.get("is_product_available")),
+        "commerceFieldsPresent": sum(
+            1 for value in (
+                value_total,
+                estimated_total,
+                shipping_cost,
+                quantity.get("quantity"),
+            )
+            if value not in (None, "")
+        ),
+        "_gigab2bProductId": gigab2b_pid,
+        "_gigab2bSellerId": seller_info.get("seller_id"),
+        "_gigab2bRetailReady": bool(product_info.get("retail_ready_flag")),
+        "_gigab2bApiSource": True,
+    }
+
+    is_available = product_info.get("is_product_available")
+    no_login_unavailable = product_info.get("no_login_and_unavaiable")
+    if is_available is False or no_login_unavailable:
+        data["availabilityStatus"] = "offline"
+        data["availabilityReason"] = "页面显示商品不可售"
+    else:
+        data["availabilityStatus"] = "available"
+        data["availabilityReason"] = None
+    return data
+
+
+async def _collect_product_data_via_api(gigab2b_pid: str, product_url: str) -> tuple[dict, str]:
+    cookie = await _get_gigab2b_cookie(product_url)
+    if not cookie:
+        raise RuntimeError("未能从 Chrome 读取 GigaB2B 登录 Cookie")
+
+    headers = _api_headers(cookie, product_url)
+    async with httpx.AsyncClient(timeout=GIGAB2B_API_TIMEOUT, follow_redirects=True) as client:
+        base_data, price_data = await asyncio.gather(
+            _gigab2b_get_json(
+                client,
+                "/product/info/info/baseInfos",
+                {"product_id": gigab2b_pid},
+                headers,
+            ),
+            _gigab2b_get_json(
+                client,
+                "/product/info/price/list",
+                {"product_id": gigab2b_pid},
+                headers,
+            ),
+        )
+
+    data = _normalize_gigab2b_api_data(gigab2b_pid, base_data, price_data)
+    if not _extract_ready_to_use(data):
+        raise RuntimeError(f"GigaB2B API 字段不完整: {_extract_summary(data)}")
+    if data.get("loginStatus") == "not_logged_in" and not _is_offline_product(data):
+        raise RuntimeError("GigaB2B API 价格/库存不可见，疑似登录态失效")
+    return data, cookie
+
+
+async def _collect_product_data_via_chrome(gigab2b_pid: str, product_url: str) -> dict:
+    logger.info(f"[Step1] 打开 GigaB2B 页面: {product_url}")
+    success = await chrome_navigate(product_url, wait=4.0)
+    if not success:
+        raise RuntimeError("Chrome 导航失败，请确认 Chrome 已开启 JS 权限")
+    ready_probe = await _wait_for_gigab2b_page_ready(gigab2b_pid)
+    logger.info(f"[Step1] GigaB2B 页面加载探测: {ready_probe}")
+    after_ready_wait = max(0.0, float(settings.STEP1_AFTER_READY_WAIT_SECONDS))
+    if after_ready_wait:
+        logger.info(f"[Step1] 页面已有内容，等待 {after_ready_wait:g}s 让价格/规格区完成渲染")
+        await asyncio.sleep(after_ready_wait)
+
+    logger.info("[Step1] 执行 JS 提取商品数据...")
+    data = {}
+    last_js_result = None
+    retry_attempts = max(1, settings.STEP1_EXTRACT_RETRY_ATTEMPTS)
+    retry_delay = max(0, settings.STEP1_EXTRACT_RETRY_DELAY_SECONDS)
+    for attempt in range(1, retry_attempts + 1):
+        js_result = await chrome_execute_js(EXTRACT_JS, timeout=30)
+        last_js_result = js_result
+        try:
+            parsed = _parse_extract_json(js_result)
+        except json.JSONDecodeError as e:
+            page_info = await chrome_get_page_info()
+            logger.warning(
+                f"[Step1] 第 {attempt} 次 JS 返回非JSON，等待后重试: {e}; "
+                f"page={page_info}; raw={_preview_js_result(js_result)}"
+            )
+            parsed = None
+
+        if parsed is None:
+            if not js_result:
+                logger.warning(f"[Step1] 第 {attempt} 次 JS 提取无返回")
+            else:
+                page_info = await chrome_get_page_info()
+                logger.warning(
+                    f"[Step1] 第 {attempt} 次 JS 返回不可解析，等待后重试: "
+                    f"page={page_info}; raw={_preview_js_result(js_result)}"
+                )
+        else:
+            data = parsed
+            if not isinstance(data, dict):
+                logger.warning(
+                    f"[Step1] 第 {attempt} 次 JS 返回结构不是对象，等待后重试: "
+                    f"raw={_preview_js_result(js_result)}"
+                )
+                data = {}
+            else:
+                logger.info(f"[Step1] 第 {attempt} 次提取摘要: {_extract_summary(data)}")
+                if _extract_ready_to_use(data):
+                    break
+                logger.warning(
+                    "[Step1] 商品标题已出现但价格/规格/库存区仍未完整，等待页面异步数据后重试..."
+                )
+
+        if attempt < retry_attempts:
+            logger.warning("[Step1] 核心商品字段为空或页面返回异常，等待页面继续加载后重试...")
+            await asyncio.sleep(retry_delay)
+
+    if not _has_core_product_data(data) and not _is_offline_product(data):
+        page_probe = await chrome_execute_js(
+            "JSON.stringify({readyState: document.readyState, url: location.href, title: document.title, bodyText: (document.body && document.body.innerText || '').slice(0, 300)})",
+            timeout=10,
+        )
+        try:
+            probe_data = json.loads(page_probe) if page_probe else None
+        except json.JSONDecodeError:
+            probe_data = {"raw": _preview_js_result(page_probe)}
+        page_info = await chrome_get_page_info()
+        logger.error(
+            "[Step1] 商品核心信息采集失败: "
+            f"product_id={gigab2b_pid}, page={page_info}, probe={probe_data}, "
+            f"summary={_extract_summary(data)}, raw={_preview_js_result(last_js_result)}, "
+            f"raw_len={len(last_js_result or '')}"
+        )
+        raise RuntimeError(
+            "大健商品核心信息采集失败，请确认 Chrome 已登录大健云仓、商品页已正常加载。"
+            f"product_id={gigab2b_pid}, page={page_info}, raw={_preview_js_result(last_js_result)}"
+        )
+    return data
+
+
+def _select_api_resource_option(data: dict) -> tuple[str, int, str]:
+    options = ["To B素材包"]
+    if data.get("_gigab2bRetailReady"):
+        options.insert(0, "Retail Ready素材包")
+    selected = _select_download_option(options)
+    product_type = GIGAB2B_RESOURCE_TYPES.get(selected)
+    if not product_type:
+        raise RuntimeError(f"GigaB2B API 暂不支持素材包类型: {selected}")
+    type_key = "retail_ready" if product_type == 2 else "to_b"
+    return selected, product_type, type_key
+
+
+async def _download_material_zips_via_api(save_dir: Path, data: dict, cookie: str | None) -> list[dict]:
+    product_id = data.get("_gigab2bProductId")
+    seller_id = data.get("_gigab2bSellerId")
+    if not product_id or not seller_id:
+        raise RuntimeError("GigaB2B API 下载缺少 product_id 或 seller_id")
+    if not cookie:
+        raise RuntimeError("GigaB2B API 下载缺少登录 Cookie")
+
+    selected, product_type, type_key = _select_api_resource_option(data)
+    product_url = f"{GIGAB2B_BASE_URL}/index.php?route=product/product&product_id={product_id}"
+    ajax_headers = _api_headers(cookie, product_url, ajax=True)
+    download_headers = _api_headers(cookie, product_url, ajax=False)
+    trigger_data = {
+        "product_id": str(product_id),
+        "customer_id": str(seller_id),
+        "product_type": str(product_type),
+    }
+
+    timeout_at = time.monotonic() + settings.STEP1_DOWNLOAD_TIMEOUT_SECONDS
+    async with httpx.AsyncClient(timeout=GIGAB2B_API_TIMEOUT, follow_redirects=True) as client:
+        attempt = 0
+        while True:
+            attempt += 1
+            payload = await _gigab2b_post_json(
+                client,
+                "product/product/download",
+                trigger_data,
+                ajax_headers,
+            )
+            code = int(payload.get("code", 0))
+            logger.info(f"[Step1] API 素材包打包状态: option={selected}, attempt={attempt}, code={code}")
+            if code == 200:
+                break
+            if code != 300:
+                raise RuntimeError(f"GigaB2B API 素材包打包失败: {payload}")
+            if time.monotonic() >= timeout_at:
+                raise RuntimeError("GigaB2B API 素材包打包超时")
+            await asyncio.sleep(3)
+
+        save_dir.mkdir(parents=True, exist_ok=True)
+        fallback_name = f"{data.get('itemCode') or product_id}_{type_key}.zip"
+        params = {
+            "route": "product/product/downloadZip",
+            "product_id": str(product_id),
+            "product_type": str(product_type),
+        }
+        async with client.stream(
+            "GET",
+            f"{GIGAB2B_BASE_URL}/index.php",
+            params=params,
+            headers=download_headers,
+        ) as response:
+            response.raise_for_status()
+            filename = _filename_from_content_disposition(
+                response.headers.get("content-disposition"),
+                fallback_name,
+            )
+            target_zip = _unique_target_path(save_dir, filename)
+            tmp_zip = target_zip.with_suffix(f"{target_zip.suffix}.part")
+            size = 0
+            try:
+                with tmp_zip.open("wb") as fh:
+                    async for chunk in response.aiter_bytes(1024 * 512):
+                        if chunk:
+                            fh.write(chunk)
+                            size += len(chunk)
+                if size == 0:
+                    raise RuntimeError("GigaB2B API 下载到空素材 ZIP")
+                with tmp_zip.open("rb") as fh:
+                    if fh.read(2) != b"PK":
+                        raise RuntimeError(
+                            "GigaB2B API 下载结果不是 ZIP: "
+                            f"content_type={response.headers.get('content-type')}, size={size}"
+                        )
+                tmp_zip.replace(target_zip)
+            except Exception:
+                tmp_zip.unlink(missing_ok=True)
+                raise
+
+    return [await asyncio.to_thread(_store_and_extract_api_zip, target_zip, type_key, save_dir)]
 
 
 async def _download_material_zips_via_chrome(save_dir: Path, item_code: str | None) -> list[dict]:
@@ -597,89 +1103,16 @@ async def _collect_product_locked(product_id: int) -> dict:
 
         product.gigab2b_product_id = gigab2b_pid
 
-        # 打开 GigaB2B 页面
         url = f"https://www.gigab2b.com/index.php?route=product/product&product_id={gigab2b_pid}"
-        logger.info(f"[Step1] 打开 GigaB2B 页面: {url}")
-        
-        success = await chrome_navigate(url, wait=4.0)
-        if not success:
-            raise RuntimeError("Chrome 导航失败，请确认 Chrome 已开启 JS 权限")
-        ready_probe = await _wait_for_gigab2b_page_ready(gigab2b_pid)
-        logger.info(f"[Step1] GigaB2B 页面加载探测: {ready_probe}")
-        after_ready_wait = max(0.0, float(settings.STEP1_AFTER_READY_WAIT_SECONDS))
-        if after_ready_wait:
-            logger.info(f"[Step1] 页面已有内容，等待 {after_ready_wait:g}s 让价格/规格区完成渲染")
-            await asyncio.sleep(after_ready_wait)
-
-        # 执行 JS 提取。页面偶尔还在异步加载，核心字段为空时重试几次。
-        logger.info("[Step1] 执行 JS 提取商品数据...")
+        api_cookie = None
         data = {}
-        last_js_result = None
-        retry_attempts = max(1, settings.STEP1_EXTRACT_RETRY_ATTEMPTS)
-        retry_delay = max(0, settings.STEP1_EXTRACT_RETRY_DELAY_SECONDS)
-        for attempt in range(1, retry_attempts + 1):
-            js_result = await chrome_execute_js(EXTRACT_JS, timeout=30)
-            last_js_result = js_result
-            try:
-                parsed = _parse_extract_json(js_result)
-            except json.JSONDecodeError as e:
-                page_info = await chrome_get_page_info()
-                logger.warning(
-                    f"[Step1] 第 {attempt} 次 JS 返回非JSON，等待后重试: {e}; "
-                    f"page={page_info}; raw={_preview_js_result(js_result)}"
-                )
-                parsed = None
-
-            if parsed is None:
-                if not js_result:
-                    logger.warning(f"[Step1] 第 {attempt} 次 JS 提取无返回")
-                else:
-                    page_info = await chrome_get_page_info()
-                    logger.warning(
-                        f"[Step1] 第 {attempt} 次 JS 返回不可解析，等待后重试: "
-                        f"page={page_info}; raw={_preview_js_result(js_result)}"
-                    )
-            else:
-                data = parsed
-                if not isinstance(data, dict):
-                    logger.warning(
-                        f"[Step1] 第 {attempt} 次 JS 返回结构不是对象，等待后重试: "
-                        f"raw={_preview_js_result(js_result)}"
-                    )
-                    data = {}
-                else:
-                    logger.info(f"[Step1] 第 {attempt} 次提取摘要: {_extract_summary(data)}")
-                    if _extract_ready_to_use(data):
-                        break
-                    logger.warning(
-                        "[Step1] 商品标题已出现但价格/规格/库存区仍未完整，等待页面异步数据后重试..."
-                    )
-
-            if attempt < retry_attempts:
-                logger.warning("[Step1] 核心商品字段为空或页面返回异常，等待页面继续加载后重试...")
-                await asyncio.sleep(retry_delay)
-
-        if not _has_core_product_data(data) and not _is_offline_product(data):
-            # 再执行一个极小 JS，帮助判断是未登录、页面空白还是专用标签页异常。
-            page_probe = await chrome_execute_js(
-                "JSON.stringify({readyState: document.readyState, url: location.href, title: document.title, bodyText: (document.body && document.body.innerText || '').slice(0, 300)})",
-                timeout=10,
-            )
-            try:
-                probe_data = json.loads(page_probe) if page_probe else None
-            except json.JSONDecodeError:
-                probe_data = {"raw": _preview_js_result(page_probe)}
-            page_info = await chrome_get_page_info()
-            logger.error(
-                "[Step1] 商品核心信息采集失败: "
-                f"product_id={gigab2b_pid}, page={page_info}, probe={probe_data}, "
-                f"summary={_extract_summary(data)}, raw={_preview_js_result(last_js_result)}, "
-                f"raw_len={len(last_js_result or '')}"
-            )
-            raise RuntimeError(
-                "大健商品核心信息采集失败，请确认 Chrome 已登录大健云仓、商品页已正常加载。"
-                f"product_id={gigab2b_pid}, page={page_info}, raw={_preview_js_result(last_js_result)}"
-            )
+        try:
+            logger.info(f"[Step1] 尝试通过 GigaB2B API 采集商品数据: {url}")
+            data, api_cookie = await _collect_product_data_via_api(gigab2b_pid, url)
+            logger.info(f"[Step1] API 提取摘要: {_extract_summary(data)}")
+        except Exception as e:
+            logger.warning(f"[Step1] GigaB2B API 采集失败，回退 Chrome 页面解析: {type(e).__name__}: {e}")
+            data = await _collect_product_data_via_chrome(gigab2b_pid, url)
 
         logger.info(f"[Step1] 提取到商品: {data.get('title', 'N/A')}")
 
@@ -757,11 +1190,19 @@ async def _collect_product_locked(product_id: int) -> dict:
             _handle_step1_issue(price_issue, settings.STEP1_PRICE_MISSING_POLICY, review_reasons)
 
         # === 下载原始 zip。页面图片不下载，后续图片来自 zip 解压内容。===
-        logger.info(f"[Step1] 通过 Chrome 下载大健云仓素材 ZIP 到 {raw_file_dir}...")
+        logger.info(f"[Step1] 下载大健云仓素材 ZIP 到 {raw_file_dir}...")
         downloaded_files = []
         material_download_failed = False
         try:
-            downloaded_files = await _download_material_zips_via_chrome(raw_file_dir, pd.item_code)
+            try:
+                logger.info("[Step1] 尝试通过 GigaB2B API 下载素材 ZIP...")
+                downloaded_files = await _download_material_zips_via_api(raw_file_dir, data, api_cookie)
+            except Exception as api_error:
+                logger.warning(
+                    "[Step1] GigaB2B API 素材下载失败，回退 Chrome 点击下载: "
+                    f"{type(api_error).__name__}: {api_error}"
+                )
+                downloaded_files = await _download_material_zips_via_chrome(raw_file_dir, pd.item_code)
         except Exception as e:
             download_unavailable_reason = _download_missing_unavailable_reason(data, pd.stock, e)
             if download_unavailable_reason:

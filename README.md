@@ -13,6 +13,23 @@ cd backend && source .venv/bin/activate && uvicorn app.main:app --port 8190
 cd frontend && npm run dev
 ```
 
+## 常用命令
+
+```bash
+make help
+make check
+make validate-template-mappings
+make test-project-rules
+```
+
+## 项目规则与维护文档
+
+- `AGENTS.md`：项目级协作规则。
+- `.cursor/rules/projectRule.mdc`：Cursor Project Rule，默认全项目生效。
+- `docs/template-mapping-spec.md`：Amazon 模板映射规范。
+- `docs/add-category-template-sop.md`：新增类目模板 SOP。
+- `docs/runbook.md`：Pipeline 操作与故障手册。
+
 ## 端口
 
 | 服务 | 端口 |

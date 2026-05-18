@@ -17,7 +17,7 @@ from datetime import datetime
 
 from app.database import get_db
 from app.config import settings
-from app.models import AplusUploadBatch, AsinSyncBatch, CatalogProduct, Product, ProductData, ProductImage, ProductAplus, ProductFile
+from app.models import AplusUploadBatch, AsinSyncBatch, CatalogProduct, InventorySyncBatch, Product, ProductData, ProductImage, ProductAplus, ProductFile
 from app.models.status import COMPLETED, DUPLICATE_SKIPPED, PENDING_REVIEW, SOURCE_UNAVAILABLE, STEP_LABELS, STEP_STATUS_MAP
 from app.api.schemas import (
     ProductCreate, ProductUpdate, ProductResponse, ProductDetail,
@@ -27,6 +27,8 @@ from app.api.schemas import (
     BulkImportResponse, BulkStartRequest, BulkStartResponse,
     PaginatedAsinSyncBatches, PaginatedCatalogProducts, CatalogProductResponse,
     PaginatedAplusUploadBatches, WorkbenchOverview, CatalogAsinUpdateRequest,
+    InventorySyncBatchDetail, InventorySyncBatchResponse, InventorySyncCreateRequest,
+    PaginatedInventorySyncBatches,
 )
 from app.pipeline.engine import start_pipeline as enqueue_pipeline, cancel_pipeline, is_running
 from app.pipeline.step1_collect import collect_product
@@ -55,6 +57,7 @@ from app.services.material_assets import (
     organize_video_files,
 )
 from app.services.asin_sync import build_sync_item, start_asin_sync_batch
+from app.services.inventory_sync import build_inventory_sync_item, start_inventory_sync_batch
 from app.services.aplus_upload import build_upload_item, start_aplus_upload_batch
 from app.services.aplus_regenerate import create_regenerate_task, retry_latest_regenerate_tasks
 from app.services.product_duplicates import (
@@ -167,8 +170,8 @@ def _static_category_options() -> list[dict]:
             "source": "ride_on_toy",
         }
 
-    # Deterministic override: when two mappings expose the same category key,
-    # the mapping loaded later wins.
+    # 项目规则：同一类目 key 冲突时，后导入的映射覆盖前者；
+    # 只替换冲突类目，其他类目继续保留。
     for mapping_path in sorted(MAPPING_DIR.glob("*.json")):
         try:
             mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
@@ -484,6 +487,20 @@ def _copy_import_data_row(source_path: Path, target_ws, target_row: int) -> None
         target_col = target_columns.get(attr)
         if target_col:
             target_ws.cell(target_row, target_col).value = source_ws.cell(DATA_ROW, source_col).value
+
+
+def _catalog_stock_export_override(ws, mapping: dict, catalog: CatalogProduct | None) -> tuple[int, int] | None:
+    if not catalog or catalog.stock is None:
+        return None
+    if catalog.stock <= 0:
+        raise ValueError(f"运营库存为 {catalog.stock}，无可售库存，已停止导出 Amazon 导入表格。")
+    quantity_attr = (mapping.get("dynamic_fields") or {}).get("quantity")
+    if not quantity_attr:
+        return None
+    quantity_col = _template_attribute_columns(ws).get(str(quantity_attr))
+    if not quantity_col:
+        raise ValueError("模板未找到 Amazon 数量字段，无法写入运营库存。")
+    return quantity_col, catalog.stock
 
 
 def _summary_workbook(rows: list[dict]) -> bytes:
@@ -917,11 +934,14 @@ async def list_catalog_products(
     amazon_asin: str | None = None,
     asin_sync_status: str | None = None,
     aplus_upload_status: str | None = None,
+    stock_sync_status: str | None = None,
     template_risk_level: str | None = None,
     upc: str | None = None,
     category: str | None = None,
     imported_from: datetime | None = None,
     imported_to: datetime | None = None,
+    stock_synced_from: datetime | None = None,
+    stock_synced_to: datetime | None = None,
     db: AsyncSession = Depends(get_db),
 ):
     """独立商品资料列表，最多单页返回 1000 条。"""
@@ -967,6 +987,13 @@ async def list_catalog_products(
     if aplus_upload_status:
         query = query.where((Product.aplus_upload_status == aplus_upload_status) | (CatalogProduct.aplus_upload_status == aplus_upload_status))
         count_query = count_query.where((Product.aplus_upload_status == aplus_upload_status) | (CatalogProduct.aplus_upload_status == aplus_upload_status))
+    if stock_sync_status:
+        if stock_sync_status == "not_synced":
+            query = query.where((CatalogProduct.stock_sync_status.is_(None)) | (CatalogProduct.stock_sync_status == "not_synced"))
+            count_query = count_query.where((CatalogProduct.stock_sync_status.is_(None)) | (CatalogProduct.stock_sync_status == "not_synced"))
+        else:
+            query = query.where(CatalogProduct.stock_sync_status == stock_sync_status)
+            count_query = count_query.where(CatalogProduct.stock_sync_status == stock_sync_status)
     if template_risk_level:
         pattern = f'%"risk_level"%{template_risk_level}%'
         query = query.where(ProductData.amazon_template_fill_summary.like(pattern))
@@ -987,6 +1014,14 @@ async def list_catalog_products(
     if imported_to:
         query = query.where(CatalogProduct.imported_at <= imported_to)
         count_query = count_query.where(CatalogProduct.imported_at <= imported_to)
+    stock_synced_from = _naive_datetime(stock_synced_from)
+    stock_synced_to = _naive_datetime(stock_synced_to)
+    if stock_synced_from:
+        query = query.where(CatalogProduct.stock_synced_at >= stock_synced_from)
+        count_query = count_query.where(CatalogProduct.stock_synced_at >= stock_synced_from)
+    if stock_synced_to:
+        query = query.where(CatalogProduct.stock_synced_at <= stock_synced_to)
+        count_query = count_query.where(CatalogProduct.stock_synced_at <= stock_synced_to)
 
     total_result = await db.execute(count_query)
     total = total_result.scalar() or 0
@@ -1037,6 +1072,7 @@ async def export_catalog_products(ids: list[int], db: AsyncSession = Depends(get
         .where(Product.id.in_(source_ids))
     )
     products_by_id = {product.id: product for product in product_result.scalars().all()}
+    catalog_by_source_id = {item.source_product_id: item for item in catalog_items}
 
     grouped: dict[tuple[str, str], dict] = {}
     report_rows: list[dict] = []
@@ -1094,6 +1130,7 @@ async def export_catalog_products(ids: list[int], db: AsyncSession = Depends(get
         for (_, category), group in grouped.items():
             products = group["products"]
             template_path: Path = group["template_path"]
+            mapping = group["mapping"]
             safe_category = _safe_export_name(category)
             template_stem = _safe_export_name(template_path.stem, "amazon_template")
             for chunk_index in range(0, len(products), 500):
@@ -1120,17 +1157,23 @@ async def export_catalog_products(ids: list[int], db: AsyncSession = Depends(get
                     try:
                         if not pd:
                             raise ValueError("商品资料不存在")
+                        catalog = catalog_by_source_id.get(product.id)
+                        stock_override = _catalog_stock_export_override(ws, mapping, catalog)
                         source_path = _amazon_template_cache_path(pd)
                         template_result = None
                         if not source_path:
                             template_result = await run_amazon_template(product.id)
                             source_path = Path(template_result["path"]).expanduser()
                         _copy_import_data_row(source_path, ws, row_number)
+                        if stock_override:
+                            quantity_col, stock_quantity = stock_override
+                            ws.cell(row_number, quantity_col).value = stock_quantity
                         exported_in_workbook += 1
                         report_rows.append({
                             **report_base,
                             "状态": "已导出",
-                            "原因": "使用已生成表格" if template_result is None else "现场重新生成表格",
+                            "原因": ("使用已生成表格" if template_result is None else "现场重新生成表格")
+                            + (f"，数量按运营库存 {stock_override[1]} 覆盖" if stock_override else ""),
                         })
                     except Exception as exc:
                         report_rows.append({
@@ -1156,6 +1199,80 @@ async def export_catalog_products(ids: list[int], db: AsyncSession = Depends(get
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@router.post("/catalog/inventory-sync", response_model=InventorySyncBatchResponse)
+async def create_inventory_sync_batch(body: InventorySyncCreateRequest, db: AsyncSession = Depends(get_db)):
+    """创建大建云仓库存同步批次。默认同步全部已确认商品资料。"""
+    selected_ids = list(dict.fromkeys(body.catalog_product_ids or []))
+    query = (
+        select(CatalogProduct)
+        .options(selectinload(CatalogProduct.source_product).selectinload(Product.data))
+        .where(CatalogProduct.confirmed_at.is_not(None))
+        .order_by(CatalogProduct.imported_at.desc())
+    )
+    if selected_ids:
+        query = query.where(CatalogProduct.id.in_(selected_ids))
+    result = await db.execute(query)
+    catalog_items = result.scalars().all()
+    if not catalog_items:
+        raise HTTPException(400, "没有找到可同步库存的商品资料")
+
+    if selected_ids:
+        found_ids = {item.id for item in catalog_items}
+        missing_ids = [item_id for item_id in selected_ids if item_id not in found_ids]
+        if missing_ids:
+            raise HTTPException(400, f"部分商品不存在或还未确认入库: {missing_ids[:10]}")
+
+    batch = InventorySyncBatch(
+        status="pending",
+        total_count=len(catalog_items),
+        created_at=datetime.now(),
+    )
+    db.add(batch)
+    await db.flush()
+    for catalog in catalog_items:
+        sync_item = build_inventory_sync_item(catalog)
+        sync_item.batch_id = batch.id
+        db.add(sync_item)
+        catalog.stock_sync_status = "skipped" if sync_item.status == "skipped" else "pending"
+        catalog.stock_sync_error = sync_item.error_message
+        catalog.updated_at = datetime.now()
+    await db.commit()
+    await db.refresh(batch)
+
+    start_inventory_sync_batch(batch.id)
+    return batch
+
+
+@router.get("/inventory-sync-batches", response_model=PaginatedInventorySyncBatches)
+async def list_inventory_sync_batches(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+):
+    total_result = await db.execute(select(func.count(InventorySyncBatch.id)))
+    total = total_result.scalar() or 0
+    result = await db.execute(
+        select(InventorySyncBatch)
+        .order_by(InventorySyncBatch.created_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+    return PaginatedInventorySyncBatches(items=result.scalars().all(), total=total, page=page, page_size=page_size)
+
+
+@router.get("/inventory-sync-batches/{batch_id}", response_model=InventorySyncBatchDetail)
+async def get_inventory_sync_batch(batch_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(InventorySyncBatch)
+        .options(selectinload(InventorySyncBatch.items))
+        .where(InventorySyncBatch.id == batch_id)
+    )
+    batch = result.scalar_one_or_none()
+    if not batch:
+        raise HTTPException(404, "Inventory sync batch not found")
+    return batch
 
 
 @router.post("/catalog/{catalog_id}/asin", response_model=CatalogProductResponse)

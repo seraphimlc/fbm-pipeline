@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button, DatePicker, Input, message, Modal, Select, Space, Table, Tag, Typography } from 'antd';
-import { DownloadOutlined, HistoryOutlined, PictureOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons';
+import { CloudSyncOutlined, DownloadOutlined, HistoryOutlined, PictureOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { createAplusUploadBatch, createAsinSyncBatch, exportCatalogProducts, getWorkbenchOverview, listCatalogProducts, updateCatalogAsin } from '../api';
 import type { CatalogProduct, WorkbenchOverview } from '../api';
@@ -29,21 +29,26 @@ const CatalogList: React.FC = () => {
   const [amazonAsinInput, setAmazonAsinInput] = useState('');
   const [asinSyncStatusInput, setAsinSyncStatusInput] = useState<string | undefined>();
   const [aplusUploadStatusInput, setAplusUploadStatusInput] = useState<string | undefined>();
+  const [stockSyncStatusInput, setStockSyncStatusInput] = useState<string | undefined>();
   const [templateRiskInput, setTemplateRiskInput] = useState<string | undefined>();
   const [upcInput, setUpcInput] = useState('');
   const [categoryInput, setCategoryInput] = useState('');
   const [dateRangeInput, setDateRangeInput] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
+  const [stockSyncedRangeInput, setStockSyncedRangeInput] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
   const [filters, setFilters] = useState<{
     item_id?: string;
     competitor_asin?: string;
     amazon_asin?: string;
     asin_sync_status?: string;
     aplus_upload_status?: string;
+    stock_sync_status?: string;
     template_risk_level?: string;
     upc?: string;
     category?: string;
     imported_from?: string;
     imported_to?: string;
+    stock_synced_from?: string;
+    stock_synced_to?: string;
   }>({});
   const [overview, setOverview] = useState<WorkbenchOverview | null>(null);
 
@@ -83,11 +88,14 @@ const CatalogList: React.FC = () => {
       amazon_asin: amazonAsinInput.trim() || undefined,
       asin_sync_status: asinSyncStatusInput,
       aplus_upload_status: aplusUploadStatusInput,
+      stock_sync_status: stockSyncStatusInput,
       template_risk_level: templateRiskInput,
       upc: upcInput.trim() || undefined,
       category: categoryInput.trim() || undefined,
       imported_from: dateRangeInput?.[0].startOf('day').toISOString(),
       imported_to: dateRangeInput?.[1].endOf('day').toISOString(),
+      stock_synced_from: stockSyncedRangeInput?.[0].startOf('day').toISOString(),
+      stock_synced_to: stockSyncedRangeInput?.[1].endOf('day').toISOString(),
     });
     setPage(1);
   };
@@ -98,10 +106,12 @@ const CatalogList: React.FC = () => {
     setAmazonAsinInput('');
     setAsinSyncStatusInput(undefined);
     setAplusUploadStatusInput(undefined);
+    setStockSyncStatusInput(undefined);
     setTemplateRiskInput(undefined);
     setUpcInput('');
     setCategoryInput('');
     setDateRangeInput(null);
+    setStockSyncedRangeInput(null);
     setFilters({});
     setPage(1);
   };
@@ -176,6 +186,23 @@ const CatalogList: React.FC = () => {
     if (status === 'failed') return <Tag color="error">失败</Tag>;
     if (status === 'skipped') return <Tag>跳过</Tag>;
     return <Tag>未上传</Tag>;
+  };
+
+  const stockStatusTag = (status?: string | null, error?: string | null) => {
+    const content = (() => {
+      if (status === 'pending' || status === 'running') return <Tag color="processing">同步中</Tag>;
+      if (status === 'synced') return <Tag color="success">已同步</Tag>;
+      if (status === 'unavailable') return <Tag color="warning">不可售</Tag>;
+      if (status === 'failed') return <Tag color="error">失败</Tag>;
+      if (status === 'skipped') return <Tag>跳过</Tag>;
+      return <Tag>未同步</Tag>;
+    })();
+    return (
+      <Space direction="vertical" size={2}>
+        {content}
+        {error && <Text type="secondary" ellipsis style={{ maxWidth: 150 }}>{error}</Text>}
+      </Space>
+    );
   };
 
   const riskTag = (risk?: string | null, count?: number | null) => {
@@ -279,6 +306,12 @@ const CatalogList: React.FC = () => {
       render: (value: string) => value || '-',
     },
     {
+      title: '运营库存',
+      dataIndex: 'stock',
+      width: 100,
+      render: (value: number | null) => value === null || value === undefined ? '-' : value,
+    },
+    {
       title: '标题',
       dataIndex: 'title',
       ellipsis: true,
@@ -318,6 +351,18 @@ const CatalogList: React.FC = () => {
           {record.aplus_upload_error && <Text type="secondary" ellipsis style={{ maxWidth: 150 }}>{record.aplus_upload_error}</Text>}
         </Space>
       ),
+    },
+    {
+      title: '库存同步',
+      dataIndex: 'stock_sync_status',
+      width: 120,
+      render: (value: string, record: CatalogProduct) => stockStatusTag(value, record.stock_sync_error),
+    },
+    {
+      title: '库存同步时间',
+      dataIndex: 'stock_synced_at',
+      width: 170,
+      render: (value: string) => value ? new Date(value).toLocaleString('zh-CN') : '-',
     },
     {
       title: '上架检查',
@@ -363,6 +408,7 @@ const CatalogList: React.FC = () => {
         <Space>
           <Text type="secondary">最多显示 1000 个商品</Text>
           <Button icon={<ReloadOutlined />} onClick={fetchItems}>刷新</Button>
+          <Button icon={<CloudSyncOutlined />} onClick={() => navigate('/inventory-sync')}>库存同步</Button>
           <Button icon={<HistoryOutlined />} onClick={() => navigate('/asin-sync')}>同步记录</Button>
           <Button icon={<SyncOutlined />} loading={syncingAsin} disabled={!selectedIds.length} onClick={syncSelectedAsins}>
             同步ASIN{selectedIds.length ? `(${selectedIds.length})` : ''}
@@ -386,6 +432,8 @@ const CatalogList: React.FC = () => {
         <Button size="small" onClick={() => applyQuickFilter({ aplus_upload_status: 'failed' })}>
           A+失败{overview ? `(${overview.aplus_failed})` : ''}
         </Button>
+        <Button size="small" onClick={() => applyQuickFilter({ stock_sync_status: 'not_synced' })}>库存未同步</Button>
+        <Button size="small" onClick={() => applyQuickFilter({ stock_sync_status: 'failed' })}>库存同步失败</Button>
         <Button size="small" onClick={() => applyQuickFilter({ template_risk_level: 'high_risk' })}>
           上架高风险{overview ? `(${overview.listing_high_risk})` : ''}
         </Button>
@@ -448,6 +496,22 @@ const CatalogList: React.FC = () => {
         />
         <Select
           allowClear
+          placeholder="库存同步状态"
+          value={stockSyncStatusInput}
+          onChange={setStockSyncStatusInput}
+          style={{ width: 170 }}
+          options={[
+            { value: 'synced', label: '已同步' },
+            { value: 'not_synced', label: '未同步' },
+            { value: 'pending', label: '等待同步' },
+            { value: 'running', label: '同步中' },
+            { value: 'unavailable', label: '不可售' },
+            { value: 'failed', label: '失败' },
+            { value: 'skipped', label: '跳过' },
+          ]}
+        />
+        <Select
+          allowClear
           placeholder="上架检查"
           value={templateRiskInput}
           onChange={setTemplateRiskInput}
@@ -475,9 +539,16 @@ const CatalogList: React.FC = () => {
           style={{ width: 180 }}
         />
         <RangePicker
+          placeholder={['导入开始', '导入结束']}
           value={dateRangeInput}
           onChange={(value) => setDateRangeInput(value as [dayjs.Dayjs, dayjs.Dayjs] | null)}
           style={{ width: 260 }}
+        />
+        <RangePicker
+          placeholder={['库存同步开始', '库存同步结束']}
+          value={stockSyncedRangeInput}
+          onChange={(value) => setStockSyncedRangeInput(value as [dayjs.Dayjs, dayjs.Dayjs] | null)}
+          style={{ width: 300 }}
         />
         <Button icon={<SearchOutlined />} type="primary" onClick={search}>搜索</Button>
         <Button onClick={reset}>重置</Button>

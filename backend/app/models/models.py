@@ -62,12 +62,17 @@ class CatalogProduct(Base):
     item_code: Mapped[str | None] = mapped_column(String(100))
     title: Mapped[str | None] = mapped_column(Text)
     leaf_category: Mapped[str | None] = mapped_column(String(200))
+    stock: Mapped[int | None] = mapped_column(Integer)
+    stock_sync_status: Mapped[str | None] = mapped_column(String(20), default="not_synced")
+    stock_synced_at: Mapped[datetime | None] = mapped_column(DateTime)
+    stock_sync_error: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(30), default="created")
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime)
     imported_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     source_product: Mapped["Product"] = relationship("Product", back_populates="catalog_item")
+    inventory_sync_items: Mapped[list["InventorySyncItem"]] = relationship("InventorySyncItem", back_populates="catalog_product")
 
     @property
     def source_url(self) -> str:
@@ -153,6 +158,45 @@ class AplusUploadItem(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     batch: Mapped["AplusUploadBatch"] = relationship("AplusUploadBatch", back_populates="items")
+
+
+class InventorySyncBatch(Base):
+    __tablename__ = "inventory_sync_batches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    total_count: Mapped[int] = mapped_column(Integer, default=0)
+    success_count: Mapped[int] = mapped_column(Integer, default=0)
+    unavailable_count: Mapped[int] = mapped_column(Integer, default=0)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0)
+    skipped_count: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+    items: Mapped[list["InventorySyncItem"]] = relationship("InventorySyncItem", back_populates="batch", cascade="all, delete-orphan")
+
+
+class InventorySyncItem(Base):
+    __tablename__ = "inventory_sync_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    batch_id: Mapped[int] = mapped_column(Integer, ForeignKey("inventory_sync_batches.id"))
+    catalog_product_id: Mapped[int] = mapped_column(Integer, ForeignKey("catalog_products.id"))
+    product_id: Mapped[int] = mapped_column(Integer, ForeignKey("products.id"))
+    gigab2b_product_id: Mapped[str | None] = mapped_column(String(50))
+    item_code: Mapped[str | None] = mapped_column(String(100))
+    old_stock: Mapped[int | None] = mapped_column(Integer)
+    new_stock: Mapped[int | None] = mapped_column(Integer)
+    availability_status: Mapped[str | None] = mapped_column(String(30))
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    error_message: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+    batch: Mapped["InventorySyncBatch"] = relationship("InventorySyncBatch", back_populates="items")
+    catalog_product: Mapped["CatalogProduct"] = relationship("CatalogProduct", back_populates="inventory_sync_items")
 
 
 class ProductData(Base):

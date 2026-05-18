@@ -54,6 +54,10 @@ export interface CatalogProduct {
   item_code: string | null;
   title: string | null;
   leaf_category: string | null;
+  stock: number | null;
+  stock_sync_status: string | null;
+  stock_synced_at: string | null;
+  stock_sync_error: string | null;
   status: string;
   confirmed_at: string | null;
   imported_at: string;
@@ -189,6 +193,47 @@ export interface PaginatedProducts {
 
 export interface PaginatedCatalogProducts {
   items: CatalogProduct[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface InventorySyncBatch {
+  id: number;
+  status: string;
+  total_count: number;
+  success_count: number;
+  unavailable_count: number;
+  failed_count: number;
+  skipped_count: number;
+  created_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  error_message: string | null;
+}
+
+export interface InventorySyncItem {
+  id: number;
+  batch_id: number;
+  catalog_product_id: number;
+  product_id: number;
+  gigab2b_product_id: string | null;
+  item_code: string | null;
+  old_stock: number | null;
+  new_stock: number | null;
+  availability_status: string | null;
+  status: string;
+  error_message: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface InventorySyncBatchDetail extends InventorySyncBatch {
+  items: InventorySyncItem[];
+}
+
+export interface PaginatedInventorySyncBatches {
+  items: InventorySyncBatch[];
   total: number;
   page: number;
   page_size: number;
@@ -474,11 +519,14 @@ export const listCatalogProducts = (params?: {
   amazon_asin?: string;
   asin_sync_status?: string;
   aplus_upload_status?: string;
+  stock_sync_status?: string;
   template_risk_level?: string;
   upc?: string;
   category?: string;
   imported_from?: string;
   imported_to?: string;
+  stock_synced_from?: string;
+  stock_synced_to?: string;
 }) => api.get<PaginatedCatalogProducts>('/products/catalog', { params });
 
 export const exportCatalogProducts = (ids: number[]) =>
@@ -486,6 +534,15 @@ export const exportCatalogProducts = (ids: number[]) =>
 
 export const updateCatalogAsin = (catalogId: number, amazonAsin: string) =>
   api.post<CatalogProduct>(`/products/catalog/${catalogId}/asin`, { amazon_asin: amazonAsin });
+
+export const createInventorySyncBatch = (catalogProductIds?: number[]) =>
+  api.post<InventorySyncBatch>('/products/catalog/inventory-sync', { catalog_product_ids: catalogProductIds || null }, { timeout: 120000 });
+
+export const listInventorySyncBatches = (params?: { page?: number; page_size?: number }) =>
+  api.get<PaginatedInventorySyncBatches>('/products/inventory-sync-batches', { params });
+
+export const getInventorySyncBatch = (id: number) =>
+  api.get<InventorySyncBatchDetail>(`/products/inventory-sync-batches/${id}`);
 
 export const createAsinSyncBatch = (catalogProductIds: number[], store = 'Andy店-US') =>
   api.post<AsinSyncBatch>('/products/catalog/asin-sync', { catalog_product_ids: catalogProductIds, store }, { timeout: 120000 });

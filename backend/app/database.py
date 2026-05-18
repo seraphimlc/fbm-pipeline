@@ -69,6 +69,10 @@ async def init_db():
                 item_code VARCHAR(100),
                 title TEXT,
                 leaf_category VARCHAR(200),
+                stock INTEGER,
+                stock_sync_status VARCHAR(20) DEFAULT 'not_synced',
+                stock_synced_at DATETIME,
+                stock_sync_error TEXT,
                 status VARCHAR(30),
                 confirmed_at DATETIME,
                 imported_at DATETIME,
@@ -88,6 +92,10 @@ async def init_db():
             ("aplus_uploaded_at", "DATETIME"),
             ("aplus_upload_error", "TEXT"),
             ("confirmed_at", "DATETIME"),
+            ("stock", "INTEGER"),
+            ("stock_sync_status", "VARCHAR(20) DEFAULT 'not_synced'"),
+            ("stock_synced_at", "DATETIME"),
+            ("stock_sync_error", "TEXT"),
         ):
             if column_name not in existing_catalog_columns:
                 await conn.execute(text(f"ALTER TABLE catalog_products ADD COLUMN {column_name} {column_type}"))
@@ -171,6 +179,43 @@ async def init_db():
                 started_at DATETIME,
                 finished_at DATETIME,
                 FOREIGN KEY(batch_id) REFERENCES aplus_upload_batches(id),
+                FOREIGN KEY(catalog_product_id) REFERENCES catalog_products(id),
+                FOREIGN KEY(product_id) REFERENCES products(id)
+            )
+        """))
+
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS inventory_sync_batches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                status VARCHAR(20),
+                total_count INTEGER,
+                success_count INTEGER,
+                unavailable_count INTEGER,
+                failed_count INTEGER,
+                skipped_count INTEGER,
+                created_at DATETIME,
+                started_at DATETIME,
+                finished_at DATETIME,
+                error_message TEXT
+            )
+        """))
+
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS inventory_sync_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id INTEGER NOT NULL,
+                catalog_product_id INTEGER NOT NULL,
+                product_id INTEGER NOT NULL,
+                gigab2b_product_id VARCHAR(50),
+                item_code VARCHAR(100),
+                old_stock INTEGER,
+                new_stock INTEGER,
+                availability_status VARCHAR(30),
+                status VARCHAR(20),
+                error_message TEXT,
+                started_at DATETIME,
+                finished_at DATETIME,
+                FOREIGN KEY(batch_id) REFERENCES inventory_sync_batches(id),
                 FOREIGN KEY(catalog_product_id) REFERENCES catalog_products(id),
                 FOREIGN KEY(product_id) REFERENCES products(id)
             )

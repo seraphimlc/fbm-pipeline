@@ -7,6 +7,7 @@ import ProductList from './pages/ProductList';
 import ProductDetail from './pages/ProductDetail';
 import CreateProduct from './pages/CreateProduct';
 import CatalogList from './pages/CatalogList';
+import InventorySyncList from './pages/InventorySyncList';
 import AsinSyncList from './pages/AsinSyncList';
 import AplusUploadList from './pages/AplusUploadList';
 import ConfigPage from './pages/ConfigPage';
@@ -20,6 +21,7 @@ const App: React.FC = () => (
             <Route path="/" element={<Navigate to="/products" replace />} />
             <Route path="/products" element={<ProductList />} />
             <Route path="/catalog" element={<CatalogList />} />
+            <Route path="/inventory-sync" element={<InventorySyncList />} />
             <Route path="/asin-sync" element={<AsinSyncList />} />
             <Route path="/aplus-upload" element={<AplusUploadList />} />
             <Route path="/config" element={<ConfigPage />} />
