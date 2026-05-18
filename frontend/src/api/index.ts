@@ -451,7 +451,7 @@ export const downloadImportTemplate = () =>
 export const importProducts = (file: File) => {
   const formData = new FormData();
   formData.append('file', file);
-  return api.post<{ created: number; skipped: number; errors: string[]; product_ids: number[] }>('/products/import', formData, {
+  return api.post<{ created: number; skipped: number; skipped_details: string[]; errors: string[]; product_ids: number[] }>('/products/import', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: 120000,
   });

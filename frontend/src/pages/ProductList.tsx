@@ -170,7 +170,8 @@ const ProductList: React.FC = () => {
     setImporting(true);
     try {
       const { data } = await importProducts(file);
-      message.success(`导入完成：新建 ${data.created} 个任务`);
+      message.success(`导入完成：新建 ${data.created} 个任务，跳过 ${data.skipped} 行`);
+      if (data.skipped_details?.length) message.info(data.skipped_details.slice(0, 3).join('；'), 6);
       if (data.errors.length) message.warning(data.errors.slice(0, 3).join('；'));
       if (autoStartAfterImport && data.product_ids.length) {
         const startResult = await bulkStartPipelines(data.product_ids);

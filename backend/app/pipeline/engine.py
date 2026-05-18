@@ -14,7 +14,7 @@ from app.config import settings
 from app.database import async_session
 from app.models import Product
 from app.models.status import *
-from app.pipeline.step1_collect import Step1NeedsReview, Step1ProductUnavailable, collect_product
+from app.pipeline.step1_collect import Step1DuplicateSkipped, Step1NeedsReview, Step1ProductUnavailable, collect_product
 from app.pipeline.step2_pricing import run_pricing
 from app.pipeline.step3_keywords import Step3NeedsLogin, run_keywords
 from app.pipeline.step4_category import Step4NeedsReview, run_category
@@ -138,6 +138,9 @@ async def _run_pipeline(product_id: int, start_step: int = 1):
     except Step1ProductUnavailable as e:
         await _update_status(product_id, SOURCE_UNAVAILABLE, 1, error=str(e))
         logger.info(f"[Pipeline] Product {product_id} 原商品下架，停止Pipeline: {e}")
+    except Step1DuplicateSkipped as e:
+        await _update_status(product_id, DUPLICATE_SKIPPED, 1, error=str(e))
+        logger.info(f"[Pipeline] Product {product_id} 重复商品已跳过: {e}")
     except Step3NeedsLogin as e:
         await _update_status(product_id, PENDING_REVIEW, 3, error=f"Step3待人工登录: {e}")
         logger.warning(f"[Pipeline] Product {product_id} Step3 需要人工登录: {e}")

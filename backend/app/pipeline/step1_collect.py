@@ -19,6 +19,11 @@ from app.database import async_session
 from app.models import Product, ProductData
 from app.pipeline.chrome_ctrl import chrome_navigate, chrome_execute_js, chrome_get_page_info, chrome_workflow
 from app.services.material_assets import organize_video_files
+from app.services.product_duplicates import (
+    extract_gigab2b_product_id,
+    find_duplicate_by_gigab2b_product_id,
+    find_duplicate_by_item_code,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +53,10 @@ class Step1NeedsReview(RuntimeError):
 
 class Step1ProductUnavailable(RuntimeError):
     """商品已下架或无库存，不应继续 Pipeline。"""
+
+
+class Step1DuplicateSkipped(RuntimeError):
+    """商品已存在，普通导入任务应跳过后续 Pipeline。"""
 
 
 def _safe_extract_zip(zip_path: Path, output_dir: Path) -> int:
@@ -333,13 +342,7 @@ EXTRACT_JS = _load_extract_js()
 
 def extract_product_id(url: str) -> str | None:
     """从 GigaB2B URL 提取商品ID"""
-    match = re.search(r'product_id=(\d+)', url)
-    if match:
-        return match.group(1)
-    match = re.search(r'product-detail/(\d+)', url)
-    if match:
-        return match.group(1)
-    return None
+    return extract_gigab2b_product_id(url)
 
 
 def _parse_float(val) -> float | None:
@@ -586,7 +589,12 @@ async def _collect_product_locked(product_id: int) -> dict:
         if not gigab2b_pid:
             raise ValueError(f"无法从URL提取商品ID: {product.gigab2b_url}")
 
-        # 更新 product_id 字段
+        duplicate = await find_duplicate_by_gigab2b_product_id(db, gigab2b_pid, exclude_product_id=product.id)
+        if duplicate:
+            product.gigab2b_product_id = gigab2b_pid
+            await db.commit()
+            raise Step1DuplicateSkipped(f"{duplicate.message}，当前任务跳过采集")
+
         product.gigab2b_product_id = gigab2b_pid
 
         # 打开 GigaB2B 页面
@@ -674,6 +682,17 @@ async def _collect_product_locked(product_id: int) -> dict:
             )
 
         logger.info(f"[Step1] 提取到商品: {data.get('title', 'N/A')}")
+
+        collected_item_code = data.get("itemCode")
+        duplicate = await find_duplicate_by_item_code(db, collected_item_code, exclude_product_id=product.id)
+        if duplicate:
+            pd = product.data
+            if not pd:
+                pd = ProductData(product_id=product.id)
+                db.add(pd)
+            pd.item_code = collected_item_code
+            await db.commit()
+            raise Step1DuplicateSkipped(f"{duplicate.message}，当前任务跳过采集")
 
         # 创建素材目录
         brand = product.brand or settings.DEFAULT_BRAND

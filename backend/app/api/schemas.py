@@ -373,6 +373,7 @@ class BulkStartResponse(BaseModel):
 class BulkImportResponse(BaseModel):
     created: int
     skipped: int
+    skipped_details: list[str] = Field(default_factory=list)
     errors: list[str] = Field(default_factory=list)
     product_ids: list[int] = Field(default_factory=list)
 

@@ -18,7 +18,7 @@ from datetime import datetime
 from app.database import get_db
 from app.config import settings
 from app.models import AplusUploadBatch, AsinSyncBatch, CatalogProduct, Product, ProductData, ProductImage, ProductAplus, ProductFile
-from app.models.status import COMPLETED, PENDING_REVIEW, SOURCE_UNAVAILABLE, STEP_LABELS, STEP_STATUS_MAP
+from app.models.status import COMPLETED, DUPLICATE_SKIPPED, PENDING_REVIEW, SOURCE_UNAVAILABLE, STEP_LABELS, STEP_STATUS_MAP
 from app.api.schemas import (
     ProductCreate, ProductUpdate, ProductResponse, ProductDetail,
     PaginatedResponse, ProductFileEntry, AplusRegenerateRequest,
@@ -57,6 +57,12 @@ from app.services.material_assets import (
 from app.services.asin_sync import build_sync_item, start_asin_sync_batch
 from app.services.aplus_upload import build_upload_item, start_aplus_upload_batch
 from app.services.aplus_regenerate import create_regenerate_task, retry_latest_regenerate_tasks
+from app.services.product_duplicates import (
+    extract_gigab2b_item_code_from_url,
+    extract_gigab2b_product_id,
+    find_duplicate_by_gigab2b_product_id,
+    find_duplicate_by_item_code,
+)
 
 # Step runners indexed by step number
 STEP_RUNNERS = {
@@ -126,6 +132,9 @@ def _current_task_status(product: Product) -> str:
     if product.status == SOURCE_UNAVAILABLE:
         detail = _compact_error_message(product.error_message)
         return f"原商品下架停止采集：{detail}" if detail else "原商品下架停止采集"
+    if product.status == DUPLICATE_SKIPPED:
+        detail = _compact_error_message(product.error_message)
+        return f"重复商品已跳过：{detail}" if detail else "重复商品已跳过"
     if product.status == "unavailable":
         detail = _compact_error_message(product.error_message)
         return f"商品已下架：{detail}" if detail else "商品已下架"
@@ -539,11 +548,25 @@ def _reset_product_aplus(pa: ProductAplus) -> None:
             setattr(pa, column.name, None)
 
 
+async def _raise_if_duplicate_gigab2b_url(db: AsyncSession, gigab2b_url: str) -> None:
+    gigab2b_product_id = extract_gigab2b_product_id(gigab2b_url)
+    duplicate = await find_duplicate_by_gigab2b_product_id(db, gigab2b_product_id)
+    if duplicate:
+        raise HTTPException(409, f"{duplicate.message}，已跳过创建")
+    url_item_code = extract_gigab2b_item_code_from_url(gigab2b_url)
+    duplicate = await find_duplicate_by_item_code(db, url_item_code)
+    if duplicate:
+        raise HTTPException(409, f"{duplicate.message}，已跳过创建")
+
+
 @router.post("", response_model=ProductResponse, status_code=201)
 async def create_product(body: ProductCreate, db: AsyncSession = Depends(get_db)):
     """创建新商品任务"""
+    await _raise_if_duplicate_gigab2b_url(db, body.gigab2b_url)
+    gigab2b_product_id = extract_gigab2b_product_id(body.gigab2b_url)
     product = Product(
         gigab2b_url=body.gigab2b_url,
+        gigab2b_product_id=gigab2b_product_id,
         competitor_asin=body.competitor_asin,
         upc=body.upc,
         brand=body.brand,
@@ -558,6 +581,7 @@ async def create_product(body: ProductCreate, db: AsyncSession = Depends(get_db)
     db.add(CatalogProduct(
         source_product_id=product.id,
         gigab2b_url=product.gigab2b_url,
+        gigab2b_product_id=product.gigab2b_product_id,
         competitor_asin=product.competitor_asin,
         asin_sync_status=product.asin_sync_status or "not_synced",
         aplus_upload_status=product.aplus_upload_status or "not_uploaded",
@@ -754,7 +778,10 @@ async def import_products(file: UploadFile = File(...), db: AsyncSession = Depen
 
     created_ids: list[int] = []
     errors: list[str] = []
+    skipped_details: list[str] = []
     skipped = 0
+    seen_product_ids: dict[str, int] = {}
+    seen_item_codes: dict[str, int] = {}
 
     for row_number, row in enumerate(rows[1:], start=2):
         values = list(row)
@@ -772,8 +799,28 @@ async def import_products(file: UploadFile = File(...), db: AsyncSession = Depen
             errors.append(f"第 {row_number} 行缺少必填字段")
             continue
 
+        gigab2b_product_id = extract_gigab2b_product_id(gigab2b_url)
+        url_item_code = extract_gigab2b_item_code_from_url(gigab2b_url)
+        if gigab2b_product_id and gigab2b_product_id in seen_product_ids:
+            skipped += 1
+            skipped_details.append(f"第 {row_number} 行跳过：大建云仓商品ID {gigab2b_product_id} 已在第 {seen_product_ids[gigab2b_product_id]} 行导入")
+            continue
+        if url_item_code and url_item_code in seen_item_codes:
+            skipped += 1
+            skipped_details.append(f"第 {row_number} 行跳过：商品Code {url_item_code} 已在第 {seen_item_codes[url_item_code]} 行导入")
+            continue
+
+        duplicate = await find_duplicate_by_gigab2b_product_id(db, gigab2b_product_id)
+        if not duplicate:
+            duplicate = await find_duplicate_by_item_code(db, url_item_code)
+        if duplicate:
+            skipped += 1
+            skipped_details.append(f"第 {row_number} 行跳过：{duplicate.message}")
+            continue
+
         product = Product(
             gigab2b_url=gigab2b_url,
+            gigab2b_product_id=gigab2b_product_id,
             competitor_asin=competitor_asin,
             upc=upc,
             brand=brand,
@@ -786,6 +833,7 @@ async def import_products(file: UploadFile = File(...), db: AsyncSession = Depen
         db.add(CatalogProduct(
             source_product_id=product.id,
             gigab2b_url=product.gigab2b_url,
+            gigab2b_product_id=gigab2b_product_id,
             competitor_asin=product.competitor_asin,
             asin_sync_status=product.asin_sync_status or "not_synced",
             aplus_upload_status=product.aplus_upload_status or "not_uploaded",
@@ -793,10 +841,20 @@ async def import_products(file: UploadFile = File(...), db: AsyncSession = Depen
             brand=product.brand,
             status=product.status,
         ))
+        if gigab2b_product_id:
+            seen_product_ids[gigab2b_product_id] = row_number
+        if url_item_code:
+            seen_item_codes[url_item_code] = row_number
         created_ids.append(product.id)
 
     await db.commit()
-    return BulkImportResponse(created=len(created_ids), skipped=skipped, errors=errors, product_ids=created_ids)
+    return BulkImportResponse(
+        created=len(created_ids),
+        skipped=skipped,
+        skipped_details=skipped_details,
+        errors=errors,
+        product_ids=created_ids,
+    )
 
 
 @router.post("/bulk-start", response_model=BulkStartResponse)
