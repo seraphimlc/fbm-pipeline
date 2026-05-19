@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button, DatePicker, Input, message, Modal, Select, Space, Table, Tag, Typography } from 'antd';
-import { CloudSyncOutlined, DownloadOutlined, HistoryOutlined, PictureOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons';
+import { CloudSyncOutlined, DownloadOutlined, FileExcelOutlined, HistoryOutlined, PictureOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { createAplusUploadBatch, createAsinSyncBatch, exportCatalogProducts, getWorkbenchOverview, listCatalogProducts, updateCatalogAsin } from '../api';
+import { createAplusUploadBatch, createAsinSyncBatch, exportCatalogProducts, exportInventoryUpdateTemplate, getWorkbenchOverview, listCatalogProducts, updateCatalogAsin } from '../api';
 import type { CatalogProduct, WorkbenchOverview } from '../api';
 
 const { Title, Text } = Typography;
@@ -14,6 +14,7 @@ const CatalogList: React.FC = () => {
   const [items, setItems] = useState<CatalogProduct[]>([]);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [inventoryExporting, setInventoryExporting] = useState(false);
   const [syncingAsin, setSyncingAsin] = useState(false);
   const [uploadingAplus, setUploadingAplus] = useState(false);
   const [asinModalOpen, setAsinModalOpen] = useState(false);
@@ -145,6 +146,29 @@ const CatalogList: React.FC = () => {
       message.error(error?.response?.data?.detail || '导出失败');
     } finally {
       setExporting(false);
+    }
+  };
+
+  const exportInventorySelected = async () => {
+    if (!selectedIds.length) {
+      message.warning('请先选择商品');
+      return;
+    }
+    const selectedSet = new Set(selectedIds.map(Number));
+    const blocked = items.filter((item) => selectedSet.has(item.id) && !item.amazon_asin);
+    if (blocked.length) {
+      message.warning(`缺少真实 ASIN 的商品不能导出库存模板：${blocked.map((item) => item.item_code || item.id).slice(0, 5).join('、')}`);
+      return;
+    }
+    setInventoryExporting(true);
+    try {
+      const { data } = await exportInventoryUpdateTemplate(selectedIds.map(Number));
+      saveBlob(data, `inventory_update_templates_${dayjs().format('YYYYMMDD_HHmmss')}.zip`);
+      message.success('已导出库存同步模板');
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '库存模板导出失败');
+    } finally {
+      setInventoryExporting(false);
     }
   };
 
@@ -416,6 +440,9 @@ const CatalogList: React.FC = () => {
           <Button icon={<PictureOutlined />} loading={uploadingAplus} disabled={!selectedIds.length} onClick={uploadSelectedAplus}>
             上传A+{selectedIds.length ? `(${selectedIds.length})` : ''}
           </Button>
+          <Button icon={<FileExcelOutlined />} loading={inventoryExporting} disabled={!selectedIds.length} onClick={exportInventorySelected}>
+            导出库存模板{selectedIds.length ? `(${selectedIds.length})` : ''}
+          </Button>
           <Button type="primary" icon={<DownloadOutlined />} loading={exporting} disabled={!selectedIds.length} onClick={exportSelected}>
             导出Amazon表格{selectedIds.length ? `(${selectedIds.length})` : ''}
           </Button>
@@ -562,9 +589,6 @@ const CatalogList: React.FC = () => {
           selectedRowKeys: selectedIds,
           onChange: setSelectedIds,
           preserveSelectedRowKeys: true,
-          getCheckboxProps: (record) => ({
-            disabled: Boolean(record.amazon_asin),
-          }),
         }}
         pagination={{
           current: page,

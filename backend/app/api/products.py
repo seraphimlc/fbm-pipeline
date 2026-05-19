@@ -520,6 +520,46 @@ def _summary_workbook(rows: list[dict]) -> bytes:
     return stream.getvalue()
 
 
+PRICE_QUANTITY_DATA_ROW = 7
+PRICE_QUANTITY_FORMAT_ROW = 6
+PRICE_QUANTITY_SKU_ATTR = "contribution_sku#1.value"
+PRICE_QUANTITY_FULFILLMENT_ATTR = "fulfillment_availability#1.fulfillment_channel_code"
+PRICE_QUANTITY_QUANTITY_ATTR = "fulfillment_availability#1.quantity"
+PRICE_QUANTITY_INVENTORY_ALWAYS_AVAILABLE_ATTR = "fulfillment_availability#1.is_inventory_available"
+PRICE_QUANTITY_FBM_VALUE = "Fulfillment by Merchant (Default)"
+
+
+def _inventory_update_report_workbook(rows: list[dict]) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "库存模板导出报告"
+    headers = ["状态", "商品资料ID", "任务ID", "商品Code", "真实ASIN", "SKU", "库存", "导出文件", "原因"]
+    ws.append(headers)
+    for row in rows:
+        ws.append([row.get(header) for header in headers])
+    for column_cells in ws.columns:
+        column_letter = column_cells[0].column_letter
+        max_length = max(len(str(cell.value or "")) for cell in column_cells[:80])
+        ws.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 60)
+    stream = BytesIO()
+    wb.save(stream)
+    return stream.getvalue()
+
+
+def _clear_price_quantity_data_rows(ws, row_count: int) -> None:
+    max_row = max(ws.max_row, PRICE_QUANTITY_DATA_ROW + row_count + 2)
+    for row in range(PRICE_QUANTITY_DATA_ROW, max_row + 1):
+        _copy_row_format(ws, PRICE_QUANTITY_FORMAT_ROW, row)
+        for col in range(1, ws.max_column + 1):
+            ws.cell(row, col).value = None
+
+
+def _catalog_price_quantity_sku(catalog: CatalogProduct) -> str:
+    product = catalog.source_product
+    product_data = product.data if product and product.data else None
+    return str(catalog.item_code or (product_data.item_code if product_data else "") or "").strip()
+
+
 def _naive_datetime(value: datetime | None) -> datetime | None:
     if value and value.tzinfo:
         return value.replace(tzinfo=None)
@@ -1194,6 +1234,119 @@ async def export_catalog_products(ids: list[int], db: AsyncSession = Depends(get
 
     zip_stream.seek(0)
     filename = f"amazon_import_templates_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+    return StreamingResponse(
+        zip_stream,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/catalog/inventory-template/export")
+async def export_inventory_update_template(ids: list[int], db: AsyncSession = Depends(get_db)):
+    """导出 Amazon Price & Quantity 库存同步模板。模板按 SKU 更新，仅导出已有真实 ASIN 的商品。"""
+    selected_ids = list(dict.fromkeys(ids or []))
+    if not selected_ids:
+        raise HTTPException(400, "请选择要导出库存同步模板的商品")
+    if len(selected_ids) > 5000:
+        raise HTTPException(400, "单次最多导出 5000 个商品")
+
+    template_path = Path(settings.PRICE_QUANTITY_TEMPLATE_PATH).expanduser()
+    if not template_path.is_file():
+        raise HTTPException(400, f"库存同步模板不存在: {template_path}")
+
+    result = await db.execute(
+        select(CatalogProduct)
+        .options(selectinload(CatalogProduct.source_product).selectinload(Product.data))
+        .where(CatalogProduct.id.in_(selected_ids))
+    )
+    catalog_by_id = {item.id: item for item in result.scalars().all()}
+
+    report_rows: list[dict] = []
+    export_items: list[CatalogProduct] = []
+    for catalog_id in selected_ids:
+        item = catalog_by_id.get(catalog_id)
+        product = item.source_product if item else None
+        product_data = product.data if product and product.data else None
+        sku = _catalog_price_quantity_sku(item) if item else ""
+        real_asin = ((item.amazon_asin if item else None) or (product.amazon_asin if product else None) or "").strip()
+        base_report = {
+            "商品资料ID": catalog_id,
+            "任务ID": item.source_product_id if item else None,
+            "商品Code": (item.item_code if item else None) or (product_data.item_code if product_data else None),
+            "真实ASIN": real_asin or None,
+            "SKU": sku or None,
+            "库存": item.stock if item else None,
+        }
+        if not item:
+            report_rows.append({**base_report, "状态": "跳过", "原因": "商品资料不存在"})
+            continue
+        if not item.confirmed_at:
+            report_rows.append({**base_report, "状态": "跳过", "原因": "商品还未确认入库"})
+            continue
+        if not real_asin:
+            report_rows.append({**base_report, "状态": "跳过", "原因": "缺少真实 ASIN，不能导出库存同步模板"})
+            continue
+        if not sku:
+            report_rows.append({**base_report, "状态": "跳过", "原因": "缺少 SKU/商品Code，Amazon 库存模板无法定位商品"})
+            continue
+        if item.stock is None:
+            report_rows.append({**base_report, "状态": "跳过", "原因": "缺少运营库存"})
+            continue
+        if item.stock < 0:
+            report_rows.append({**base_report, "状态": "跳过", "原因": f"运营库存为 {item.stock}，不能导出负数库存"})
+            continue
+        export_items.append(item)
+
+    if not export_items:
+        raise HTTPException(400, "选中的商品没有可导出的库存同步模板数据；需要已有真实 ASIN、SKU 和运营库存。")
+
+    wb = load_workbook(template_path, keep_vba=True, data_only=False)
+    if "Template" not in wb.sheetnames:
+        raise HTTPException(400, f"库存同步模板缺少 Template 工作表: {template_path}")
+    ws = wb["Template"]
+    columns = _template_attribute_columns(ws)
+    required_columns = {
+        PRICE_QUANTITY_SKU_ATTR: "SKU",
+        PRICE_QUANTITY_FULFILLMENT_ATTR: "Fulfillment Channel Code",
+        PRICE_QUANTITY_QUANTITY_ATTR: "Quantity",
+    }
+    missing = [label for attr, label in required_columns.items() if attr not in columns]
+    if missing:
+        raise HTTPException(400, f"库存同步模板缺少字段: {', '.join(missing)}")
+
+    _clear_price_quantity_data_rows(ws, len(export_items))
+    inventory_always_col = columns.get(PRICE_QUANTITY_INVENTORY_ALWAYS_AVAILABLE_ATTR)
+    export_name = f"price_quantity_inventory_update_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsm"
+    for offset, item in enumerate(export_items):
+        row_number = PRICE_QUANTITY_DATA_ROW + offset
+        sku = _catalog_price_quantity_sku(item)
+        product = item.source_product
+        real_asin = (item.amazon_asin or (product.amazon_asin if product else None) or "").strip()
+        ws.cell(row_number, columns[PRICE_QUANTITY_SKU_ATTR]).value = sku
+        ws.cell(row_number, columns[PRICE_QUANTITY_FULFILLMENT_ATTR]).value = PRICE_QUANTITY_FBM_VALUE
+        ws.cell(row_number, columns[PRICE_QUANTITY_QUANTITY_ATTR]).value = int(item.stock or 0)
+        if inventory_always_col:
+            ws.cell(row_number, inventory_always_col).value = None
+        report_rows.append({
+            "状态": "已导出",
+            "商品资料ID": item.id,
+            "任务ID": item.source_product_id,
+            "商品Code": item.item_code,
+            "真实ASIN": real_asin,
+            "SKU": sku,
+            "库存": item.stock,
+            "导出文件": export_name,
+            "原因": "按 SKU 写入库存；价格列留空，不更新价格",
+        })
+
+    workbook_stream = BytesIO()
+    wb.save(workbook_stream)
+    zip_stream = BytesIO()
+    with zipfile.ZipFile(zip_stream, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(export_name, workbook_stream.getvalue())
+        archive.writestr("库存模板导出报告.xlsx", _inventory_update_report_workbook(report_rows))
+    zip_stream.seek(0)
+    filename = f"inventory_update_templates_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
     return StreamingResponse(
         zip_stream,
         media_type="application/zip",

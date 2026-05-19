@@ -28,7 +28,7 @@ from sqlalchemy.orm import selectinload
 logger = logging.getLogger(__name__)
 
 DATA_ROW = 8
-AMAZON_TEMPLATE_LOGIC_VERSION = "2026-05-18-sofa-dimensions-quantity-v8"
+AMAZON_TEMPLATE_LOGIC_VERSION = "2026-05-18-reuse-image-urls-v9"
 PIPELINE_DIR = Path(__file__).parent
 MAPPING_DIR = PIPELINE_DIR / "template_mappings"
 TEMPLATE_DIR = PIPELINE_DIR / "templates"
@@ -385,6 +385,40 @@ def _gallery_paths(product: Product) -> list[Path]:
     return [Path(str(path)).expanduser() for path in paths if path]
 
 
+def _image_field_sequence(mapping: dict) -> list[str]:
+    image_fields = mapping.get("image_fields", {})
+    return [
+        field
+        for field in [
+            image_fields.get("main"),
+            *(image_fields.get("others") or []),
+        ]
+        if field
+    ]
+
+
+def _existing_template_image_urls(pd: ProductData, mapping: dict) -> dict[str, str]:
+    if not pd.amazon_template_path:
+        return {}
+    path = Path(pd.amazon_template_path).expanduser()
+    if not path.is_file():
+        return {}
+    try:
+        wb = load_workbook(path, data_only=True, read_only=True, keep_vba=True)
+        ws = wb["Template"]
+        columns = _index_template_columns(ws)
+        urls: dict[str, str] = {}
+        for field in _image_field_sequence(mapping):
+            col = columns.get(field)
+            value = ws[f"{col}{DATA_ROW}"].value if col else None
+            if isinstance(value, str) and value.strip():
+                urls[field] = value.strip()
+        return urls
+    except Exception as exc:
+        logger.warning(f"[Step10] 读取既有 Amazon 模板图片URL失败: {path}: {exc}")
+        return {}
+
+
 def _image_health_warnings(product: Product) -> list[str]:
     if not product.images or not product.images.image_analysis:
         return []
@@ -411,16 +445,24 @@ def _image_health_warnings(product: Product) -> list[str]:
     return [f"Step6图片健康等级为 {label}: {issue}" for issue in issues[:5]]
 
 
-def _upload_listing_images(product: Product, pd: ProductData, mapping: dict) -> tuple[dict[str, str], list[str], list[dict]]:
+def _upload_listing_images(
+    product: Product,
+    pd: ProductData,
+    mapping: dict,
+    existing_urls: dict[str, str] | None = None,
+) -> tuple[dict[str, str], list[str], list[dict]]:
     warnings: list[str] = []
     uploaded: list[dict] = []
-    fill: dict[str, str] = {}
+    fill: dict[str, str] = dict(existing_urls or {})
+
+    if not product.images or not product.images.main_image_path:
+        if not fill:
+            warnings.append("缺少Step6选定主图，主图/副图URL未写入导入模板。")
+        return fill, warnings, uploaded
 
     if not oss_configured():
-        warnings.append("OSS 未配置，主图/副图URL未写入导入模板。")
-        return fill, warnings, uploaded
-    if not product.images or not product.images.main_image_path:
-        warnings.append("缺少Step6选定主图，主图/副图URL未写入导入模板。")
+        if not fill:
+            warnings.append("OSS 未配置，主图/副图URL未写入导入模板。")
         return fill, warnings, uploaded
 
     product_key = pd.item_code or f"product-{product.id}"
@@ -432,6 +474,9 @@ def _upload_listing_images(product: Product, pd: ProductData, mapping: dict) -> 
         slot = "main" if idx == 0 else f"other_{idx}"
         field = mapping.get("image_fields", {}).get("main") if idx == 0 else other_fields[idx - 1]
         if not field:
+            continue
+        if field in fill:
+            uploaded.append({"slot": slot, "path": str(path), "url": fill[field], "status": "reused"})
             continue
         try:
             result = upload_private_image(path, product_key, slot)
@@ -1037,6 +1082,7 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
     output_dir.mkdir(parents=True, exist_ok=True)
     output_name = str(mapping.get("output_filename") or "{item_code}_amazon_import.xlsm").format(item_code=pd.item_code)
     output_path = output_dir / output_name
+    existing_image_urls = _existing_template_image_urls(pd, mapping)
     shutil.copy2(template_path, output_path)
 
     wb = load_workbook(output_path, keep_vba=True, data_only=False)
@@ -1157,7 +1203,7 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
             fill[fields["item_weight_value"]] = pd.weight
             fill[fields["item_weight_unit"]] = "Pounds"
 
-    image_fill, image_warnings, uploaded_images = _upload_listing_images(product, pd, mapping)
+    image_fill, image_warnings, uploaded_images = _upload_listing_images(product, pd, mapping, existing_image_urls)
     fill.update(image_fill)
     warnings.extend(image_warnings)
     if package:

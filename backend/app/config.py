@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     OSS_ENDPOINT: str = ""
     OSS_UPLOAD_PREFIX: str = "main_image/"
     OSS_SIGNED_URL_EXPIRES_SECONDS: int = 30 * 24 * 60 * 60
+    OSS_UPLOAD_TIMEOUT_SECONDS: int = 15
+
+    # Amazon Price & Quantity 库存同步模板
+    PRICE_QUANTITY_TEMPLATE_PATH: Path = Path(__file__).resolve().parent / "pipeline" / "templates" / "PriceAndQuantity.xlsm"
 
     # 卖家精灵
     SELLERSPRITE_TOKEN: str = ""

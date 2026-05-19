@@ -30,7 +30,7 @@ def _safe_part(value: str | None, fallback: str) -> str:
 
 def _bucket() -> oss2.Bucket:
     auth = oss2.Auth(settings.OSS_ACCESS_KEY_ID, settings.OSS_ACCESS_KEY_SECRET)
-    return oss2.Bucket(auth, _endpoint(), settings.OSS_BUCKET)
+    return oss2.Bucket(auth, _endpoint(), settings.OSS_BUCKET, connect_timeout=settings.OSS_UPLOAD_TIMEOUT_SECONDS)
 
 
 def upload_private_image(path: Path, product_key: str, slot: str) -> dict:

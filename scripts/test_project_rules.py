@@ -62,6 +62,18 @@ def test_real_asin_export_guard_is_present() -> None:
     assert_true("不能再次导出 Amazon 导入表格" in text, "已有真实 ASIN 的商品必须禁止再次导出导入表格")
 
 
+def test_inventory_update_template_exports_stock_only_by_sku() -> None:
+    products_py = ROOT / "backend" / "app" / "api" / "products.py"
+    config_py = ROOT / "backend" / "app" / "config.py"
+    template_path = ROOT / "backend" / "app" / "pipeline" / "templates" / "PriceAndQuantity.xlsm"
+    text = products_py.read_text(encoding="utf-8")
+    assert_true(template_path.is_file(), "库存同步 Price & Quantity 模板必须随项目保存")
+    assert_true("PRICE_QUANTITY_TEMPLATE_PATH" in config_py.read_text(encoding="utf-8"), "库存同步模板路径必须可配置")
+    assert_true('"/catalog/inventory-template/export"' in text, "必须提供库存同步模板导出接口")
+    assert_true("缺少真实 ASIN" in text, "库存同步模板导出必须只允许已有真实 ASIN 的商品")
+    assert_true("按 SKU 写入库存；价格列留空，不更新价格" in text, "库存同步模板只能写 SKU 和库存，不能更新价格")
+
+
 def test_step10_keeps_sofa_dimensions_and_avoids_inventory_conflict() -> None:
     step10_py = ROOT / "backend" / "app" / "pipeline" / "step10_amazon_template.py"
     text = step10_py.read_text(encoding="utf-8")
@@ -77,12 +89,17 @@ def test_step10_keeps_sofa_dimensions_and_avoids_inventory_conflict() -> None:
         '"living-room-chaise-lounges"' in text and "high_confidence_nodes" in text,
         "Chaise Lounges 来源类目应优先映射到休闲椅，不能被 sofa 尺寸兜底提前改成 sofas",
     )
+    assert_true(
+        "_existing_template_image_urls" in text and '"status": "reused"' in text,
+        "重复生成 Amazon 模板时应复用既有图片 URL，避免每次导出都重新上传 OSS",
+    )
 
 
 def main() -> int:
     tests = [
         test_category_conflict_only_overrides_conflict,
         test_real_asin_export_guard_is_present,
+        test_inventory_update_template_exports_stock_only_by_sku,
         test_step10_keeps_sofa_dimensions_and_avoids_inventory_conflict,
     ]
     for test in tests:

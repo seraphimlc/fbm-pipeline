@@ -532,6 +532,9 @@ export const listCatalogProducts = (params?: {
 export const exportCatalogProducts = (ids: number[]) =>
   api.post<Blob>('/products/catalog/export', ids, { responseType: 'blob', timeout: 300000 });
 
+export const exportInventoryUpdateTemplate = (ids: number[]) =>
+  api.post<Blob>('/products/catalog/inventory-template/export', ids, { responseType: 'blob', timeout: 300000 });
+
 export const updateCatalogAsin = (catalogId: number, amazonAsin: string) =>
   api.post<CatalogProduct>(`/products/catalog/${catalogId}/asin`, { amazon_asin: amazonAsin });
 
