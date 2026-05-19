@@ -93,6 +93,11 @@ def test_step10_keeps_sofa_dimensions_and_avoids_inventory_conflict() -> None:
         "_existing_template_image_urls" in text and '"status": "reused"' in text,
         "重复生成 Amazon 模板时应复用既有图片 URL，避免每次导出都重新上传 OSS",
     )
+    chair_block = text.split('if product_type == "CHAIR":', 1)[1].split("if pd.weight:", 1)[0]
+    assert_true(
+        "maximum_weight_recommendation" not in chair_block,
+        "CHAIR 模板必须保留 Maximum Weight Recommendation，Amazon processing summary 会把它当必填字段",
+    )
 
 
 def main() -> int:

@@ -1194,8 +1194,6 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
                 "seating_capacity",
                 "weight_capacity_maximum",
                 "weight_capacity_maximum_unit",
-                "maximum_weight_recommendation",
-                "maximum_weight_recommendation_unit",
                 "item_length_value",
                 "item_length_unit",
             ))
