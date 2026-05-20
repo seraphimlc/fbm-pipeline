@@ -13,6 +13,7 @@ from datetime import datetime
 from app.config import settings
 from app.database import async_session
 from app.models import Product, ProductData
+from app.pipeline.search_terms import SEARCH_TERMS_MAX_KEYWORDS, normalize_search_terms
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -107,13 +108,13 @@ Keyword rules:
 - Choose one primary keyword that truthfully names the product. Put it in the first 80 characters of the title when possible.
 - Put product-identity and high-intent keywords in the title. Do not turn the title into a keyword warehouse.
 - Put scenario/use keywords in bullets when they help shoppers understand fit and use.
-- Put synonym, long-tail, and secondary terms in Search Terms only when they are not already covered by title/bullets.
+- Put synonym, long-tail, and secondary terms in Search Terms only when they are not already covered by title/bullets. Select no more than {search_terms_max_keywords} keyword phrases from the Top Keywords candidate list when available.
 - Exclude any keyword that conflicts with product facts. Never use traffic words such as leather, sleeper, recliner, waterproof, certified, non-toxic, etc. unless the facts support them.
 
 Copy rules:
 1. **Title** (max 200 chars): Optimize for click-through and algorithm clarity. Use this shape where possible: brand + primary keyword + key type/configuration + strongest factual differentiators + suitable use/room + size/count + color suffix. Put the color at the very end in parentheses, for example "(Brown)"; do not put the color elsewhere if it can be avoided. Avoid more than two commas.
 2. **Five Bullets** (each max 500 chars): Each bullet must have one clear selling job and should not repeat the same claim in different words. Turn facts into buyer-relevant outcomes without exaggeration.
-3. **Search Terms** (max 250 bytes total, space-separated): Algorithm-only field. Do not repeat words already used in title/bullets. Do not include punctuation or claims not supported by facts.
+3. **Search Terms** (max 250 bytes total, comma-separated): Algorithm-only field. Separate keyword phrases with ", ". Do not repeat words already used in title/bullets. Do not include punctuation except the comma separators, or claims not supported by facts.
 4. **Compliance Check**: Flag risky claims, unsupported keywords, prohibited words, length/clarity issues, and any conversion risk.
 5. **Chinese Translation**: Provide faithful Chinese translations for the title, five bullets, and search terms. Keep meaning accurate; do not add claims.
 
@@ -201,6 +202,7 @@ def _build_prompt(product: Product, pd: ProductData) -> str:
         keywords_json=keywords_json,
         category_path=category_path,
         category_strategy=category_strategy,
+        search_terms_max_keywords=SEARCH_TERMS_MAX_KEYWORDS,
     )
 
 
@@ -248,49 +250,6 @@ def _trim_chars(value: str | None, limit: int) -> tuple[str, bool]:
     return text[:limit].rstrip(" ,;-"), True
 
 
-def _trim_utf8_bytes(value: str | None, limit: int) -> tuple[str, bool]:
-    words = str(value or "").split()
-    selected: list[str] = []
-    changed = False
-    for word in words:
-        candidate = " ".join([*selected, word]) if selected else word
-        if len(candidate.encode("utf-8")) <= limit:
-            selected.append(word)
-        else:
-            changed = True
-    text = " ".join(selected)
-    return text, changed or text != str(value or "").strip()
-
-
-def _visible_words(text: str) -> set[str]:
-    return {
-        word
-        for word in re.findall(r"[a-z0-9]+", text.lower())
-        if len(word) > 1
-    }
-
-
-def _dedupe_search_terms(search_terms: str | None, visible_copy: str) -> tuple[str, bool]:
-    """去掉标题/五点中已经出现的单词，避免 Search Terms 重复浪费权重。"""
-    visible = _visible_words(visible_copy)
-    kept: list[str] = []
-    seen: set[str] = set()
-    changed = False
-    for raw in str(search_terms or "").split():
-        cleaned = re.sub(r"[^A-Za-z0-9-]", "", raw).strip("-").lower()
-        if not cleaned:
-            changed = True
-            continue
-        key = cleaned.replace("-", "")
-        if key in seen or key in visible:
-            changed = True
-            continue
-        kept.append(cleaned)
-        seen.add(key)
-    text = " ".join(kept)
-    return text, changed or text != str(search_terms or "").strip()
-
-
 def _as_text_list(value) -> list[str]:
     if isinstance(value, list):
         return [" ".join(str(item).split()).strip() for item in value if str(item).strip()]
@@ -322,15 +281,15 @@ def _normalize_listing(listing: dict, color: str | None) -> dict:
     listing["bullets_zh"] = bullets_zh
 
     visible_copy = " ".join([title or "", *normalized_bullets])
-    search_terms, changed = _dedupe_search_terms(listing.get("search_terms"), visible_copy)
-    if changed:
-        adjustments.append("search_terms_deduped_against_visible_copy")
-    search_terms, changed = _trim_utf8_bytes(
-        search_terms,
-        settings.STEP5_SEARCH_TERMS_MAX_BYTES,
+    search_terms, changed, search_terms_count = normalize_search_terms(
+        listing.get("search_terms"),
+        visible_copy=visible_copy,
+        max_bytes=settings.STEP5_SEARCH_TERMS_MAX_BYTES,
     )
     if changed:
-        adjustments.append(f"search_terms_trimmed_to_{settings.STEP5_SEARCH_TERMS_MAX_BYTES}_bytes")
+        adjustments.append(
+            f"search_terms_normalized_to_comma_separated_max_{SEARCH_TERMS_MAX_KEYWORDS}_keywords"
+        )
     listing["search_terms"] = search_terms
 
     check = listing.get("compliance_check")
@@ -355,6 +314,7 @@ def _normalize_listing(listing: dict, color: str | None) -> dict:
         check["status"] = "warning"
     check["keyword_plan"] = keyword_plan
     check["positioning"] = positioning
+    check["search_terms_count"] = search_terms_count
     if adjustments:
         check.setdefault("system_adjustments", []).extend(sorted(set(adjustments)))
         if check.get("status") != "warning":

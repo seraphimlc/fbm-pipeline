@@ -10,14 +10,28 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook, load_workbook
-from sqlalchemy import select, func
+from sqlalchemy import delete, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from datetime import datetime
 
 from app.database import get_db
 from app.config import settings
-from app.models import AplusUploadBatch, AsinSyncBatch, CatalogProduct, InventorySyncBatch, Product, ProductData, ProductImage, ProductAplus, ProductFile
+from app.models import (
+    AplusRegenerateTask,
+    AplusUploadBatch,
+    AplusUploadItem,
+    AsinSyncBatch,
+    AsinSyncItem,
+    CatalogProduct,
+    InventorySyncBatch,
+    InventorySyncItem,
+    Product,
+    ProductData,
+    ProductImage,
+    ProductAplus,
+    ProductFile,
+)
 from app.models.status import COMPLETED, DUPLICATE_SKIPPED, PENDING_REVIEW, SOURCE_UNAVAILABLE, STEP_LABELS, STEP_STATUS_MAP
 from app.api.schemas import (
     ProductCreate, ProductUpdate, ProductResponse, ProductDetail,
@@ -1964,8 +1978,16 @@ async def delete_product(product_id: int, db: AsyncSession = Depends(get_db)):
     product = result.scalar_one_or_none()
     if not product:
         raise HTTPException(404, "Product not found")
-    if product.catalog_item:
-        await db.delete(product.catalog_item)
+    cancel_pipeline(product_id)
+    catalog_id = product.catalog_item.id if product.catalog_item else None
+    await db.execute(delete(AplusRegenerateTask).where(AplusRegenerateTask.product_id == product_id))
+    await db.execute(delete(AsinSyncItem).where(AsinSyncItem.product_id == product_id))
+    await db.execute(delete(AplusUploadItem).where(AplusUploadItem.product_id == product_id))
+    await db.execute(delete(InventorySyncItem).where(InventorySyncItem.product_id == product_id))
+    if catalog_id is not None:
+        await db.execute(delete(AsinSyncItem).where(AsinSyncItem.catalog_product_id == catalog_id))
+        await db.execute(delete(AplusUploadItem).where(AplusUploadItem.catalog_product_id == catalog_id))
+        await db.execute(delete(InventorySyncItem).where(InventorySyncItem.catalog_product_id == catalog_id))
     await db.delete(product)
     await db.commit()
 

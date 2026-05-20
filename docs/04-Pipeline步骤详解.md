@@ -387,7 +387,7 @@ document.querySelectorAll('#wayfinding-breadcrumbs_container li a')
   },
   "title": "品牌 + 主关键词 + 核心属性",
   "bullets": ["5条卖点描述"],
-  "search_terms": "后台搜索词（空格分隔）",
+  "search_terms": "后台搜索词（最多20个关键词短语，逗号分隔）",
   "primary_keyword": "主关键词",
   "compliance_check": {
     "status": "pass|warning",
@@ -401,7 +401,7 @@ document.querySelectorAll('#wayfinding-breadcrumbs_container li a')
 - 无 `title` 且无 `product_type` → `ValueError("缺少商品基本信息")`
 - LLM 返回空 → `RuntimeError`
 - LLM 输出超过标题、五点或 Search Terms 限制 → 系统自动裁剪，并写入 `listing_check.system_adjustments`
-- Search Terms 中和标题/五点重复的词会自动剔除，避免浪费后台关键词空间
+- Search Terms 会统一为最多 20 个关键词短语，并用 `, ` 分隔；标题/五点中已覆盖的词会自动剔除，避免浪费后台关键词空间
 - 主关键词未进入标题前 80 字符、标题逗号过多等问题会写入 `listing_check.issues`
 
 ### 人工编辑

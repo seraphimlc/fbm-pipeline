@@ -21,6 +21,7 @@ from app.config import settings
 from app.database import async_session
 from app.models import Product, ProductData, ProductFile
 from app.pipeline.ride_on_category import RIDE_ON_CATEGORY_MARKERS, select_ride_on_category
+from app.pipeline.search_terms import normalize_search_terms
 from app.services.oss_uploader import oss_configured, upload_private_image
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -331,9 +332,16 @@ def _listing_template_warnings(pd: ProductData) -> list[str]:
     title_start = (pd.listing_title or "")[:100].lower()
     if primary and primary not in title_start:
         warnings.append("主关键词未出现在标题前100字符内，可能影响搜索相关性。")
-    if not pd.listing_search_terms:
+    bullets = _json_loads(pd.listing_bullets, [])
+    bullets = bullets if isinstance(bullets, list) else []
+    search_terms = normalize_search_terms(
+        pd.listing_search_terms,
+        visible_copy=" ".join([pd.listing_title or "", *bullets]),
+        max_bytes=settings.STEP5_SEARCH_TERMS_MAX_BYTES,
+    )[0]
+    if not search_terms:
         warnings.append("Search Terms 为空，导入模板缺少后台关键词。")
-    elif len(pd.listing_search_terms.strip()) < 40:
+    elif len(search_terms) < 40:
         warnings.append("Search Terms 偏短，后台关键词覆盖可能不足。")
     return warnings
 
@@ -1237,7 +1245,11 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
         fields["model_name"]: pd.item_code,
         fields["manufacturer"]: product.brand,
         fields["description"]: _description(pd),
-        fields["search_terms"]: pd.listing_search_terms,
+        fields["search_terms"]: normalize_search_terms(
+            pd.listing_search_terms,
+            visible_copy=" ".join([pd.listing_title or "", *bullets]),
+            max_bytes=settings.STEP5_SEARCH_TERMS_MAX_BYTES,
+        )[0],
         fields["list_price"]: pd.suggested_price,
         fields["fulfillment_channel"]: "Fulfillment by Merchant (Default)",
         fields["quantity"]: stock_quantity,

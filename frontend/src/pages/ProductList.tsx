@@ -51,6 +51,7 @@ const ProductList: React.FC = () => {
   const [autoStartAfterImport, setAutoStartAfterImport] = useState(false);
   const [statusFilter, setStatusFilter] = useState<string | undefined>(initialSearch.get('status') || undefined);
   const [overview, setOverview] = useState<WorkbenchOverview | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
   const buildListPath = () => {
     const params = new URLSearchParams();
@@ -101,6 +102,25 @@ const ProductList: React.FC = () => {
       setOverview(data);
     } catch {
       // 概览失败不影响列表使用。
+    }
+  };
+
+  const handleDeleteProduct = async (record: Product) => {
+    setDeletingId(record.id);
+    try {
+      await deleteProduct(record.id);
+      message.success('商品已删除');
+      setSelectedIds((prev) => prev.filter((id) => Number(id) !== record.id));
+      if (products.length === 1 && page > 1) {
+        setPage(page - 1);
+      } else {
+        fetchProducts();
+      }
+      fetchOverview();
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '删除失败');
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -389,8 +409,15 @@ const ProductList: React.FC = () => {
               <Button size="small" icon={<RedoOutlined />}>重新开始</Button>
             </Popconfirm>
           )}
-          <Popconfirm title="确定删除？" onConfirm={async () => { await deleteProduct(record.id); fetchProducts(); fetchOverview(); }}>
-            <Button size="small" danger icon={<DeleteOutlined />} />
+          <Popconfirm
+            title="确定删除？"
+            okText="删除"
+            cancelText="取消"
+            onConfirm={() => handleDeleteProduct(record)}
+          >
+            <Button size="small" danger icon={<DeleteOutlined />} loading={deletingId === record.id}>
+              删除
+            </Button>
           </Popconfirm>
         </Space>
       ),

@@ -7,8 +7,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "backend"))
 
 from validate_template_mappings import merge_category_options  # noqa: E402
+from app.pipeline.search_terms import SEARCH_TERMS_MAX_KEYWORDS, normalize_search_terms  # noqa: E402
 
 
 def assert_true(condition: bool, message: str) -> None:
@@ -169,6 +171,29 @@ def test_mapping_sets_andy_free_shipping_template() -> None:
         )
 
 
+def test_search_terms_are_twenty_comma_separated_keywords() -> None:
+    terms, changed, count = normalize_search_terms(
+        "deep seat sofa, modular couch, apartment couch, sofa, living room seating",
+        visible_copy="Vindhvisk sofa with deep seat",
+        max_bytes=250,
+    )
+    assert_true(terms == "modular couch, apartment couch, living room seating", "Search Terms 必须保留关键词短语并用逗号分隔")
+    assert_true(changed, "Search Terms 去重/格式化后必须标记调整")
+    assert_true(count == 3, "Search Terms 数量必须按关键词短语统计")
+
+    many_terms = ", ".join(f"keyword {idx}" for idx in range(1, 30))
+    limited_terms, _, limited_count = normalize_search_terms(many_terms, max_bytes=1000)
+    assert_true(limited_count == SEARCH_TERMS_MAX_KEYWORDS, "Search Terms 最多只能保留 20 个候选关键词")
+    assert_true(limited_terms.count(",") == SEARCH_TERMS_MAX_KEYWORDS - 1, "Search Terms 必须使用逗号分隔关键词")
+
+    step5_text = (ROOT / "backend" / "app" / "pipeline" / "step5_listing.py").read_text(encoding="utf-8")
+    step10_text = (ROOT / "backend" / "app" / "pipeline" / "step10_amazon_template.py").read_text(encoding="utf-8")
+    assert_true("Select no more than {search_terms_max_keywords} keyword phrases" in step5_text, "Step5 Prompt 必须明确最多 20 个候选关键词短语")
+    assert_true("when available" in step5_text, "Step5 Prompt 在缺少关键词候选时必须允许用商品事实兜底")
+    assert_true('Separate keyword phrases with ", "' in step5_text, "Step5 Prompt 必须要求逗号分隔 Search Terms")
+    assert_true("normalize_search_terms(" in step10_text, "Step10 写入 Amazon 模板前必须统一 Search Terms 格式")
+
+
 def main() -> int:
     tests = [
         test_category_conflict_only_overrides_conflict,
@@ -178,6 +203,7 @@ def main() -> int:
         test_step1_collects_product_dimensions_and_numeric_packages,
         test_step10_sums_multi_package_dimensions,
         test_mapping_sets_andy_free_shipping_template,
+        test_search_terms_are_twenty_comma_separated_keywords,
     ]
     for test in tests:
         test()

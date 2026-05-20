@@ -79,6 +79,7 @@ const ProductDetail: React.FC = () => {
   const [listingPrimaryKeywordInput, setListingPrimaryKeywordInput] = useState('');
   const [listingSaving, setListingSaving] = useState(false);
   const [amazonTemplateLoading, setAmazonTemplateLoading] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchDetail = async () => {
@@ -118,6 +119,19 @@ const ProductDetail: React.FC = () => {
   const aplus = product.aplus;
   const aplusStatus = aplus?.aplus_status ? APLUS_STATUS_LABELS[aplus.aplus_status] : null;
   const canRetryAplusRegeneration = APLUS_REGEN_RETRYABLE_STATUSES.includes(aplus?.aplus_status || '');
+
+  const handleDelete = async () => {
+    setDeleting(true);
+    try {
+      await deleteProduct(product.id);
+      message.success('商品已删除');
+      navigate(backTarget);
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '删除失败');
+    } finally {
+      setDeleting(false);
+    }
+  };
   const videoFolder = product.video_folder;
   const aplusFolder = product.aplus_folder;
   const packages = parseJson(data?.packages, []);
@@ -1457,8 +1471,15 @@ const ProductDetail: React.FC = () => {
               <Button icon={<RedoOutlined />}>重新开始</Button>
             </Popconfirm>
           )}
-          <Popconfirm title="确定删除此商品？" onConfirm={async () => { await deleteProduct(product.id); navigate(backTarget); }}>
-            <Button danger icon={<DeleteOutlined />} />
+          <Popconfirm
+            title="确定删除此商品？"
+            okText="删除"
+            cancelText="取消"
+            onConfirm={handleDelete}
+          >
+            <Button danger icon={<DeleteOutlined />} loading={deleting}>
+              删除
+            </Button>
           </Popconfirm>
         </Space>
       </div>
