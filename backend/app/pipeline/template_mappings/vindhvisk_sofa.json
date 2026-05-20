@@ -4,6 +4,10 @@
   "template_path": "templates/CHAIR_SOFA.xlsm",
   "output_filename": "{item_code}_amazon_chair_sofa_import.xlsm",
   "data_row": 8,
+  "shipping_template_by_brand": {
+    "Vindhvisk": "Migrated Template FreeShipping",
+    "Andy店-US": "Migrated Template FreeShipping"
+  },
   "fixed_values": {
     "product_type#1.value": "SOFA",
     "::record_action": "Create or Replace (Full Update)",

@@ -67,11 +67,20 @@ def test_inventory_update_template_exports_stock_only_by_sku() -> None:
     config_py = ROOT / "backend" / "app" / "config.py"
     template_path = ROOT / "backend" / "app" / "pipeline" / "templates" / "PriceAndQuantity.xlsm"
     text = products_py.read_text(encoding="utf-8")
+    inventory_sync_text = (ROOT / "backend" / "app" / "services" / "inventory_sync.py").read_text(encoding="utf-8")
     assert_true(template_path.is_file(), "库存同步 Price & Quantity 模板必须随项目保存")
     assert_true("PRICE_QUANTITY_TEMPLATE_PATH" in config_py.read_text(encoding="utf-8"), "库存同步模板路径必须可配置")
     assert_true('"/catalog/inventory-template/export"' in text, "必须提供库存同步模板导出接口")
     assert_true("缺少真实 ASIN" in text, "库存同步模板导出必须只允许已有真实 ASIN 的商品")
     assert_true("按 SKU 写入库存；价格列留空，不更新价格" in text, "库存同步模板只能写 SKU 和库存，不能更新价格")
+    assert_true(
+        "assert_gigab2b_logged_in_for_inventory" in text,
+        "创建库存同步批次前必须先检查大建云仓登录态，未登录不能创建同步批次",
+    )
+    assert_true(
+        "GIGAB2B_LOGIN_REQUIRED_ERROR" in inventory_sync_text and "_fail_whole_batch" in inventory_sync_text,
+        "库存同步后台批次也必须保留大建云仓登录态兜底检查",
+    )
 
 
 def test_step10_keeps_sofa_dimensions_and_avoids_inventory_conflict() -> None:
@@ -98,6 +107,66 @@ def test_step10_keeps_sofa_dimensions_and_avoids_inventory_conflict() -> None:
         "maximum_weight_recommendation" not in chair_block,
         "CHAIR 模板必须保留 Maximum Weight Recommendation，Amazon processing summary 会把它当必填字段",
     )
+    assert_true(
+        "DEFAULT_WEIGHT_CAPACITY_LBS = 500" in text,
+        "无法判断几人位时，Maximum Weight Recommendation 必须默认填 500 lbs",
+    )
+    assert_true(
+        "SINGLE_SEAT_WEIGHT_CAPACITY_LBS = 250" in text and "* 300" in text,
+        "承重默认规则必须覆盖单人 250 lbs、标准座位 250 lbs/座、模块化/sectional 300 lbs/座",
+    )
+    assert_true(
+        'fields["maximum_weight_recommendation"]: _weight_capacity_maximum(seating, pd)' in text,
+        "Maximum Weight Recommendation 必须由商品文本和座位数共同推断，不能只按旧座位数兜底",
+    )
+    assert_true(
+        "_shipping_template_for_product" in text and "shipping_template_by_brand" in text,
+        "Amazon 导入表格必须支持按品牌指定配送模板，不能只取模板第一个下拉值",
+    )
+
+
+def test_step1_collects_product_dimensions_and_numeric_packages() -> None:
+    step1_py = ROOT / "backend" / "app" / "pipeline" / "step1_collect.py"
+    text = step1_py.read_text(encoding="utf-8")
+    assert_true(
+        "product_dimensions.get(\"assemble_info\")" in text
+        and '"dimensionLength": dimensions.get("length_show")' in text
+        and '"weight": dimensions.get("weight_show")' in text,
+        "Step1 必须从大建产品尺寸读取组装长宽高和产品重量",
+    )
+    assert_true(
+        '"length": length' in text and '"weight_value": weight' in text,
+        "Step1 包装明细必须保存数值长宽高、重量和数量，供导出表格聚合",
+    )
+    assert_true(
+        "_max_package_dimensions" not in text and "_judge_product_dimensions_with_llm" not in text,
+        "产品尺寸不能再用包装尺寸最大值或大模型兜底覆盖",
+    )
+
+
+def test_step10_sums_multi_package_dimensions() -> None:
+    step10_py = ROOT / "backend" / "app" / "pipeline" / "step10_amazon_template.py"
+    text = step10_py.read_text(encoding="utf-8")
+    assert_true(
+        "sum(item[\"length\"] for item in parsed_packages)" in text
+        and "sum(item[\"weight\"] for item in parsed_packages)" in text,
+        "Step10 多子产品包装尺寸必须按长宽高和重量分别相加",
+    )
+    assert_true(
+        "重量最大的外包装" not in text,
+        "Step10 不能再取重量最大的单个外包装作为代表包裹",
+    )
+
+
+def test_mapping_sets_andy_free_shipping_template() -> None:
+    mapping_dir = ROOT / "backend" / "app" / "pipeline" / "template_mappings"
+    for name in ("vindhvisk_sofa.json", "ride_on_toy.json"):
+        text = (mapping_dir / name).read_text(encoding="utf-8")
+        assert_true(
+            '"Vindhvisk": "Migrated Template FreeShipping"' in text
+            and '"Andy店-US": "Migrated Template FreeShipping"' in text,
+            f"{name} 必须把 Andy 店当前品牌默认配送模板设为 FreeShipping",
+        )
 
 
 def main() -> int:
@@ -106,6 +175,9 @@ def main() -> int:
         test_real_asin_export_guard_is_present,
         test_inventory_update_template_exports_stock_only_by_sku,
         test_step10_keeps_sofa_dimensions_and_avoids_inventory_conflict,
+        test_step1_collects_product_dimensions_and_numeric_packages,
+        test_step10_sums_multi_package_dimensions,
+        test_mapping_sets_andy_free_shipping_template,
     ]
     for test in tests:
         test()

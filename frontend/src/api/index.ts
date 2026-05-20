@@ -114,6 +114,7 @@ export interface ProductData {
   amazon_template_warnings: string | null;
   amazon_template_fill_summary: string | null;
   amazon_template_generated_at: string | null;
+  gigab2b_raw_snapshot: string | null;
   [key: string]: unknown;
 }
 
@@ -145,6 +146,7 @@ export interface ProductDetail extends Product {
   generated_files: ProductGeneratedFile[];
   video_folder: ProductFolderEntry | null;
   aplus_folder: ProductFolderEntry | null;
+  amazon_export_preview: Record<string, any> | null;
 }
 
 export interface CategoryOption {
@@ -537,6 +539,9 @@ export const exportInventoryUpdateTemplate = (ids: number[]) =>
 
 export const updateCatalogAsin = (catalogId: number, amazonAsin: string) =>
   api.post<CatalogProduct>(`/products/catalog/${catalogId}/asin`, { amazon_asin: amazonAsin });
+
+export const clearCatalogAsin = (catalogId: number) =>
+  api.delete<CatalogProduct>(`/products/catalog/${catalogId}/asin`);
 
 export const createInventorySyncBatch = (catalogProductIds?: number[]) =>
   api.post<InventorySyncBatch>('/products/catalog/inventory-sync', { catalog_product_ids: catalogProductIds || null }, { timeout: 120000 });

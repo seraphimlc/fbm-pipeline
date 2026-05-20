@@ -46,6 +46,8 @@ from app.pipeline.step10_amazon_template import (
     DATA_ROW,
     MAPPING_DIR,
     _load_template_mapping,
+    _offer_quantity,
+    _representative_package,
     run_amazon_template,
 )
 from app.services.material_assets import (
@@ -57,7 +59,12 @@ from app.services.material_assets import (
     organize_video_files,
 )
 from app.services.asin_sync import build_sync_item, start_asin_sync_batch
-from app.services.inventory_sync import build_inventory_sync_item, start_inventory_sync_batch
+from app.services.inventory_sync import (
+    InventorySyncLoginRequired,
+    assert_gigab2b_logged_in_for_inventory,
+    build_inventory_sync_item,
+    start_inventory_sync_batch,
+)
 from app.services.aplus_upload import build_upload_item, start_aplus_upload_batch
 from app.services.aplus_regenerate import create_regenerate_task, retry_latest_regenerate_tasks
 from app.services.product_duplicates import (
@@ -357,6 +364,100 @@ def _amazon_template_cache_path(pd: ProductData | None) -> Path | None:
     if not isinstance(summary, dict) or summary.get("logic_version") != AMAZON_TEMPLATE_LOGIC_VERSION:
         return None
     return source_path
+
+
+def _safe_json(value: str | None, fallback):
+    if not value:
+        return fallback
+    try:
+        parsed = json.loads(value)
+        return parsed if parsed is not None else fallback
+    except Exception:
+        return fallback
+
+
+def _shipping_template_preview(product: Product, pd: ProductData, mapping: dict) -> str | None:
+    preferences = mapping.get("shipping_template_by_brand") or {}
+    for candidate in (product.brand, settings.DEFAULT_BRAND, "Andy店-US", "*"):
+        preferred = preferences.get(str(candidate or ""))
+        if preferred:
+            return preferred
+    return None
+
+
+def _build_amazon_export_preview(product: Product) -> dict | None:
+    pd = product.data
+    if not pd:
+        return None
+    try:
+        mapping = _load_template_mapping(product, pd)
+    except Exception as exc:
+        return {"available": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    package, package_warnings = _representative_package(pd)
+    try:
+        quantity = _offer_quantity(pd)
+    except Exception as exc:
+        quantity = None
+        package_warnings.append(str(exc))
+
+    fields = mapping.get("dynamic_fields") or {}
+    return {
+        "available": True,
+        "logic_version": AMAZON_TEMPLATE_LOGIC_VERSION,
+        "template_path": mapping.get("template_path"),
+        "output_filename": str(mapping.get("output_filename") or "{item_code}_amazon_import.xlsm").format(item_code=pd.item_code),
+        "category": pd.leaf_category or mapping.get("category") or mapping.get("category_type"),
+        "field_attributes": {
+            "shipping_template": fields.get("shipping_template"),
+            "price": fields.get("price"),
+            "quantity": fields.get("quantity"),
+            "product_weight": fields.get("item_weight_value"),
+        },
+        "offer": {
+            "sku": pd.item_code,
+            "brand": product.brand,
+            "fulfillment_channel": "Fulfillment by Merchant (Default)",
+            "shipping_template": _shipping_template_preview(product, pd, mapping),
+            "quantity": quantity,
+            "price": pd.suggested_price,
+            "list_price": pd.suggested_price,
+            "country_of_origin": pd.origin or "China",
+        },
+        "product_dimensions": {
+            "length": pd.dimension_length,
+            "width": pd.dimension_width,
+            "height": pd.dimension_height,
+            "unit": "Inches",
+            "size_text": (
+                f'{pd.dimension_length:g}" x {pd.dimension_width:g}" x {pd.dimension_height:g}"'
+                if pd.dimension_length and pd.dimension_width and pd.dimension_height
+                else None
+            ),
+        },
+        "product_weight": {
+            "value": pd.weight,
+            "unit": "Pounds" if pd.weight else None,
+        },
+        "package_aggregate": {
+            **(package or {}),
+            "length_unit": "Inches" if package else None,
+            "weight_unit": "Pounds" if package else None,
+            "warnings": package_warnings,
+        },
+        "package_items": _safe_json(pd.packages, []),
+        "source_costs": {
+            "value_total": pd.value_total,
+            "estimated_total": pd.estimated_total,
+            "shipping_cost": pd.shipping_cost,
+            "shipping_cost_min": pd.shipping_cost_min,
+            "shipping_cost_max": pd.shipping_cost_max,
+            "suggested_price": pd.suggested_price,
+            "cost_total": pd.cost_total,
+            "profit": pd.profit,
+            "profit_rate": pd.profit_rate,
+        },
+    }
 
 
 def _sync_catalog_item(product: Product, db: AsyncSession, confirm: bool = False) -> CatalogProduct:
@@ -1377,6 +1478,11 @@ async def create_inventory_sync_batch(body: InventorySyncCreateRequest, db: Asyn
         if missing_ids:
             raise HTTPException(400, f"部分商品不存在或还未确认入库: {missing_ids[:10]}")
 
+    try:
+        await assert_gigab2b_logged_in_for_inventory(catalog_items)
+    except InventorySyncLoginRequired as exc:
+        raise HTTPException(400, str(exc)) from exc
+
     batch = InventorySyncBatch(
         status="pending",
         total_count=len(catalog_items),
@@ -1457,6 +1563,38 @@ async def update_catalog_asin(catalog_id: int, body: CatalogAsinUpdateRequest, d
         product.asin_sync_error = None
         product.asin_synced_at = catalog.asin_synced_at
         product.updated_at = datetime.now()
+
+    await db.commit()
+    await db.refresh(catalog)
+    return catalog
+
+
+@router.delete("/catalog/{catalog_id}/asin", response_model=CatalogProductResponse)
+async def clear_catalog_asin(catalog_id: int, db: AsyncSession = Depends(get_db)):
+    """清除真实 ASIN，让商品回到可同步状态。"""
+    result = await db.execute(
+        select(CatalogProduct)
+        .options(selectinload(CatalogProduct.source_product).selectinload(Product.data))
+        .where(CatalogProduct.id == catalog_id)
+    )
+    catalog = result.scalar_one_or_none()
+    if not catalog:
+        raise HTTPException(404, "商品资料不存在")
+
+    now = datetime.now()
+    catalog.amazon_asin = None
+    catalog.asin_sync_status = "not_synced"
+    catalog.asin_sync_error = None
+    catalog.asin_synced_at = now
+    catalog.updated_at = now
+
+    product = catalog.source_product
+    if product:
+        product.amazon_asin = None
+        product.asin_sync_status = "not_synced"
+        product.asin_sync_error = None
+        product.asin_synced_at = now
+        product.updated_at = now
 
     await db.commit()
     await db.refresh(catalog)
@@ -1661,6 +1799,7 @@ async def get_product(product_id: int, db: AsyncSession = Depends(get_db)):
 
     detail = ProductDetail.model_validate(product)
     detail.current_task_status = _current_task_status(product)
+    detail.amazon_export_preview = _build_amazon_export_preview(product)
     if product.data and product.data.material_dir:
         material_dir = Path(product.data.material_dir).expanduser()
         if material_dir.is_dir():

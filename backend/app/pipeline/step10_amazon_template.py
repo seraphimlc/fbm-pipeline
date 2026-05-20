@@ -28,7 +28,9 @@ from sqlalchemy.orm import selectinload
 logger = logging.getLogger(__name__)
 
 DATA_ROW = 8
-AMAZON_TEMPLATE_LOGIC_VERSION = "2026-05-18-reuse-image-urls-v9"
+AMAZON_TEMPLATE_LOGIC_VERSION = "2026-05-20-free-shipping-dimensions-v1"
+SINGLE_SEAT_WEIGHT_CAPACITY_LBS = 250
+DEFAULT_WEIGHT_CAPACITY_LBS = 500
 PIPELINE_DIR = Path(__file__).parent
 MAPPING_DIR = PIPELINE_DIR / "template_mappings"
 TEMPLATE_DIR = PIPELINE_DIR / "templates"
@@ -135,10 +137,24 @@ def _information_workbook_values(pd: ProductData) -> dict[str, Any]:
     return {}
 
 
+def _number_value(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    match = re.search(r"\d+(?:\.\d+)?", str(value).replace(",", ""))
+    return float(match.group(0)) if match else None
+
+
+def _quantity_value(value: Any) -> int:
+    number = _number_value(value)
+    return max(int(number), 1) if number else 1
+
+
 def _parse_package_dimensions(text: str | None) -> dict[str, float] | None:
     if not text:
         return None
-    nums = [float(item) for item in re.findall(r"\d+(?:\.\d+)?", text)]
+    nums = [float(item) for item in re.findall(r"\d+(?:\.\d+)?", str(text).replace(",", ""))]
     if len(nums) < 4:
         return None
     return {
@@ -146,6 +162,30 @@ def _parse_package_dimensions(text: str | None) -> dict[str, float] | None:
         "width": nums[1],
         "height": nums[2],
         "weight": nums[3],
+    }
+
+
+def _package_dimensions_from_entry(item: Any) -> dict[str, float] | None:
+    if not isinstance(item, dict):
+        return _parse_package_dimensions(str(item))
+
+    parsed = {
+        "length": _number_value(item.get("length")),
+        "width": _number_value(item.get("width")),
+        "height": _number_value(item.get("height")),
+        "weight": _number_value(item.get("weight_value")),
+    }
+    if not all(parsed.values()):
+        parsed = _parse_package_dimensions(item.get("dimensions"))
+    if not parsed:
+        return None
+
+    quantity = _quantity_value(item.get("qty") or item.get("quantity") or item.get("package_quantity"))
+    return {
+        "length": parsed["length"] * quantity,
+        "width": parsed["width"] * quantity,
+        "height": parsed["height"] * quantity,
+        "weight": parsed["weight"] * quantity,
     }
 
 
@@ -172,7 +212,7 @@ def _representative_package(pd: ProductData) -> tuple[dict[str, float] | None, l
     parsed_packages: list[dict[str, float]] = []
     if isinstance(packages, list):
         for item in packages:
-            parsed = _parse_package_dimensions((item or {}).get("dimensions") if isinstance(item, dict) else str(item))
+            parsed = _package_dimensions_from_entry(item)
             if parsed:
                 parsed_packages.append(parsed)
 
@@ -185,9 +225,14 @@ def _representative_package(pd: ProductData) -> tuple[dict[str, float] | None, l
         return None, warnings
 
     if len(parsed_packages) > 1:
-        warnings.append("该商品有多个外包装，Amazon模板只有一组包裹尺寸列；当前使用重量最大的外包装作为代表包裹。")
+        warnings.append("该商品有多个子产品/外包装，Amazon模板只有一组包裹尺寸列；当前按各包裹长宽高和重量分别相加。")
 
-    return max(parsed_packages, key=lambda item: item.get("weight", 0)), warnings
+    return {
+        "length": round(sum(item["length"] for item in parsed_packages), 2),
+        "width": round(sum(item["width"] for item in parsed_packages), 2),
+        "height": round(sum(item["height"] for item in parsed_packages), 2),
+        "weight": round(sum(item["weight"] for item in parsed_packages), 2),
+    }, warnings
 
 
 def _index_template_columns(ws) -> dict[str, str]:
@@ -526,6 +571,30 @@ def _first_template_value(wb, attr: str, fallback: str | None = None) -> str | N
     return values[0] if values else fallback
 
 
+def _shipping_template_for_product(wb, attr: str, mapping: dict, product: Product, warnings: list[str]) -> str | None:
+    values = _template_values(wb, attr)
+    if not values:
+        warnings.append("模板未找到 Shipping Template 下拉值，配送模板未填写。")
+        return None
+
+    preferences = mapping.get("shipping_template_by_brand") or {}
+    candidates = [
+        product.brand,
+        settings.DEFAULT_BRAND,
+        "Andy店-US",
+        "*",
+    ]
+    for candidate in candidates:
+        preferred = preferences.get(str(candidate or ""))
+        if not preferred:
+            continue
+        if preferred in values:
+            return preferred
+        warnings.append(f"映射指定配送模板 {preferred}，但模板下拉值不存在，已改用 {values[0]}。")
+        return values[0]
+    return values[0]
+
+
 def _stock_value(pd: ProductData) -> int | None:
     if pd.stock is not None:
         return pd.stock
@@ -683,8 +752,58 @@ def _seat_depth(pd: ProductData) -> float | None:
     return round(min(max(pd.dimension_width - 12, 20), 30), 1)
 
 
-def _weight_capacity_maximum(seating: int | None) -> int:
-    return max(seating or 3, 1) * 250
+def _weight_capacity_maximum(seating: int | None, pd: ProductData | None = None) -> int:
+    text = _furniture_match_text(pd).lower() if pd else ""
+    sectional_or_modular = any(marker in text for marker in (
+        "sectional",
+        "modular",
+        "l shape",
+        "l-shaped",
+        "l shaped",
+        "l形",
+        "模块化",
+        "组合沙发",
+    ))
+    large_sectional = sectional_or_modular and any(marker in text for marker in (
+        "large sectional",
+        "oversized sectional",
+        "大尺寸",
+        "5 seater",
+        "6 seater",
+        "5-seat",
+        "6-seat",
+    ))
+
+    if seating is not None:
+        seats = max(int(seating), 1)
+        if sectional_or_modular and seats >= 3:
+            return seats * 300
+        return seats * SINGLE_SEAT_WEIGHT_CAPACITY_LBS
+
+    if re.search(r"\b(?:single|one|1)[ -]?(?:seat|seater)\b", text) or any(marker in text for marker in (
+        "armchair",
+        "accent chair",
+        "lounge chair",
+        "single chair",
+        "单人沙发",
+        "扶手椅",
+        "单人椅",
+    )):
+        return SINGLE_SEAT_WEIGHT_CAPACITY_LBS
+    if re.search(r"\b(?:two|2)[ -]?(?:seat|seater)\b", text) or any(marker in text for marker in (
+        "loveseat",
+        "love seat",
+        "双人沙发",
+        "二人沙发",
+    )):
+        return 500
+    if re.search(r"\b(?:three|3)[ -]?(?:seat|seater)\b", text) or "三人沙发" in text:
+        return 750
+    if large_sectional:
+        return 1500
+    if sectional_or_modular:
+        return 900
+    return DEFAULT_WEIGHT_CAPACITY_LBS
 
 
 def _omit_fields(fill: dict[str, Any], fields: dict[str, str], keys: tuple[str, ...]) -> None:
@@ -1105,9 +1224,7 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
 
     fields = mapping["dynamic_fields"]
     fill = dict(mapping.get("fixed_values", {}))
-    shipping_template = _first_template_value(wb, fields["shipping_template"])
-    if not shipping_template:
-        warnings.append("模板未找到 Shipping Template 下拉值，配送模板未填写。")
+    shipping_template = _shipping_template_for_product(wb, fields["shipping_template"], mapping, product, warnings)
     stock_quantity = _offer_quantity(pd)
 
     fill.update({
@@ -1165,9 +1282,9 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
             fields["seat_depth_unit"]: "Inches",
             fields["seat_height"]: 16,
             fields["seat_height_unit"]: "Inches",
-            fields["weight_capacity_maximum"]: _weight_capacity_maximum(seating),
+            fields["weight_capacity_maximum"]: _weight_capacity_maximum(seating, pd),
             fields["weight_capacity_maximum_unit"]: "Pounds",
-            fields["maximum_weight_recommendation"]: _weight_capacity_maximum(seating),
+            fields["maximum_weight_recommendation"]: _weight_capacity_maximum(seating, pd),
             fields["maximum_weight_recommendation_unit"]: "Pounds",
             fields["depth_value"]: pd.dimension_width,
             fields["depth_unit"]: "Inches",
@@ -1182,11 +1299,6 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
         })
         if seating:
             fill[fields["seating_capacity"]] = seating
-        if product_type == "SOFA":
-            _omit_fields(fill, fields, (
-                "maximum_weight_recommendation",
-                "maximum_weight_recommendation_unit",
-            ))
         if product_type == "CHAIR":
             fill[fields["included_components"]] = "Chair"
             _omit_fields(fill, fields, (

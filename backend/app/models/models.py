@@ -225,6 +225,7 @@ class ProductData(Base):
     features: Mapped[str | None] = mapped_column(Text)           # JSON
     description: Mapped[str | None] = mapped_column(Text)        # 大建五点描述(characteristic)
     variants: Mapped[str | None] = mapped_column(Text)           # JSON
+    gigab2b_raw_snapshot: Mapped[str | None] = mapped_column(Text) # JSON，保留采集原始关键字段
     stock: Mapped[int | None] = mapped_column(Integer)
     seller: Mapped[str | None] = mapped_column(String(200))
     origin: Mapped[str | None] = mapped_column(String(100))

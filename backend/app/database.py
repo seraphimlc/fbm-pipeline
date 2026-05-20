@@ -383,6 +383,7 @@ async def init_db():
             "listing_title_zh",
             "listing_bullets_zh",
             "listing_search_terms_zh",
+            "gigab2b_raw_snapshot",
             "amazon_template_path",
             "amazon_template_warnings",
             "amazon_template_fill_summary",

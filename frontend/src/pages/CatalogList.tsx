@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, DatePicker, Input, message, Modal, Select, Space, Table, Tag, Typography } from 'antd';
-import { CloudSyncOutlined, DownloadOutlined, FileExcelOutlined, HistoryOutlined, PictureOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons';
+import { Button, DatePicker, Input, message, Modal, Popconfirm, Select, Space, Table, Tag, Typography } from 'antd';
+import { CloudSyncOutlined, DeleteOutlined, DownloadOutlined, FileExcelOutlined, HistoryOutlined, PictureOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { createAplusUploadBatch, createAsinSyncBatch, exportCatalogProducts, exportInventoryUpdateTemplate, getWorkbenchOverview, listCatalogProducts, updateCatalogAsin } from '../api';
+import { clearCatalogAsin, createAplusUploadBatch, createAsinSyncBatch, deleteProduct, exportCatalogProducts, exportInventoryUpdateTemplate, getWorkbenchOverview, listCatalogProducts, updateCatalogAsin } from '../api';
 import type { CatalogProduct, WorkbenchOverview } from '../api';
 
 const { Title, Text } = Typography;
@@ -122,8 +122,28 @@ const CatalogList: React.FC = () => {
     const link = document.createElement('a');
     link.href = url;
     link.download = filename;
+    link.style.display = 'none';
+    document.body.appendChild(link);
     link.click();
-    URL.revokeObjectURL(url);
+    setTimeout(() => {
+      URL.revokeObjectURL(url);
+      link.remove();
+    }, 1000);
+  };
+
+  const extractDownloadError = async (error: any, fallback: string) => {
+    const payload = error?.response?.data;
+    if (payload instanceof Blob) {
+      const text = await payload.text();
+      if (!text) return fallback;
+      try {
+        const parsed = JSON.parse(text);
+        return parsed?.detail || text;
+      } catch {
+        return text;
+      }
+    }
+    return payload?.detail || error?.message || fallback;
   };
 
   const exportSelected = async () => {
@@ -138,13 +158,15 @@ const CatalogList: React.FC = () => {
       return;
     }
     setExporting(true);
+    const hideLoading = message.loading('正在导出 Amazon 表格，生成完成后会自动下载...', 0);
     try {
       const { data } = await exportCatalogProducts(selectedIds.map(Number));
       saveBlob(data, `amazon_import_templates_${dayjs().format('YYYYMMDD_HHmmss')}.zip`);
       message.success('已导出 Amazon 导入表格压缩包');
     } catch (error: any) {
-      message.error(error?.response?.data?.detail || '导出失败');
+      message.error(await extractDownloadError(error, '导出失败'));
     } finally {
+      hideLoading();
       setExporting(false);
     }
   };
@@ -161,13 +183,15 @@ const CatalogList: React.FC = () => {
       return;
     }
     setInventoryExporting(true);
+    const hideLoading = message.loading('正在导出库存模板，生成完成后会自动下载...', 0);
     try {
       const { data } = await exportInventoryUpdateTemplate(selectedIds.map(Number));
       saveBlob(data, `inventory_update_templates_${dayjs().format('YYYYMMDD_HHmmss')}.zip`);
       message.success('已导出库存同步模板');
     } catch (error: any) {
-      message.error(error?.response?.data?.detail || '库存模板导出失败');
+      message.error(await extractDownloadError(error, '库存模板导出失败'));
     } finally {
+      hideLoading();
       setInventoryExporting(false);
     }
   };
@@ -305,6 +329,33 @@ const CatalogList: React.FC = () => {
     }
   };
 
+  const deleteCatalogRecord = async (record: CatalogProduct) => {
+    try {
+      await deleteProduct(record.source_product_id);
+      message.success('商品已删除');
+      setSelectedIds((prev) => prev.filter((id) => Number(id) !== record.id));
+      if (items.length === 1 && page > 1) {
+        setPage(page - 1);
+      } else {
+        fetchItems();
+      }
+      fetchOverview();
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '删除失败');
+    }
+  };
+
+  const clearAsin = async (record: CatalogProduct) => {
+    try {
+      await clearCatalogAsin(record.id);
+      message.success('真实 ASIN 已清除');
+      fetchItems();
+      fetchOverview();
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '清除 ASIN 失败');
+    }
+  };
+
   const columns = [
     {
       title: '商品资料ID',
@@ -413,13 +464,34 @@ const CatalogList: React.FC = () => {
     },
     {
       title: '操作',
-      width: 190,
+      width: 330,
       render: (_: unknown, record: CatalogProduct) => (
         <Space size="small">
           <Button size="small" onClick={() => navigate(`/products/${record.source_product_id}`)}>详情</Button>
           <Button size="small" onClick={() => openAsinModal(record)}>
             {record.amazon_asin ? '重新关联ASIN' : '关联ASIN'}
           </Button>
+          {record.amazon_asin && (
+            <Popconfirm
+              title="确定清除真实 ASIN？"
+              description="清除后这个商品会回到可同步 ASIN 状态。"
+              okText="清除"
+              cancelText="取消"
+              onConfirm={() => clearAsin(record)}
+            >
+              <Button size="small">清除ASIN</Button>
+            </Popconfirm>
+          )}
+          <Popconfirm
+            title="确定删除这个商品？"
+            description="会删除对应任务和商品资料。"
+            okText="删除"
+            cancelText="取消"
+            okButtonProps={{ danger: true }}
+            onConfirm={() => deleteCatalogRecord(record)}
+          >
+            <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
+          </Popconfirm>
         </Space>
       ),
     },

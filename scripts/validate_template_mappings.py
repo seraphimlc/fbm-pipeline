@@ -117,7 +117,7 @@ def validate_mapping(path: Path, mapping: dict[str, Any], pipeline_dir: Path) ->
     if isinstance(mapping.get("data_row"), int) and mapping["data_row"] <= 0:
         findings.append(Finding("ERROR", rel, "`data_row` 必须是正整数"))
 
-    for optional_dict in ("image_fields", "package_fields"):
+    for optional_dict in ("image_fields", "package_fields", "shipping_template_by_brand"):
         if optional_dict in mapping and not isinstance(mapping[optional_dict], dict):
             findings.append(Finding("ERROR", rel, f"`{optional_dict}` 类型应为 dict"))
 

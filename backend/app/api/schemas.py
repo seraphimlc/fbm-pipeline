@@ -108,6 +108,7 @@ class ProductDetail(ProductResponse):
     generated_files: list[ProductGeneratedFileResponse] = Field(default_factory=list)
     video_folder: ProductFolderEntry | None = None
     aplus_folder: ProductFolderEntry | None = None
+    amazon_export_preview: dict[str, Any] | None = None
 
 
 # ─── ProductData ───
@@ -134,6 +135,7 @@ class ProductDataResponse(BaseModel):
     features: str | None = None
     description: str | None = None
     variants: str | None = None
+    gigab2b_raw_snapshot: str | None = None
     stock: int | None = None
     seller: str | None = None
     origin: str | None = None

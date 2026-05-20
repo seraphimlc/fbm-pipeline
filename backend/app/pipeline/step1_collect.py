@@ -15,6 +15,7 @@ import html
 import httpx
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 from urllib.parse import unquote
 
 from app.config import settings
@@ -403,20 +404,26 @@ def _package_entries_from_api(specification: dict) -> list[dict]:
     unit_weight = "lbs." if "磅" in raw_unit_weight or raw_unit_weight.lower().startswith("lb") else raw_unit_weight
 
     def build_entry(item: dict, fallback_code: str | None = None) -> dict | None:
-        length = item.get("length") or item.get("length_show")
-        width = item.get("width") or item.get("width_show")
-        height = item.get("height") or item.get("height_show")
-        weight = item.get("weight") or item.get("weight_show")
+        length = _parse_dimension_float(item.get("length") or item.get("length_show"))
+        width = _parse_dimension_float(item.get("width") or item.get("width_show"))
+        height = _parse_dimension_float(item.get("height") or item.get("height_show"))
+        weight = _parse_dimension_float(item.get("weight") or item.get("weight_show"))
         if not (length and width and height and weight):
             return None
         code = item.get("sku") or item.get("sub_sku") or item.get("code") or fallback_code or ""
-        qty = item.get("qty") or item.get("quantity") or item.get("package_quantity") or 1
-        dimensions = f"{length} * {width} * {height} {unit_length} {weight} {unit_weight}"
+        qty = _parse_int(item.get("qty") or item.get("quantity") or item.get("package_quantity")) or 1
+        dimensions = f"{length:g} * {width:g} * {height:g} {unit_length} {weight:g} {unit_weight}"
         return {
             "code": str(code),
             "qty": str(qty),
+            "length": length,
+            "width": width,
+            "height": height,
+            "weight_value": weight,
+            "length_unit": unit_length,
+            "weight_unit": unit_weight,
             "dimensions": dimensions,
-            "weight": f"{weight} {unit_weight}",
+            "weight": f"{weight:g} {unit_weight}",
         }
 
     entries = []
@@ -431,6 +438,60 @@ def _package_entries_from_api(specification: dict) -> list[dict]:
             if entry:
                 entries.append(entry)
     return entries
+
+
+def _parse_dimension_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    match = re.search(r"\d+(?:\.\d+)?", str(value).replace(",", ""))
+    return float(match.group(0)) if match else None
+
+
+def _resolve_product_dimensions(data: dict) -> dict[str, float | None]:
+    dimensions = {
+        "length": _parse_dimension_float(data.get("dimensionLength")),
+        "width": _parse_dimension_float(data.get("dimensionWidth")),
+        "height": _parse_dimension_float(data.get("dimensionHeight")),
+    }
+    if not all(dimensions.values()):
+        logger.warning(
+            "[Step1] 大建产品尺寸缺少组装长宽高，产品尺寸不使用包装尺寸兜底: "
+            f"length={data.get('dimensionLength')}, width={data.get('dimensionWidth')}, height={data.get('dimensionHeight')}"
+        )
+    return dimensions
+
+
+def _gigab2b_raw_snapshot(base_data: dict, price_data: dict) -> dict:
+    product_info = base_data.get("product_info") or {}
+    specification = product_info.get("specification") or {}
+    return {
+        "product": {
+            "sku": product_info.get("sku") or specification.get("sku"),
+            "product_name": product_info.get("product_name") or specification.get("product_name"),
+            "brand_name": product_info.get("brand_name"),
+            "product_type": product_info.get("product_type") or specification.get("product_type_name"),
+            "category_info": product_info.get("category_info"),
+            "retail_ready_flag": product_info.get("retail_ready_flag"),
+            "white_labeling_flag": product_info.get("white_labeling_flag"),
+            "return_warranty": product_info.get("return_warranty"),
+            "first_available_date": product_info.get("first_available_date"),
+        },
+        "specification": {
+            "product_dimensions": specification.get("product_dimensions"),
+            "package_size": specification.get("package_size"),
+            "property_infos": specification.get("property_infos"),
+            "origin_place": specification.get("origin_place"),
+            "danger_info": specification.get("danger_info"),
+            "upc": specification.get("upc"),
+        },
+        "pricing": {
+            "base_price_info": price_data.get("base_price_info"),
+            "fulfillment_options": price_data.get("fulfillment_options"),
+            "quantity": price_data.get("quantity"),
+        },
+    }
 
 
 def _api_headers(cookie: str | None, referer: str, *, ajax: bool = True) -> dict[str, str]:
@@ -483,7 +544,8 @@ def _normalize_gigab2b_api_data(gigab2b_pid: str, base_data: dict, price_data: d
     seller_info = base_data.get("seller_info") or {}
     specification = product_info.get("specification") or {}
     props = _property_lookup(specification)
-    dimensions = (specification.get("product_dimensions") or {}).get("assemble_info") or {}
+    product_dimensions = specification.get("product_dimensions") or {}
+    dimensions = product_dimensions.get("assemble_info") or {}
     package_entries = _package_entries_from_api(specification)
     image_urls = _image_urls_from_api(product_info)
 
@@ -511,6 +573,7 @@ def _normalize_gigab2b_api_data(gigab2b_pid: str, base_data: dict, price_data: d
         "dimensionWidth": dimensions.get("width_show"),
         "dimensionHeight": dimensions.get("height_show"),
         "weight": dimensions.get("weight_show"),
+        "_rawProductDimensions": product_dimensions,
         "packages": package_entries,
         "valueTotal": value_total,
         "unitPrice": value_total,
@@ -541,6 +604,7 @@ def _normalize_gigab2b_api_data(gigab2b_pid: str, base_data: dict, price_data: d
         "_gigab2bSellerId": seller_info.get("seller_id"),
         "_gigab2bRetailReady": bool(product_info.get("retail_ready_flag")),
         "_gigab2bApiSource": True,
+        "_gigab2bRawSnapshot": _gigab2b_raw_snapshot(base_data, price_data),
     }
 
     is_available = product_info.get("is_product_available")
@@ -1115,6 +1179,7 @@ async def _collect_product_locked(product_id: int) -> dict:
             data = await _collect_product_data_via_chrome(gigab2b_pid, url)
 
         logger.info(f"[Step1] 提取到商品: {data.get('title', 'N/A')}")
+        resolved_dimensions = _resolve_product_dimensions(data)
 
         collected_item_code = data.get("itemCode")
         duplicate = await find_duplicate_by_item_code(db, collected_item_code, exclude_product_id=product.id)
@@ -1146,9 +1211,9 @@ async def _collect_product_locked(product_id: int) -> dict:
         pd.material = data.get("material")
         pd.filler = data.get("filler")
         pd.product_type = data.get("productType")
-        pd.dimension_length = _parse_float(data.get("dimensionLength"))
-        pd.dimension_width = _parse_float(data.get("dimensionWidth"))
-        pd.dimension_height = _parse_float(data.get("dimensionHeight"))
+        pd.dimension_length = resolved_dimensions.get("length")
+        pd.dimension_width = resolved_dimensions.get("width")
+        pd.dimension_height = resolved_dimensions.get("height")
         pd.weight = _parse_float(data.get("weight"))
         pd.packages = json.dumps(data.get("packages", []), ensure_ascii=False) if data.get("packages") else None
         pd.value_total = _parse_float(data.get("valueTotal"))
@@ -1159,6 +1224,11 @@ async def _collect_product_locked(product_id: int) -> dict:
         pd.features = json.dumps(data.get("features", []), ensure_ascii=False) if data.get("features") else None
         pd.description = data.get("characteristic")  # 大建五点描述
         pd.variants = json.dumps(data.get("variants", []), ensure_ascii=False) if data.get("variants") else None
+        pd.gigab2b_raw_snapshot = (
+            json.dumps(data.get("_gigab2bRawSnapshot"), ensure_ascii=False)
+            if data.get("_gigab2bRawSnapshot")
+            else None
+        )
         pd.stock = _parse_int(data.get("stock"))
         pd.seller = data.get("seller")
         pd.origin = data.get("origin")

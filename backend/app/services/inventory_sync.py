@@ -15,6 +15,12 @@ from app.pipeline.step1_collect import _collect_product_data_via_api, _parse_int
 logger = logging.getLogger(__name__)
 
 _running_batches: dict[int, asyncio.Task] = {}
+GIGAB2B_LOGIN_REQUIRED_ERROR = "大建云仓未登录或登录态已失效，已停止库存同步；请先在 Chrome 登录大建云仓后重试。"
+GIGAB2B_LOGIN_CHECK_SAMPLE_LIMIT = 3
+
+
+class InventorySyncLoginRequired(RuntimeError):
+    pass
 
 
 def is_inventory_batch_running(batch_id: int) -> bool:
@@ -28,6 +34,59 @@ def start_inventory_sync_batch(batch_id: int) -> bool:
     task = asyncio.create_task(_run_batch(batch_id))
     _running_batches[batch_id] = task
     return True
+
+
+def _gigab2b_source_from_catalog(catalog: CatalogProduct) -> tuple[str, str] | None:
+    product = catalog.source_product
+    product_url = catalog.gigab2b_url
+    gigab2b_product_id = catalog.gigab2b_product_id or (product.gigab2b_product_id if product else None)
+    if not product_url or not gigab2b_product_id:
+        return None
+    return product_url, gigab2b_product_id
+
+
+def _looks_like_gigab2b_login_error(exc: Exception) -> bool:
+    text = str(exc)
+    return any(
+        marker in text
+        for marker in (
+            "未能从 Chrome 读取 GigaB2B 登录 Cookie",
+            "GigaB2B API 价格/库存不可见",
+            "疑似登录态失效",
+            "登录态失效",
+            "未登录",
+        )
+    )
+
+
+async def _assert_gigab2b_logged_in_for_sources(sources: list[tuple[str, str]]) -> None:
+    last_non_auth_error: Exception | None = None
+    for product_url, gigab2b_product_id in sources[:GIGAB2B_LOGIN_CHECK_SAMPLE_LIMIT]:
+        try:
+            data, _cookie = await _collect_product_data_via_api(gigab2b_product_id, product_url)
+            if data.get("loginStatus") == "not_logged_in":
+                raise InventorySyncLoginRequired(GIGAB2B_LOGIN_REQUIRED_ERROR)
+            return
+        except InventorySyncLoginRequired:
+            raise
+        except Exception as exc:
+            if _looks_like_gigab2b_login_error(exc):
+                raise InventorySyncLoginRequired(GIGAB2B_LOGIN_REQUIRED_ERROR) from exc
+            last_non_auth_error = exc
+
+    if last_non_auth_error:
+        logger.warning("[Inventory Sync] 大建云仓登录预检未完成，继续逐项同步: %s", last_non_auth_error)
+
+
+async def assert_gigab2b_logged_in_for_inventory(catalog_items: list[CatalogProduct], *, own_workflow: bool = True) -> None:
+    sources = [source for catalog in catalog_items if (source := _gigab2b_source_from_catalog(catalog))]
+    if not sources:
+        return
+    if own_workflow:
+        async with chrome_workflow("inventory_sync_login_check"):
+            await _assert_gigab2b_logged_in_for_sources(sources)
+    else:
+        await _assert_gigab2b_logged_in_for_sources(sources)
 
 
 async def _update_batch_counts(db, batch: InventorySyncBatch) -> None:
@@ -70,6 +129,19 @@ async def _run_batch(batch_id: int) -> None:
                 if not item_ids:
                     await _update_batch_counts(db, batch)
                     return
+                catalog_ids = [item.catalog_product_id for item in batch.items if item.status == "pending"]
+                catalog_result = await db.execute(
+                    select(CatalogProduct)
+                    .options(selectinload(CatalogProduct.source_product))
+                    .where(CatalogProduct.id.in_(catalog_ids))
+                )
+                pending_catalogs = catalog_result.scalars().all()
+
+            try:
+                await assert_gigab2b_logged_in_for_inventory(pending_catalogs, own_workflow=False)
+            except InventorySyncLoginRequired as exc:
+                await _fail_whole_batch(batch_id, str(exc))
+                return
 
             for item_id in item_ids:
                 await _run_item(item_id)

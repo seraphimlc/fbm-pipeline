@@ -121,6 +121,14 @@ const ProductDetail: React.FC = () => {
   const videoFolder = product.video_folder;
   const aplusFolder = product.aplus_folder;
   const packages = parseJson(data?.packages, []);
+  const rawSnapshot = parseJson(data?.gigab2b_raw_snapshot, null);
+  const exportPreview = product.amazon_export_preview || null;
+  const exportPackage = exportPreview?.package_aggregate || null;
+  const rawProductDimensions = rawSnapshot?.specification?.product_dimensions?.assemble_info || {};
+  const rawPackageSize = rawSnapshot?.specification?.package_size || {};
+  const rawPricing = rawSnapshot?.pricing || {};
+  const rawFulfillment = rawPricing?.fulfillment_options || {};
+  const rawQuantity = rawPricing?.quantity || {};
   const features = parseJson(data?.features, []);
   const variants = parseJson(data?.variants, []);
   const pricingDetail = parseJson(data?.pricing_detail, null);
@@ -136,6 +144,9 @@ const ProductDetail: React.FC = () => {
   };
   const amazonTemplateRiskDisplay = amazonTemplateRiskMap[amazonTemplateRisk] || { color: 'default', label: '未检查' };
   const generatedFiles = product.generated_files || [];
+  const dimensionLine = (length?: number | string | null, width?: number | string | null, height?: number | string | null, unit = 'in') => (
+    length != null && width != null && height != null ? `${length} × ${width} × ${height} ${unit}` : '-'
+  );
   const imageAnalysisPayload = parseJson(images?.image_analysis, null);
   const imageReviews = Array.isArray(imageAnalysisPayload)
     ? imageAnalysisPayload
@@ -445,8 +456,11 @@ const ProductDetail: React.FC = () => {
   const packageColumns = [
     { title: '外包装商品', dataIndex: 'code', width: 180, render: (v) => v || '-' },
     { title: '数量', dataIndex: 'qty', width: 90, render: (v) => v || '-' },
-    { title: '外包装尺寸/重量', dataIndex: 'dimensions', render: (v, record) => v || record.weight || '-' },
-    { title: '重量', dataIndex: 'weight', width: 140, render: (v) => v || '-' },
+    { title: '长', dataIndex: 'length', width: 90, render: (v) => numberText(v) },
+    { title: '宽', dataIndex: 'width', width: 90, render: (v) => numberText(v) },
+    { title: '高', dataIndex: 'height', width: 90, render: (v) => numberText(v) },
+    { title: '重量', dataIndex: 'weight_value', width: 100, render: (v, record) => numberText(v ?? record.weight) },
+    { title: '原始文本', dataIndex: 'dimensions', render: (v, record) => v || record.weight || '-' },
   ];
 
   const zipColumns = [
@@ -671,6 +685,74 @@ const ProductDetail: React.FC = () => {
               pagination={false}
               locale={{ emptyText: '暂无外包装信息' }}
             />
+          </Card>
+
+          <Card title="采集原始数据 / 导出预览" size="small" style={{ marginBottom: 16 }}>
+            <Space direction="vertical" style={{ width: '100%' }} size={12}>
+              <Descriptions bordered size="small" column={{ xs: 1, md: 2 }}>
+                <Descriptions.Item label="大建产品尺寸">
+                  {dimensionLine(rawProductDimensions.length_show, rawProductDimensions.width_show, rawProductDimensions.height_show, rawSnapshot?.specification?.product_dimensions?.unit_length || '英寸')}
+                </Descriptions.Item>
+                <Descriptions.Item label="大建产品重量">
+                  {rawProductDimensions.weight_show ? `${rawProductDimensions.weight_show} ${rawSnapshot?.specification?.product_dimensions?.unit_weight || '磅'}` : '-'}
+                </Descriptions.Item>
+                <Descriptions.Item label="系统存储尺寸">
+                  {dimensionLine(data?.dimension_length, data?.dimension_width, data?.dimension_height, '英寸')}
+                </Descriptions.Item>
+                <Descriptions.Item label="系统存储重量">{numberText(data?.weight, ' 磅')}</Descriptions.Item>
+                <Descriptions.Item label="导出包装合计">
+                  {exportPackage?.length != null ? dimensionLine(exportPackage.length, exportPackage.width, exportPackage.height, '英寸') : '-'}
+                </Descriptions.Item>
+                <Descriptions.Item label="导出包装重量">
+                  {exportPackage?.weight != null ? `${exportPackage.weight} 磅` : '-'}
+                </Descriptions.Item>
+                <Descriptions.Item label="Amazon模板">{exportPreview?.output_filename || '-'}</Descriptions.Item>
+                <Descriptions.Item label="配送模板">{exportPreview?.offer?.shipping_template || '-'}</Descriptions.Item>
+                <Descriptions.Item label="导出价格">{money(exportPreview?.offer?.price)}</Descriptions.Item>
+                <Descriptions.Item label="导出库存">{exportPreview?.offer?.quantity ?? '-'}</Descriptions.Item>
+              </Descriptions>
+              <Descriptions bordered size="small" column={{ xs: 1, md: 3 }}>
+                <Descriptions.Item label="货值">{money(data?.value_total)}</Descriptions.Item>
+                <Descriptions.Item label="一件代发物流">{money(data?.shipping_cost)}</Descriptions.Item>
+                <Descriptions.Item label="云送仓物流">
+                  {data?.shipping_cost_min != null || data?.shipping_cost_max != null ? `${money(data?.shipping_cost_min)} - ${money(data?.shipping_cost_max)}` : '-'}
+                </Descriptions.Item>
+                <Descriptions.Item label="大建折扣价">{money(rawPricing?.base_price_info?.discount_price)}</Descriptions.Item>
+                <Descriptions.Item label="处理时效">
+                  {rawFulfillment?.drop_ship?.handling_time ? `${rawFulfillment.drop_ship.handling_time.min_day}-${rawFulfillment.drop_ship.handling_time.max_day} 天` : '-'}
+                </Descriptions.Item>
+                <Descriptions.Item label="发货时效">
+                  {rawFulfillment?.drop_ship?.estimated_ship_day ? `${rawFulfillment.drop_ship.estimated_ship_day.min_day}-${rawFulfillment.drop_ship.estimated_ship_day.max_day} 天` : '-'}
+                </Descriptions.Item>
+                <Descriptions.Item label="大建库存">{rawQuantity?.quantity ?? '-'}</Descriptions.Item>
+                <Descriptions.Item label="组合商品">{rawFulfillment?.is_combo ? '是' : '否'}</Descriptions.Item>
+                <Descriptions.Item label="Retail Ready">{rawSnapshot?.product?.retail_ready_flag ? '是' : '否'}</Descriptions.Item>
+              </Descriptions>
+              {Array.isArray(exportPackage?.warnings) && exportPackage.warnings.length > 0 && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="导出提醒"
+                  description={exportPackage.warnings.join('；')}
+                />
+              )}
+              <Table
+                size="small"
+                columns={[
+                  { title: '子 SKU', dataIndex: 'sku', width: 180, render: (v, r) => v || r.code || '-' },
+                  { title: '数量', dataIndex: 'qty', width: 80, render: (v) => v ?? '-' },
+                  { title: '长', dataIndex: 'length', width: 90, render: (v, r) => numberText(v ?? r.length_inch) },
+                  { title: '宽', dataIndex: 'width', width: 90, render: (v, r) => numberText(v ?? r.width_inch) },
+                  { title: '高', dataIndex: 'height', width: 90, render: (v, r) => numberText(v ?? r.height_inch) },
+                  { title: '重量', dataIndex: 'weight', width: 110, render: (v, r) => numberText(r.weight_value ?? v) },
+                  { title: '箱名', dataIndex: 'box_name', render: (v) => v || '-' },
+                ]}
+                dataSource={Array.isArray(rawPackageSize.combo) && rawPackageSize.combo.length ? rawPackageSize.combo : (Array.isArray(packages) ? packages : [])}
+                rowKey={(record, index) => `${record.sku || record.code || 'package'}-${index}`}
+                pagination={false}
+                locale={{ emptyText: '暂无大建包装明细' }}
+              />
+            </Space>
           </Card>
 
           <Card title="采集特征" size="small" style={{ marginBottom: 16 }}>

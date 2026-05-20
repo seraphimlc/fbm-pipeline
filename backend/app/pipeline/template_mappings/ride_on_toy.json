@@ -4,6 +4,10 @@
   "category_type": "ride_on_toy",
   "template_path": "templates/RIDE_ON_TOY.xlsm",
   "output_filename": "{item_code}_amazon_ride_on_toy_import.xlsm",
+  "shipping_template_by_brand": {
+    "Vindhvisk": "Migrated Template FreeShipping",
+    "Andy店-US": "Migrated Template FreeShipping"
+  },
   "item_type_keyword_options": [
     "玩具和游戏 > 婴幼玩具 > 摇摆木马和动物 (childrens-rocking-horses-and-animals)",
     "玩具和游戏 > 童车、助步、轮滑 > 儿童电瓶车 (childrens-powered-ride-ons)",

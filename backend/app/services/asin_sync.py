@@ -158,7 +158,7 @@ async def _run_item(item_id: int, store: str) -> None:
             await _finish_item(item_id, "failed", error="领星未登录，无法查询 ASIN")
             return
         if lookup.get("status") == "not_found":
-            await _finish_item(item_id, "not_found", error="没查到数据")
+            await _finish_item(item_id, "not_found", error=lookup.get("error") or "没查到数据")
             return
         if lookup.get("status") == "multiple_found":
             await _finish_item(item_id, "multiple_found", error=lookup.get("error") or "匹配到多个 Listing，未写入 ASIN")
@@ -312,6 +312,24 @@ async def _lookup_asin(code: str, store: str) -> dict:
     const style = window.getComputedStyle(el);
     return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
   }};
+  const cleanText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+  const hasDeletedStatusText = (value) => /(?:商品状态|Listing状态|listing状态|刊登状态|销售状态|状态)\\s*[:：]?\\s*(已删除|删除|DELETED)(?:\\s|$|[，,。；;|/])/i.test(value || '');
+  const isInteractiveDelete = (el) => {{
+    const interactive = el.matches('a,button,[role=button]')
+      ? el
+      : (el.querySelector('a,button,[role=button]') || el.closest('a,button,[role=button]'));
+    if (!interactive) return false;
+    return /^删除$/i.test(cleanText(interactive.innerText || interactive.value || interactive.getAttribute('title')));
+  }};
+  const isDeletedListing = (linkedRows, combinedText) => {{
+    if (hasDeletedStatusText(combinedText)) return true;
+    const statusNodes = linkedRows.flatMap(row => Array.from(row.querySelectorAll('td,.ant-table-cell,[role=cell],.ant-tag,.ant-badge-status-text'))).filter(visible);
+    return statusNodes.some(el => {{
+      const value = cleanText(el.innerText || el.textContent || '');
+      if (/^(已删除|DELETED)$/i.test(value)) return true;
+      return /^删除$/i.test(value) && !isInteractiveDelete(el);
+    }});
+  }};
   const text = () => document.body ? document.body.innerText : '';
   if (/登录|login/i.test(text()) && !/Listing|商品编码|产品|销售/.test(text())) {{
     return JSON.stringify({{status:'not_logged_in'}});
@@ -329,26 +347,41 @@ async def _lookup_asin(code: str, store: str) -> dict:
       const rowId = row.getAttribute('rowid') || row.getAttribute('data-rowid');
       const linkedRows = rowId
         ? rows.filter(candidate => (candidate.getAttribute('rowid') || candidate.getAttribute('data-rowid')) === rowId)
-        : [row, row.nextElementSibling].filter(Boolean);
+        : [row, row.nextElementSibling].filter(candidate => candidate && visible(candidate));
       const combined = linkedRows.map(candidate => candidate.innerText || '').join('\\n');
-      if (combined && !matches.includes(combined)) matches.push(combined);
+      if (combined && !matches.some(match => match.text === combined)) {{
+        matches.push({{
+          text: combined,
+          deleted: isDeletedListing(linkedRows, combined)
+        }});
+      }}
     }}
   }}
   if (!matches.length) {{
     if (!norm(bodyText).includes(norm(targetCode))) return JSON.stringify({{status:'not_found'}});
-    matches.push(bodyText);
+    matches.push({{text: bodyText, deleted: hasDeletedStatusText(bodyText)}});
   }}
 
-  const matchedAsins = Array.from(new Set(matches.flatMap(rowText => rowText.match(/\\bB[A-Z0-9]{{9}}\\b/g) || [])));
-  if (matches.length > 1 || matchedAsins.length > 1) {{
+  const activeMatches = matches.filter(match => !match.deleted);
+  if (!activeMatches.length) {{
+    return JSON.stringify({{
+      status:'not_found',
+      matched_count: matches.length,
+      deleted_count: matches.filter(match => match.deleted).length,
+      error:'匹配到的 Listing 是删除状态，未写入 ASIN'
+    }});
+  }}
+
+  const matchedAsins = Array.from(new Set(activeMatches.flatMap(match => match.text.match(/\\bB[A-Z0-9]{{9}}\\b/g) || [])));
+  if (activeMatches.length > 1 || matchedAsins.length > 1) {{
     return JSON.stringify({{
       status:'multiple_found',
-      matched_count: Math.max(matches.length, matchedAsins.length),
+      matched_count: Math.max(activeMatches.length, matchedAsins.length),
       error:'匹配到多个 Listing，请人工确认'
     }});
   }}
 
-  const matchedText = matches[0] || '';
+  const matchedText = activeMatches[0].text || '';
   const asinMatch = matchedText.match(/\\bB[A-Z0-9]{{9}}\\b/);
   if (!asinMatch) {{
     return JSON.stringify({{status:'not_found'}});
