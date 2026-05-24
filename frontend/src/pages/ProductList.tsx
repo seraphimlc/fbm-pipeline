@@ -554,7 +554,7 @@ const ProductList: React.FC = () => {
         >
           <p className="ant-upload-drag-icon"><UploadOutlined /></p>
           <p className="ant-upload-text">选择或拖入本地 Excel</p>
-          <p className="ant-upload-hint">模板列为：原始数据链接、竞品ASIN、UPC</p>
+          <p className="ant-upload-hint">模板列为：原始数据链接、竞品ASIN；UPC 会自动从 UPC池子领取</p>
         </Upload.Dragger>
       </Modal>
     </div>

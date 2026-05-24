@@ -301,7 +301,7 @@ const ConfigPage: React.FC = () => {
       >
         <Descriptions bordered size="small" column={2}>
           <Descriptions.Item label="LLM API">{yesNo(config.llm_api_configured)}</Descriptions.Item>
-          <Descriptions.Item label="VLM API">{yesNo(config.vlm_api_configured)}</Descriptions.Item>
+          <Descriptions.Item label="图片分析 API">{yesNo(config.vlm_api_configured)}</Descriptions.Item>
           <Descriptions.Item label="图片 API">{yesNo(config.gpt_image_api_configured)}</Descriptions.Item>
           <Descriptions.Item label="SellerSprite">{yesNo(config.sellersprite_configured)}</Descriptions.Item>
           <Descriptions.Item label="图片通道">{config.gpt_image_api_provider}</Descriptions.Item>

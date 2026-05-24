@@ -31,6 +31,47 @@ class ProductUpdate(BaseModel):
     listing_primary_keyword: str | None = None
 
 
+class UpcPoolImportRequest(BaseModel):
+    text: str = Field(..., min_length=1)
+
+
+class UpcPoolItemResponse(BaseModel):
+    id: int
+    upc: str
+    status: str
+    source: str | None = None
+    product_id: int | None = None
+    bound_item_code: str | None = None
+    bound_source_product_id: str | None = None
+    bound_source_url: str | None = None
+    bound_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class UpcPoolSummary(BaseModel):
+    total: int
+    available: int
+    bound: int
+
+
+class UpcPoolImportResponse(BaseModel):
+    added: int
+    duplicated: int
+    invalid: list[str] = Field(default_factory=list)
+    summary: UpcPoolSummary
+
+
+class PaginatedUpcPoolItems(BaseModel):
+    items: list[UpcPoolItemResponse]
+    total: int
+    page: int
+    page_size: int
+    summary: UpcPoolSummary
+
+
 class AplusRegenerateRequest(BaseModel):
     module_position: int = Field(..., ge=1)
     reason: str = Field(..., min_length=1, max_length=2000)

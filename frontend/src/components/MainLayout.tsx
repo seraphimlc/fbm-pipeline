@@ -5,6 +5,7 @@ import {
   ShoppingOutlined,
   CloudSyncOutlined,
   SyncOutlined,
+  DatabaseOutlined,
   PictureOutlined,
   PlusCircleOutlined,
   SettingOutlined,
@@ -24,6 +25,7 @@ const MainLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     { key: '/inventory-sync', icon: <CloudSyncOutlined />, label: '库存同步' },
     { key: '/asin-sync', icon: <SyncOutlined />, label: 'ASIN同步' },
     { key: '/aplus-upload', icon: <PictureOutlined />, label: 'A+上传' },
+    { key: '/upc-pool', icon: <DatabaseOutlined />, label: 'UPC池子' },
     { key: '/products/new', icon: <PlusCircleOutlined />, label: '创建任务' },
     { key: '/config', icon: <SettingOutlined />, label: '系统配置' },
   ];

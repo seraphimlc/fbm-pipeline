@@ -1,5 +1,6 @@
 import re
 from dataclasses import dataclass
+from urllib.parse import parse_qs, urlparse
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,10 +29,15 @@ def field_label(field: str) -> str:
 def extract_gigab2b_product_id(url: str | None) -> str | None:
     if not url:
         return None
+    parsed = urlparse(url)
+    product_id = (parse_qs(parsed.query).get("product_id") or [None])[0]
+    if product_id:
+        return product_id.strip() or None
+
     patterns = (
-        r"[?&]product_id=(\d+)",
-        r"/product/detail/(\d+)",
-        r"/product-detail/(\d+)",
+        r"[?&]product_id=([A-Za-z0-9_-]+)",
+        r"/product/detail/([A-Za-z0-9_-]+)",
+        r"/product-detail/([A-Za-z0-9_-]+)",
     )
     for pattern in patterns:
         match = re.search(pattern, url)

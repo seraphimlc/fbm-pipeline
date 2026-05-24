@@ -12,6 +12,7 @@ from app.models.models import (
     ProductImage,
     ProductAplus,
     ProductFile,
+    UpcPoolItem,
 )
 
 __all__ = [
@@ -28,4 +29,5 @@ __all__ = [
     "ProductImage",
     "ProductAplus",
     "ProductFile",
+    "UpcPoolItem",
 ]

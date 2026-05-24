@@ -36,6 +36,27 @@ async def init_db():
                 await conn.execute(text(f"ALTER TABLE products ADD COLUMN {column_name} {column_type}"))
 
         await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS upc_pool_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                upc VARCHAR(32) NOT NULL UNIQUE,
+                status VARCHAR(20),
+                source VARCHAR(50),
+                product_id INTEGER,
+                bound_item_code VARCHAR(100),
+                bound_source_product_id VARCHAR(50),
+                bound_source_url TEXT,
+                bound_at DATETIME,
+                created_at DATETIME,
+                updated_at DATETIME,
+                FOREIGN KEY(product_id) REFERENCES products(id)
+            )
+        """))
+        await conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_upc_pool_items_status_id
+            ON upc_pool_items(status, id)
+        """))
+
+        await conn.execute(text("""
             CREATE TABLE IF NOT EXISTS product_files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 product_id INTEGER NOT NULL,

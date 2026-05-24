@@ -74,3 +74,8 @@ make test-project-rules
 - 类目 key 重复但不是预期覆盖。
 - 新类目只加了模板文件，没有加匹配逻辑。
 - 修改 `fixed_values` 时误删了合规、配送或 `product_type` 必填字段。
+
+## 当前特殊类目
+
+- `vindhvisk_bicycle.json` 使用 `BICYCLE_CYCLING.xlsm`，覆盖 Kids/Folding/Road/Cruiser/Mountain/Electric/Cycling 等自行车任务。Step10 会先按来源叶子类目匹配细分 browse node，再用标题中的 electric/folding/mountain/cruiser/BMX 等关键词兜底。
+- 电动自行车会自动补电压、瓦数、锂电池包装等可从标题识别的字段；电池重量、UL/认证编号、FCC/SDoC 仍需要发布前人工复核。

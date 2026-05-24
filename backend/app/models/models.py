@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Integer, String, Float, Text, DateTime, ForeignKey
+from sqlalchemy import Integer, String, Float, Text, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -40,6 +40,23 @@ class Product(Base):
     @property
     def source_item_id(self) -> str | None:
         return self.gigab2b_product_id
+
+
+class UpcPoolItem(Base):
+    __tablename__ = "upc_pool_items"
+    __table_args__ = (UniqueConstraint("upc", name="uq_upc_pool_items_upc"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    upc: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="available")
+    source: Mapped[str | None] = mapped_column(String(50))
+    product_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("products.id"))
+    bound_item_code: Mapped[str | None] = mapped_column(String(100))
+    bound_source_product_id: Mapped[str | None] = mapped_column(String(50))
+    bound_source_url: Mapped[str | None] = mapped_column(Text)
+    bound_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
 class CatalogProduct(Base):
@@ -289,7 +306,7 @@ class ProductImage(Base):
     main_image_summary: Mapped[str | None] = mapped_column(Text)
 
     analyzed_at: Mapped[datetime | None] = mapped_column(DateTime)
-    vlm_model: Mapped[str] = mapped_column(String(50), default="qwen3.6-plus")
+    vlm_model: Mapped[str] = mapped_column(String(50), default="gpt-5.5")
 
     product: Mapped["Product"] = relationship("Product", back_populates="images")
 

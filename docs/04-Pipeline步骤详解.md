@@ -417,7 +417,7 @@ document.querySelectorAll('#wayfinding-breadcrumbs_container li a')
 `backend/app/pipeline/step6_image.py`
 
 ### 职责
-使用 VLM（Qwen3.6-plus）分析商品图片，选择合规主图和副图序列。
+使用 VLM（默认 GPT-5.5 多模态）分析商品图片，选择合规主图和副图序列。
 
 ### 输入
 | 字段 | 来源 | 说明 |

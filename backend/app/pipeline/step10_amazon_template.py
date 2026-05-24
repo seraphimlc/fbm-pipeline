@@ -1,7 +1,7 @@
 """
 模块10：Amazon 导入模板 — 将商品数据写入类目专用 Excel 模板
 
-当前支持 Vindhvisk / Sofas & Couches，以及儿童骑乘玩具 RIDE_ON_TOY。
+当前支持 Vindhvisk / Sofas & Couches、Vindhvisk / Bicycle，以及儿童骑乘玩具 RIDE_ON_TOY。
 模板字段映射保存在 template_mappings/*.json，运行时不依赖大模型。
 """
 
@@ -29,14 +29,61 @@ from sqlalchemy.orm import selectinload
 logger = logging.getLogger(__name__)
 
 DATA_ROW = 8
-AMAZON_TEMPLATE_LOGIC_VERSION = "2026-05-20-free-shipping-dimensions-v1"
+AMAZON_TEMPLATE_LOGIC_VERSION = "2026-05-24-sofa-seating-chaise-v1"
 SINGLE_SEAT_WEIGHT_CAPACITY_LBS = 250
 DEFAULT_WEIGHT_CAPACITY_LBS = 500
 PIPELINE_DIR = Path(__file__).parent
 MAPPING_DIR = PIPELINE_DIR / "template_mappings"
 TEMPLATE_DIR = PIPELINE_DIR / "templates"
+SOFA_MAPPING = MAPPING_DIR / "vindhvisk_sofa.json"
+BICYCLE_MAPPING = MAPPING_DIR / "vindhvisk_bicycle.json"
+ANDY_STORAGE_MAPPING = MAPPING_DIR / "andy_storage_furniture.json"
+ANDY_SHELF_TABLE_MAPPING = MAPPING_DIR / "andy_shelf_table_cabinet_gate.json"
+BICYCLE_LEAF_CATEGORIES = (
+    "Kids' Bikes",
+    "Cycling",
+    "Folding Bikes",
+    "Cruiser Bikes",
+    "Electric Bicycles",
+    "Mountain Bikes",
+    "Road Bikes",
+)
 BRAND_TEMPLATE_MAPPINGS = {
-    ("Vindhvisk", "Sofas & Couches"): MAPPING_DIR / "vindhvisk_sofa.json",
+    ("Vindhvisk", "Sofas & Couches"): SOFA_MAPPING,
+    **{("Vindhvisk", category): BICYCLE_MAPPING for category in BICYCLE_LEAF_CATEGORIES},
+}
+GENERIC_TEMPLATE_MAPPINGS = (
+    ANDY_SHELF_TABLE_MAPPING,
+    ANDY_STORAGE_MAPPING,
+)
+SHELF_TABLE_LEAF_CATEGORIES = {
+    "Bookcases, Cabinets & Shelves",
+    "Nightstands",
+    "Bookcases",
+    "Table & Chair Sets",
+    "Furniture-Style Crates",
+    "Coffee Tables",
+    "Door & Stair Gates",
+    "Litter Box Enclosures",
+    "Tables",
+    "Free Standing Shoe Racks",
+    "Storage Benches",
+    "Living Room Table Sets",
+}
+STORAGE_FURNITURE_LEAF_CATEGORIES = {
+    "Storage Cabinets",
+    "Lidded Storage Bins",
+    "Over-the-Toilet Storage",
+    "Storage Drawer Units",
+    "Toy Chests & Organizers",
+    "Armoires & Dressers",
+    "Buffets & Sideboards",
+    "Chests & Trunks",
+    "Dressers",
+    "Medicine Cabinets",
+    "Step Stools",
+    "Storage Boxes",
+    "Vanities",
 }
 RIDE_ON_TOY_MAPPING = MAPPING_DIR / "ride_on_toy.json"
 RIDE_ON_TOY_CATEGORY_MARKERS = RIDE_ON_CATEGORY_MARKERS
@@ -55,6 +102,26 @@ def _resolve_template_path(template_path: str | Path) -> Path:
     return (PIPELINE_DIR / path).resolve()
 
 
+def _mapping_has_category_marker(mapping_path: Path, category_text: str) -> bool:
+    if not mapping_path.exists():
+        return False
+    try:
+        mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    for option in mapping.get("browse_category_options") or []:
+        if not isinstance(option, dict):
+            continue
+        candidates = [
+            option.get("node"),
+            option.get("path"),
+            *(option.get("markers") or []),
+        ]
+        if any(str(candidate or "").lower() in category_text for candidate in candidates if candidate):
+            return True
+    return False
+
+
 def _load_template_mapping(product: Product, pd: ProductData) -> dict:
     key = (product.brand or "", pd.leaf_category or "")
     mapping_path = BRAND_TEMPLATE_MAPPINGS.get(key)
@@ -67,26 +134,22 @@ def _load_template_mapping(product: Product, pd: ProductData) -> dict:
             pd.title,
         )
     ).lower()
+    if not mapping_path and (product.brand or "") == "Vindhvisk" and _mapping_has_category_marker(BICYCLE_MAPPING, category_text):
+        mapping_path = BICYCLE_MAPPING
     if not mapping_path and any(marker in category_text for marker in RIDE_ON_TOY_CATEGORY_MARKERS):
         mapping_path = RIDE_ON_TOY_MAPPING
     if not mapping_path and (product.brand or "") == "Vindhvisk":
-        sofa_mapping_path = MAPPING_DIR / "vindhvisk_sofa.json"
-        if sofa_mapping_path.exists():
-            try:
-                sofa_mapping = json.loads(sofa_mapping_path.read_text(encoding="utf-8"))
-            except Exception:
-                sofa_mapping = {}
-            for option in sofa_mapping.get("browse_category_options") or []:
-                if not isinstance(option, dict):
-                    continue
-                candidates = [
-                    option.get("node"),
-                    option.get("path"),
-                    *(option.get("markers") or []),
-                ]
-                if any(str(candidate or "").lower() in category_text for candidate in candidates if candidate):
-                    mapping_path = sofa_mapping_path
-                    break
+        if _mapping_has_category_marker(SOFA_MAPPING, category_text):
+            mapping_path = SOFA_MAPPING
+    if not mapping_path and pd.leaf_category in SHELF_TABLE_LEAF_CATEGORIES:
+        mapping_path = ANDY_SHELF_TABLE_MAPPING
+    if not mapping_path and pd.leaf_category in STORAGE_FURNITURE_LEAF_CATEGORIES:
+        mapping_path = ANDY_STORAGE_MAPPING
+    if not mapping_path:
+        for candidate in GENERIC_TEMPLATE_MAPPINGS:
+            if _mapping_has_category_marker(candidate, category_text):
+                mapping_path = candidate
+                break
     if not mapping_path:
         raise ValueError(f"未配置品牌/类目导入模板映射: brand={product.brand or '未知'}, leaf_category={pd.leaf_category or '未知'}")
     with mapping_path.open("r", encoding="utf-8") as f:
@@ -244,12 +307,20 @@ def _index_template_columns(ws) -> dict[str, str]:
     return columns
 
 
-def _set(ws, columns: dict[str, str], attr: str, value: Any) -> None:
+def _mapping_data_row(mapping: dict) -> int:
+    try:
+        data_row = int(mapping.get("data_row") or DATA_ROW)
+    except (TypeError, ValueError):
+        return DATA_ROW
+    return data_row if data_row > 0 else DATA_ROW
+
+
+def _set(ws, columns: dict[str, str], data_row: int, attr: str, value: Any) -> None:
     if value in (None, ""):
         return
     col = columns.get(attr)
     if col:
-        ws[f"{col}{DATA_ROW}"] = value
+        ws[f"{col}{data_row}"] = value
 
 
 def _nonempty(value: Any) -> bool:
@@ -460,10 +531,11 @@ def _existing_template_image_urls(pd: ProductData, mapping: dict) -> dict[str, s
         wb = load_workbook(path, data_only=True, read_only=True, keep_vba=True)
         ws = wb["Template"]
         columns = _index_template_columns(ws)
+        data_row = _mapping_data_row(mapping)
         urls: dict[str, str] = {}
         for field in _image_field_sequence(mapping):
             col = columns.get(field)
-            value = ws[f"{col}{DATA_ROW}"].value if col else None
+            value = ws[f"{col}{data_row}"].value if col else None
             if isinstance(value, str) and value.strip():
                 urls[field] = value.strip()
         return urls
@@ -548,12 +620,12 @@ def _upload_listing_images(
     return fill, warnings, uploaded
 
 
-def _remove_column_validations(ws, column_letter: str) -> None:
+def _remove_column_validations(ws, column_letter: str, data_row: int) -> None:
     if not ws.data_validations:
         return
     kept = []
-    target_prefix = f"{column_letter}{DATA_ROW}:"
-    target_cell = f"{column_letter}{DATA_ROW}"
+    target_prefix = f"{column_letter}{data_row}:"
+    target_cell = f"{column_letter}{data_row}"
     for validation in ws.data_validations.dataValidation:
         sqref = str(validation.sqref)
         if target_prefix in sqref or target_cell in sqref:
@@ -738,7 +810,7 @@ def _included_components(pd: ProductData, seating: int | None) -> str:
 
 def _seating_capacity(pd: ProductData) -> int | None:
     text = " ".join([pd.title or "", pd.listing_title or "", pd.product_type or "", pd.description or ""])
-    match = re.search(r"(\d+)\s*(?:Seat|Seater|seat|seater)", text)
+    match = re.search(r"\b(\d+)\s*[- ]?\s*(?:Seat|Seater|seat|seater)\b", text)
     if match:
         return int(match.group(1))
     variants = _json_loads(pd.variants, [])
@@ -748,9 +820,30 @@ def _seating_capacity(pd: ProductData) -> int | None:
             item_text = str(item.get("text") if isinstance(item, dict) else item)
             if color and color not in item_text.lower():
                 continue
-            match = re.search(r"(\d+)\s*(?:Seat|Seater|seat|seater)", item_text)
+            match = re.search(r"\b(\d+)\s*[- ]?\s*(?:Seat|Seater|seat|seater)\b", item_text)
             if match:
                 return int(match.group(1))
+    return None
+
+
+def _estimated_sofa_seating_capacity(pd: ProductData) -> int | None:
+    explicit = _seating_capacity(pd)
+    if explicit:
+        return explicit
+
+    text = _furniture_match_text(pd)
+    if any(marker in text for marker in ("loveseat", "love seat", "2-piece", "2 piece")):
+        return 2
+    if any(marker in text for marker in ("sofa bed", "futon", "convertible")):
+        return 2
+    if "sectional" in text or "l shape" in text or "l-shaped" in text or "modular" in text:
+        return 3
+
+    longest_side = max((pd.dimension_length or 0), (pd.dimension_width or 0))
+    if longest_side >= 96:
+        return 3
+    if longest_side >= 60:
+        return 2
     return None
 
 
@@ -861,6 +954,8 @@ def _source_selected_furniture_option(options: list[Any], pd: ProductData) -> di
     for option in options:
         if not isinstance(option, dict) or option.get("node") not in high_confidence_nodes:
             continue
+        if option.get("product_type") == "CHAIR" and _oversized_for_chair_template(pd):
+            continue
         candidates = [
             option.get("node"),
             option.get("path"),
@@ -869,6 +964,12 @@ def _source_selected_furniture_option(options: list[Any], pd: ProductData) -> di
         if any(str(candidate or "").lower() in source_text for candidate in candidates if candidate):
             return option
     return None
+
+
+def _oversized_for_chair_template(pd: ProductData) -> bool:
+    longest_side = max((pd.dimension_length or 0), (pd.dimension_width or 0))
+    depth_side = min((pd.dimension_length or 0), (pd.dimension_width or 0))
+    return longest_side > 40 or depth_side > 35.04
 
 
 def _looks_like_sofa(pd: ProductData) -> bool:
@@ -895,9 +996,7 @@ def _looks_like_sofa(pd: ProductData) -> bool:
     # Amazon returned CHAIR dimension warnings for 62.6 x 48.23 in. Sofa-like
     # furniture should not be squeezed into living-room-chairs just because the
     # supplier leaf category says so.
-    longest_side = max((pd.dimension_length or 0), (pd.dimension_width or 0))
-    depth_side = min((pd.dimension_length or 0), (pd.dimension_width or 0))
-    return longest_side > 40 or depth_side > 35.04
+    return _oversized_for_chair_template(pd)
 
 
 def _preferred_sofa_node(pd: ProductData) -> str:
@@ -991,6 +1090,717 @@ def _apply_furniture_category_fill(fill: dict[str, Any], mapping: dict, pd: Prod
     else:
         fill["sofa_type[marketplace_id=ATVPDKIKX0DER]#1.value"] = _sofa_type_value(pd)
     return option, warnings
+
+
+def _option_match_score(option: dict[str, Any], pd: ProductData) -> int:
+    source_text = _source_category_text(pd)
+    title_text = _furniture_match_text(pd)
+    score = 0
+    for candidate in [option.get("node"), option.get("path")]:
+        candidate_text = str(candidate or "").lower().strip()
+        if not candidate_text:
+            continue
+        if candidate_text in source_text:
+            score += 45 + min(len(candidate_text), 45)
+        if candidate_text in title_text:
+            score += 35 + min(len(candidate_text), 35)
+
+    for marker in option.get("markers") or []:
+        marker_text = str(marker or "").lower().strip()
+        if not marker_text:
+            continue
+        if marker_text in source_text:
+            score += 45 + min(len(marker_text), 45)
+        if marker_text in title_text:
+            score += 65 + min(len(marker_text), 45)
+    return score
+
+
+def _select_general_category_option(mapping: dict, pd: ProductData) -> dict[str, Any] | None:
+    options = mapping.get("browse_category_options") or []
+    if not isinstance(options, list):
+        return None
+
+    best: tuple[int, int, dict[str, Any]] | None = None
+    for index, option in enumerate(options):
+        if not isinstance(option, dict):
+            continue
+        score = _option_match_score(option, pd)
+        if score and (best is None or score > best[0]):
+            best = (score, index, option)
+    if best:
+        return best[2]
+
+    return options[0] if options and isinstance(options[0], dict) else None
+
+
+def _field(fill: dict[str, Any], fields: dict[str, Any], key: str, value: Any) -> None:
+    target = fields.get(key)
+    if not target:
+        return
+    for field in _flatten_mapping_values(target):
+        if _nonempty(value):
+            fill[field] = value
+            return
+
+
+def _fields(fill: dict[str, Any], fields: dict[str, Any], key: str, values: list[Any]) -> None:
+    targets = _flatten_mapping_values(fields.get(key))
+    for field, value in zip(targets, values):
+        if _nonempty(value):
+            fill[field] = value
+
+
+def _size_text(pd: ProductData) -> str | None:
+    if pd.dimension_length and pd.dimension_width and pd.dimension_height:
+        return f'{pd.dimension_length:g}" x {pd.dimension_width:g}" x {pd.dimension_height:g}"'
+    return None
+
+
+def _count_from_text(pd: ProductData, nouns: tuple[str, ...]) -> int | None:
+    text = _furniture_match_text(pd)
+    pattern = r"\b(\d+)[ -]*(?:" + "|".join(re.escape(noun) for noun in nouns) + r")s?\b"
+    match = re.search(pattern, text)
+    if match:
+        return int(match.group(1))
+    words = {
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "four": 4,
+        "five": 5,
+        "six": 6,
+        "seven": 7,
+        "eight": 8,
+    }
+    word_pattern = r"\b(" + "|".join(words) + r")[ -]*(?:" + "|".join(re.escape(noun) for noun in nouns) + r")s?\b"
+    match = re.search(word_pattern, text)
+    return words.get(match.group(1)) if match else None
+
+
+def _room_values(pd: ProductData) -> list[str]:
+    text = _furniture_match_text(pd)
+    rooms: list[str] = []
+    for marker, room in (
+        ("bathroom", "Bathroom"),
+        ("bedroom", "Bedroom"),
+        ("living room", "Living Room"),
+        ("livingroom", "Living Room"),
+        ("kitchen", "Kitchen"),
+        ("entryway", "Entryway"),
+        ("hallway", "Hallway"),
+        ("nursery", "Nursery"),
+        ("playroom", "Kids Room"),
+        ("kids room", "Kids Room"),
+        ("office", "Home Office"),
+        ("classroom", "Classroom"),
+        ("patio", "Patio"),
+    ):
+        if marker in text and room not in rooms:
+            rooms.append(room)
+    return rooms[:5] or ["Living Room"]
+
+
+def _use_values(pd: ProductData, option: dict[str, Any] | None) -> list[str]:
+    text = _furniture_match_text(pd)
+    uses: list[str] = []
+    for marker, value in (
+        ("book", "Books"),
+        ("toy", "Toy Storage"),
+        ("shoe", "Shoes"),
+        ("bathroom", "Bathroom Storage"),
+        ("kitchen", "Kitchen Storage"),
+        ("litter", "Cat Litter Box"),
+        ("dog", "Dog Crate"),
+        ("pet", "Pet Enclosure"),
+        ("gate", "Safety Gate"),
+        ("coffee table", "Coffee Table"),
+        ("dining", "Dining"),
+        ("nightstand", "Bedside Storage"),
+        ("dresser", "Clothing Storage"),
+        ("vanity", "Makeup"),
+    ):
+        if marker in text and value not in uses:
+            uses.append(value)
+    if not uses and option:
+        leaf = str(option.get("node") or option.get("path") or "Home Storage").replace("-", " ").title()
+        uses.append(leaf[:80])
+    return uses[:5]
+
+
+def _material_from_product(pd: ProductData) -> str:
+    return (pd.material or "").strip() or _frame_material_value(pd)
+
+
+def _general_weight_capacity(pd: ProductData) -> int:
+    text = _furniture_match_text(pd)
+    if any(marker in text for marker in ("bench", "seat", "stool")):
+        return 250
+    if any(marker in text for marker in ("table", "shelf", "bookcase", "cabinet", "dresser")):
+        return 100
+    return 50
+
+
+def _apply_general_template_fill(fill: dict[str, Any], fields: dict[str, Any], mapping: dict, pd: ProductData) -> list[str]:
+    warnings: list[str] = []
+    option = _select_general_category_option(mapping, pd)
+    if option:
+        fill["product_type#1.value"] = option.get("product_type") or fill.get("product_type#1.value")
+        fill["item_type_keyword[marketplace_id=ATVPDKIKX0DER]#1.value"] = _amazon_item_type_keyword(option)
+    else:
+        warnings.append("新家具/收纳模板未匹配到细分类目，沿用映射默认类目。")
+
+    material = _material_from_product(pd)
+    frame_material = _frame_material_value(pd)
+    shape = "Round" if any(marker in _furniture_match_text(pd) for marker in ("round", "circle", "circular")) else "Rectangular"
+    text = _furniture_match_text(pd)
+
+    _field(fill, fields, "material", material)
+    _field(fill, fields, "color", pd.color)
+    _field(fill, fields, "size", _size_text(pd))
+    _field(fill, fields, "part_number", pd.item_code)
+    _field(fill, fields, "number_of_items", 1)
+    _field(fill, fields, "number_of_pieces", _count_from_text(pd, ("piece", "pc")) or 1)
+    _field(fill, fields, "number_of_packs", 1)
+    _field(fill, fields, "item_shape", shape)
+    _field(fill, fields, "container_shape", shape)
+    _field(fill, fields, "unit_count", 1)
+    _field(fill, fields, "unit_count_type", "Count")
+    _field(fill, fields, "included_components", (pd.leaf_category or "Furniture"))
+    _field(fill, fields, "is_assembly_required", "Yes")
+    _field(fill, fields, "assembly_instructions", "Assembly required. Follow the included instructions before use.")
+    _field(fill, fields, "assembly_instructions_description", "Assembly required. Follow the included instructions before use.")
+    _field(fill, fields, "frame_material", frame_material)
+    _field(fill, fields, "frame_material_structured", frame_material)
+    _field(fill, fields, "top_material", material)
+    _field(fill, fields, "base_material", frame_material)
+    _field(fill, fields, "back_material", material)
+    _field(fill, fields, "case_material", material)
+    _field(fill, fields, "furniture_finish", pd.color)
+    _field(fill, fields, "finish_type", "Painted" if pd.color else None)
+    _field(fill, fields, "mounting_type", "Freestanding" if "wall" not in text and "mounted" not in text else "Wall Mount")
+    _field(fill, fields, "weight_capacity_maximum", _general_weight_capacity(pd))
+    _field(fill, fields, "weight_capacity_maximum_unit", "Pounds")
+    _field(fill, fields, "maximum_weight_recommendation", _general_weight_capacity(pd))
+    _field(fill, fields, "maximum_weight_recommendation_unit", "Pounds")
+    _field(fill, fields, "number_of_drawers", _count_from_text(pd, ("drawer",)))
+    _field(fill, fields, "number_of_doors", _count_from_text(pd, ("door",)))
+    _field(fill, fields, "number_of_shelves", _count_from_text(pd, ("shelf", "shelves", "tier")))
+    _field(fill, fields, "number_of_levels", _count_from_text(pd, ("tier", "level")))
+    _field(fill, fields, "number_of_racks", _count_from_text(pd, ("rack",)))
+    _field(fill, fields, "number_of_steps", _count_from_text(pd, ("step",)) or (2 if "step stool" in text else None))
+    _field(fill, fields, "pet_type", "Dog" if "dog" in text else ("Cat" if "cat" in text or "litter" in text else None))
+    _field(fill, fields, "dog_breed_size", "Small" if "small" in text else ("Medium" if "medium" in text else None))
+    _field(fill, fields, "indoor_outdoor_usage", "Indoor")
+    _field(fill, fields, "table_design", "Coffee Table" if "coffee table" in text else ("Dining Table" if "dining" in text else None))
+    _field(fill, fields, "target_audience", "Children" if any(marker in text for marker in ("kids", "children", "child", "toddler", "baby")) else "Adult")
+
+    if pd.dimension_length and pd.dimension_width and pd.dimension_height:
+        for prefix in ("item_lwh", "item_dwh", "item_dimensions"):
+            _field(fill, fields, f"{prefix}_length_value", pd.dimension_length)
+            _field(fill, fields, f"{prefix}_length_unit", "Inches")
+            _field(fill, fields, f"{prefix}_width_value", pd.dimension_width)
+            _field(fill, fields, f"{prefix}_width_unit", "Inches")
+            _field(fill, fields, f"{prefix}_height_value", pd.dimension_height)
+            _field(fill, fields, f"{prefix}_height_unit", "Inches")
+        _field(fill, fields, "item_width_value", pd.dimension_width)
+        _field(fill, fields, "item_width_unit", "Inches")
+        _field(fill, fields, "item_length_value", pd.dimension_length)
+        _field(fill, fields, "item_length_unit", "Inches")
+        _field(fill, fields, "item_depth", f"{pd.dimension_width:g} Inches")
+        _field(fill, fields, "base_width_value", pd.dimension_width)
+        _field(fill, fields, "base_width_unit", "Inches")
+    else:
+        warnings.append("商品尺寸缺少长宽高，模板尺寸列只能部分填写。")
+
+    if pd.weight:
+        _field(fill, fields, "item_weight_value", pd.weight)
+        _field(fill, fields, "item_weight_unit", "Pounds")
+
+    _fields(fill, fields, "room_type", _room_values(pd))
+    uses = _use_values(pd, option)
+    _fields(fill, fields, "recommended_uses_for_product", uses)
+    _fields(fill, fields, "specific_uses_for_product", uses)
+    return warnings
+
+
+def _set_sequence_fields(fill: dict[str, Any], field_names: Any, values: list[Any]) -> None:
+    fields = _flatten_mapping_values(field_names)
+    for field, value in zip(fields, values):
+        if _nonempty(value):
+            fill[field] = value
+
+
+def _bicycle_match_text(pd: ProductData) -> str:
+    text_values = [
+        pd.leaf_category,
+        pd.categories,
+        pd.product_type,
+        pd.title,
+        pd.listing_title,
+        pd.description,
+        pd.features,
+        pd.variants,
+        _facts_text(pd),
+    ]
+    return " ".join(str(value or "") for value in text_values).lower()
+
+
+def _select_bicycle_category_option(mapping: dict, pd: ProductData) -> dict[str, Any] | None:
+    options = mapping.get("browse_category_options") or []
+    if not isinstance(options, list):
+        return None
+
+    source_text = _source_category_text(pd)
+    if source_text:
+        best: tuple[int, int, dict[str, Any]] | None = None
+        for index, option in enumerate(options):
+            if not isinstance(option, dict):
+                continue
+            score = 0
+            candidates = [
+                option.get("node"),
+                option.get("path"),
+                *(option.get("markers") or []),
+            ]
+            for candidate in candidates:
+                candidate_text = str(candidate or "").lower().strip()
+                if candidate_text and candidate_text in source_text:
+                    score += 50 + min(len(candidate_text), 50)
+            if score and (best is None or score > best[0]):
+                best = (score, index, option)
+        if best:
+            return best[2]
+
+    text = _bicycle_match_text(pd)
+    preferred_nodes: tuple[str, ...]
+    if any(marker in text for marker in ("electric bicycle", "electric bike", "e-bike", "ebike", "500w", "750w", "48v", "电动自行车")):
+        preferred_nodes = ("electric-bicycles",)
+    elif any(marker in text for marker in ("folding bike", "foldable bike", "folding bicycle", "折叠自行车")):
+        preferred_nodes = ("folding-bicycles",)
+    elif any(marker in text for marker in ("freestyle", "bmx")):
+        preferred_nodes = ("freestyle-bmx-bicycles", "bmx-bicycles")
+    elif any(marker in text for marker in ("fat tire", "fat tyre", "fat bike", "胖胎")):
+        preferred_nodes = ("fat-bicycles",)
+    elif any(marker in text for marker in ("kids mountain", "children mountain", "girls mountain", "boys mountain")):
+        preferred_nodes = ("childrens-mountain-bicycles",)
+    elif "mountain" in text or "mtb" in text:
+        preferred_nodes = ("mountain-bicycles",)
+    elif "road bike" in text or "road bicycle" in text:
+        preferred_nodes = ("road-bicycles",)
+    elif any(marker in text for marker in ("cruiser", "city bike", "commuter", "step-through", "comfort bike")):
+        preferred_nodes = ("cruiser-bicycles", "comfort-bicycles")
+    elif any(marker in text for marker in ("balance bike", "balance bicycle")):
+        preferred_nodes = ("childrens-balance-bikes",)
+    elif _bicycle_is_child(pd):
+        preferred_nodes = ("childrens-bicycles",)
+    else:
+        preferred_nodes = ("cruiser-bicycles",)
+
+    for node in preferred_nodes:
+        option = _find_browse_option(options, node)
+        if option:
+            return option
+
+    best: tuple[int, int, dict[str, Any]] | None = None
+    for index, option in enumerate(options):
+        if not isinstance(option, dict):
+            continue
+        score = 0
+        node = str(option.get("node") or "").lower()
+        path = str(option.get("path") or "").lower()
+        if node and node in text:
+            score += 40
+        if path and path in text:
+            score += 40
+        for marker in option.get("markers") or []:
+            marker_text = str(marker or "").lower().strip()
+            if marker_text and marker_text in text:
+                score += 20 + min(len(marker_text), 30)
+        if score and (best is None or score > best[0]):
+            best = (score, index, option)
+    if best:
+        return best[2]
+    return _find_browse_option(options, "childrens-bicycles")
+
+
+def _apply_bicycle_category_fill(fill: dict[str, Any], mapping: dict, pd: ProductData) -> tuple[dict[str, Any] | None, list[str]]:
+    warnings: list[str] = []
+    option = _select_bicycle_category_option(mapping, pd)
+    if not option:
+        warnings.append("BICYCLE 模板未匹配到细分类目，沿用映射默认儿童自行车类目。")
+        return None, warnings
+
+    fill["product_type#1.value"] = option.get("product_type") or "BICYCLE"
+    fill["item_type_keyword[marketplace_id=ATVPDKIKX0DER]#1.value"] = _amazon_item_type_keyword(option)
+    return option, warnings
+
+
+def _bicycle_is_child(pd: ProductData) -> bool:
+    text = _bicycle_match_text(pd)
+    if any(marker in text for marker in ("kids", "kid ", "children", "childrens", "children's", "boys", "girls", "ages 6", "ages 7", "ages 8", "ages 9", "ages 10", "儿童")):
+        return True
+    return bool(re.search(r"\b(?:12|14|16|18|20)\s*(?:inch|in\\.?|\")\b", text))
+
+
+def _bicycle_material(pd: ProductData) -> str:
+    text = _bicycle_match_text(pd)
+    if "aluminum alloy" in text or "aluminium alloy" in text:
+        return "Aluminum Alloy"
+    if "aluminum" in text or "aluminium" in text:
+        return "Aluminum"
+    if "high carbon steel" in text:
+        return "High Carbon Steel"
+    if "carbon steel" in text:
+        return "Carbon Steel"
+    if "stainless steel" in text:
+        return "Stainless Steel"
+    if "steel" in text:
+        return "Steel"
+    if "iron" in text:
+        return "Iron"
+    return "Steel"
+
+
+def _bicycle_color_value(pd: ProductData) -> str | None:
+    if pd.color:
+        return pd.color
+    text = _bicycle_match_text(pd)
+    colors = (
+        "light pink",
+        "pink",
+        "black",
+        "blue",
+        "yellow",
+        "red",
+        "white",
+        "green",
+        "purple",
+        "orange",
+        "silver",
+        "gray",
+        "grey",
+    )
+    found = [color for color in colors if color in text]
+    if not found:
+        return None
+    return found[0].title().replace("Grey", "Gray")
+
+
+def _bicycle_color_map(pd: ProductData) -> str | None:
+    color = (_bicycle_color_value(pd) or "").lower()
+    standard_colors = {
+        "black": "Black",
+        "blue": "Blue",
+        "pink": "Pink",
+        "light pink": "Pink",
+        "yellow": "Yellow",
+        "red": "Red",
+        "white": "White",
+        "green": "Green",
+        "purple": "Purple",
+        "orange": "Orange",
+        "silver": "Silver",
+        "gray": "Gray",
+        "grey": "Gray",
+    }
+    for marker, value in standard_colors.items():
+        if marker in color:
+            return value
+    return None
+
+
+def _bicycle_wheel_size(pd: ProductData) -> float | int | None:
+    text = " ".join(str(value or "") for value in (pd.title, pd.listing_title, pd.product_type)).lower()
+    match = re.search(r"\b(12|14|16|18|20|22|24|26|27(?:\\.5)?|27\\.5|29)\s*(?:inch|in\\.?|\")\b", text)
+    if not match:
+        return None
+    value = float(match.group(1))
+    return int(value) if value.is_integer() else value
+
+
+def _bicycle_frame_size(pd: ProductData) -> str:
+    wheel_size = _bicycle_wheel_size(pd)
+    if isinstance(wheel_size, (int, float)):
+        if wheel_size <= 20:
+            return "Small"
+        if wheel_size <= 24:
+            return "Medium"
+    return "Large"
+
+
+def _bicycle_size(pd: ProductData) -> str:
+    wheel_size = _bicycle_wheel_size(pd)
+    if wheel_size:
+        return f"{wheel_size:g} Inch"
+    if pd.dimension_length and pd.dimension_width and pd.dimension_height:
+        return f'{pd.dimension_length:g}" x {pd.dimension_width:g}" x {pd.dimension_height:g}"'
+    return _bicycle_frame_size(pd)
+
+
+def _bicycle_number_of_speeds(pd: ProductData) -> tuple[int, bool]:
+    text = _bicycle_match_text(pd)
+    match = re.search(r"\b(\d{1,2})\s*[- ]?speed\b", text)
+    if match:
+        return max(int(match.group(1)), 1), False
+    if "single speed" in text:
+        return 1, False
+    return 1, True
+
+
+def _bicycle_brake_styles(pd: ProductData) -> list[str]:
+    text = _bicycle_match_text(pd)
+    styles: list[str] = []
+    if "disc brake" in text or "disc brakes" in text:
+        styles.append("Disc")
+    if "v-brake" in text or "v brake" in text or "v-brakes" in text:
+        styles.append("V Brake")
+    if "caliper" in text:
+        styles.append("Caliper")
+    if "coaster" in text:
+        styles.append("Coaster")
+    if "drum brake" in text:
+        styles.append("Drum")
+    if not styles:
+        styles.append("V Brake")
+    return list(dict.fromkeys(styles))
+
+
+def _bicycle_suspension_type(pd: ProductData) -> str:
+    text = _bicycle_match_text(pd)
+    if "full suspension" in text or "dual suspension" in text:
+        return "Full"
+    if "rear suspension" in text:
+        return "Rear"
+    if "front suspension" in text or "suspension fork" in text or "fork suspension" in text:
+        return "Front"
+    return "Rigid"
+
+
+def _bicycle_bike_type(option: dict[str, Any] | None, pd: ProductData) -> str:
+    node = (option or {}).get("node") or ""
+    text = _bicycle_match_text(pd)
+    if node == "electric-bicycles" or "electric bike" in text or "e-bike" in text or "ebike" in text:
+        return "Electric Bike"
+    if node in {"childrens-mountain-bicycles", "mountain-bicycles"} or "mountain" in text or "mtb" in text:
+        return "Mountain Bike"
+    if node in {"folding-bicycles"}:
+        return "Folding Bike"
+    if node in {"cruiser-bicycles", "comfort-bicycles"} or "cruiser" in text:
+        return "Cruiser Bike"
+    if node == "road-bicycles":
+        return "Road Bike"
+    if "bmx" in node or "bmx" in text or "freestyle" in text:
+        return "BMX Bike"
+    if node == "childrens-balance-bikes":
+        return "Balance Bike"
+    if node.startswith("childrens"):
+        return "Kids Bike"
+    return "Bicycle"
+
+
+def _bicycle_style(option: dict[str, Any] | None, pd: ProductData) -> str:
+    bike_type = _bicycle_bike_type(option, pd)
+    if bike_type in {"Cruiser Bike", "Electric Bike"}:
+        return "Urban"
+    if bike_type == "Mountain Bike":
+        return "Trail"
+    if bike_type == "Road Bike":
+        return "Road"
+    if bike_type == "Kids Bike":
+        return "Kids"
+    return "Cycling"
+
+
+def _bicycle_specific_uses(option: dict[str, Any] | None, pd: ProductData) -> list[str]:
+    bike_type = _bicycle_bike_type(option, pd)
+    if bike_type == "Mountain Bike":
+        return ["Trail", "Off Road", "Recreation"]
+    if bike_type in {"Cruiser Bike", "Electric Bike"}:
+        return ["Commuting", "City Riding", "Recreation"]
+    if bike_type == "Road Bike":
+        return ["Road Cycling", "Commuting", "Fitness"]
+    if bike_type == "Folding Bike":
+        return ["Commuting", "Travel", "City Riding"]
+    if bike_type == "BMX Bike":
+        return ["Freestyle", "Recreation"]
+    return ["Recreation", "Cycling"]
+
+
+def _bicycle_included_components(pd: ProductData) -> list[str]:
+    text = _bicycle_match_text(pd)
+    parts = ["Bicycle", "User Manual"]
+    if "basket" in text:
+        parts.append("Basket")
+    if "fender" in text:
+        parts.append("Fenders")
+    if "rear rack" in text or "rack" in text:
+        parts.append("Rear Rack")
+    if "training wheel" in text:
+        parts.append("Training Wheels")
+    if "bell" in text:
+        parts.append("Bell")
+    return list(dict.fromkeys(parts))[:5]
+
+
+def _bicycle_special_features(pd: ProductData) -> list[str]:
+    text = _bicycle_match_text(pd)
+    features: list[str] = []
+    feature_markers = [
+        ("fold", "Foldable"),
+        ("basket", "Basket"),
+        ("rear rack", "Rear Rack"),
+        ("fender", "Fenders"),
+        ("disc brake", "Disc Brakes"),
+        ("suspension", "Suspension"),
+        ("chain guard", "Chain Guard"),
+        ("phone holder", "Phone Holder"),
+        ("fat tire", "Fat Tire"),
+        ("removable battery", "Removable Battery"),
+    ]
+    for marker, label in feature_markers:
+        if marker in text:
+            features.append(label)
+    return list(dict.fromkeys(features))[:5]
+
+
+def _bicycle_age_range(pd: ProductData) -> tuple[str, int | None, int | None]:
+    text = _bicycle_match_text(pd)
+    range_match = re.search(r"ages?\s*(\d{1,2})\s*[-~–]\s*(\d{1,2})", text)
+    if range_match:
+        minimum = int(range_match.group(1))
+        maximum = int(range_match.group(2))
+        return f"Ages {minimum}-{maximum}", minimum, maximum
+    plus_match = re.search(r"ages?\s*(\d{1,2})\s*\\+", text)
+    if plus_match:
+        minimum = int(plus_match.group(1))
+        return f"Ages {minimum}+", minimum, None
+    if _bicycle_is_child(pd):
+        return "Kids", 6, 12
+    return "Adult", None, None
+
+
+def _bicycle_is_electric(option: dict[str, Any] | None, pd: ProductData) -> bool:
+    text = _bicycle_match_text(pd)
+    node = (option or {}).get("node")
+    return node == "electric-bicycles" or any(marker in text for marker in ("electric bicycle", "electric bike", "e-bike", "ebike", "500w", "750w", "48v"))
+
+
+def _bicycle_power_number(pd: ProductData, suffix: str) -> float | int | None:
+    match = re.search(rf"\b(\d+(?:\.\d+)?)\s*{suffix}\b", _bicycle_match_text(pd))
+    if not match:
+        return None
+    value = float(match.group(1))
+    return int(value) if value.is_integer() else value
+
+
+def _apply_bicycle_fill(fill: dict[str, Any], fields: dict[str, Any], product: Product, pd: ProductData, mapping: dict) -> list[str]:
+    warnings: list[str] = []
+    category_option, category_warnings = _apply_bicycle_category_fill(fill, mapping, pd)
+    warnings.extend(category_warnings)
+
+    material = _bicycle_material(pd)
+    color = _bicycle_color_value(pd)
+    wheel_size = _bicycle_wheel_size(pd)
+    number_of_speeds, defaulted_speeds = _bicycle_number_of_speeds(pd)
+    age_description, min_age, max_age = _bicycle_age_range(pd)
+    is_electric = _bicycle_is_electric(category_option, pd)
+
+    if defaulted_speeds:
+        warnings.append("未识别自行车变速数量，按单速默认填写；上传前建议核对规格。")
+    if not wheel_size:
+        warnings.append("未识别车轮尺寸，Wheel Size 暂未填写；上传前建议补车轮尺寸。")
+    if not color:
+        warnings.append("未识别自行车颜色，Color 暂未填写；上传前建议补颜色。")
+
+    fill.update({
+        fields["material"]: material,
+        fields["color_map"]: _bicycle_color_map(pd),
+        fields["color"]: color,
+        fields["size"]: _bicycle_size(pd),
+        fields["part_number"]: pd.item_code,
+        fields["unit_count"]: 1,
+        fields["unit_count_type"]: "Count",
+        fields["height_value"]: pd.dimension_height,
+        fields["height_unit"]: "Inches",
+        fields["length_value"]: pd.dimension_length,
+        fields["length_unit"]: "Inches",
+        fields["width_value"]: pd.dimension_width,
+        fields["width_unit"]: "Inches",
+        fields["item_dimensions_length_value"]: pd.dimension_length,
+        fields["item_dimensions_length_unit"]: "Inches",
+        fields["item_dimensions_width_value"]: pd.dimension_width,
+        fields["item_dimensions_width_unit"]: "Inches",
+        fields["item_dimensions_height_value"]: pd.dimension_height,
+        fields["item_dimensions_height_unit"]: "Inches",
+        fields["item_weight_value"]: pd.weight,
+        fields["item_weight_unit"]: "Pounds",
+        fields["wheel_size_value"]: wheel_size,
+        fields["wheel_size_unit"]: "Inches" if wheel_size else None,
+        fields["wheel_material"]: "Aluminum Alloy",
+        fields["frame_material"]: material,
+        fields["frame_material_structured"]: material,
+        fields["frame_size"]: _bicycle_frame_size(pd),
+        fields["frame_type_1"]: "Step-Through" if "step-through" in _bicycle_match_text(pd) else "Rigid",
+        fields["bike_type_1"]: _bicycle_bike_type(category_option, pd),
+        fields["power_source"]: "Electric" if is_electric else "Pedal Power",
+        fields["suspension_type"]: _bicycle_suspension_type(pd),
+        fields["skill_level"]: "Beginner" if _bicycle_is_child(pd) else "Intermediate",
+        fields["handlebar_type"]: "Adjustable" if "adjustable" in _bicycle_match_text(pd) else "Flat",
+        fields["seat_material"]: "Synthetic Leather",
+        fields["wheel_set"]: "Front and Rear Wheels",
+        fields["number_of_speeds"]: number_of_speeds,
+        fields["bicycle_gear_shifter_type"]: "Trigger" if number_of_speeds > 1 else None,
+        fields["age_range_description"]: age_description,
+        fields["style"]: _bicycle_style(category_option, pd),
+    })
+    _set_sequence_fields(fill, fields.get("brake_style"), _bicycle_brake_styles(pd))
+    _set_sequence_fields(fill, fields.get("specific_uses_for_product"), _bicycle_specific_uses(category_option, pd))
+    _set_sequence_fields(fill, fields.get("included_components"), _bicycle_included_components(pd))
+    _set_sequence_fields(fill, fields.get("special_features"), _bicycle_special_features(pd))
+
+    if min_age is not None:
+        fill[fields["min_user_age"]] = min_age
+    if max_age is not None:
+        fill[fields["max_user_age"]] = max_age
+
+    if is_electric:
+        wattage = _bicycle_power_number(pd, "w")
+        voltage = _bicycle_power_number(pd, "v")
+        battery_capacity = _bicycle_power_number(pd, "ah")
+        fill.update({
+            fields["power_source"]: "Electric",
+            fields["electric_assist_type"]: "Hub Motor",
+            fields["wattage"]: wattage,
+            fields["wattage_unit"]: "Watts" if wattage else None,
+            fields["voltage_value"]: voltage,
+            fields["voltage_unit"]: "Volts" if voltage else None,
+            fields["batteries_required"]: "Yes",
+            fields["batteries_included"]: "Yes",
+            fields["battery_cell_composition"]: "Lithium Ion",
+            fields["num_batteries_quantity"]: 1,
+            fields["num_batteries_type"]: "Lithium Ion",
+            fields["lithium_battery_packaging"]: "Batteries contained in equipment",
+            fields["lithium_battery_energy_content_unit"]: "Watt Hours",
+            fields["contains_battery_or_cell"]: "Battery",
+            fields["battery_contains_free_unabsorbed_liquid"]: "No",
+            fields["has_replaceable_battery"]: "Yes",
+            fields["battery_installation_device_type"]: "Installed in Vehicle",
+            fields["battery_capacity"]: battery_capacity,
+            fields["battery_capacity_unit"]: "amp hours" if battery_capacity else None,
+        })
+        if voltage and battery_capacity:
+            fill[fields["lithium_battery_energy_content"]] = round(float(voltage) * float(battery_capacity), 2)
+        if not wattage:
+            warnings.append("电动自行车未识别电机瓦数，Wattage 暂未填写；上传前需核对电机铭牌。")
+        if not voltage:
+            warnings.append("电动自行车未识别电池电压，Voltage 暂未填写；上传前需核对电池规格。")
+        warnings.append("电动自行车电池重量、UL/认证编号、FCC/SDoC 等合规资料未自动填写，发布前需要人工复核。")
+
+    if "tricycle" in _bicycle_match_text(pd) or "trike" in _bicycle_match_text(pd):
+        warnings.append("标题包含 Tricycle/Trike，但当前 Amazon 模板按 Bicycle 生成；上传前请确认成人三轮车可放入所选电动自行车/自行车类目。")
+
+    return warnings
 
 
 def _ride_on_material(pd: ProductData) -> str:
@@ -1168,6 +1978,7 @@ def _apply_ride_on_toy_fill(fill: dict[str, Any], fields: dict[str, str], produc
         fields["num_batteries_quantity"]: battery["quantity"],
         fields["num_batteries_type"]: battery["type"],
     })
+    _field(fill, fields, "sub_brand", product.brand)
 
     if ships_globally:
         fill.update({
@@ -1215,15 +2026,16 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
     wb = load_workbook(output_path, keep_vba=True, data_only=False)
     ws = wb["Template"]
     columns = _index_template_columns(ws)
+    data_row = _mapping_data_row(mapping)
     warnings: list[str] = []
 
-    # 清空模板第8行的示例/偏好默认值，保留表头和验证规则。
-    for cell in ws[DATA_ROW]:
+    # 清空模板数据行的示例/偏好默认值，保留表头和验证规则。
+    for cell in ws[data_row]:
         cell.value = None
 
     brand_col = columns.get("brand[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value")
     if brand_col:
-        _remove_column_validations(ws, brand_col)
+        _remove_column_validations(ws, brand_col, data_row)
 
     package, package_warnings = _representative_package(pd)
     warnings.extend(package_warnings)
@@ -1265,10 +2077,14 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
         else:
             warnings.append("未能匹配 RIDE_ON_TOY 细分类目，沿用模板默认儿童电瓶车类目。")
         warnings.extend(_apply_ride_on_toy_fill(fill, fields, product, pd))
+    elif mapping.get("category_type") == "bicycle":
+        warnings.extend(_apply_bicycle_fill(fill, fields, product, pd, mapping))
+    elif mapping.get("category_type") in {"home_storage_furniture", "shelf_table_cabinet_gate"}:
+        warnings.extend(_apply_general_template_fill(fill, fields, mapping, pd))
     else:
         category_option, category_warnings = _apply_furniture_category_fill(fill, mapping, pd)
         warnings.extend(category_warnings)
-        seating = _seating_capacity(pd)
+        seating = _estimated_sofa_seating_capacity(pd)
         if category_option and category_option.get("product_type") == "CHAIR" and not seating:
             seating = 1
         if seating is None:
@@ -1349,7 +2165,7 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
         if attr not in columns:
             missing_columns.append(attr)
             continue
-        _set(ws, columns, attr, value)
+        _set(ws, columns, data_row, attr, value)
     if missing_columns:
         warnings.append(f"模板中未找到 {len(missing_columns)} 个预期字段: {', '.join(missing_columns[:5])}")
     warnings.extend(_listing_template_warnings(pd))

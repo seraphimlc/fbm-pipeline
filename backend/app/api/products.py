@@ -31,6 +31,7 @@ from app.models import (
     ProductImage,
     ProductAplus,
     ProductFile,
+    UpcPoolItem,
 )
 from app.models.status import COMPLETED, DUPLICATE_SKIPPED, PENDING_REVIEW, SOURCE_UNAVAILABLE, STEP_LABELS, STEP_STATUS_MAP
 from app.api.schemas import (
@@ -42,7 +43,8 @@ from app.api.schemas import (
     PaginatedAsinSyncBatches, PaginatedCatalogProducts, CatalogProductResponse,
     PaginatedAplusUploadBatches, WorkbenchOverview, CatalogAsinUpdateRequest,
     InventorySyncBatchDetail, InventorySyncBatchResponse, InventorySyncCreateRequest,
-    PaginatedInventorySyncBatches,
+    PaginatedInventorySyncBatches, PaginatedUpcPoolItems, UpcPoolImportRequest,
+    UpcPoolImportResponse, UpcPoolSummary,
 )
 from app.pipeline.engine import start_pipeline as enqueue_pipeline, cancel_pipeline, is_running
 from app.pipeline.step1_collect import collect_product
@@ -86,6 +88,12 @@ from app.services.product_duplicates import (
     extract_gigab2b_product_id,
     find_duplicate_by_gigab2b_product_id,
     find_duplicate_by_item_code,
+)
+from app.services.upc_pool import (
+    UpcPoolEmptyError,
+    add_upcs_to_pool,
+    available_upc_count,
+    ensure_product_upc,
 )
 
 # Step runners indexed by step number
@@ -220,7 +228,7 @@ def _static_category_options() -> list[dict]:
     return sorted(options.values(), key=lambda item: item["label"])
 
 
-IMPORT_TEMPLATE_HEADERS = ["原始数据链接", "竞品ASIN", "UPC"]
+IMPORT_TEMPLATE_HEADERS = ["原始数据链接", "竞品ASIN"]
 HEADER_ALIASES = {
     "原始数据链接": "gigab2b_url",
     "来源链接": "gigab2b_url",
@@ -522,6 +530,21 @@ def _workbook_response(wb: Workbook, filename: str) -> StreamingResponse:
     )
 
 
+async def _upc_pool_summary(db: AsyncSession) -> UpcPoolSummary:
+    total_result = await db.execute(select(func.count(UpcPoolItem.id)))
+    available_result = await db.execute(
+        select(func.count(UpcPoolItem.id)).where(UpcPoolItem.status == "available")
+    )
+    bound_result = await db.execute(
+        select(func.count(UpcPoolItem.id)).where(UpcPoolItem.status == "bound")
+    )
+    return UpcPoolSummary(
+        total=total_result.scalar() or 0,
+        available=available_result.scalar() or 0,
+        bound=bound_result.scalar() or 0,
+    )
+
+
 def _catalog_export_row(product: Product) -> dict:
     pd = product.data
     return {
@@ -740,12 +763,14 @@ async def create_product(body: ProductCreate, db: AsyncSession = Depends(get_db)
         gigab2b_url=body.gigab2b_url,
         gigab2b_product_id=gigab2b_product_id,
         competitor_asin=body.competitor_asin,
-        upc=body.upc,
         brand=body.brand,
     )
     db.add(product)
-    await db.commit()
-    await db.refresh(product)
+    await db.flush()
+    try:
+        await ensure_product_upc(db, product)
+    except UpcPoolEmptyError as exc:
+        raise HTTPException(400, str(exc))
     # 创建关联空子表
     db.add(ProductData(product_id=product.id))
     db.add(ProductImage(product_id=product.id))
@@ -914,8 +939,8 @@ async def download_import_template():
     ws = wb.active
     ws.title = "批量导入任务"
     ws.append(IMPORT_TEMPLATE_HEADERS)
-    ws.append(["https://www.gigab2b.com/product-detail/example", "B0XXXXXXXX", "714532191586"])
-    for width, column in zip((42, 18, 18), ("A", "B", "C")):
+    ws.append(["https://www.gigab2b.com/product-detail/example", "B0XXXXXXXX"])
+    for width, column in zip((42, 18), ("A", "B")):
         ws.column_dimensions[column].width = width
     return _workbook_response(wb, "fbm_task_import_template.xlsx")
 
@@ -945,8 +970,8 @@ async def import_products(file: UploadFile = File(...), db: AsyncSession = Depen
         if field:
             index_map[field] = idx
 
-    if "gigab2b_url" not in index_map or "competitor_asin" not in index_map or "upc" not in index_map:
-        raise HTTPException(400, "模板必须包含：原始数据链接、竞品ASIN、UPC")
+    if "gigab2b_url" not in index_map or "competitor_asin" not in index_map:
+        raise HTTPException(400, "模板必须包含：原始数据链接、竞品ASIN")
 
     created_ids: list[int] = []
     errors: list[str] = []
@@ -954,20 +979,20 @@ async def import_products(file: UploadFile = File(...), db: AsyncSession = Depen
     skipped = 0
     seen_product_ids: dict[str, int] = {}
     seen_item_codes: dict[str, int] = {}
+    remaining_upcs = await available_upc_count(db)
 
     for row_number, row in enumerate(rows[1:], start=2):
         values = list(row)
         gigab2b_url = str(values[index_map["gigab2b_url"]]).strip() if index_map["gigab2b_url"] < len(values) and values[index_map["gigab2b_url"]] is not None else ""
         competitor_asin = str(values[index_map["competitor_asin"]]).strip() if index_map["competitor_asin"] < len(values) and values[index_map["competitor_asin"]] is not None else ""
-        upc = str(values[index_map["upc"]]).strip() if index_map["upc"] < len(values) and values[index_map["upc"]] is not None else ""
         brand = "Vindhvisk"
         if "brand" in index_map and index_map["brand"] < len(values) and values[index_map["brand"]] is not None:
             brand = str(values[index_map["brand"]]).strip() or brand
 
-        if not any([gigab2b_url, competitor_asin, upc]):
+        if not any([gigab2b_url, competitor_asin]):
             skipped += 1
             continue
-        if not gigab2b_url or not competitor_asin or not upc:
+        if not gigab2b_url or not competitor_asin:
             errors.append(f"第 {row_number} 行缺少必填字段")
             continue
 
@@ -990,15 +1015,22 @@ async def import_products(file: UploadFile = File(...), db: AsyncSession = Depen
             skipped_details.append(f"第 {row_number} 行跳过：{duplicate.message}")
             continue
 
+        if remaining_upcs <= 0:
+            raise HTTPException(400, f"UPC池子可用UPC不足：已可导入 {len(created_ids)} 行，后续第 {row_number} 行没有可用UPC")
+
         product = Product(
             gigab2b_url=gigab2b_url,
             gigab2b_product_id=gigab2b_product_id,
             competitor_asin=competitor_asin,
-            upc=upc,
             brand=brand,
         )
         db.add(product)
         await db.flush()
+        try:
+            await ensure_product_upc(db, product)
+        except UpcPoolEmptyError as exc:
+            raise HTTPException(400, str(exc))
+        remaining_upcs -= 1
         db.add(ProductData(product_id=product.id))
         db.add(ProductImage(product_id=product.id))
         db.add(ProductAplus(product_id=product.id))
@@ -1026,6 +1058,54 @@ async def import_products(file: UploadFile = File(...), db: AsyncSession = Depen
         skipped_details=skipped_details,
         errors=errors,
         product_ids=created_ids,
+    )
+
+
+@router.get("/upc-pool", response_model=PaginatedUpcPoolItems)
+async def list_upc_pool(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    status: str | None = None,
+    q: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """UPC池子列表。已绑定记录只允许同一商品Code/来源商品ID重复确认。"""
+    query = select(UpcPoolItem).order_by(UpcPoolItem.id.asc())
+    count_query = select(func.count(UpcPoolItem.id))
+    if status:
+        query = query.where(UpcPoolItem.status == status)
+        count_query = count_query.where(UpcPoolItem.status == status)
+    if q:
+        pattern = f"%{q.strip()}%"
+        criteria = (
+            (UpcPoolItem.upc.ilike(pattern))
+            | (UpcPoolItem.bound_item_code.ilike(pattern))
+            | (UpcPoolItem.bound_source_product_id.ilike(pattern))
+        )
+        query = query.where(criteria)
+        count_query = count_query.where(criteria)
+
+    total_result = await db.execute(count_query)
+    result = await db.execute(query.offset((page - 1) * page_size).limit(page_size))
+    return PaginatedUpcPoolItems(
+        items=result.scalars().all(),
+        total=total_result.scalar() or 0,
+        page=page,
+        page_size=page_size,
+        summary=await _upc_pool_summary(db),
+    )
+
+
+@router.post("/upc-pool/import", response_model=UpcPoolImportResponse)
+async def import_upc_pool(body: UpcPoolImportRequest, db: AsyncSession = Depends(get_db)):
+    """批量追加 UPC 到池子，重复 UPC 会保留原记录。"""
+    result = await add_upcs_to_pool(db, body.text)
+    await db.commit()
+    return UpcPoolImportResponse(
+        added=result["added"],
+        duplicated=result["duplicated"],
+        invalid=result["invalid"],
+        summary=await _upc_pool_summary(db),
     )
 
 
@@ -1917,6 +1997,11 @@ async def update_product(
         raise HTTPException(404, "Product not found")
 
     update_data = body.model_dump(exclude_unset=True)
+    if "upc" in update_data:
+        requested_upc = str(update_data.pop("upc") or "").strip() or None
+        current_upc = str(product.upc or "").strip() or None
+        if requested_upc != current_upc:
+            raise HTTPException(400, "UPC由UPC池子绑定后不可手动修改")
     categories_value = update_data.pop("categories", None)
     leaf_category_value = update_data.pop("leaf_category", None)
     product_data_updates = {
@@ -2030,8 +2115,10 @@ async def restart_pipeline(product_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "Product not found")
     if is_running(product.id):
         raise HTTPException(400, "任务正在运行中，请先暂停后再重新开始")
-    if not (product.upc or "").strip():
-        raise HTTPException(400, "重新开始前请先填写UPC码")
+    try:
+        await ensure_product_upc(db, product)
+    except UpcPoolEmptyError as exc:
+        raise HTTPException(400, str(exc))
 
     _delete_material_dir(product.data.material_dir if product.data else None)
 
@@ -2063,6 +2150,7 @@ async def restart_pipeline(product_id: int, db: AsyncSession = Depends(get_db)):
     product.updated_at = datetime.now()
     if product.catalog_item:
         product.catalog_item.confirmed_at = None
+        product.catalog_item.upc = product.upc
         product.catalog_item.aplus_upload_status = product.aplus_upload_status
         product.catalog_item.aplus_uploaded_at = None
         product.catalog_item.aplus_upload_error = None

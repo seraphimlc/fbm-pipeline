@@ -42,7 +42,7 @@ make test-project-rules
 
 - **后端**: FastAPI + SQLAlchemy (async) + SQLite
 - **前端**: React + TypeScript + Ant Design + Vite
-- **AI**: GPT-5.5 (LLM) + Qwen3.6-plus (VLM) + GPT Image
+- **AI**: GPT-5.5 (LLM/VLM) + GPT Image
 
 ## Pipeline 10步流程
 

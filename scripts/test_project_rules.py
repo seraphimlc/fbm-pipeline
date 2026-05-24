@@ -162,13 +162,27 @@ def test_step10_sums_multi_package_dimensions() -> None:
 
 def test_mapping_sets_andy_free_shipping_template() -> None:
     mapping_dir = ROOT / "backend" / "app" / "pipeline" / "template_mappings"
-    for name in ("vindhvisk_sofa.json", "ride_on_toy.json"):
+    for name in ("vindhvisk_sofa.json", "ride_on_toy.json", "vindhvisk_bicycle.json"):
         text = (mapping_dir / name).read_text(encoding="utf-8")
         assert_true(
             '"Vindhvisk": "Migrated Template FreeShipping"' in text
             and '"Andy店-US": "Migrated Template FreeShipping"' in text,
             f"{name} 必须把 Andy 店当前品牌默认配送模板设为 FreeShipping",
         )
+
+
+def test_bicycle_template_mapping_covers_current_failed_categories() -> None:
+    mapping_path = ROOT / "backend" / "app" / "pipeline" / "template_mappings" / "vindhvisk_bicycle.json"
+    template_path = ROOT / "backend" / "app" / "pipeline" / "templates" / "BICYCLE_CYCLING.xlsm"
+    mapping_text = mapping_path.read_text(encoding="utf-8")
+    step10_text = (ROOT / "backend" / "app" / "pipeline" / "step10_amazon_template.py").read_text(encoding="utf-8")
+
+    assert_true(template_path.is_file(), "自行车 Amazon 模板必须随项目保存")
+    for category in ("Kids' Bikes", "Cycling", "Folding Bikes", "Cruiser Bikes", "Electric Bicycles", "Mountain Bikes", "Road Bikes"):
+        assert_true(category in step10_text, f"{category} 必须直接映射到自行车模板，不能落到玩具兜底")
+    assert_true('"category_type": "bicycle"' in mapping_text, "自行车映射必须使用专门的 bicycle 填表逻辑")
+    assert_true('"electric-bicycles"' in mapping_text and '"childrens-bicycles"' in mapping_text, "自行车映射必须包含当前缺失的细分类目")
+    assert_true("_apply_bicycle_fill" in step10_text, "Step10 必须有自行车专用字段填充分支")
 
 
 def test_search_terms_are_twenty_comma_separated_keywords() -> None:
@@ -194,6 +208,31 @@ def test_search_terms_are_twenty_comma_separated_keywords() -> None:
     assert_true("normalize_search_terms(" in step10_text, "Step10 写入 Amazon 模板前必须统一 Search Terms 格式")
 
 
+def test_gigab2b_alphanumeric_product_id_url_is_supported() -> None:
+    duplicate_text = (ROOT / "backend" / "app" / "services" / "product_duplicates.py").read_text(encoding="utf-8")
+    assert_true("parse_qs(parsed.query)" in duplicate_text, "大建云仓 product_id 必须从 query 参数结构化提取")
+    assert_true("[A-Za-z0-9_-]+" in duplicate_text, "大建云仓 product_id 必须支持字母数字混合 ID")
+
+    create_page_text = (ROOT / "frontend" / "src" / "pages" / "CreateProduct.tsx").read_text(encoding="utf-8")
+    assert_true("请输入竞品ASIN" not in create_page_text, "创建任务不能强制要求竞品 ASIN")
+    assert_true("请输入UPC码" not in create_page_text, "创建任务不能强制要求 UPC")
+    assert_true("error?.response?.data?.detail" in create_page_text, "创建失败时必须展示后端具体原因")
+
+
+def test_upc_pool_is_source_of_new_task_upcs() -> None:
+    products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    upc_pool_text = (ROOT / "backend" / "app" / "services" / "upc_pool.py").read_text(encoding="utf-8")
+    product_list_text = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
+    create_page_text = (ROOT / "frontend" / "src" / "pages" / "CreateProduct.tsx").read_text(encoding="utf-8")
+
+    assert_true('IMPORT_TEMPLATE_HEADERS = ["原始数据链接", "竞品ASIN"]' in products_api_text, "批量导入模板不应再要求 UPC 列")
+    assert_true("await ensure_product_upc(db, product)" in products_api_text, "创建/导入任务必须从 UPC 池领取 UPC")
+    assert_true("UPC由UPC池子绑定后不可手动修改" in products_api_text, "已绑定 UPC 不能被手动改绑")
+    assert_true("bound_item_code" in upc_pool_text and "bound_source_product_id" in upc_pool_text, "UPC 池必须记录商品Code和来源商品ID")
+    assert_true("UPC 会自动从 UPC池子领取" in product_list_text, "前端导入提示必须说明 UPC 来自池子")
+    assert_true('name="upc"' not in create_page_text, "创建任务页面不应再显示 UPC 输入框")
+
+
 def main() -> int:
     tests = [
         test_category_conflict_only_overrides_conflict,
@@ -203,7 +242,10 @@ def main() -> int:
         test_step1_collects_product_dimensions_and_numeric_packages,
         test_step10_sums_multi_package_dimensions,
         test_mapping_sets_andy_free_shipping_template,
+        test_bicycle_template_mapping_covers_current_failed_categories,
         test_search_terms_are_twenty_comma_separated_keywords,
+        test_gigab2b_alphanumeric_product_id_url_is_supported,
+        test_upc_pool_is_source_of_new_task_upcs,
     ]
     for test in tests:
         test()

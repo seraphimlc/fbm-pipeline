@@ -10,16 +10,22 @@ const CreateProduct: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [form] = Form.useForm();
 
-  const handleSubmit = async (values: { gigab2b_url: string; competitor_asin?: string; upc?: string; brand?: string }) => {
+  const handleSubmit = async (values: { gigab2b_url: string; competitor_asin?: string; brand?: string }) => {
     setLoading(true);
     try {
-      const { data } = await createProduct(values);
+      const payload = {
+        ...values,
+        gigab2b_url: values.gigab2b_url.trim(),
+        competitor_asin: values.competitor_asin?.trim() || undefined,
+      };
+      const { data } = await createProduct(payload);
       message.success('任务创建成功');
       navigate(`/products/${data.id}`);
-    } catch {
-      message.error('创建失败');
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '创建失败');
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   return (
@@ -43,17 +49,9 @@ const CreateProduct: React.FC = () => {
           <Form.Item
             label="竞品 ASIN"
             name="competitor_asin"
-            rules={[{ required: true, message: '请输入竞品ASIN' }]}
+            extra="可稍后补充；缺少时关键词和类目步骤会需要人工处理。"
           >
             <Input placeholder="B0GMWKDNBC" />
-          </Form.Item>
-
-          <Form.Item
-            label="UPC"
-            name="upc"
-            rules={[{ required: true, message: '请输入UPC码' }]}
-          >
-            <Input placeholder="714532191586" />
           </Form.Item>
 
           <Form.Item label="品牌名" name="brand">

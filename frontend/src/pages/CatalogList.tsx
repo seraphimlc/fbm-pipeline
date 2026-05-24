@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { Button, DatePicker, Input, message, Modal, Popconfirm, Select, Space, Table, Tag, Typography } from 'antd';
 import { CloudSyncOutlined, DeleteOutlined, DownloadOutlined, FileExcelOutlined, HistoryOutlined, PictureOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { clearCatalogAsin, createAplusUploadBatch, createAsinSyncBatch, deleteProduct, exportCatalogProducts, exportInventoryUpdateTemplate, getWorkbenchOverview, listCatalogProducts, updateCatalogAsin } from '../api';
+import { clearCatalogAsin, createAplusUploadBatch, createAsinSyncBatch, createInventorySyncBatch, deleteProduct, exportCatalogProducts, exportInventoryUpdateTemplate, getWorkbenchOverview, listCatalogProducts, updateCatalogAsin } from '../api';
 import type { CatalogProduct, WorkbenchOverview } from '../api';
 
 const { Title, Text } = Typography;
@@ -15,6 +15,7 @@ const CatalogList: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [inventoryExporting, setInventoryExporting] = useState(false);
+  const [syncingInventory, setSyncingInventory] = useState(false);
   const [syncingAsin, setSyncingAsin] = useState(false);
   const [uploadingAplus, setUploadingAplus] = useState(false);
   const [asinModalOpen, setAsinModalOpen] = useState(false);
@@ -193,6 +194,26 @@ const CatalogList: React.FC = () => {
     } finally {
       hideLoading();
       setInventoryExporting(false);
+    }
+  };
+
+  const syncSelectedInventory = async () => {
+    if (!selectedIds.length) {
+      navigate('/inventory-sync');
+      return;
+    }
+    setSyncingInventory(true);
+    try {
+      const { data } = await createInventorySyncBatch(selectedIds.map(Number));
+      message.success(`已创建库存同步批次 #${data.id}`);
+      setSelectedIds([]);
+      fetchItems();
+      fetchOverview();
+      navigate('/inventory-sync');
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '库存同步批次创建失败');
+    } finally {
+      setSyncingInventory(false);
     }
   };
 
@@ -504,7 +525,9 @@ const CatalogList: React.FC = () => {
         <Space>
           <Text type="secondary">最多显示 1000 个商品</Text>
           <Button icon={<ReloadOutlined />} onClick={fetchItems}>刷新</Button>
-          <Button icon={<CloudSyncOutlined />} onClick={() => navigate('/inventory-sync')}>库存同步</Button>
+          <Button icon={<CloudSyncOutlined />} loading={syncingInventory} onClick={syncSelectedInventory}>
+            库存同步{selectedIds.length ? `(${selectedIds.length})` : ''}
+          </Button>
           <Button icon={<HistoryOutlined />} onClick={() => navigate('/asin-sync')}>同步记录</Button>
           <Button icon={<SyncOutlined />} loading={syncingAsin} disabled={!selectedIds.length} onClick={syncSelectedAsins}>
             同步ASIN{selectedIds.length ? `(${selectedIds.length})` : ''}

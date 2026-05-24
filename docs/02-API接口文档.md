@@ -17,6 +17,8 @@
 | 商品 | DELETE | `/api/products/{id}` | 删除商品 |
 | 商品 | GET | `/api/products/import/template` | 下载批量导入模板 |
 | 商品 | POST | `/api/products/import` | 批量导入任务 |
+| UPC池子 | GET | `/api/products/upc-pool` | UPC池子列表 |
+| UPC池子 | POST | `/api/products/upc-pool/import` | 批量追加UPC |
 | Pipeline | POST | `/api/products/{id}/start` | 启动 Pipeline |
 | Pipeline | POST | `/api/products/bulk-start` | 批量启动待处理任务 |
 | Pipeline | POST | `/api/products/{id}/pause` | 暂停 Pipeline |
@@ -43,8 +45,7 @@ POST /api/products
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 |------|------|------|--------|------|
 | gigab2b_url | string | ✅ | — | 大健云仓商品链接 |
-| competitor_asin | string \| null | 前端必填 | null | 竞品 ASIN（用于关键词反查） |
-| upc | string \| null | 前端必填 | null | UPC，用于后续导入模板和 ASIN 同步 |
+| competitor_asin | string \| null | ❌ | null | 竞品 ASIN（用于关键词反查） |
 | brand | string | ❌ | "Vindhvisk" | 品牌 |
 
 **请求示例**：
@@ -52,7 +53,6 @@ POST /api/products
 {
   "gigab2b_url": "https://www.gigab2b.com/product/detail/W3327A001065",
   "competitor_asin": "B0GMWKDNBC",
-  "upc": "714532191586",
   "brand": "Vindhvisk"
 }
 ```
@@ -60,9 +60,10 @@ POST /api/products
 **响应** `201 Created` → [ProductResponse](#productresponse)
 
 **逻辑**：
-1. 创建 `Product` 记录，状态为 `created`
-2. 自动创建3张空子表（`ProductData`、`ProductImage`、`ProductAplus`）
-3. 同步创建一条未确认的商品资料记录，待 Pipeline 完成并人工确认后进入商品资料库
+1. 从 UPC池子领取一个可用 UPC 并绑定当前商品；池子不足时返回 400
+2. 创建 `Product` 记录，状态为 `created`
+3. 自动创建3张空子表（`ProductData`、`ProductImage`、`ProductAplus`）
+4. 同步创建一条未确认的商品资料记录，待 Pipeline 完成并人工确认后进入商品资料库
 
 ---
 
@@ -262,7 +263,7 @@ GET /api/config
   "frontend_port": 3190,
   "default_brand": "Vindhvisk",
   "llm_model": "gpt-5.5",
-  "vlm_model": "qwen3.6-plus",
+  "vlm_model": "gpt-5.5",
   "gpt_image_model": "gpt-image-2",
   "product_base_dir": "/Users/.../大健云仓",
   "pipeline_max_concurrency": 3,

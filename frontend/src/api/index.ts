@@ -252,6 +252,34 @@ export interface WorkbenchOverview {
   listing_high_risk: number;
 }
 
+export interface UpcPoolSummary {
+  total: number;
+  available: number;
+  bound: number;
+}
+
+export interface UpcPoolItem {
+  id: number;
+  upc: string;
+  status: string;
+  source: string | null;
+  product_id: number | null;
+  bound_item_code: string | null;
+  bound_source_product_id: string | null;
+  bound_source_url: string | null;
+  bound_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface PaginatedUpcPoolItems {
+  items: UpcPoolItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  summary: UpcPoolSummary;
+}
+
 export interface AsinSyncBatch {
   id: number;
   store: string;
@@ -509,6 +537,12 @@ export const bulkStartPipelines = (productIds: number[]) =>
 
 export const getWorkbenchOverview = () =>
   api.get<WorkbenchOverview>('/products/overview');
+
+export const listUpcPool = (params?: { page?: number; page_size?: number; status?: string; q?: string }) =>
+  api.get<PaginatedUpcPoolItems>('/products/upc-pool', { params });
+
+export const importUpcPool = (text: string) =>
+  api.post<{ added: number; duplicated: number; invalid: string[]; summary: UpcPoolSummary }>('/products/upc-pool/import', { text });
 
 export const listCategoryOptions = () =>
   api.get<{ items: CategoryOption[] }>('/products/category-options');

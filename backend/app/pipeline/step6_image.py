@@ -15,6 +15,7 @@ import math
 import re
 import shutil
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -30,11 +31,14 @@ logger = logging.getLogger(__name__)
 # 支持的图片格式
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff"}
 
-# Contact Sheet 参数，参考 Amazon Main Image Curator：每批最多9张，带清晰标签。
-THUMB_SIZE = 720
-LABEL_HEIGHT = 72
+# Contact Sheet 参数：压缩到新多模态网关可接受的请求体大小，同时保留标签可读性。
+THUMB_SIZE = 420
+LABEL_HEIGHT = 52
 SHEET_COLS = 3
-SHEET_MAX = 9  # 每页最多9张
+SHEET_MAX = 6  # 每页最多6张，避免 base64 后请求体过大
+SHEET_JPEG_QUALITY = 82
+SHEET_MIN_JPEG_QUALITY = 60
+SHEET_MAX_BYTES = 550_000
 
 # VLM 系统提示
 VLM_SYSTEM_PROMPT = """You are an expert Amazon product image analyst. Analyze every labeled tile in the contact sheet.
@@ -416,7 +420,7 @@ def _build_contact_sheets(image_records: list[dict], output_dir: Path, product_k
                 "sheet_label": record["image_id"],
             }
 
-        sheet.save(sheet_path, "JPEG", quality=94, optimize=True, progressive=True)
+        _save_contact_sheet(sheet, sheet_path)
         sheets.append({
             "sheet_page": page,
             "sheet_path": str(sheet_path),
@@ -426,8 +430,36 @@ def _build_contact_sheets(image_records: list[dict], output_dir: Path, product_k
     return sheets
 
 
+def _save_contact_sheet(sheet: Image.Image, sheet_path: Path) -> None:
+    """保存 Contact Sheet，并在必要时降低质量/尺寸以避开网关请求体限制。"""
+    current = sheet
+    quality = SHEET_JPEG_QUALITY
+    while True:
+        buffer = BytesIO()
+        current.save(buffer, "JPEG", quality=quality, optimize=True, progressive=True)
+        size = buffer.tell()
+        if size <= SHEET_MAX_BYTES:
+            sheet_path.write_bytes(buffer.getvalue())
+            return
+
+        if quality > SHEET_MIN_JPEG_QUALITY:
+            quality = max(SHEET_MIN_JPEG_QUALITY, quality - 8)
+            continue
+
+        width, height = current.size
+        next_size = (max(720, int(width * 0.88)), max(540, int(height * 0.88)))
+        if next_size == current.size:
+            logger.warning(
+                f"Contact Sheet 仍超过目标大小: {sheet_path.name}, bytes={size}, "
+                f"target={SHEET_MAX_BYTES}"
+            )
+            sheet_path.write_bytes(buffer.getvalue())
+            return
+        current = current.resize(next_size, Image.Resampling.LANCZOS)
+
+
 def _image_data_url(image_path: Path) -> str:
-    """DashScope 兼容模式对 JPG 示例使用 image/jpg。"""
+    """OpenAI-compatible 多模态接口对 JPG 示例使用 image/jpg。"""
     suffix = image_path.suffix.lower()
     mime = {
         ".jpg": "image/jpg",

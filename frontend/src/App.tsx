@@ -11,6 +11,7 @@ import InventorySyncList from './pages/InventorySyncList';
 import AsinSyncList from './pages/AsinSyncList';
 import AplusUploadList from './pages/AplusUploadList';
 import ConfigPage from './pages/ConfigPage';
+import UpcPoolPage from './pages/UpcPoolPage';
 
 const App: React.FC = () => (
   <ConfigProvider locale={zhCN}>
@@ -24,6 +25,7 @@ const App: React.FC = () => (
             <Route path="/inventory-sync" element={<InventorySyncList />} />
             <Route path="/asin-sync" element={<AsinSyncList />} />
             <Route path="/aplus-upload" element={<AplusUploadList />} />
+            <Route path="/upc-pool" element={<UpcPoolPage />} />
             <Route path="/config" element={<ConfigPage />} />
             <Route path="/products/new" element={<CreateProduct />} />
             <Route path="/products/:id" element={<ProductDetail />} />

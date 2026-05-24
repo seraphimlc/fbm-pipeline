@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """
-Batch Image Curator - Analyze all products in Excel using Qwen VLM API
-Directly calls DashScope API (bypasses OpenClaw image tool issues)
+Batch Image Curator - Analyze all products in Excel using the configured GPT multimodal API.
 """
 
 import json
@@ -18,9 +17,9 @@ from PIL import Image
 # Config
 EXCEL_PATH = "/Users/jiyuhang/Documents/F/亚马逊工作目录/亚马逊商品/05-03/商品表格.xlsx"
 IMAGE_ROOT = "/Users/jiyuhang/Documents/F/亚马逊工作目录/亚马逊商品/05-03"
-API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-API_KEY = "YOUR_API_KEY_HERE"
-MODEL = "qwen3.6-plus"
+API_URL = os.environ.get("LLM_API_BASE", "https://sub2api.127space.com/v1").rstrip("/") + "/chat/completions"
+API_KEY = os.environ.get("LLM_API_KEY", "YOUR_API_KEY_HERE")
+MODEL = os.environ.get("LLM_MODEL", "gpt-5.5")
 CONTACT_SHEET_SIZE = (1600, 1600)
 CONTACT_SHEET_QUALITY = 80
 MAX_RETRIES = 3
@@ -49,7 +48,7 @@ def find_product_images(product_dir):
     images = []
     for root, dirs, files in os.walk(product_dir):
         # Skip analysis and output dirs
-        dirs[:] = [d for d in dirs if d not in ('gallery_selected', 'new main image', 'amazon_image_curator_runs')]]
+        dirs[:] = [d for d in dirs if d not in ('gallery_selected', 'new main image', 'amazon_image_curator_runs')]
         for f in sorted(files):
             if f.lower().endswith(('.jpg', '.jpeg', '.png', '.webp')):
                 images.append(os.path.join(root, f))
@@ -98,7 +97,7 @@ def build_contact_sheet(image_paths, output_path, tiles_per_row=3, tile_size=400
 
 
 def call_vlm_api(image_path, prompt):
-    """Call Qwen VLM API with an image and prompt."""
+    """Call the configured multimodal API with an image and prompt."""
     # Compress image
     img = Image.open(image_path).convert('RGB')
     img.thumbnail(CONTACT_SHEET_SIZE, Image.LANCZOS)

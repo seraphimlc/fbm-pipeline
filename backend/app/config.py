@@ -30,11 +30,11 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""
     LLM_MODEL: str = "gpt-5.5"
 
-    # VLM API (通义千问 DashScope — 主图分析)
-    VLM_API_BASE: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    # VLM API (默认复用 LLM API 的 GPT-5.5 多模态能力做主图分析)
+    VLM_API_BASE: str = "https://sub2api.127space.com/v1"
     VLM_API_KEY: str = ""
-    VLM_MODEL: str = "qwen3.6-plus"
-    VLM_USE_LLM_API: bool = False  # True 时使用 LLM_API_BASE/LLM_API_KEY 跑图片分析，便于切到 gpt-5.5
+    VLM_MODEL: str = "gpt-5.5"
+    VLM_USE_LLM_API: bool = True  # True 时使用 LLM_API_BASE/LLM_API_KEY 跑图片分析
 
     # GPT Image API (t8star — A+出图)
     GPT_IMAGE_API_BASE: str = "https://ai.t8star.cn/v1"

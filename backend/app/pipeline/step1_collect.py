@@ -34,6 +34,7 @@ from app.services.product_duplicates import (
     find_duplicate_by_gigab2b_product_id,
     find_duplicate_by_item_code,
 )
+from app.services.upc_pool import refresh_upc_binding
 
 logger = logging.getLogger(__name__)
 
@@ -1189,6 +1190,7 @@ async def _collect_product_locked(product_id: int) -> dict:
                 pd = ProductData(product_id=product.id)
                 db.add(pd)
             pd.item_code = collected_item_code
+            await refresh_upc_binding(db, product)
             await db.commit()
             raise Step1DuplicateSkipped(f"{duplicate.message}，当前任务跳过采集")
 
@@ -1235,6 +1237,7 @@ async def _collect_product_locked(product_id: int) -> dict:
         pd.image_count = _parse_int(data.get("imageCount"))
         pd.material_dir = str(material_dir)
         pd.collected_at = datetime.now()
+        await refresh_upc_binding(db, product)
 
         unavailable_reason = _unavailable_reason(data, pd.stock)
         if unavailable_reason:

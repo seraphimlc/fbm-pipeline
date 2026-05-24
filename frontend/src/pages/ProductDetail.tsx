@@ -61,8 +61,6 @@ const ProductDetail: React.FC = () => {
   const [regenReason, setRegenReason] = useState('');
   const [regenLoading, setRegenLoading] = useState(false);
   const [regenRetryLoading, setRegenRetryLoading] = useState(false);
-  const [restartUpcOpen, setRestartUpcOpen] = useState(false);
-  const [restartUpc, setRestartUpc] = useState('');
   const [restartLoading, setRestartLoading] = useState(false);
   const [categoryEditOpen, setCategoryEditOpen] = useState(false);
   const [categoryOptions, setCategoryOptions] = useState<CategoryOption[]>([]);
@@ -444,20 +442,10 @@ const ProductDetail: React.FC = () => {
     }
   };
 
-  const doRestart = async (upcOverride?: string) => {
-    const nextUpc = (upcOverride ?? product.upc ?? '').trim();
-    if (!nextUpc) {
-      setRestartUpc(product.upc || '');
-      setRestartUpcOpen(true);
-      return;
-    }
+  const doRestart = async () => {
     setRestartLoading(true);
     try {
-      if (nextUpc !== (product.upc || '').trim()) {
-        await updateProduct(product.id, { upc: nextUpc });
-      }
       await restartPipeline(product.id);
-      setRestartUpcOpen(false);
       await fetchDetail();
       message.success('已重新开始');
     } catch (e: any) {
@@ -1527,25 +1515,6 @@ const ProductDetail: React.FC = () => {
         showCount
         style={{ marginTop: 12 }}
         placeholder="例如：沙发比例变形了，场景图里人物只露出半身；请保持商品原结构，人物要完整，图片文字不要出现品牌名。"
-      />
-    </Modal>
-    <Modal
-      title="填写 UPC 后重新开始"
-      open={restartUpcOpen}
-      okText="保存并重新开始"
-      cancelText="取消"
-      confirmLoading={restartLoading}
-      onOk={() => doRestart(restartUpc)}
-      onCancel={() => {
-        if (!restartLoading) setRestartUpcOpen(false);
-      }}
-    >
-      <Text type="secondary">重新开始会重新生成导入表格；请先补上 UPC，后续会写入 Amazon 表格的 Product Id。</Text>
-      <Input
-        value={restartUpc}
-        onChange={(event) => setRestartUpc(event.target.value)}
-        style={{ marginTop: 12 }}
-        placeholder="请输入 UPC"
       />
     </Modal>
     <Modal
