@@ -57,6 +57,32 @@ def test_category_conflict_only_overrides_conflict() -> None:
     assert_true(merged["Home > Furniture > Chairs (chairs)"]["source"] == "first", "非冲突类目不应被覆盖")
 
 
+def test_template_mapping_changes_must_be_logged() -> None:
+    project_rule = ROOT / ".cursor" / "rules" / "projectRule.mdc"
+    agents_rule = ROOT / "AGENTS.md"
+    change_log = ROOT / "docs" / "template-mapping-change-log.md"
+    rule_text = project_rule.read_text(encoding="utf-8")
+    agents_text = agents_rule.read_text(encoding="utf-8")
+    log_text = change_log.read_text(encoding="utf-8")
+
+    assert_true(change_log.is_file(), "必须保留类目导出文件映射修改专用记录文件")
+    assert_true(
+        "docs/template-mapping-change-log.md" in rule_text
+        and "每次新增、删除或修改 Amazon 类目导出文件映射" in rule_text,
+        "Project Rule 必须要求每次类目导出文件映射修改都追加记录",
+    )
+    assert_true(
+        "docs/template-mapping-change-log.md" in agents_text
+        and "类目导出文件映射修改记录" in agents_text,
+        "AGENTS.md 必须同步记录类目导出文件映射修改规则，保证 Codex 换电脑后也能读到",
+    )
+    assert_true(
+        "backend/app/pipeline/template_mappings/*.json" in log_text
+        and "backend/app/pipeline/step10_amazon_template.py" in log_text,
+        "类目映射修改记录必须覆盖映射 JSON 和 Step10 类目/字段逻辑",
+    )
+
+
 def test_real_asin_export_guard_is_present() -> None:
     products_py = ROOT / "backend" / "app" / "api" / "products.py"
     text = products_py.read_text(encoding="utf-8")
@@ -236,6 +262,7 @@ def test_upc_pool_is_source_of_new_task_upcs() -> None:
 def main() -> int:
     tests = [
         test_category_conflict_only_overrides_conflict,
+        test_template_mapping_changes_must_be_logged,
         test_real_asin_export_guard_is_present,
         test_inventory_update_template_exports_stock_only_by_sku,
         test_step10_keeps_sofa_dimensions_and_avoids_inventory_conflict,

@@ -12,6 +12,13 @@
 
 只覆盖发生冲突的类目映射；没有冲突的其他类目必须保留原有映射，不得因为一次导入而整体替换或清空。
 
+## 类目导出文件映射修改记录
+
+- 每次新增、删除或修改 Amazon 类目导出文件映射时，必须同步追加记录到 `docs/template-mapping-change-log.md`。
+- 记录范围包括 `backend/app/pipeline/template_mappings/*.json`、`backend/app/pipeline/step10_amazon_template.py` 中的类目选择/字段填充逻辑、`backend/app/pipeline/templates/*.xlsm` 模板文件，以及会影响 Step 10 导出字段或类目匹配的文档/配置。
+- 每条记录至少写明日期、改动文件、涉及类目/模板、变更原因、验证命令和结果、后续注意事项。
+- 该记录是类目导出文件映射修改专用，不用于泛化记录无关功能改动。
+
 ## Amazon 导入表格
 
 - 新增或修改类目模板时，必须同步维护 `template_mappings/*.json`，并跑模板映射校验。
