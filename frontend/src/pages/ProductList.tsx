@@ -9,6 +9,7 @@ import type { Product, WorkbenchOverview } from '../api';
 const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
 const PRODUCT_LIST_RETURN_KEY = 'fbm.productList.returnPath';
+const APLUS_REGEN_ACTIVE_STATUSES = ['regen_queued', 'regen_script_running', 'regen_image_running'];
 
 const positiveIntParam = (value: string | null, fallback: number) => {
   const parsed = Number(value);
@@ -258,6 +259,7 @@ const ProductList: React.FC = () => {
 
   const nextAction = (record: Product) => {
     if (runningStatuses.includes(record.status)) return <Tag color="processing">等待运行完成</Tag>;
+    if (APLUS_REGEN_ACTIVE_STATUSES.includes(record.aplus_status || '')) return <Tag color="processing">等待A+重新生成</Tag>;
     if (record.status === 'created') return <Tag color="blue">启动任务</Tag>;
     if (record.status === 'failed') return <Tag color="error">查看错误并重试</Tag>;
     if (record.status === 'paused') return <Tag color="warning">继续任务</Tag>;
@@ -360,7 +362,9 @@ const ProductList: React.FC = () => {
       title: '操作',
       width: 280,
       fixed: 'right' as const,
-      render: (_: unknown, record: Product) => (
+      render: (_: unknown, record: Product) => {
+        const aplusRegenerating = APLUS_REGEN_ACTIVE_STATUSES.includes(record.aplus_status || '');
+        return (
         <Space size="small">
           <Button size="small" onClick={() => openProductDetail(record.id)}>详情</Button>
           {record.status === 'created' && (
@@ -390,12 +394,20 @@ const ProductList: React.FC = () => {
           {record.status === 'pending_review' && record.current_step >= 10 && (
             <Popconfirm
               title="确认同步到商品列表？"
-              description="确认后，这个商品会进入商品列表，可继续同步 ASIN 和上传 A+。"
+              description={aplusRegenerating ? 'A+重新生成还在进行中，完成后才能确认入库。' : '确认后，这个商品会进入商品列表，可继续同步 ASIN 和上传 A+。'}
               okText="确认入库"
               cancelText="再看看"
+              disabled={aplusRegenerating}
               onConfirm={async () => { await confirmProduct(record.id); message.success('已同步到商品列表'); fetchProducts(); fetchOverview(); }}
             >
-              <Button size="small" type="primary" icon={<CheckOutlined />}>确认入库</Button>
+              <Button
+                size="small"
+                type="primary"
+                icon={<CheckOutlined />}
+                disabled={aplusRegenerating}
+              >
+                确认入库
+              </Button>
             </Popconfirm>
           )}
           {!['step1_collecting', 'step2_pricing', 'step3_keywords', 'step4_category', 'step5_listing', 'step6_curating', 'step7_aplus_plan', 'step8_aplus_script', 'step9_aplus_image', 'step10_amazon_template'].includes(record.status) && (
@@ -420,7 +432,8 @@ const ProductList: React.FC = () => {
             </Button>
           </Popconfirm>
         </Space>
-      ),
+        );
+      },
     },
   ];
 

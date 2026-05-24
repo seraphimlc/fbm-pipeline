@@ -28,6 +28,12 @@ UPLOAD_DESTINATION_URL = "https://gw.lingxingerp.com/amz/amz-data-transfer/amazo
 APLUS_ADD_URL = "https://gw.lingxingerp.com/amz/amz-data-transfer/amazon/aplus/add"
 APLUS_EDIT_URL = "https://gw.lingxingerp.com/amz/amz-data-transfer/amazon/aplus/edit"
 _running_batches: dict[int, asyncio.Task] = {}
+SELLABLE_STATUS_KEYWORDS = ("售卖", "在售", "可售", "active", "buyable", "正常")
+
+
+def is_sellable_amazon_product_status(status: str | None) -> bool:
+    normalized = str(status or "").strip().lower()
+    return bool(normalized) and any(keyword in normalized for keyword in SELLABLE_STATUS_KEYWORDS)
 
 
 def start_aplus_upload_batch(batch_id: int) -> bool:
@@ -44,13 +50,23 @@ def build_upload_item(catalog: CatalogProduct) -> AplusUploadItem:
     asin = (catalog.amazon_asin or (product.amazon_asin if product else None) or "").strip()
     item_code = (catalog.item_code or (pd.item_code if pd else None) or "").strip()
     document_name = f"{asin}_{item_code}_{catalog.source_product_id}" if asin and item_code else None
+    amazon_status = catalog.amazon_product_status or (product.amazon_product_status if product else None)
+    status = "pending"
+    error_message = None
+    if not asin:
+        status = "skipped"
+        error_message = "缺少真实 ASIN，请先同步 ASIN"
+    elif not is_sellable_amazon_product_status(amazon_status):
+        status = "skipped"
+        error_message = f"亚马逊商品状态不是售卖：{amazon_status or '未同步'}"
     return AplusUploadItem(
         catalog_product_id=catalog.id,
         product_id=catalog.source_product_id,
         amazon_asin=asin or None,
         item_code=item_code or None,
         document_name=document_name,
-        status="pending",
+        status=status,
+        error_message=error_message,
     )
 
 

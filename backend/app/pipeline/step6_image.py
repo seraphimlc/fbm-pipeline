@@ -357,6 +357,50 @@ def _scan_images(material_dir: str) -> list[Path]:
     return result
 
 
+def _image_fingerprint(images: list[Path]) -> list[dict]:
+    fingerprint = []
+    for path in images:
+        stat = path.stat()
+        fingerprint.append({
+            "path": str(path),
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        })
+    return fingerprint
+
+
+def _load_cached_image_analysis(material_dir: Path, images: list[Path]) -> dict | None:
+    analysis_path = material_dir / "image analysis" / "image_selling_points.json"
+    if not analysis_path.is_file():
+        return None
+    try:
+        payload = json.loads(analysis_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning(f"[Step6] 图片分析缓存读取失败，将重新分析: {analysis_path}, error={exc}")
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    reviews = payload.get("image_reviews") or payload.get("images")
+    gallery = payload.get("gallery_selection")
+    if not isinstance(reviews, list) or not isinstance(gallery, list) or not reviews:
+        return None
+
+    current_fingerprint = _image_fingerprint(images)
+    cached_fingerprint = payload.get("source_images")
+    if isinstance(cached_fingerprint, list):
+        if cached_fingerprint == current_fingerprint:
+            payload["source_images"] = current_fingerprint
+            return payload
+        return None
+
+    newest_source_mtime = max((path.stat().st_mtime for path in images), default=0)
+    if analysis_path.stat().st_mtime >= newest_source_mtime:
+        payload["source_images"] = current_fingerprint
+        return payload
+    return None
+
+
 def _load_font(size: int):
     for name in ["Arial.ttf", "Helvetica.ttc", "DejaVuSans.ttf"]:
         try:
@@ -1353,6 +1397,7 @@ def _write_image_analysis_files(
     reviews: list[dict],
     gallery: list[dict],
     diagnostics: dict | None = None,
+    source_images: list[dict] | None = None,
 ) -> None:
     out_dir = material_dir / "image analysis"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1361,6 +1406,7 @@ def _write_image_analysis_files(
         "image_reviews": reviews,
         "gallery_selection": gallery,
         "selection_diagnostics": diagnostics or {},
+        "source_images": source_images or [],
     }
     (out_dir / "image_selling_points.json").write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
@@ -1417,6 +1463,83 @@ def _write_image_analysis_files(
     (out_dir / "image_selling_points.md").write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
 
+def _restore_cached_image_analysis(
+    pi: ProductImage,
+    cached: dict,
+    images: list[Path],
+    image_analysis_model: str,
+) -> dict:
+    reviews = cached.get("image_reviews") or cached.get("images") or []
+    gallery_selection = cached.get("gallery_selection") or []
+    diagnostics = cached.get("selection_diagnostics") or {}
+    contact_sheets = cached.get("contact_sheets") or []
+    sheet_payloads = cached.get("sheet_payloads") or []
+    strategy_name = (
+        cached.get("gallery_strategy")
+        or (diagnostics.get("image_strategy") or {}).get("name")
+        or "cached"
+    )
+
+    main_item = next(
+        (item for item in gallery_selection if str(item.get("slot") or "").zfill(2) == "01"),
+        gallery_selection[0] if gallery_selection else None,
+    )
+    main_image_path = main_item.get("path") if isinstance(main_item, dict) else None
+    gallery_items = [
+        item for item in gallery_selection
+        if isinstance(item, dict) and item.get("path") and item.get("path") != main_image_path
+    ]
+    gallery_paths = [item.get("path") for item in gallery_items]
+    gallery_order = [item.get("image_id") for item in gallery_items]
+
+    selling_points = []
+    for item in reviews:
+        if not isinstance(item, dict):
+            continue
+        if item.get("visible_selling_point"):
+            selling_points.append(item.get("visible_selling_point"))
+        mm = item.get("multimodal_result")
+        if isinstance(mm, dict) and mm.get("aplus_reference_value"):
+            selling_points.append(mm.get("aplus_reference_value"))
+    selling_points = list(dict.fromkeys(selling_points))[:15]
+
+    pi.contact_sheet_path = str(contact_sheets[0].get("sheet_path")) if contact_sheets else pi.contact_sheet_path
+    pi.image_analysis = json.dumps({
+        "contact_sheets": contact_sheets,
+        "sheet_payloads": sheet_payloads,
+        "images": reviews,
+        "gallery_selection": gallery_selection,
+        "selection_diagnostics": diagnostics,
+        "gallery_strategy": strategy_name,
+        "cache_source": "image_selling_points.json",
+        "source_images": cached.get("source_images") or [],
+    }, ensure_ascii=False)
+    pi.image_selling_points = json.dumps(selling_points, ensure_ascii=False)
+    pi.category_style = f"multi_sheet:{strategy_name}"
+    pi.main_image_path = main_image_path
+    pi.main_image_source = diagnostics.get("main_image_source") or "cache"
+    pi.gallery_images = json.dumps(gallery_paths, ensure_ascii=False)
+    pi.gallery_order = json.dumps(gallery_order, ensure_ascii=False)
+    pi.main_image_summary = (
+        f"复用图片分析缓存，覆盖 {len(reviews)}/{len(images)} 张图片，"
+        f"选择 {len(gallery_selection)} 张主/副图。"
+    )
+    pi.analyzed_at = datetime.now()
+    pi.vlm_model = image_analysis_model
+
+    return {
+        "contact_sheets": contact_sheets,
+        "sheet_payloads": sheet_payloads,
+        "images": reviews,
+        "gallery_selection": gallery_selection,
+        "main_image_path": main_image_path,
+        "main_image_source": pi.main_image_source,
+        "selection_diagnostics": diagnostics,
+        "gallery_strategy": strategy_name,
+        "cache_hit": True,
+    }
+
+
 async def run_image_analysis(product_id: int) -> dict:
     """
     执行主图分析
@@ -1454,6 +1577,17 @@ async def run_image_analysis(product_id: int) -> dict:
             db.add(pi)
 
         material_dir = Path(pd.material_dir)
+        image_analysis_model = settings.VLM_MODEL
+        cached_analysis = _load_cached_image_analysis(material_dir, images)
+        if cached_analysis:
+            result_payload = _restore_cached_image_analysis(pi, cached_analysis, images, image_analysis_model)
+            await db.commit()
+            logger.info(
+                f"[Step6] 命中图片分析缓存: product={product_id}, images={len(images)}, "
+                f"source=image_selling_points.json"
+            )
+            return result_payload
+
         analysis_dir = material_dir / "image analysis"
         contact_sheet_dir = analysis_dir / "contact_sheets"
         if contact_sheet_dir.exists():
@@ -1467,7 +1601,6 @@ async def run_image_analysis(product_id: int) -> dict:
 
         # 调用 VLM 分析
         client = settings.get_image_analysis_client()
-        image_analysis_model = settings.VLM_MODEL
 
         category = pd.leaf_category or "General"
         facts = _facts_from_product(pd)
@@ -1588,7 +1721,14 @@ async def run_image_analysis(product_id: int) -> dict:
                 selling_points.append(mm.get("aplus_reference_value"))
         selling_points = list(dict.fromkeys(selling_points))[:15]  # 去重取前15
 
-        _write_image_analysis_files(material_dir, analysis_contact_sheets, all_reviews, gallery_selection, selection_diagnostics)
+        _write_image_analysis_files(
+            material_dir,
+            analysis_contact_sheets,
+            all_reviews,
+            gallery_selection,
+            selection_diagnostics,
+            source_images=_image_fingerprint(images),
+        )
 
         # 保存到数据库
         pi.image_analysis = json.dumps({

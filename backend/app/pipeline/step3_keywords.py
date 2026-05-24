@@ -8,6 +8,7 @@ POST /v3/api/relation/ta/export-keyword-new?market=1
 import io
 import json
 import logging
+import re
 import httpx
 from pathlib import Path
 
@@ -15,7 +16,7 @@ import openpyxl
 
 from app.config import settings
 from app.database import async_session
-from app.models import Product
+from app.models import Product, ProductData
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -37,6 +38,36 @@ HEADERS = {
 
 PLACEHOLDER_TOKENS = {"", "xxx", "token", "your_token"}
 SELLERSPRITE_LOGIN_URL = "https://www.sellersprite.com/v3/keyword-reverse"
+LLM_KEYWORD_LIMIT = 20
+
+LLM_KEYWORD_SYSTEM_PROMPT = """You are an Amazon US marketplace keyword research specialist.
+Generate high-intent keyword phrases that are likely to match how shoppers search for the product.
+Use only facts supported by the provided title and bullet points/features.
+Avoid unsupported materials, certifications, age claims, medical/safety promises, competitor brand names, and trademarked terms.
+Return valid JSON only."""
+
+LLM_KEYWORD_USER_TEMPLATE = """Generate exactly {limit} likely high-traffic Amazon search keyword phrases for this product.
+
+Requirements:
+- US English keyword phrases only.
+- 2 to 5 words per phrase where possible.
+- No duplicates or near-duplicates.
+- Keep each phrase truthful to the product facts.
+- Do not include punctuation except spaces and hyphens inside normal words.
+- Rank from highest likely shopping relevance/traffic to lower.
+
+Product title:
+{title}
+
+Five bullet points or product features:
+{bullets}
+
+Return JSON in this shape:
+{{
+  "keywords": [
+    {{"keyword": "keyword phrase", "reason": "short factual reason"}}
+  ]
+}}"""
 
 
 class Step3NeedsLogin(RuntimeError):
@@ -295,6 +326,100 @@ def _top_keywords(keywords: list[dict], limit: int = 20) -> list[dict]:
     return sorted_kw[:limit]
 
 
+def _json_list(value: str | None) -> list:
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return []
+    return parsed if isinstance(parsed, list) else []
+
+
+def _keyword_context(pd: ProductData) -> tuple[str, list[str]]:
+    title = (pd.listing_title or pd.title or pd.product_type or "").strip()
+    bullets = [str(item).strip() for item in _json_list(pd.listing_bullets) if str(item).strip()]
+    if not bullets:
+        bullets = [str(item).strip() for item in _json_list(pd.features) if str(item).strip()]
+    if not bullets and pd.description:
+        bullets = [line.strip() for line in re.split(r"[\n\r]+", pd.description) if line.strip()]
+    return title, bullets[:5]
+
+
+def _normalize_llm_keyword(value: str) -> str:
+    text = re.sub(r"[^A-Za-z0-9\s-]+", " ", value or "")
+    text = re.sub(r"\s+", " ", text).strip().lower()
+    return text[:120]
+
+
+def _normalize_llm_keywords(items: list, limit: int = LLM_KEYWORD_LIMIT) -> list[dict]:
+    normalized: list[dict] = []
+    seen: set[str] = set()
+    for item in items:
+        if isinstance(item, dict):
+            raw_keyword = item.get("keyword")
+            reason = str(item.get("reason") or "LLM fallback").strip()
+        else:
+            raw_keyword = item
+            reason = "LLM fallback"
+        keyword = _normalize_llm_keyword(str(raw_keyword or ""))
+        if not keyword or keyword in seen:
+            continue
+        seen.add(keyword)
+        normalized.append({
+            "keyword": keyword,
+            "volume": None,
+            "position": None,
+            "source": "llm_generated",
+            "reason": reason[:180],
+        })
+        if len(normalized) >= limit:
+            break
+    return normalized
+
+
+async def generate_llm_keywords_from_product(product: Product, limit: int = LLM_KEYWORD_LIMIT) -> list[dict]:
+    pd = product.data
+    if not pd:
+        raise ValueError(f"Product {product.id} has no product_data")
+
+    title, bullets = _keyword_context(pd)
+    if not title and not bullets:
+        raise ValueError("缺少标题和五点/Features，无法用大模型生成关键词")
+
+    client = settings.get_llm_client()
+    prompt = LLM_KEYWORD_USER_TEMPLATE.format(
+        limit=limit,
+        title=title or "N/A",
+        bullets="\n".join(f"- {item}" for item in bullets) if bullets else "- N/A",
+    )
+    logger.info(f"[Step3] 调用LLM生成关键词兜底: product_id={product.id}, title={title[:80]}")
+    response = await client.chat.completions.create(
+        model=settings.LLM_MODEL,
+        messages=[
+            {"role": "system", "content": LLM_KEYWORD_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.35,
+        max_tokens=1800,
+        response_format={"type": "json_object"},
+    )
+    content = response.choices[0].message.content
+    if not content:
+        raise RuntimeError("LLM 返回空关键词结果")
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"LLM 关键词JSON解析失败: {e}") from e
+    keywords = payload.get("keywords") if isinstance(payload, dict) else None
+    if not isinstance(keywords, list):
+        raise RuntimeError("LLM 关键词结果缺少 keywords 数组")
+    result = _normalize_llm_keywords(keywords, limit)
+    if not result:
+        raise RuntimeError("LLM 未生成可用关键词")
+    return result
+
+
 async def run_keywords(product_id: int) -> dict:
     """
     执行关键词获取
@@ -312,39 +437,54 @@ async def run_keywords(product_id: int) -> dict:
             raise ValueError(f"Product {product_id} not found")
 
         asin = product.competitor_asin
-        if not asin:
-            raise ValueError("未设置竞品ASIN，无法获取关键词")
+        keywords: list[dict] = []
+        excel_bytes: bytes | None = None
+        generated_by_llm = False
+        if asin:
+            keywords, excel_bytes = await fetch_keywords(asin)
+            if not keywords:
+                await _ensure_sellersprite_logged_in_for_empty_keywords(asin)
+        else:
+            logger.warning(f"[Step3] 未设置竞品ASIN，改用LLM关键词兜底: product_id={product_id}")
 
-        # 调用API
-        keywords, excel_bytes = await fetch_keywords(asin)
-        if not keywords:
-            await _ensure_sellersprite_logged_in_for_empty_keywords(asin)
-
-        # 取 Top 20
-        top = _top_keywords(keywords, 20)
+        if keywords:
+            top = _top_keywords(keywords, LLM_KEYWORD_LIMIT)
+        else:
+            top = await generate_llm_keywords_from_product(product, LLM_KEYWORD_LIMIT)
+            generated_by_llm = True
 
         # 保存 Excel 到素材目录
         pd = product.data
         keyword_dir = Path(pd.material_dir) if pd and pd.material_dir else None
         excel_path = None
-        if keyword_dir:
+        if keyword_dir and excel_bytes:
             keyword_dir.mkdir(parents=True, exist_ok=True)
-            excel_path = keyword_dir / f"keywords_{asin}.xlsx"
+            excel_path = keyword_dir / f"keywords_{asin or product_id}.xlsx"
             excel_path.write_bytes(excel_bytes)
 
         # 保存到数据库
         if pd:
             pd.keywords_top = json.dumps(
-                [{"keyword": k.get("keyword"), "volume": k.get("search_volume") or k.get("monthly_volume"), "position": k.get("position")} for k in top],
+                [
+                    {
+                        "keyword": k.get("keyword"),
+                        "volume": k.get("search_volume") or k.get("monthly_volume") or k.get("volume"),
+                        "position": k.get("position"),
+                        **({"source": k.get("source"), "reason": k.get("reason")} if k.get("source") else {}),
+                    }
+                    for k in top
+                ],
                 ensure_ascii=False,
             )
-            pd.keyword_excel_path = str(excel_path) if excel_path else None
+            if excel_path:
+                pd.keyword_excel_path = str(excel_path)
             await db.commit()
 
-        logger.info(f"[Step3] 关键词获取完成: ASIN={asin}, top={len(top)}, total={len(keywords)}")
+        logger.info(f"[Step3] 关键词获取完成: ASIN={asin}, top={len(top)}, total={len(keywords)}, llm_fallback={generated_by_llm}")
         return {
             "asin": asin,
             "total_keywords": len(keywords),
             "top_keywords": top,
             "excel_path": str(excel_path) if excel_path else None,
+            "llm_fallback": generated_by_llm,
         }

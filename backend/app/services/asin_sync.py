@@ -5,18 +5,25 @@ import json
 import logging
 import re
 from datetime import datetime
+from urllib.parse import unquote
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.database import async_session
 from app.models import AsinSyncBatch, AsinSyncItem, CatalogProduct, Product
-from app.pipeline.chrome_ctrl import chrome_execute_js, chrome_navigate, chrome_workflow
+from app.pipeline.chrome_ctrl import chrome_execute_js, chrome_get_cookie_for_domain, chrome_navigate, chrome_workflow
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_STORE = "Andy店-US"
+DEFAULT_STORE_ID = 17983
+STORE_IDS = {
+    "Andy店-US": 17983,
+}
 LINGXING_LISTING_URL = "https://erp.lingxing.com/erp/listing"
+LINGXING_LISTING_API_URL = "https://gw.lingxingerp.com/listing-api/api/product/showOnline"
 ASIN_RE = re.compile(r"\bB[A-Z0-9]{9}\b")
 _running_batches: dict[int, asyncio.Task] = {}
 
@@ -38,8 +45,13 @@ def _normalize_code(value: str | None) -> str:
     return re.sub(r"\s+", "", value or "").upper()
 
 
-def _looks_like_upc(value: str | None) -> bool:
-    return bool(value and re.fullmatch(r"\d{8,14}", value.strip()))
+def _normalize_lookup_type(value: str | None) -> str:
+    normalized = (value or "").strip()
+    if normalized.upper() == "UPC":
+        return "商品编码"
+    if normalized.upper() == "SKU":
+        return "MSKU"
+    return normalized or "商品编码"
 
 
 async def _update_batch_counts(db, batch: AsinSyncBatch) -> None:
@@ -70,27 +82,26 @@ async def _run_batch(batch_id: int) -> None:
             batch.started_at = datetime.now()
             await db.commit()
 
-        async with chrome_workflow(f"asin_sync batch={batch_id}"):
-            page_ready = await _prepare_lingxing_listing()
-            if not page_ready.get("ok"):
-                await _fail_whole_batch(batch_id, page_ready.get("error") or "领星 Listing 页面不可用")
+        async with async_session() as db:
+            result = await db.execute(
+                select(AsinSyncBatch)
+                .options(selectinload(AsinSyncBatch.items))
+                .where(AsinSyncBatch.id == batch_id)
+            )
+            batch = result.scalar_one()
+            item_ids = [item.id for item in batch.items if item.status == "pending"]
+            store = batch.store or DEFAULT_STORE
+            if not item_ids:
+                await _update_batch_counts(db, batch)
                 return
 
-            async with async_session() as db:
-                result = await db.execute(
-                    select(AsinSyncBatch)
-                    .options(selectinload(AsinSyncBatch.items))
-                    .where(AsinSyncBatch.id == batch_id)
-                )
-                batch = result.scalar_one()
-                item_ids = [item.id for item in batch.items if item.status == "pending"]
-                store = batch.store or DEFAULT_STORE
-                if not item_ids:
-                    await _update_batch_counts(db, batch)
-                    return
+        auth = await _get_lingxing_listing_auth(store)
+        if not auth.get("ok"):
+            await _fail_whole_batch(batch_id, auth.get("error") or "领星未登录，无法查询 ASIN")
+            return
 
-            for item_id in item_ids:
-                await _run_item(item_id, store)
+        for item_id in item_ids:
+            await _run_item(item_id, store, auth)
 
         async with async_session() as db:
             result = await db.execute(
@@ -136,7 +147,7 @@ async def _fail_whole_batch(batch_id: int, error: str) -> None:
         await _update_batch_counts(db, batch)
 
 
-async def _run_item(item_id: int, store: str) -> None:
+async def _run_item(item_id: int, store: str, auth: dict | None = None) -> None:
     async with async_session() as db:
         result = await db.execute(select(AsinSyncItem).where(AsinSyncItem.id == item_id))
         item = result.scalar_one_or_none()
@@ -146,14 +157,14 @@ async def _run_item(item_id: int, store: str) -> None:
         item.started_at = datetime.now()
         await db.commit()
         lookup_code = item.lookup_code
-        lookup_type = item.lookup_type or "商品编码"
+        lookup_type = _normalize_lookup_type(item.lookup_type)
 
     if not lookup_code:
-        await _finish_item(item_id, "skipped", error="缺少 UPC 或商品编码，无法查询")
+        await _finish_item(item_id, "skipped", error="缺少 ASIN、UPC/商品编码或 SKU，无法查询")
         return
 
     try:
-        lookup = await _lookup_asin(lookup_code, store)
+        lookup = await _lookup_asin(lookup_code, store, lookup_type, auth)
         if lookup.get("status") == "not_logged_in":
             await _finish_item(item_id, "failed", error="领星未登录，无法查询 ASIN")
             return
@@ -168,10 +179,11 @@ async def _run_item(item_id: int, store: str) -> None:
             return
         asin = lookup.get("asin")
         matched_code = lookup.get("matched_code")
+        amazon_product_status = lookup.get("amazon_product_status")
         if not asin or _normalize_code(matched_code) != _normalize_code(lookup_code):
             await _finish_item(item_id, "failed", error="查询结果未通过商品编码校验")
             return
-        await _finish_item(item_id, "success", asin=asin, matched_code=matched_code)
+        await _finish_item(item_id, "success", asin=asin, matched_code=matched_code, amazon_product_status=amazon_product_status)
     except Exception as exc:
         await _finish_item(item_id, "failed", error=f"{type(exc).__name__}: {exc}")
 
@@ -181,6 +193,7 @@ async def _finish_item(
     status: str,
     asin: str | None = None,
     matched_code: str | None = None,
+    amazon_product_status: str | None = None,
     error: str | None = None,
 ) -> None:
     async with async_session() as db:
@@ -191,6 +204,7 @@ async def _finish_item(
         item.status = status
         item.amazon_asin = asin
         item.matched_code = matched_code
+        item.amazon_product_status = amazon_product_status
         item.error_message = error
         item.finished_at = datetime.now()
 
@@ -208,11 +222,16 @@ async def _finish_item(
                 continue
             target.asin_sync_status = sync_status
             target.asin_sync_error = error
+            target.amazon_product_status_error = error
             if asin:
                 target.amazon_asin = asin
                 target.asin_synced_at = datetime.now()
+                target.amazon_product_status = amazon_product_status
+                target.amazon_product_status_synced_at = datetime.now()
+                target.amazon_product_status_error = None
             elif status in {"not_found", "multiple_found", "failed", "skipped"}:
                 target.asin_synced_at = datetime.now()
+                target.amazon_product_status_synced_at = datetime.now()
 
         batch_result = await db.execute(
             select(AsinSyncBatch)
@@ -252,169 +271,186 @@ async def _prepare_lingxing_listing() -> dict:
     return data
 
 
-async def _lookup_asin(code: str, store: str) -> dict:
-    search_js = f"""
-(function() {{
-  const targetCode = {json.dumps(code)};
-  const norm = (value) => String(value || '').replace(/\\s+/g, '').toUpperCase();
-  const visible = (el) => {{
-    const rect = el.getBoundingClientRect();
-    const style = window.getComputedStyle(el);
-    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-  }};
-  const text = () => document.body ? document.body.innerText : '';
-  if (/登录|login/i.test(text()) && !/Listing|商品编码|产品|销售/.test(text())) {{
-    return JSON.stringify({{status:'not_logged_in'}});
-  }}
-  const clickByText = (needle) => {{
-    const nodes = Array.from(document.querySelectorAll('button,span,div,input,[role=button]')).filter(visible);
-    const found = nodes.find(el => norm(el.innerText || el.value || el.getAttribute('title')).includes(norm(needle)));
-    if (found) {{
-      found.click();
-      return true;
-    }}
-    return false;
-  }};
-  clickByText('商品编码');
+def _parse_cookie(cookie: str) -> dict[str, str]:
+    parsed = {}
+    for part in cookie.split(";"):
+        if "=" in part:
+            key, value = part.split("=", 1)
+            parsed[key.strip()] = unquote(value.strip())
+    return parsed
 
-  const inputs = Array.from(document.querySelectorAll('input')).filter(visible);
-  const searchInput = inputs.reverse().find(el => !/date|time|checkbox|radio/.test(el.type || '')) || inputs[0];
-  if (!searchInput) {{
-    return JSON.stringify({{status:'failed', error:'未找到搜索输入框'}});
-  }}
-  searchInput.focus();
-  searchInput.value = targetCode;
-  searchInput.dispatchEvent(new Event('input', {{bubbles:true}}));
-  searchInput.dispatchEvent(new Event('change', {{bubbles:true}}));
-  searchInput.dispatchEvent(new KeyboardEvent('keydown', {{key:'Enter', code:'Enter', bubbles:true}}));
-  searchInput.dispatchEvent(new KeyboardEvent('keyup', {{key:'Enter', code:'Enter', bubbles:true}}));
-  const searchButton = Array.from(document.querySelectorAll('button')).filter(visible).find(el => /搜索|查询/.test(el.innerText || ''));
-  if (searchButton) searchButton.click();
-  return JSON.stringify({{status:'search_triggered'}});
-}})()
+
+async def _get_lingxing_listing_auth(store: str = DEFAULT_STORE) -> dict:
+    async with chrome_workflow("asin_sync_auth"):
+        opened = await chrome_navigate(LINGXING_LISTING_URL, wait=3)
+        if not opened:
+            return {"ok": False, "error": "无法打开领星 Listing 页面"}
+        cookie = await chrome_get_cookie_for_domain("erp.lingxing.com")
+        if not cookie:
+            return {"ok": False, "error": "领星未登录，无法读取 Cookie"}
+        page_ready = await _prepare_lingxing_listing()
+        if not page_ready.get("ok"):
+            return page_ready
+        js = """
+(function() {
+  return JSON.stringify({
+    ok: true,
+    language: localStorage.getItem('language') || 'zh',
+    loginEnv: sessionStorage.getItem('loginEnv') || '1',
+    origin: location.origin
+  });
+})()
 """
-    raw = await chrome_execute_js(search_js, timeout=20)
+        raw = await chrome_execute_js(js, timeout=20)
+        try:
+            data = json.loads(raw or "{}")
+        except json.JSONDecodeError:
+            data = {"ok": False, "error": "无法读取领星页面状态"}
+        if not data.get("ok"):
+            return data
+        cookies = _parse_cookie(cookie)
+
+    headers = {
+        "Cookie": cookie,
+        "X-AK-Language": data.get("language") or "zh",
+        "X-AK-Request-Source": "erp",
+        "X-AK-Zid": cookies.get("zid", ""),
+        "X-AK-Version": "3.8.3.3.0.141",
+        "X-AK-ENV-KEY": cookies.get("envKey", ""),
+        "X-AK-PLATFORM": data.get("loginEnv") or "1",
+        "AK-Client-Type": "web",
+        "auth-token": cookies.get("authToken", ""),
+        "X-AK-Uid": cookies.get("uid", ""),
+        "X-AK-Company-Id": cookies.get("company_id", ""),
+        "AK-Origin": data.get("origin") or "https://erp.lingxing.com",
+        "Origin": "https://erp.lingxing.com",
+        "Referer": "https://erp.lingxing.com/",
+    }
+    return {"ok": True, "headers": headers, "store_id": STORE_IDS.get(store, DEFAULT_STORE_ID)}
+
+
+def _lookup_api_field(search_type: str) -> str:
+    lookup_type = _normalize_lookup_type(search_type)
+    if lookup_type == "商品编码":
+        return "amz_product_id"
+    if lookup_type == "MSKU":
+        return "msku"
+    if lookup_type == "ASIN":
+        return "asin"
+    return lookup_type
+
+
+def _row_match_code(row: dict, api_field: str) -> str:
+    if api_field == "amz_product_id":
+        return str(row.get("amz_product_id") or "")
+    if api_field == "msku":
+        return str(row.get("msku") or "")
+    if api_field == "asin":
+        return str(row.get("asin") or "")
+    return str(row.get(api_field) or "")
+
+
+def _is_deleted_listing(row: dict) -> bool:
+    status_text = str(row.get("status_text") or "").strip().lower()
+    is_delete = str(row.get("is_delete") or "").strip().lower()
+    return is_delete in {"1", "true", "yes"} or status_text in {"已删除", "deleted"}
+
+
+def _listing_status_text(row: dict) -> str | None:
+    for key in (
+        "status_text",
+        "statusText",
+        "status_name",
+        "statusName",
+        "listing_status",
+        "listingStatus",
+        "sale_status",
+        "saleStatus",
+        "state",
+    ):
+        value = row.get(key)
+        if value not in (None, ""):
+            return str(value).strip()
+    return None
+
+
+async def _lookup_asin(
+    code: str,
+    store: str,
+    search_type: str = "商品编码",
+    auth: dict | None = None,
+) -> dict:
+    auth = auth or await _get_lingxing_listing_auth(store)
+    if not auth.get("ok"):
+        return {"status": "not_logged_in", "error": auth.get("error") or "领星未登录，无法查询 ASIN"}
+
+    api_field = _lookup_api_field(search_type)
+    payload = {
+        "sids": str(auth.get("store_id") or STORE_IDS.get(store, DEFAULT_STORE_ID)),
+        "search_field": api_field,
+        "search_value": [code],
+        "offset": 0,
+        "length": 20,
+    }
     try:
-        initial = json.loads(raw or "{}")
-    except json.JSONDecodeError:
-        initial = {"status": "failed", "error": "领星搜索触发失败"}
-    if initial.get("status") in {"not_logged_in", "failed"}:
-        return initial
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.post(LINGXING_LISTING_API_URL, headers=auth["headers"], json=payload)
+            response.raise_for_status()
+            data = response.json()
+    except Exception as exc:
+        return {"status": "failed", "error": f"领星 API 查询失败: {type(exc).__name__}: {exc}"}
 
-    await asyncio.sleep(3.5)
+    if data.get("code") != 1:
+        return {"status": "failed", "error": data.get("msg") or "领星 API 返回失败"}
 
-    extract_js = f"""
-(function() {{
-  const targetCode = {json.dumps(code)};
-  const norm = (value) => String(value || '').replace(/\\s+/g, '').toUpperCase();
-  const visible = (el) => {{
-    const rect = el.getBoundingClientRect();
-    const style = window.getComputedStyle(el);
-    return rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none';
-  }};
-  const cleanText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
-  const hasDeletedStatusText = (value) => /(?:商品状态|Listing状态|listing状态|刊登状态|销售状态|状态)\\s*[:：]?\\s*(已删除|删除|DELETED)(?:\\s|$|[，,。；;|/])/i.test(value || '');
-  const isInteractiveDelete = (el) => {{
-    const interactive = el.matches('a,button,[role=button]')
-      ? el
-      : (el.querySelector('a,button,[role=button]') || el.closest('a,button,[role=button]'));
-    if (!interactive) return false;
-    return /^删除$/i.test(cleanText(interactive.innerText || interactive.value || interactive.getAttribute('title')));
-  }};
-  const isDeletedListing = (linkedRows, combinedText) => {{
-    if (hasDeletedStatusText(combinedText)) return true;
-    const statusNodes = linkedRows.flatMap(row => Array.from(row.querySelectorAll('td,.ant-table-cell,[role=cell],.ant-tag,.ant-badge-status-text'))).filter(visible);
-    return statusNodes.some(el => {{
-      const value = cleanText(el.innerText || el.textContent || '');
-      if (/^(已删除|DELETED)$/i.test(value)) return true;
-      return /^删除$/i.test(value) && !isInteractiveDelete(el);
-    }});
-  }};
-  const text = () => document.body ? document.body.innerText : '';
-  if (/登录|login/i.test(text()) && !/Listing|商品编码|产品|销售/.test(text())) {{
-    return JSON.stringify({{status:'not_logged_in'}});
-  }}
-  const bodyText = text();
-  if (/暂无数据|无数据|没有数据|No Data|no data/i.test(bodyText) && !bodyText.includes(targetCode)) {{
-    return JSON.stringify({{status:'not_found'}});
-  }}
+    rows = ((data.get("data") or {}).get("list") or [])
+    matched_rows = [
+        row for row in rows
+        if _normalize_code(_row_match_code(row, api_field)) == _normalize_code(code)
+    ]
+    if not matched_rows:
+        return {"status": "not_found"}
 
-  const rows = Array.from(document.querySelectorAll('tr,.ant-table-row,[role=row]')).filter(visible);
-  const matches = [];
-  for (const row of rows) {{
-    const rowText = row.innerText || '';
-    if (norm(rowText).includes(norm(targetCode))) {{
-      const rowId = row.getAttribute('rowid') || row.getAttribute('data-rowid');
-      const linkedRows = rowId
-        ? rows.filter(candidate => (candidate.getAttribute('rowid') || candidate.getAttribute('data-rowid')) === rowId)
-        : [row, row.nextElementSibling].filter(candidate => candidate && visible(candidate));
-      const combined = linkedRows.map(candidate => candidate.innerText || '').join('\\n');
-      if (combined && !matches.some(match => match.text === combined)) {{
-        matches.push({{
-          text: combined,
-          deleted: isDeletedListing(linkedRows, combined)
-        }});
-      }}
-    }}
-  }}
-  if (!matches.length) {{
-    if (!norm(bodyText).includes(norm(targetCode))) return JSON.stringify({{status:'not_found'}});
-    matches.push({{text: bodyText, deleted: hasDeletedStatusText(bodyText)}});
-  }}
+    active_rows = [row for row in matched_rows if not _is_deleted_listing(row)]
+    if not active_rows:
+        return {
+            "status": "not_found",
+            "matched_count": len(matched_rows),
+            "deleted_count": len(matched_rows),
+            "error": "匹配到的 Listing 是删除状态，未写入 ASIN",
+        }
 
-  const activeMatches = matches.filter(match => !match.deleted);
-  if (!activeMatches.length) {{
-    return JSON.stringify({{
-      status:'not_found',
-      matched_count: matches.length,
-      deleted_count: matches.filter(match => match.deleted).length,
-      error:'匹配到的 Listing 是删除状态，未写入 ASIN'
-    }});
-  }}
+    matched_asins = sorted({str(row.get("asin") or "").strip() for row in active_rows if row.get("asin")})
+    if len(active_rows) > 1 or len(matched_asins) > 1:
+        return {
+            "status": "multiple_found",
+            "matched_count": max(len(active_rows), len(matched_asins)),
+            "error": "匹配到多个 Listing，请人工确认",
+        }
 
-  const matchedAsins = Array.from(new Set(activeMatches.flatMap(match => match.text.match(/\\bB[A-Z0-9]{{9}}\\b/g) || [])));
-  if (activeMatches.length > 1 || matchedAsins.length > 1) {{
-    return JSON.stringify({{
-      status:'multiple_found',
-      matched_count: Math.max(activeMatches.length, matchedAsins.length),
-      error:'匹配到多个 Listing，请人工确认'
-    }});
-  }}
-
-  const matchedText = activeMatches[0].text || '';
-  const asinMatch = matchedText.match(/\\bB[A-Z0-9]{{9}}\\b/);
-  if (!asinMatch) {{
-    return JSON.stringify({{status:'not_found'}});
-  }}
-  return JSON.stringify({{
-    status:'success',
-    asin: asinMatch[0],
-    matched_code: targetCode
-  }});
-}})()
-"""
-    raw = await chrome_execute_js(extract_js, timeout=20)
-    try:
-        data = json.loads(raw or "{}")
-    except json.JSONDecodeError:
-        data = {"status": "failed", "error": "领星查询结果解析失败"}
-    if data.get("status") == "success":
-        asin = data.get("asin")
-        if not asin or not ASIN_RE.fullmatch(asin):
-            return {"status": "failed", "error": "ASIN 格式无效"}
-    return data
+    asin = matched_asins[0] if matched_asins else ""
+    if not asin or not ASIN_RE.fullmatch(asin):
+        return {"status": "not_found"}
+    return {
+        "status": "success",
+        "asin": asin,
+        "matched_code": _row_match_code(active_rows[0], api_field),
+        "amazon_product_status": _listing_status_text(active_rows[0]),
+    }
 
 
 def build_sync_item(catalog: CatalogProduct) -> AsinSyncItem:
     product = catalog.source_product
     item_code = product.data.item_code if product and product.data else catalog.item_code
-    lookup_code = (catalog.upc or (product.upc if product else None) or item_code or "").strip()
-    lookup_type = "UPC" if _looks_like_upc(lookup_code) else "商品编码"
+    asin = (catalog.amazon_asin or (product.amazon_asin if product else None) or "").strip()
+    upc = (catalog.upc or (product.upc if product else None) or "").strip()
+    lookup_code = (asin or upc or item_code or "").strip()
+    lookup_type = "ASIN" if asin else ("商品编码" if upc else "MSKU")
     return AsinSyncItem(
         catalog_product_id=catalog.id,
         product_id=catalog.source_product_id,
         lookup_code=lookup_code or None,
         lookup_type=lookup_type,
         status="pending" if lookup_code else "skipped",
-        error_message=None if lookup_code else "缺少 UPC 或商品编码，无法查询",
+        error_message=None if lookup_code else "缺少 ASIN、UPC/商品编码或 SKU，无法查询",
     )

@@ -12,6 +12,7 @@ import logging
 import math
 import re
 import shutil
+import time
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
@@ -309,9 +310,11 @@ async def _submit_reference_generations(prompt: str, ref_paths: list[Path], qual
     }
 
     last_error = ""
+    rate_limit_count = 0
     retries = max(settings.APLUS_IMAGE_API_RETRIES, 1)
     async with httpx.AsyncClient(timeout=300, verify=not settings.GPT_IMAGE_USE_LLM_API) as http:
         for attempt in range(1, retries + 1):
+            attempt_started = time.monotonic()
             try:
                 logger.info(
                     f"[Step9] 提交A+参考图生图: model={settings.GPT_IMAGE_MODEL}, "
@@ -321,13 +324,25 @@ async def _submit_reference_generations(prompt: str, ref_paths: list[Path], qual
                 )
                 response = await http.post(url, headers=headers, json=payload)
                 if response.status_code >= 400:
+                    if response.status_code == 429:
+                        rate_limit_count += 1
                     raise RuntimeError(f"图片接口请求失败 {response.status_code}: {response.text[:1000]}")
-                return await _image_bytes_from_result(http, response.json())
+                img_bytes = await _image_bytes_from_result(http, response.json())
+                logger.info(
+                    f"[Step9] generations 生图返回成功: quality={payload['quality']}, "
+                    f"attempt={attempt}/{retries}, 耗时={time.monotonic() - attempt_started:.1f}s, "
+                    f"429次数={rate_limit_count}"
+                )
+                return img_bytes
             except Exception as e:
                 last_error = str(e)
                 if attempt >= retries:
                     break
-                logger.warning(f"[Step9] A+ generations 生图请求失败，准备重试: {last_error}")
+                logger.warning(
+                    f"[Step9] A+ generations 生图请求失败，准备重试: {last_error}; "
+                    f"attempt={attempt}/{retries}, 耗时={time.monotonic() - attempt_started:.1f}s, "
+                    f"429次数={rate_limit_count}"
+                )
                 await asyncio.sleep(2 * attempt)
 
     raise RuntimeError(last_error or "图片接口未返回图片")
@@ -355,9 +370,11 @@ async def _submit_reference_edits(prompt: str, ref_paths: list[Path], width: int
     }
 
     last_error = ""
+    rate_limit_count = 0
     retries = max(settings.APLUS_IMAGE_API_RETRIES, 1)
     async with httpx.AsyncClient(timeout=300, verify=not settings.GPT_IMAGE_USE_LLM_API) as http:
         for attempt in range(1, retries + 1):
+            attempt_started = time.monotonic()
             try:
                 logger.info(
                     f"[Step9] 提交A+参考图生图: model={settings.GPT_IMAGE_MODEL}, "
@@ -367,13 +384,25 @@ async def _submit_reference_edits(prompt: str, ref_paths: list[Path], width: int
                 )
                 response = await http.post(url, headers=headers, data=data, files=files)
                 if response.status_code >= 400:
+                    if response.status_code == 429:
+                        rate_limit_count += 1
                     raise RuntimeError(f"图片接口请求失败 {response.status_code}: {response.text[:1000]}")
-                return await _image_bytes_from_result(http, response.json())
+                img_bytes = await _image_bytes_from_result(http, response.json())
+                logger.info(
+                    f"[Step9] edits 生图返回成功: size={data['size']}, "
+                    f"attempt={attempt}/{retries}, 耗时={time.monotonic() - attempt_started:.1f}s, "
+                    f"429次数={rate_limit_count}"
+                )
+                return img_bytes
             except Exception as e:
                 last_error = str(e)
                 if attempt >= retries:
                     break
-                logger.warning(f"[Step9] A+ edits 生图请求失败，准备重试: {last_error}")
+                logger.warning(
+                    f"[Step9] A+ edits 生图请求失败，准备重试: {last_error}; "
+                    f"attempt={attempt}/{retries}, 耗时={time.monotonic() - attempt_started:.1f}s, "
+                    f"429次数={rate_limit_count}"
+                )
                 await asyncio.sleep(2 * attempt)
 
     raise RuntimeError(last_error or "图片接口未返回图片")
@@ -481,6 +510,7 @@ async def _generate_single_image(
         dict: {path, status, error?}
     """
     async with semaphore:
+        image_started = time.monotonic()
         width = settings.APLUS_IMAGE_WIDTH
         height = settings.APLUS_IMAGE_HEIGHT
         prompt = _sanitize_generation_prompt(script.get("prompt", ""), brand, script.get("negative_prompt"))
@@ -497,7 +527,7 @@ async def _generate_single_image(
             raw_path = output_path.with_name(f"{output_path.stem}_raw{_image_extension(img_bytes)}")
             size_info = _save_exact_size_image(img_bytes, raw_path, output_path, width, height)
 
-            logger.info(f"[Step9] 模块 {position} 图片已保存: {output_path.name}")
+            logger.info(f"[Step9] 模块 {position} 图片已保存: {output_path.name}, 耗时={time.monotonic() - image_started:.1f}s")
             return {
                 "position": position,
                 "status": "done",
@@ -514,7 +544,7 @@ async def _generate_single_image(
 
         except Exception as e:
             error_msg = f"{type(e).__name__}: {str(e)}"
-            logger.error(f"[Step9] 模块 {position} 生成失败: {error_msg}")
+            logger.error(f"[Step9] 模块 {position} 生成失败: {error_msg}, 耗时={time.monotonic() - image_started:.1f}s")
             return {"position": position, "status": "failed", "error": error_msg}
 
 
@@ -559,6 +589,7 @@ async def run_aplus_image(product_id: int) -> dict:
     读取 A+ 脚本，并发生成所有 A+ 图片
     """
     async with async_session() as db:
+        step_started = time.monotonic()
         result = await db.execute(
             select(Product)
             .options(
@@ -640,7 +671,7 @@ async def run_aplus_image(product_id: int) -> dict:
 
         logger.info(
             f"[Step9] A+出图完成: {success_count}/{len(scripts)} 成功, "
-            f"目录={output_dir}"
+            f"目录={output_dir}, 耗时={time.monotonic() - step_started:.1f}s"
         )
         expected_count = min(len(scripts), 5)
         if success_count < expected_count:

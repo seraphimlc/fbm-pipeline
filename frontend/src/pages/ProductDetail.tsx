@@ -6,9 +6,9 @@ import {
   ArrowLeftOutlined, PlayCircleOutlined, RedoOutlined,
   PauseOutlined, ReloadOutlined, DeleteOutlined,
   FolderOpenOutlined, FileZipOutlined, InboxOutlined, FileExcelOutlined,
-  CheckOutlined,
+  CheckOutlined, DragOutlined,
 } from '@ant-design/icons';
-import { getProduct, startPipeline, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, runPipelineStep, updateProduct, confirmProduct, listCategoryOptions, STEP_LABELS } from '../api';
+import { getProduct, startPipeline, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, runPipelineStep, updateProduct, updateProductListingImages, confirmProduct, listCategoryOptions, STEP_LABELS } from '../api';
 import type { CategoryOption, ProductDetail } from '../api';
 
 const { Title, Text } = Typography;
@@ -40,6 +40,20 @@ const parseJson = (value: string | null | undefined, fallback: any = null) => {
   } catch {
     return fallback;
   }
+};
+
+const normalizeImagePath = (item: any) => {
+  const path = typeof item === 'string' ? item : item?.path;
+  return path ? String(path).trim() : '';
+};
+
+const listingImagePathsFromImages = (images: any) => {
+  const galleryImagePaths = parseJson(images?.gallery_images, []);
+  const paths = [
+    images?.main_image_path ? String(images.main_image_path).trim() : '',
+    ...(Array.isArray(galleryImagePaths) ? galleryImagePaths.map(normalizeImagePath) : []),
+  ].filter(Boolean);
+  return paths.filter((path, index) => paths.indexOf(path) === index);
 };
 
 const money = (value: number | null | undefined) => value != null ? `$${value}` : '-';
@@ -78,6 +92,11 @@ const ProductDetail: React.FC = () => {
   const [listingSaving, setListingSaving] = useState(false);
   const [amazonTemplateLoading, setAmazonTemplateLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [imageOrderSaving, setImageOrderSaving] = useState(false);
+  const [imageDragPayload, setImageDragPayload] = useState<any | null>(null);
+  const [listingImageDraftPaths, setListingImageDraftPaths] = useState<string[]>([]);
+  const [listingImageDirty, setListingImageDirty] = useState(false);
+  const [listingImageDraftProductId, setListingImageDraftProductId] = useState<number | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchDetail = async () => {
@@ -109,6 +128,21 @@ const ProductDetail: React.FC = () => {
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [product?.status, product?.aplus?.aplus_status]);
 
+  useEffect(() => {
+    if (!product) return;
+    if (listingImageDraftProductId !== product.id || !listingImageDirty) {
+      setListingImageDraftPaths(listingImagePathsFromImages(product.images));
+      setListingImageDirty(false);
+      setListingImageDraftProductId(product.id);
+    }
+  }, [
+    product?.id,
+    product?.images?.main_image_path,
+    product?.images?.gallery_images,
+    listingImageDirty,
+    listingImageDraftProductId,
+  ]);
+
   if (loading) return <Spin size="large" style={{ display: 'block', margin: '100px auto' }} />;
   if (!product) return <div>商品不存在</div>;
 
@@ -116,6 +150,7 @@ const ProductDetail: React.FC = () => {
   const images = product.images;
   const aplus = product.aplus;
   const aplusStatus = aplus?.aplus_status ? APLUS_STATUS_LABELS[aplus.aplus_status] : null;
+  const isAplusRegenerating = APLUS_REGEN_ACTIVE_STATUSES.includes(aplus?.aplus_status || '');
   const canRetryAplusRegeneration = APLUS_REGEN_RETRYABLE_STATUSES.includes(aplus?.aplus_status || '');
 
   const handleDelete = async () => {
@@ -182,10 +217,45 @@ const ProductDetail: React.FC = () => {
   const galleryImagePaths = parseJson(images?.gallery_images, []);
   const galleryOnlyImages = Array.isArray(galleryImagePaths)
     ? galleryImagePaths.filter((item) => {
-      const path = typeof item === 'string' ? item : item?.path;
+      const path = normalizeImagePath(item);
       return path && path !== images?.main_image_path;
     })
     : [];
+  const imageMetaByPath = new Map<string, string>();
+  if (images?.main_image_path) {
+    imageMetaByPath.set(images.main_image_path, images?.main_image_source || 'main image');
+  }
+  galleryOnlyImages.forEach((item) => {
+    const path = normalizeImagePath(item);
+    if (path) {
+      imageMetaByPath.set(path, typeof item === 'string' ? 'gallery image' : (item?.role || item?.label || 'gallery image'));
+    }
+  });
+  const selectedListingImages = listingImageDraftPaths.map((path, index) => ({
+    path,
+    label: index === 0 ? '主图' : `副图 ${index}`,
+    meta: imageMetaByPath.get(path) || (index === 0 ? 'manual selected' : 'gallery image'),
+  })).filter((item) => item.path);
+  const imageResourceItems = (() => {
+    const items: any[] = [];
+    const seen = new Set<string>();
+    const addItem = (item: any, fallback: any = {}) => {
+      const path = typeof item === 'string' ? item : item?.path;
+      if (!path || seen.has(path)) return;
+      seen.add(path);
+      items.push({
+        path,
+        image_id: item?.image_id || fallback.image_id,
+        filename: item?.filename || fallback.filename || String(path).split('/').pop(),
+        image_type: item?.image_type || fallback.image_type,
+        visible_selling_point: item?.visible_selling_point || fallback.visible_selling_point,
+        reason: item?.decision_reason || item?.reason || fallback.reason,
+      });
+    };
+    imageReviews.forEach((item: any) => addItem(item));
+    selectedListingImages.forEach((item: any) => addItem(item, { image_type: item.label, reason: item.meta }));
+    return items;
+  })();
   const aplusScriptsPayload = parseJson(aplus?.aplus_scripts, null);
   const aplusScripts = Array.isArray(aplusScriptsPayload?.scripts) ? aplusScriptsPayload.scripts.slice(0, 5) : [];
   const aplusPlanPayload = parseJson(aplus?.aplus_plan, {});
@@ -360,6 +430,90 @@ const ProductDetail: React.FC = () => {
     } finally {
       setAmazonTemplateLoading(false);
     }
+  };
+
+  const setDraftListingImagePaths = (paths: string[]) => {
+    setListingImageDraftPaths(paths.filter((path, index) => path && paths.indexOf(path) === index));
+    setListingImageDirty(true);
+  };
+
+  const saveListingImagePaths = async () => {
+    const orderedPaths = listingImageDraftPaths.filter(Boolean);
+    if (!orderedPaths.length) return;
+    setImageOrderSaving(true);
+    try {
+      await updateProductListingImages(product.id, {
+        main_image_path: orderedPaths[0],
+        gallery_images: orderedPaths.slice(1),
+      });
+      message.success('主图/副图已保存');
+      setListingImageDirty(false);
+      await fetchDetail();
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '主图/副图保存失败');
+    } finally {
+      setImageOrderSaving(false);
+      setImageDragPayload(null);
+    }
+  };
+
+  const resetListingImageDraft = () => {
+    setListingImageDraftPaths(listingImagePathsFromImages(images));
+    setListingImageDirty(false);
+    setImageDragPayload(null);
+  };
+
+  const saveListingImageOrder = (nextImages: any[]) => {
+    const orderedPaths = nextImages.map((item) => item?.path).filter(Boolean);
+    setDraftListingImagePaths(orderedPaths);
+  };
+
+  const dragPayloadFromEvent = (event: React.DragEvent) => {
+    if (imageDragPayload) return imageDragPayload;
+    const raw = event.dataTransfer.getData('application/json');
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;
+    }
+  };
+
+  const startListingImageDrag = (event: React.DragEvent, payload: any) => {
+    event.dataTransfer.effectAllowed = 'move';
+    event.dataTransfer.setData('application/json', JSON.stringify(payload));
+    setImageDragPayload(payload);
+  };
+
+  const replaceListingImageSlot = (event: React.DragEvent, toIndex: number) => {
+    event.preventDefault();
+    const payload = dragPayloadFromEvent(event);
+    if (!payload) return;
+    if (payload.source === 'selected') {
+      moveListingImage(payload.index, toIndex);
+      return;
+    }
+    const nextPaths = selectedListingImages.map((item: any) => item?.path).filter(Boolean);
+    const nextPath = payload.path;
+    if (!nextPath || nextPaths[toIndex] === nextPath) {
+      setImageDragPayload(null);
+      return;
+    }
+    nextPaths[toIndex] = nextPath;
+    setDraftListingImagePaths(nextPaths.filter((path, index) => nextPaths.indexOf(path) === index));
+    setImageDragPayload(null);
+  };
+
+  const moveListingImage = (fromIndex: number | null, toIndex: number) => {
+    if (fromIndex == null || fromIndex === toIndex) {
+      setImageDragPayload(null);
+      return;
+    }
+    const nextImages = [...selectedListingImages];
+    const [moved] = nextImages.splice(fromIndex, 1);
+    nextImages.splice(toIndex, 0, moved);
+    saveListingImageOrder(nextImages);
+    setImageDragPayload(null);
   };
 
   const openCategoryEditor = async () => {
@@ -607,8 +761,12 @@ const ProductDetail: React.FC = () => {
             <Descriptions.Item label="ASIN同步状态">
               {product.amazon_asin ? <Tag color="success">已同步</Tag> : product.asin_sync_status === 'not_found' ? <Tag color="warning">未查到</Tag> : product.asin_sync_status === 'failed' ? <Tag color="error">失败</Tag> : product.asin_sync_status === 'pending' || product.asin_sync_status === 'running' ? <Tag color="processing">同步中</Tag> : <Tag>未同步</Tag>}
             </Descriptions.Item>
+            <Descriptions.Item label="亚马逊商品状态">
+              {product.amazon_product_status ? <Tag color={String(product.amazon_product_status).includes('售') ? 'success' : 'warning'}>{product.amazon_product_status}</Tag> : '-'}
+            </Descriptions.Item>
             <Descriptions.Item label="品牌">{product.brand || '-'}</Descriptions.Item>
             {product.asin_sync_error && <Descriptions.Item label="ASIN同步信息" span={2}>{product.asin_sync_error}</Descriptions.Item>}
+            {product.amazon_product_status_error && <Descriptions.Item label="亚马逊商品状态同步信息" span={2}>{product.amazon_product_status_error}</Descriptions.Item>}
             <Descriptions.Item label="Amazon类目" span={2}>
               <Space>
                 <span>{categoryPath || '-'}</span>
@@ -1039,13 +1197,118 @@ const ProductDetail: React.FC = () => {
               )}
             </Space>
           </Card>
-          <Card title="副图" size="small">
-            {galleryOnlyImages.length ? (
-              <Space wrap>
-                {galleryOnlyImages.map((img, i) => {
-                  const path = typeof img === 'string' ? img : img.path;
-                  return <Image key={path || i} src={imgUrl(path)} width={120} alt={`副图${i + 1}`} />;
-                })}
+          <Card
+            title="主图 / 副图排序"
+            size="small"
+            extra={selectedListingImages.length ? (
+              <Space>
+                {listingImageDirty && <Tag color="warning">未保存</Tag>}
+                <Button
+                  size="small"
+                  icon={<ReloadOutlined />}
+                  disabled={!listingImageDirty || imageOrderSaving}
+                  onClick={resetListingImageDraft}
+                >
+                  取消
+                </Button>
+                <Button
+                  size="small"
+                  type="primary"
+                  icon={<CheckOutlined />}
+                  loading={imageOrderSaving}
+                  disabled={!listingImageDirty}
+                  onClick={saveListingImagePaths}
+                >
+                  保存
+                </Button>
+              </Space>
+            ) : null}
+          >
+            {selectedListingImages.length ? (
+              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                <Spin spinning={imageOrderSaving}>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 12 }}>
+                    {selectedListingImages.map((item, i) => {
+                      const isMain = i === 0;
+                      const isDropTarget = imageDragPayload?.source && imageDragPayload?.path !== item.path;
+                      return (
+                        <div
+                          key={item.path || i}
+                          draggable={!imageOrderSaving}
+                          onDragStart={(event) => startListingImageDrag(event, { source: 'selected', index: i, path: item.path })}
+                          onDragOver={(event) => event.preventDefault()}
+                          onDrop={(event) => replaceListingImageSlot(event, i)}
+                          onDragEnd={() => setImageDragPayload(null)}
+                          style={{
+                            cursor: imageOrderSaving ? 'default' : 'grab',
+                            border: isMain ? '2px solid #1677ff' : '1px solid #d9d9d9',
+                            borderRadius: 8,
+                            padding: 8,
+                            background: imageDragPayload?.source === 'selected' && imageDragPayload?.index === i ? '#f0f7ff' : '#fff',
+                            boxShadow: isDropTarget ? '0 0 0 2px rgba(22, 119, 255, 0.12)' : 'none',
+                          }}
+                        >
+                          <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                            <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+                              <Tag color={isMain ? 'blue' : 'default'}>{isMain ? '主图' : `副图 ${i}`}</Tag>
+                              <DragOutlined style={{ color: '#999' }} />
+                            </Space>
+                            <Image src={imgUrl(item.path)} width="100%" alt={isMain ? '主图' : `副图${i}`} preview={false} />
+                            {item.meta && (
+                              <Typography.Paragraph
+                                type="secondary"
+                                ellipsis={{ rows: 1 }}
+                                style={{ fontSize: 12, marginBottom: 0 }}
+                              >
+                                {item.meta}
+                              </Typography.Paragraph>
+                            )}
+                          </Space>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Spin>
+                {imageResourceItems.length ? (
+                  <div>
+                    <Text strong>全部图片资源</Text>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))', gap: 10, marginTop: 8, maxHeight: 460, overflow: 'auto', paddingRight: 4 }}>
+                      {imageResourceItems.map((item, i) => {
+                        const selectedIndex = selectedListingImages.findIndex((selected: any) => selected.path === item.path);
+                        return (
+                          <div
+                            key={item.path || i}
+                            draggable={!imageOrderSaving}
+                            onDragStart={(event) => startListingImageDrag(event, { source: 'pool', path: item.path })}
+                            onDragEnd={() => setImageDragPayload(null)}
+                            style={{
+                              cursor: imageOrderSaving ? 'default' : 'grab',
+                              border: selectedIndex >= 0 ? '1px solid #91caff' : '1px solid #eee',
+                              borderRadius: 8,
+                              padding: 8,
+                              background: selectedIndex >= 0 ? '#f0f7ff' : '#fff',
+                            }}
+                          >
+                            <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                              <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+                                <Text strong style={{ fontSize: 12 }}>{item.image_id || `#${i + 1}`}</Text>
+                                {selectedIndex >= 0 && <Tag color={selectedIndex === 0 ? 'blue' : 'default'}>{selectedIndex === 0 ? '主图' : `副图 ${selectedIndex}`}</Tag>}
+                              </Space>
+                              <Image src={imgUrl(item.path)} width="100%" alt={item.filename || `图片${i + 1}`} preview={false} />
+                              <Typography.Paragraph
+                                type="secondary"
+                                ellipsis={{ rows: 2 }}
+                                style={{ fontSize: 12, marginBottom: 0 }}
+                              >
+                                {item.visible_selling_point || item.image_type || item.filename}
+                              </Typography.Paragraph>
+                            </Space>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ) : <Text type="secondary">暂无可替换图片资源</Text>}
               </Space>
             ) : <Text type="secondary">（未选择）</Text>}
           </Card>
@@ -1208,8 +1471,20 @@ const ProductDetail: React.FC = () => {
                           </Space>
                         </div>
                         <div style={{ marginTop: 12 }}>
-                          <Text strong>生成图</Text>
-	                        <div style={{ marginTop: 8 }}>
+                          <Space align="center" style={{ marginBottom: 8 }}>
+                            <Text strong>生成图</Text>
+                            <Button
+                              size="small"
+                              icon={<ReloadOutlined />}
+                              onClick={() => {
+                                setRegenTarget(script);
+                                setRegenReason('');
+                              }}
+                            >
+                              重新生成
+                            </Button>
+                          </Space>
+	                        <div>
 	                          {generated?.path ? (
 	                            <Space direction="vertical" style={{ width: '100%' }}>
 	                              <Space>
@@ -1430,12 +1705,13 @@ const ProductDetail: React.FC = () => {
           {product.status === 'pending_review' && product.current_step >= 10 && (
             <Popconfirm
               title="确认同步到商品列表？"
-              description="确认后，这个商品会进入商品列表，可继续同步 ASIN 和上传 A+。"
+              description={isAplusRegenerating ? 'A+重新生成还在进行中，完成后才能确认入库。' : '确认后，这个商品会进入商品列表，可继续同步 ASIN 和上传 A+。'}
               okText="确认入库"
               cancelText="再看看"
+              disabled={isAplusRegenerating}
               onConfirm={async () => { await confirmProduct(product.id); message.success('已同步到商品列表'); fetchDetail(); }}
             >
-              <Button type="primary" icon={<CheckOutlined />}>确认入库</Button>
+              <Button type="primary" icon={<CheckOutlined />} disabled={isAplusRegenerating}>确认入库</Button>
             </Popconfirm>
           )}
           {canRetryAplusRegeneration && (

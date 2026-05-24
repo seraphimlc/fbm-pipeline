@@ -29,6 +29,13 @@ class ProductUpdate(BaseModel):
     listing_bullets_zh: Any | None = None
     listing_search_terms_zh: str | None = None
     listing_primary_keyword: str | None = None
+    main_image_path: str | None = None
+    gallery_images: Any | None = None
+
+
+class ProductListingImagesUpdate(BaseModel):
+    main_image_path: str
+    gallery_images: list[str] = Field(default_factory=list)
 
 
 class UpcPoolImportRequest(BaseModel):
@@ -88,9 +95,13 @@ class ProductResponse(BaseModel):
     asin_sync_status: str | None = None
     asin_synced_at: datetime | None = None
     asin_sync_error: str | None = None
+    amazon_product_status: str | None = None
+    amazon_product_status_synced_at: datetime | None = None
+    amazon_product_status_error: str | None = None
     aplus_upload_status: str | None = None
     aplus_uploaded_at: datetime | None = None
     aplus_upload_error: str | None = None
+    aplus_status: str | None = None
     upc: str | None = None
     brand: str = "Vindhvisk"
     status: str
@@ -270,6 +281,9 @@ class CatalogProductResponse(BaseModel):
     asin_sync_status: str | None = None
     asin_synced_at: datetime | None = None
     asin_sync_error: str | None = None
+    amazon_product_status: str | None = None
+    amazon_product_status_synced_at: datetime | None = None
+    amazon_product_status_error: str | None = None
     aplus_upload_status: str | None = None
     aplus_uploaded_at: datetime | None = None
     aplus_upload_error: str | None = None
@@ -383,6 +397,7 @@ class AsinSyncItemResponse(BaseModel):
     lookup_type: str | None = None
     matched_code: str | None = None
     amazon_asin: str | None = None
+    amazon_product_status: str | None = None
     status: str
     error_message: str | None = None
     started_at: datetime | None = None

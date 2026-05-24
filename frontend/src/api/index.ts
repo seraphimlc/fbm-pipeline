@@ -18,9 +18,13 @@ export interface Product {
   asin_sync_status: string | null;
   asin_synced_at: string | null;
   asin_sync_error: string | null;
+  amazon_product_status: string | null;
+  amazon_product_status_synced_at: string | null;
+  amazon_product_status_error: string | null;
   aplus_upload_status: string | null;
   aplus_uploaded_at: string | null;
   aplus_upload_error: string | null;
+  aplus_status?: string | null;
   upc: string | null;
   item_code?: string | null;
   title?: string | null;
@@ -46,6 +50,9 @@ export interface CatalogProduct {
   asin_sync_status: string | null;
   asin_synced_at: string | null;
   asin_sync_error: string | null;
+  amazon_product_status: string | null;
+  amazon_product_status_synced_at: string | null;
+  amazon_product_status_error: string | null;
   aplus_upload_status: string | null;
   aplus_uploaded_at: string | null;
   aplus_upload_error: string | null;
@@ -304,6 +311,7 @@ export interface AsinSyncItem {
   lookup_type: string | null;
   matched_code: string | null;
   amazon_asin: string | null;
+  amazon_product_status: string | null;
   status: string;
   error_message: string | null;
   started_at: string | null;
@@ -554,6 +562,7 @@ export const listCatalogProducts = (params?: {
   competitor_asin?: string;
   amazon_asin?: string;
   asin_sync_status?: string;
+  amazon_product_status?: string;
   aplus_upload_status?: string;
   stock_sync_status?: string;
   template_risk_level?: string;
@@ -617,8 +626,16 @@ export const updateProduct = (id: number, data: Partial<Product> & {
   listing_bullets_zh?: string | string[];
   listing_search_terms_zh?: string;
   listing_primary_keyword?: string;
+  main_image_path?: string | null;
+  gallery_images?: string[];
 }) =>
   api.patch<Product>(`/products/${id}`, data);
+
+export const updateProductListingImages = (id: number, data: {
+  main_image_path: string;
+  gallery_images: string[];
+}) =>
+  api.put<ProductImage>(`/products/${id}/listing-images`, data);
 
 export const confirmProduct = (id: number) =>
   api.post<Product>(`/products/${id}/confirm`);

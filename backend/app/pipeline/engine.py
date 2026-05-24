@@ -7,6 +7,7 @@ Pipeline 引擎 — 编排10步Pipeline的执行
 
 import asyncio
 import logging
+import time
 import traceback
 from datetime import datetime
 
@@ -60,70 +61,91 @@ async def _run_pipeline(product_id: int, start_step: int = 1):
         if start_step <= 1:
             # === Step 1: 商品采集 ===
             logger.info(f"[Pipeline] Product {product_id} Step1 商品采集开始")
+            step_started = time.monotonic()
             await _update_status(product_id, STEP1_COLLECTING, 1)
             await collect_product(product_id)
             await _update_status(product_id, STEP1_DONE, 1)
-            logger.info(f"[Pipeline] Product {product_id} Step1 商品采集完成")
+            logger.info(f"[Pipeline] Product {product_id} Step1 商品采集完成，耗时={time.monotonic() - step_started:.1f}s")
 
         if start_step <= 2:
             # === Step 2: 利润计算 ===
             logger.info(f"[Pipeline] Product {product_id} Step2 利润计算开始")
+            step_started = time.monotonic()
             await _update_status(product_id, STEP2_PRICING, 2)
             await run_pricing(product_id)
             await _update_status(product_id, STEP2_DONE, 2)
-            logger.info(f"[Pipeline] Product {product_id} Step2 利润计算完成")
+            logger.info(f"[Pipeline] Product {product_id} Step2 利润计算完成，耗时={time.monotonic() - step_started:.1f}s")
 
         if start_step <= 3:
             # === Step 3: 关键词 ===
             logger.info(f"[Pipeline] Product {product_id} Step3 关键词开始")
+            step_started = time.monotonic()
             await _update_status(product_id, STEP3_KEYWORDS, 3)
             await run_keywords(product_id)
-            logger.info(f"[Pipeline] Product {product_id} Step3 关键词完成")
+            logger.info(f"[Pipeline] Product {product_id} Step3 关键词完成，耗时={time.monotonic() - step_started:.1f}s")
 
         if start_step <= 4:
             # === Step 4: 类目 ===
             logger.info(f"[Pipeline] Product {product_id} Step4 类目开始")
+            step_started = time.monotonic()
             await _update_status(product_id, STEP4_CATEGORY, 4)
             await run_category(product_id)
             await _update_status(product_id, STEP3_4_DONE, 4)
-            logger.info(f"[Pipeline] Product {product_id} Step4 类目完成")
+            logger.info(f"[Pipeline] Product {product_id} Step4 类目完成，耗时={time.monotonic() - step_started:.1f}s")
 
         if start_step <= 5:
             # === Step 5: Listing 文案 ===
             logger.info(f"[Pipeline] Product {product_id} Step5 Listing 开始")
+            step_started = time.monotonic()
             await _update_status(product_id, STEP5_LISTING, 5)
             await run_listing(product_id)
             await _update_status(product_id, STEP5_DONE, 5)
+            logger.info(f"[Pipeline] Product {product_id} Step5 Listing 完成，耗时={time.monotonic() - step_started:.1f}s")
 
         if start_step <= 6:
             # === Step 6: 主图分析 ===
+            logger.info(f"[Pipeline] Product {product_id} Step6 主图分析开始")
+            step_started = time.monotonic()
             await _update_status(product_id, STEP6_CURATING, 6)
             await run_image_analysis(product_id)
             await _update_status(product_id, STEP6_DONE, 6)
+            logger.info(f"[Pipeline] Product {product_id} Step6 主图分析完成，耗时={time.monotonic() - step_started:.1f}s")
 
         if start_step <= 7:
             # === Step 7: A+ 规划 ===
+            logger.info(f"[Pipeline] Product {product_id} Step7 A+规划开始")
+            step_started = time.monotonic()
             await _update_status(product_id, STEP7_APLUS_PLAN, 7)
             await run_aplus_plan(product_id)
             await _update_status(product_id, STEP7_DONE, 7)
+            logger.info(f"[Pipeline] Product {product_id} Step7 A+规划完成，耗时={time.monotonic() - step_started:.1f}s")
 
         if start_step <= 8:
             # === Step 8: A+ 脚本 ===
+            logger.info(f"[Pipeline] Product {product_id} Step8 A+脚本开始")
+            step_started = time.monotonic()
             await _update_status(product_id, STEP8_APLUS_SCRIPT, 8)
             await run_aplus_script(product_id)
             await _update_status(product_id, STEP8_DONE, 8)
+            logger.info(f"[Pipeline] Product {product_id} Step8 A+脚本完成，耗时={time.monotonic() - step_started:.1f}s")
 
         if start_step <= 9:
             # === Step 9: A+ 出图 ===
+            logger.info(f"[Pipeline] Product {product_id} Step9 A+出图开始")
+            step_started = time.monotonic()
             await _update_status(product_id, STEP9_APLUS_IMAGE, 9)
             await run_aplus_image(product_id)
             await _update_status(product_id, STEP9_DONE, 9)
+            logger.info(f"[Pipeline] Product {product_id} Step9 A+出图完成，耗时={time.monotonic() - step_started:.1f}s")
 
         if start_step <= 10:
             # === Step 10: Amazon导入表格 ===
+            logger.info(f"[Pipeline] Product {product_id} Step10 Amazon导入表格开始")
+            step_started = time.monotonic()
             await _update_status(product_id, STEP10_AMAZON_TEMPLATE, 10)
             await run_amazon_template(product_id)
             await _update_status(product_id, STEP10_DONE, 10)
+            logger.info(f"[Pipeline] Product {product_id} Step10 Amazon导入表格完成，耗时={time.monotonic() - step_started:.1f}s")
 
         # === 等待人工确认 ===
         await _update_status(product_id, PENDING_REVIEW, 10)
@@ -237,7 +259,7 @@ async def cancel_all_pipelines() -> None:
 
 
 async def recover_interrupted_pipelines() -> None:
-    """服务启动时把上次遗留的运行中 Pipeline 标记为可继续。"""
+    """服务启动时把上次遗留的运行中 Pipeline 重新排队继续跑。"""
     running_statuses = {
         STEP1_COLLECTING,
         STEP2_PRICING,
@@ -255,10 +277,20 @@ async def recover_interrupted_pipelines() -> None:
         result = await db.execute(select(Product).where(Product.status.in_(running_statuses)))
         products = result.scalars().all()
         now = datetime.now()
+        resume_items: list[tuple[int, int]] = []
         for product in products:
-            product.status = PAUSED
-            product.error_message = "服务重启导致任务中断，可点击继续从当前步骤重试。"
+            step = product.current_step or 1
+            if step < 1:
+                step = 1
+            if step > 10:
+                step = 10
+            product.status = get_step_status(step)
+            product.error_message = None
             product.updated_at = now
+            resume_items.append((product.id, step))
         if products:
             await db.commit()
-            logger.warning(f"[Pipeline] 启动恢复: {len(products)} 个运行中任务已标记为暂停")
+            logger.warning(f"[Pipeline] 启动恢复: {len(products)} 个运行中任务将从原步骤自动续跑")
+    for product_id, step in resume_items:
+        if start_pipeline(product_id, start_step=step):
+            logger.info(f"[Pipeline] 启动恢复: Product {product_id} 已重新排队，从 Step{step} 继续")

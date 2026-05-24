@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     GPT_IMAGE_API_KEY: str = ""
     GPT_IMAGE_MODEL: str = "gpt-image-2"
     GPT_IMAGE_USE_LLM_API: bool = False  # True 时复用 LLM_API_BASE/LLM_API_KEY 跑生图，模型仍使用 GPT_IMAGE_MODEL
-    APLUS_IMAGE_API_MODE: str = "generations"
+    APLUS_IMAGE_API_MODE: str = "edits"
     APLUS_IMAGE_GENERATION_QUALITY: str = "high"
     APLUS_IMAGE_WIDTH: int = 1940
     APLUS_IMAGE_HEIGHT: int = 1200
@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     BROWSER_WORKFLOW_CONCURRENCY: int = 1  # 完整浏览器业务流程并发数。当前共用一个 worker tab，建议保持 1。
 
     # Pipeline
-    PIPELINE_MAX_CONCURRENCY: int = 3  # 同时运行的Pipeline任务数上限
+    PIPELINE_MAX_CONCURRENCY: int = 2  # 同时运行的Pipeline任务数上限
     BULK_START_MAX_TASKS: int = 100    # 单次批量启动最大任务数
     STEP3_4_PARALLEL: bool = True  # Step3/4是否并行
     STEP1_EXTRACT_RETRY_ATTEMPTS: int = 5  # Step1页面信息提取重试次数
@@ -97,7 +97,7 @@ class Settings(BaseSettings):
     STEP5_TITLE_MAX_CHARS: int = 200
     STEP5_BULLET_MAX_CHARS: int = 500
     STEP5_SEARCH_TERMS_MAX_BYTES: int = 250
-    APLUS_CONCURRENCY: int = 2     # A+图并发数
+    APLUS_CONCURRENCY: int = 1     # A+图并发数
     POLL_INTERVAL: int = 3         # 前端轮询间隔(秒)
 
     def model_post_init(self, __context):

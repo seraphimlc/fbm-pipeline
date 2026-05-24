@@ -28,6 +28,9 @@ async def init_db():
             ("asin_sync_status", "VARCHAR(20) DEFAULT 'not_synced'"),
             ("asin_synced_at", "DATETIME"),
             ("asin_sync_error", "TEXT"),
+            ("amazon_product_status", "VARCHAR(100)"),
+            ("amazon_product_status_synced_at", "DATETIME"),
+            ("amazon_product_status_error", "TEXT"),
             ("aplus_upload_status", "VARCHAR(20) DEFAULT 'not_uploaded'"),
             ("aplus_uploaded_at", "DATETIME"),
             ("aplus_upload_error", "TEXT"),
@@ -82,6 +85,9 @@ async def init_db():
                 asin_sync_status VARCHAR(20) DEFAULT 'not_synced',
                 asin_synced_at DATETIME,
                 asin_sync_error TEXT,
+                amazon_product_status VARCHAR(100),
+                amazon_product_status_synced_at DATETIME,
+                amazon_product_status_error TEXT,
                 aplus_upload_status VARCHAR(20) DEFAULT 'not_uploaded',
                 aplus_uploaded_at DATETIME,
                 aplus_upload_error TEXT,
@@ -109,6 +115,9 @@ async def init_db():
             ("asin_sync_status", "VARCHAR(20) DEFAULT 'not_synced'"),
             ("asin_synced_at", "DATETIME"),
             ("asin_sync_error", "TEXT"),
+            ("amazon_product_status", "VARCHAR(100)"),
+            ("amazon_product_status_synced_at", "DATETIME"),
+            ("amazon_product_status_error", "TEXT"),
             ("aplus_upload_status", "VARCHAR(20) DEFAULT 'not_uploaded'"),
             ("aplus_uploaded_at", "DATETIME"),
             ("aplus_upload_error", "TEXT"),
@@ -157,6 +166,7 @@ async def init_db():
                 lookup_type VARCHAR(20),
                 matched_code VARCHAR(100),
                 amazon_asin VARCHAR(20),
+                amazon_product_status VARCHAR(100),
                 status VARCHAR(20),
                 error_message TEXT,
                 started_at DATETIME,
@@ -166,6 +176,10 @@ async def init_db():
                 FOREIGN KEY(product_id) REFERENCES products(id)
             )
         """))
+        result = await conn.execute(text("PRAGMA table_info(asin_sync_items)"))
+        existing_asin_sync_item_columns = {row[1] for row in result.fetchall()}
+        if "amazon_product_status" not in existing_asin_sync_item_columns:
+            await conn.execute(text("ALTER TABLE asin_sync_items ADD COLUMN amazon_product_status VARCHAR(100)"))
 
         await conn.execute(text("""
             CREATE TABLE IF NOT EXISTS aplus_upload_batches (
@@ -356,6 +370,9 @@ async def init_db():
                 asin_sync_status,
                 asin_synced_at,
                 asin_sync_error,
+                amazon_product_status,
+                amazon_product_status_synced_at,
+                amazon_product_status_error,
                 aplus_upload_status,
                 aplus_uploaded_at,
                 aplus_upload_error,
@@ -377,6 +394,9 @@ async def init_db():
                 COALESCE(p.asin_sync_status, 'not_synced'),
                 p.asin_synced_at,
                 p.asin_sync_error,
+                p.amazon_product_status,
+                p.amazon_product_status_synced_at,
+                p.amazon_product_status_error,
                 COALESCE(p.aplus_upload_status, 'not_uploaded'),
                 p.aplus_uploaded_at,
                 p.aplus_upload_error,

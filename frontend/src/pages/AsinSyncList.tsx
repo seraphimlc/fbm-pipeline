@@ -61,6 +61,7 @@ const AsinSyncList: React.FC = () => {
     { title: '查询值', dataIndex: 'lookup_code', width: 150, render: (value: string) => value || '-' },
     { title: '查询类型', dataIndex: 'lookup_type', width: 100, render: (value: string) => value || '-' },
     { title: '真实ASIN', dataIndex: 'amazon_asin', width: 140, render: (value: string) => value || '-' },
+    { title: '亚马逊商品状态', dataIndex: 'amazon_product_status', width: 150, render: (value: string) => value || '-' },
     { title: '状态', dataIndex: 'status', width: 100, render: statusTag },
     { title: '错误信息', dataIndex: 'error_message', render: (value: string) => value || '-' },
   ];

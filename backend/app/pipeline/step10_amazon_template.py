@@ -578,18 +578,19 @@ def _upload_listing_images(
 ) -> tuple[dict[str, str], list[str], list[dict]]:
     warnings: list[str] = []
     uploaded: list[dict] = []
-    fill: dict[str, str] = dict(existing_urls or {})
+    existing_fill: dict[str, str] = dict(existing_urls or {})
 
     if not product.images or not product.images.main_image_path:
-        if not fill:
+        if not existing_fill:
             warnings.append("缺少Step6选定主图，主图/副图URL未写入导入模板。")
-        return fill, warnings, uploaded
+        return existing_fill, warnings, uploaded
 
     if not oss_configured():
-        if not fill:
+        if not existing_fill:
             warnings.append("OSS 未配置，主图/副图URL未写入导入模板。")
-        return fill, warnings, uploaded
+        return existing_fill, warnings, uploaded
 
+    fill: dict[str, str] = {}
     product_key = pd.item_code or f"product-{product.id}"
     image_paths = [Path(product.images.main_image_path).expanduser()]
     other_fields = mapping.get("image_fields", {}).get("others", [])
@@ -2069,6 +2070,8 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
         fields["country_of_origin"]: pd.origin or "China",
         fields["shipping_template"]: shipping_template,
     })
+    if fields.get("handling_time"):
+        fill[fields["handling_time"]] = 1
 
     if mapping.get("category_type") == "ride_on_toy":
         item_type_option = select_ride_on_category(_facts_text(pd))

@@ -111,6 +111,33 @@ def test_inventory_update_template_exports_stock_only_by_sku() -> None:
     )
 
 
+def test_asin_sync_uses_lingxing_product_code_for_upc() -> None:
+    asin_sync_py = ROOT / "backend" / "app" / "services" / "asin_sync.py"
+    text = asin_sync_py.read_text(encoding="utf-8")
+    assert_true(
+        'lookup_type = "商品编码" if upc else "MSKU"' in text,
+        "ASIN 同步必须把 UPC 当作领星商品编码查询，只有缺少 UPC 时才用 MSKU 兜底",
+    )
+    assert_true(
+        'if normalized.upper() == "UPC":' in text
+        and 'return "商品编码"' in text
+        and 'if normalized.upper() == "SKU":' in text
+        and 'return "MSKU"' in text,
+        "ASIN 同步必须兼容旧批次里已保存的 UPC/SKU 查询类型",
+    )
+    assert_true(
+        "lookup = await _lookup_asin(lookup_code, store, lookup_type, auth)" in text,
+        "ASIN 同步执行时必须把查询类型传给领星 API，不能忽略 lookup_type",
+    )
+    assert_true(
+        "LINGXING_LISTING_API_URL" in text
+        and "listing-api/api/product/showOnline" in text
+        and '"amz_product_id"' in text
+        and '"msku"' in text,
+        "ASIN 同步必须走领星 Listing API：UPC/商品编码查 amz_product_id，商品 code 查 msku",
+    )
+
+
 def test_step10_keeps_sofa_dimensions_and_avoids_inventory_conflict() -> None:
     step10_py = ROOT / "backend" / "app" / "pipeline" / "step10_amazon_template.py"
     text = step10_py.read_text(encoding="utf-8")
@@ -265,6 +292,7 @@ def main() -> int:
         test_template_mapping_changes_must_be_logged,
         test_real_asin_export_guard_is_present,
         test_inventory_update_template_exports_stock_only_by_sku,
+        test_asin_sync_uses_lingxing_product_code_for_upc,
         test_step10_keeps_sofa_dimensions_and_avoids_inventory_conflict,
         test_step1_collects_product_dimensions_and_numeric_packages,
         test_step10_sums_multi_package_dimensions,

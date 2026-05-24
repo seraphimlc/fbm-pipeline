@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Button, Popconfirm, Space, Table, Tag, Typography, message } from 'antd';
+import { Alert, Button, Modal, Popconfirm, Space, Table, Tag, Typography, message } from 'antd';
 import { CloudSyncOutlined, ReloadOutlined } from '@ant-design/icons';
 import { createInventorySyncBatch, getInventorySyncBatch, listInventorySyncBatches } from '../api';
 import type { InventorySyncBatch, InventorySyncItem } from '../api';
@@ -66,7 +66,15 @@ const InventorySyncList: React.FC = () => {
       setPage(1);
       await fetchBatches();
     } catch (error: any) {
-      message.error(error?.response?.data?.detail || '库存同步批次创建失败');
+      const detail = error?.response?.data?.detail || '库存同步批次创建失败';
+      if (String(detail).includes('大建云仓未登录') || String(detail).includes('登录态')) {
+        Modal.error({
+          title: '库存同步批次未创建',
+          content: detail,
+        });
+      } else {
+        message.error(detail);
+      }
     } finally {
       setCreating(false);
     }
@@ -138,6 +146,12 @@ const InventorySyncList: React.FC = () => {
           </Popconfirm>
         </Space>
       </div>
+      <Alert
+        type="info"
+        showIcon
+        style={{ marginBottom: 16 }}
+        message="创建同步批次前会先检查大建云仓登录态；如果 Chrome 登录已失效，系统不会创建批次。"
+      />
       <Table
         rowKey="id"
         dataSource={items}

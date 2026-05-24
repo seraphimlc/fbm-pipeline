@@ -15,7 +15,7 @@ from app.pipeline.step1_collect import _collect_product_data_via_api, _parse_int
 logger = logging.getLogger(__name__)
 
 _running_batches: dict[int, asyncio.Task] = {}
-GIGAB2B_LOGIN_REQUIRED_ERROR = "大建云仓未登录或登录态已失效，已停止库存同步；请先在 Chrome 登录大建云仓后重试。"
+GIGAB2B_LOGIN_REQUIRED_ERROR = "大建云仓未登录或登录态已失效，未创建库存同步批次；请先在 Chrome 登录大建云仓后重试。"
 GIGAB2B_LOGIN_CHECK_SAMPLE_LIMIT = 3
 
 

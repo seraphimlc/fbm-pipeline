@@ -11,6 +11,51 @@
 
 ## 2026-05-24
 
+### Handling Time 默认值填充
+
+- 改动文件：
+  - `backend/app/pipeline/step10_amazon_template.py`
+  - `backend/app/api/products.py`
+  - `backend/app/pipeline/template_mappings/vindhvisk_sofa.json`
+  - `backend/app/pipeline/template_mappings/vindhvisk_bicycle.json`
+  - `backend/app/pipeline/template_mappings/ride_on_toy.json`
+  - `backend/app/pipeline/template_mappings/andy_storage_furniture.json`
+  - `backend/app/pipeline/template_mappings/andy_shelf_table_cabinet_gate.json`
+- 涉及类目/模板：
+  - 所有当前 Step 10 类目导入模板：`CHAIR_SOFA.xlsm`、`BICYCLE_CYCLING.xlsm`、`RIDE_ON_TOY.xlsm`、`DRESSER_STORAGE_DRAWER_STORAGE_BOX_CABINET_STEP_STOOL.xlsm`、`SHELF_TABLE_CABINET_ANIMAL_CAGE_TEMPORARY_GATE.xlsm`
+  - 库存/价格更新模板：`PriceAndQuantity.xlsm`
+- 变更原因：
+  - Amazon 模板中存在 `Handling Time (US)` 字段，需要在所有含该字段的导出表格里默认填写 1 天。
+- 主要行为：
+  - 映射 JSON 增加 `handling_time`，统一指向 `fulfillment_availability#1.lead_time_to_ship_max_days`。
+  - Step 10 导出时只要映射声明 `handling_time` 就写入 `1`。
+  - 库存/价格更新导出检测到同一字段时也写入 `1`。
+- 验证：
+  - `make validate-template-mappings` 通过：5 个映射文件、96 个类目选项、0 个 warning。
+  - `python3 -m compileall -q backend/app/pipeline/step10_amazon_template.py backend/app/api/products.py` 通过。
+  - `make test-project-rules` 未通过：`test_asin_sync_uses_lingxing_product_code_for_upc` 断言失败，属于 ASIN 同步 UPC 查询规则，与本次 Handling Time 填充逻辑无关；本次相关的 `test_template_mapping_changes_must_be_logged` 已通过。
+- 后续注意：
+  - 新增类目模板时，如果模板含 `Handling Time (US)`，需同步在映射 JSON 声明 `handling_time`。
+
+### Step 10 图片 OSS URL 复用修复
+
+- 改动文件：
+  - `backend/app/pipeline/step10_amazon_template.py`
+- 涉及类目/模板：
+  - 所有带 `image_fields` 的 Amazon 导入模板
+  - 当前包括 `CHAIR_SOFA.xlsm`、`RIDE_ON_TOY.xlsm`、`ANDY_STORAGE_FURNITURE.xlsm`、`VINDHVISK_BICYCLE.xlsm`
+- 变更原因：
+  - 商品详情页允许人工替换主图/副图后，Step 10 重新生成导入表格时不能继续复用旧表格里的图片 URL，否则会把替换前的主图 URL 写回模板。
+- 主要行为：
+  - 当当前商品存在主图且 OSS 配置可用时，Step 10 总是按当前 `main_image_path` 和 `gallery_images` 重新上传图片并写入导入模板。
+  - 仅在缺少当前主图或 OSS 未配置时，才继续复用旧导入表格中已有的图片 URL，避免无图/无 OSS 情况下丢失已有可用 URL。
+- 验证：
+  - `npm run build` 通过。
+  - `make validate-template-mappings` 通过：5 个映射文件、96 个类目选项、0 个 warning。
+  - `make test-project-rules` 未通过：`test_asin_sync_uses_lingxing_product_code_for_upc` 断言失败，属于 ASIN 同步 UPC 查询规则，与本次 Step 10 图片上传逻辑无关；本次相关的 `test_template_mapping_changes_must_be_logged` 已通过。
+- 后续注意：
+  - 替换主图只更新数据库中的本地图片路径；新的 OSS URL 会在下一次执行 Step 10 生成 Amazon 导入表格时产生。
+
 ### SOFA/CHAIR 与 RIDE_ON_TOY 导出修复
 
 - 改动文件：

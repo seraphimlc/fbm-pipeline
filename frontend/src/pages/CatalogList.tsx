@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button, DatePicker, Input, message, Modal, Popconfirm, Select, Space, Table, Tag, Typography } from 'antd';
-import { CloudSyncOutlined, DeleteOutlined, DownloadOutlined, FileExcelOutlined, HistoryOutlined, PictureOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons';
+import { CloudSyncOutlined, CopyOutlined, DeleteOutlined, DownloadOutlined, FileExcelOutlined, HistoryOutlined, PictureOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { clearCatalogAsin, createAplusUploadBatch, createAsinSyncBatch, createInventorySyncBatch, deleteProduct, exportCatalogProducts, exportInventoryUpdateTemplate, getWorkbenchOverview, listCatalogProducts, updateCatalogAsin } from '../api';
 import type { CatalogProduct, WorkbenchOverview } from '../api';
@@ -23,6 +23,7 @@ const CatalogList: React.FC = () => {
   const [asinTarget, setAsinTarget] = useState<CatalogProduct | null>(null);
   const [manualAsin, setManualAsin] = useState('');
   const [selectedIds, setSelectedIds] = useState<React.Key[]>([]);
+  const [selectedItemMap, setSelectedItemMap] = useState<Record<number, CatalogProduct>>({});
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
@@ -30,6 +31,7 @@ const CatalogList: React.FC = () => {
   const [asinInput, setAsinInput] = useState('');
   const [amazonAsinInput, setAmazonAsinInput] = useState('');
   const [asinSyncStatusInput, setAsinSyncStatusInput] = useState<string | undefined>();
+  const [amazonProductStatusInput, setAmazonProductStatusInput] = useState<string | undefined>();
   const [aplusUploadStatusInput, setAplusUploadStatusInput] = useState<string | undefined>();
   const [stockSyncStatusInput, setStockSyncStatusInput] = useState<string | undefined>();
   const [templateRiskInput, setTemplateRiskInput] = useState<string | undefined>();
@@ -42,6 +44,7 @@ const CatalogList: React.FC = () => {
     competitor_asin?: string;
     amazon_asin?: string;
     asin_sync_status?: string;
+    amazon_product_status?: string;
     aplus_upload_status?: string;
     stock_sync_status?: string;
     template_risk_level?: string;
@@ -82,6 +85,19 @@ const CatalogList: React.FC = () => {
 
   useEffect(() => { fetchItems(); }, [page, pageSize, filters]);
   useEffect(() => { fetchOverview(); }, []);
+  useEffect(() => {
+    if (!selectedIds.length) return;
+    const selectedSet = new Set(selectedIds.map(Number));
+    const selectedItemsOnPage = items.filter((item) => selectedSet.has(item.id));
+    if (!selectedItemsOnPage.length) return;
+    setSelectedItemMap((prev) => {
+      const next = { ...prev };
+      selectedItemsOnPage.forEach((item) => {
+        next[item.id] = item;
+      });
+      return next;
+    });
+  }, [items, selectedIds]);
 
   const search = () => {
     setFilters({
@@ -89,6 +105,7 @@ const CatalogList: React.FC = () => {
       competitor_asin: asinInput.trim() || undefined,
       amazon_asin: amazonAsinInput.trim() || undefined,
       asin_sync_status: asinSyncStatusInput,
+      amazon_product_status: amazonProductStatusInput,
       aplus_upload_status: aplusUploadStatusInput,
       stock_sync_status: stockSyncStatusInput,
       template_risk_level: templateRiskInput,
@@ -107,6 +124,7 @@ const CatalogList: React.FC = () => {
     setAsinInput('');
     setAmazonAsinInput('');
     setAsinSyncStatusInput(undefined);
+    setAmazonProductStatusInput(undefined);
     setAplusUploadStatusInput(undefined);
     setStockSyncStatusInput(undefined);
     setTemplateRiskInput(undefined);
@@ -172,16 +190,55 @@ const CatalogList: React.FC = () => {
     }
   };
 
+  const copyText = async (text: string) => {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+  };
+
+  const copySelectedAmazonAsins = async () => {
+    if (!selectedIds.length) {
+      message.warning('请先选择商品');
+      return;
+    }
+    const selectedRecords = selectedIds
+      .map((id) => selectedItemMap[Number(id)] || items.find((item) => item.id === Number(id)))
+      .filter(Boolean) as CatalogProduct[];
+    const asins = selectedRecords
+      .map((item) => item.amazon_asin?.trim())
+      .filter((asin): asin is string => Boolean(asin));
+    if (!asins.length) {
+      message.info('勾选商品没有真实 ASIN，已跳过');
+      return;
+    }
+    try {
+      await copyText(asins.join('\n'));
+      const missingCount = selectedIds.length - asins.length;
+      message.success(`已复制 ${asins.length} 个真实 ASIN${missingCount ? `，跳过 ${missingCount} 个空 ASIN` : ''}`);
+    } catch {
+      message.error('复制失败，请检查浏览器剪贴板权限');
+    }
+  };
+
   const exportInventorySelected = async () => {
     if (!selectedIds.length) {
       message.warning('请先选择商品');
       return;
     }
     const selectedSet = new Set(selectedIds.map(Number));
-    const blocked = items.filter((item) => selectedSet.has(item.id) && !item.amazon_asin);
-    if (blocked.length) {
-      message.warning(`缺少真实 ASIN 的商品不能导出库存模板：${blocked.map((item) => item.item_code || item.id).slice(0, 5).join('、')}`);
-      return;
+    const missingAsinItems = items.filter((item) => selectedSet.has(item.id) && !item.amazon_asin);
+    if (missingAsinItems.length) {
+      message.info(`缺少真实 ASIN 的商品会自动跳过：${missingAsinItems.map((item) => item.item_code || item.id).slice(0, 5).join('、')}`);
     }
     setInventoryExporting(true);
     const hideLoading = message.loading('正在导出库存模板，生成完成后会自动下载...', 0);
@@ -207,6 +264,7 @@ const CatalogList: React.FC = () => {
       const { data } = await createInventorySyncBatch(selectedIds.map(Number));
       message.success(`已创建库存同步批次 #${data.id}`);
       setSelectedIds([]);
+      setSelectedItemMap({});
       fetchItems();
       fetchOverview();
       navigate('/inventory-sync');
@@ -225,12 +283,13 @@ const CatalogList: React.FC = () => {
     try {
       setSyncingAsin(true);
       const { data } = await createAsinSyncBatch(selectedIds.map(Number));
-      message.success(`已创建 ASIN 同步批次 #${data.id}`);
+      message.success(`已创建 ASIN/亚马逊商品状态同步批次 #${data.id}`);
       setSelectedIds([]);
+      setSelectedItemMap({});
       fetchItems();
       fetchOverview();
     } catch (error: any) {
-      message.error(error?.response?.data?.detail || 'ASIN 同步批次创建失败');
+      message.error(error?.response?.data?.detail || 'ASIN/亚马逊商品状态同步批次创建失败');
     } finally {
       setSyncingAsin(false);
     }
@@ -255,6 +314,18 @@ const CatalogList: React.FC = () => {
     if (status === 'failed') return <Tag color="error">失败</Tag>;
     if (status === 'skipped') return <Tag>跳过</Tag>;
     return <Tag>未上传</Tag>;
+  };
+
+  const amazonProductStatusTag = (status?: string | null, error?: string | null) => {
+    const text = status || '未同步';
+    const normalized = String(status || '').toLowerCase();
+    const sellable = ['售卖', '在售', '可售', 'active', 'buyable', '正常'].some((keyword) => normalized.includes(keyword));
+    return (
+      <Space direction="vertical" size={2}>
+        <Tag color={sellable ? 'success' : status ? 'warning' : 'default'}>{text}</Tag>
+        {error && <Text type="secondary" ellipsis style={{ maxWidth: 150 }}>{error}</Text>}
+      </Space>
+    );
   };
 
   const stockStatusTag = (status?: string | null, error?: string | null) => {
@@ -311,6 +382,7 @@ const CatalogList: React.FC = () => {
       const { data } = await createAplusUploadBatch(selectedIds.map(Number));
       message.success(`已创建 A+ 上传批次 #${data.id}`);
       setSelectedIds([]);
+      setSelectedItemMap({});
       fetchItems();
       fetchOverview();
       navigate('/aplus-upload');
@@ -355,6 +427,11 @@ const CatalogList: React.FC = () => {
       await deleteProduct(record.source_product_id);
       message.success('商品已删除');
       setSelectedIds((prev) => prev.filter((id) => Number(id) !== record.id));
+      setSelectedItemMap((prev) => {
+        const next = { ...prev };
+        delete next[record.id];
+        return next;
+      });
       if (items.length === 1 && page > 1) {
         setPage(page - 1);
       } else {
@@ -436,6 +513,12 @@ const CatalogList: React.FC = () => {
       dataIndex: 'asin_sync_status',
       width: 120,
       render: (value: string, record: CatalogProduct) => asinStatusTag(value, record.amazon_asin),
+    },
+    {
+      title: '亚马逊商品状态',
+      dataIndex: 'amazon_product_status',
+      width: 150,
+      render: (value: string, record: CatalogProduct) => amazonProductStatusTag(value, record.amazon_product_status_error),
     },
     {
       title: 'A+上传',
@@ -530,7 +613,10 @@ const CatalogList: React.FC = () => {
           </Button>
           <Button icon={<HistoryOutlined />} onClick={() => navigate('/asin-sync')}>同步记录</Button>
           <Button icon={<SyncOutlined />} loading={syncingAsin} disabled={!selectedIds.length} onClick={syncSelectedAsins}>
-            同步ASIN{selectedIds.length ? `(${selectedIds.length})` : ''}
+            同步ASIN/状态{selectedIds.length ? `(${selectedIds.length})` : ''}
+          </Button>
+          <Button icon={<CopyOutlined />} disabled={!selectedIds.length} onClick={copySelectedAmazonAsins}>
+            提取真实ASIN{selectedIds.length ? `(${selectedIds.length})` : ''}
           </Button>
           <Button icon={<PictureOutlined />} loading={uploadingAplus} disabled={!selectedIds.length} onClick={uploadSelectedAplus}>
             上传A+{selectedIds.length ? `(${selectedIds.length})` : ''}
@@ -550,6 +636,8 @@ const CatalogList: React.FC = () => {
         </Button>
         <Button size="small" onClick={() => applyQuickFilter({ asin_sync_status: 'not_found' })}>ASIN未查到</Button>
         <Button size="small" onClick={() => applyQuickFilter({ asin_sync_status: 'multiple_found' })}>ASIN多匹配</Button>
+        <Button size="small" onClick={() => applyQuickFilter({ amazon_product_status: 'sellable' })}>亚马逊售卖</Button>
+        <Button size="small" onClick={() => applyQuickFilter({ amazon_product_status: 'not_synced' })}>状态未同步</Button>
         <Button size="small" onClick={() => applyQuickFilter({ aplus_upload_status: 'not_uploaded' })}>可上传A+</Button>
         <Button size="small" onClick={() => applyQuickFilter({ aplus_upload_status: 'failed' })}>
           A+失败{overview ? `(${overview.aplus_failed})` : ''}
@@ -598,6 +686,19 @@ const CatalogList: React.FC = () => {
             { value: 'not_found', label: '未查到' },
             { value: 'multiple_found', label: '多匹配' },
             { value: 'failed', label: '失败' },
+          ]}
+        />
+        <Select
+          allowClear
+          placeholder="亚马逊商品状态"
+          value={amazonProductStatusInput}
+          onChange={setAmazonProductStatusInput}
+          style={{ width: 180 }}
+          options={[
+            { value: 'sellable', label: '售卖' },
+            { value: 'not_synced', label: '未同步' },
+            { value: '不可售', label: '不可售' },
+            { value: '已删除', label: '已删除' },
           ]}
         />
         <Select
@@ -682,7 +783,22 @@ const CatalogList: React.FC = () => {
         loading={loading}
         rowSelection={{
           selectedRowKeys: selectedIds,
-          onChange: setSelectedIds,
+          onChange: (keys, selectedRows) => {
+            setSelectedIds(keys);
+            setSelectedItemMap((prev) => {
+              const next: Record<number, CatalogProduct> = {};
+              keys.forEach((key) => {
+                const id = Number(key);
+                const latestRow = selectedRows.find((row) => row.id === id);
+                const currentPageRow = items.find((item) => item.id === id);
+                const cachedRow = prev[id];
+                if (latestRow || currentPageRow || cachedRow) {
+                  next[id] = latestRow || currentPageRow || cachedRow;
+                }
+              });
+              return next;
+            });
+          },
           preserveSelectedRowKeys: true,
         }}
         pagination={{

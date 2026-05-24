@@ -122,6 +122,7 @@
     "fulfillment_channel": "fulfillment_availability#1.fulfillment_channel_code",
     "quantity": "fulfillment_availability#1.quantity",
     "inventory_available": "fulfillment_availability#1.is_inventory_available",
+    "handling_time": "fulfillment_availability#1.lead_time_to_ship_max_days",
     "price": "purchasable_offer[marketplace_id=ATVPDKIKX0DER][audience=ALL]#1.our_price#1.schedule#1.value_with_tax",
     "country_of_origin": "country_of_origin[marketplace_id=ATVPDKIKX0DER]#1.value",
     "shipping_template": "merchant_shipping_group[marketplace_id=ATVPDKIKX0DER]#1.value"

@@ -35,7 +35,7 @@ from app.models import (
 )
 from app.models.status import COMPLETED, DUPLICATE_SKIPPED, PENDING_REVIEW, SOURCE_UNAVAILABLE, STEP_LABELS, STEP_STATUS_MAP
 from app.api.schemas import (
-    ProductCreate, ProductUpdate, ProductResponse, ProductDetail,
+    ProductCreate, ProductUpdate, ProductListingImagesUpdate, ProductResponse, ProductDetail, ProductImageResponse,
     PaginatedResponse, ProductFileEntry, AplusRegenerateRequest,
     AsinSyncBatchDetail, AsinSyncBatchResponse, AsinSyncCreateRequest,
     AplusUploadBatchDetail, AplusUploadBatchResponse, AplusUploadCreateRequest,
@@ -127,6 +127,27 @@ RUNNING_STATUSES = {
     "step9_aplus_image",
     "step10_amazon_template",
 }
+
+APLUS_REGEN_ACTIVE_STATUSES = {"regen_queued", "regen_script_running", "regen_image_running"}
+
+
+def _aplus_regeneration_running(product: Product) -> bool:
+    return bool(product.aplus and product.aplus.aplus_status in APLUS_REGEN_ACTIVE_STATUSES)
+
+
+def _normalize_listing_image_paths(main_image_path: str | None, gallery_images: list[str] | None) -> tuple[str, list[str]]:
+    main_path = str(main_image_path or "").strip()
+    if not main_path:
+        raise HTTPException(400, "主图不能为空")
+
+    gallery_paths: list[str] = []
+    seen_paths = {main_path}
+    for item in gallery_images or []:
+        path = str(item).strip()
+        if path and path not in seen_paths:
+            gallery_paths.append(path)
+            seen_paths.add(path)
+    return main_path, gallery_paths
 
 
 def _compact_error_message(message: str | None) -> str | None:
@@ -338,9 +359,13 @@ def _build_list_item(product: Product) -> dict:
         "asin_sync_status": product.asin_sync_status,
         "asin_synced_at": product.asin_synced_at,
         "asin_sync_error": product.asin_sync_error,
+        "amazon_product_status": product.amazon_product_status,
+        "amazon_product_status_synced_at": product.amazon_product_status_synced_at,
+        "amazon_product_status_error": product.amazon_product_status_error,
         "aplus_upload_status": product.aplus_upload_status,
         "aplus_uploaded_at": product.aplus_uploaded_at,
         "aplus_upload_error": product.aplus_upload_error,
+        "aplus_status": product.aplus.aplus_status if product.aplus else None,
         "upc": product.upc,
         "brand": product.brand,
         "status": product.status,
@@ -496,6 +521,9 @@ def _sync_catalog_item(product: Product, db: AsyncSession, confirm: bool = False
     item.asin_sync_status = product.asin_sync_status
     item.asin_synced_at = product.asin_synced_at
     item.asin_sync_error = product.asin_sync_error
+    item.amazon_product_status = product.amazon_product_status
+    item.amazon_product_status_synced_at = product.amazon_product_status_synced_at
+    item.amazon_product_status_error = product.amazon_product_status_error
     item.aplus_upload_status = product.aplus_upload_status
     item.aplus_uploaded_at = product.aplus_uploaded_at
     item.aplus_upload_error = product.aplus_upload_error
@@ -556,6 +584,9 @@ def _catalog_export_row(product: Product) -> dict:
         "真实ASIN": product.amazon_asin,
         "ASIN同步状态": product.asin_sync_status,
         "ASIN同步信息": product.asin_sync_error,
+        "亚马逊商品状态": product.amazon_product_status,
+        "亚马逊商品状态同步时间": product.amazon_product_status_synced_at,
+        "亚马逊商品状态同步信息": product.amazon_product_status_error,
         "UPC": product.upc,
         "A+上传状态": product.aplus_upload_status,
         "A+上传信息": product.aplus_upload_error,
@@ -664,6 +695,7 @@ PRICE_QUANTITY_SKU_ATTR = "contribution_sku#1.value"
 PRICE_QUANTITY_FULFILLMENT_ATTR = "fulfillment_availability#1.fulfillment_channel_code"
 PRICE_QUANTITY_QUANTITY_ATTR = "fulfillment_availability#1.quantity"
 PRICE_QUANTITY_INVENTORY_ALWAYS_AVAILABLE_ATTR = "fulfillment_availability#1.is_inventory_available"
+PRICE_QUANTITY_HANDLING_TIME_ATTR = "fulfillment_availability#1.lead_time_to_ship_max_days"
 PRICE_QUANTITY_FBM_VALUE = "Fulfillment by Merchant (Default)"
 
 
@@ -797,7 +829,15 @@ async def get_workbench_overview(db: AsyncSession = Depends(get_db)):
     running_result = await db.execute(select(func.count(Product.id)).where(Product.status.in_(RUNNING_STATUSES)))
     manual_result = await db.execute(select(func.count(Product.id)).where(Product.status == PENDING_REVIEW, Product.current_step < 10))
     failed_result = await db.execute(select(func.count(Product.id)).where(Product.status == "failed"))
-    confirmable_result = await db.execute(select(func.count(Product.id)).where(Product.status == PENDING_REVIEW, Product.current_step >= 10))
+    confirmable_result = await db.execute(
+        select(func.count(Product.id))
+        .join(ProductAplus, ProductAplus.product_id == Product.id, isouter=True)
+        .where(
+            Product.status == PENDING_REVIEW,
+            Product.current_step >= 10,
+            (ProductAplus.aplus_status.is_(None) | ProductAplus.aplus_status.notin_(APLUS_REGEN_ACTIVE_STATUSES)),
+        )
+    )
     asin_not_synced_result = await db.execute(
         select(func.count(CatalogProduct.id)).where(
             CatalogProduct.confirmed_at.is_not(None),
@@ -1168,6 +1208,7 @@ async def list_catalog_products(
     competitor_asin: str | None = None,
     amazon_asin: str | None = None,
     asin_sync_status: str | None = None,
+    amazon_product_status: str | None = None,
     aplus_upload_status: str | None = None,
     stock_sync_status: str | None = None,
     template_risk_level: str | None = None,
@@ -1219,6 +1260,17 @@ async def list_catalog_products(
         else:
             query = query.where((Product.asin_sync_status == asin_sync_status) | (CatalogProduct.asin_sync_status == asin_sync_status))
             count_query = count_query.where((Product.asin_sync_status == asin_sync_status) | (CatalogProduct.asin_sync_status == asin_sync_status))
+    if amazon_product_status:
+        if amazon_product_status == "sellable":
+            query = query.where((Product.amazon_product_status.ilike("%售卖%")) | (Product.amazon_product_status.ilike("%在售%")) | (CatalogProduct.amazon_product_status.ilike("%售卖%")) | (CatalogProduct.amazon_product_status.ilike("%在售%")))
+            count_query = count_query.where((Product.amazon_product_status.ilike("%售卖%")) | (Product.amazon_product_status.ilike("%在售%")) | (CatalogProduct.amazon_product_status.ilike("%售卖%")) | (CatalogProduct.amazon_product_status.ilike("%在售%")))
+        elif amazon_product_status == "not_synced":
+            query = query.where(((Product.amazon_product_status.is_(None)) | (Product.amazon_product_status == "")) & ((CatalogProduct.amazon_product_status.is_(None)) | (CatalogProduct.amazon_product_status == "")))
+            count_query = count_query.where(((Product.amazon_product_status.is_(None)) | (Product.amazon_product_status == "")) & ((CatalogProduct.amazon_product_status.is_(None)) | (CatalogProduct.amazon_product_status == "")))
+        else:
+            pattern = f"%{amazon_product_status.strip()}%"
+            query = query.where((Product.amazon_product_status.ilike(pattern)) | (CatalogProduct.amazon_product_status.ilike(pattern)))
+            count_query = count_query.where((Product.amazon_product_status.ilike(pattern)) | (CatalogProduct.amazon_product_status.ilike(pattern)))
     if aplus_upload_status:
         query = query.where((Product.aplus_upload_status == aplus_upload_status) | (CatalogProduct.aplus_upload_status == aplus_upload_status))
         count_query = count_query.where((Product.aplus_upload_status == aplus_upload_status) | (CatalogProduct.aplus_upload_status == aplus_upload_status))
@@ -1273,6 +1325,9 @@ async def list_catalog_products(
             item.asin_sync_status = product.asin_sync_status
             item.asin_synced_at = product.asin_synced_at
             item.asin_sync_error = product.asin_sync_error
+            item.amazon_product_status = product.amazon_product_status
+            item.amazon_product_status_synced_at = product.amazon_product_status_synced_at
+            item.amazon_product_status_error = product.amazon_product_status_error
             item.aplus_upload_status = product.aplus_upload_status
             item.aplus_uploaded_at = product.aplus_uploaded_at
             item.aplus_upload_error = product.aplus_upload_error
@@ -1445,10 +1500,6 @@ async def export_inventory_update_template(ids: list[int], db: AsyncSession = De
     if len(selected_ids) > 5000:
         raise HTTPException(400, "单次最多导出 5000 个商品")
 
-    template_path = Path(settings.PRICE_QUANTITY_TEMPLATE_PATH).expanduser()
-    if not template_path.is_file():
-        raise HTTPException(400, f"库存同步模板不存在: {template_path}")
-
     result = await db.execute(
         select(CatalogProduct)
         .options(selectinload(CatalogProduct.source_product).selectinload(Product.data))
@@ -1479,7 +1530,7 @@ async def export_inventory_update_template(ids: list[int], db: AsyncSession = De
             report_rows.append({**base_report, "状态": "跳过", "原因": "商品还未确认入库"})
             continue
         if not real_asin:
-            report_rows.append({**base_report, "状态": "跳过", "原因": "缺少真实 ASIN，不能导出库存同步模板"})
+            report_rows.append({**base_report, "状态": "跳过", "原因": "缺少真实 ASIN，已自动跳过"})
             continue
         if not sku:
             report_rows.append({**base_report, "状态": "跳过", "原因": "缺少 SKU/商品Code，Amazon 库存模板无法定位商品"})
@@ -1493,7 +1544,20 @@ async def export_inventory_update_template(ids: list[int], db: AsyncSession = De
         export_items.append(item)
 
     if not export_items:
-        raise HTTPException(400, "选中的商品没有可导出的库存同步模板数据；需要已有真实 ASIN、SKU 和运营库存。")
+        zip_stream = BytesIO()
+        with zipfile.ZipFile(zip_stream, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr("库存模板导出报告.xlsx", _inventory_update_report_workbook(report_rows))
+        zip_stream.seek(0)
+        filename = f"inventory_update_templates_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+        return StreamingResponse(
+            zip_stream,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    template_path = Path(settings.PRICE_QUANTITY_TEMPLATE_PATH).expanduser()
+    if not template_path.is_file():
+        raise HTTPException(400, f"库存同步模板不存在: {template_path}")
 
     wb = load_workbook(template_path, keep_vba=True, data_only=False)
     if "Template" not in wb.sheetnames:
@@ -1511,6 +1575,7 @@ async def export_inventory_update_template(ids: list[int], db: AsyncSession = De
 
     _clear_price_quantity_data_rows(ws, len(export_items))
     inventory_always_col = columns.get(PRICE_QUANTITY_INVENTORY_ALWAYS_AVAILABLE_ATTR)
+    handling_time_col = columns.get(PRICE_QUANTITY_HANDLING_TIME_ATTR)
     export_name = f"price_quantity_inventory_update_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsm"
     for offset, item in enumerate(export_items):
         row_number = PRICE_QUANTITY_DATA_ROW + offset
@@ -1522,6 +1587,8 @@ async def export_inventory_update_template(ids: list[int], db: AsyncSession = De
         ws.cell(row_number, columns[PRICE_QUANTITY_QUANTITY_ATTR]).value = int(item.stock or 0)
         if inventory_always_col:
             ws.cell(row_number, inventory_always_col).value = None
+        if handling_time_col:
+            ws.cell(row_number, handling_time_col).value = 1
         report_rows.append({
             "状态": "已导出",
             "商品资料ID": item.id,
@@ -1648,6 +1715,9 @@ async def update_catalog_asin(catalog_id: int, body: CatalogAsinUpdateRequest, d
     catalog.asin_sync_status = "manual_linked"
     catalog.asin_sync_error = None
     catalog.asin_synced_at = datetime.now()
+    catalog.amazon_product_status = None
+    catalog.amazon_product_status_synced_at = None
+    catalog.amazon_product_status_error = "手动关联 ASIN 后尚未同步亚马逊商品状态"
     catalog.updated_at = datetime.now()
 
     product = catalog.source_product
@@ -1656,6 +1726,9 @@ async def update_catalog_asin(catalog_id: int, body: CatalogAsinUpdateRequest, d
         product.asin_sync_status = "manual_linked"
         product.asin_sync_error = None
         product.asin_synced_at = catalog.asin_synced_at
+        product.amazon_product_status = None
+        product.amazon_product_status_synced_at = None
+        product.amazon_product_status_error = catalog.amazon_product_status_error
         product.updated_at = datetime.now()
 
     await db.commit()
@@ -1680,6 +1753,9 @@ async def clear_catalog_asin(catalog_id: int, db: AsyncSession = Depends(get_db)
     catalog.asin_sync_status = "not_synced"
     catalog.asin_sync_error = None
     catalog.asin_synced_at = now
+    catalog.amazon_product_status = None
+    catalog.amazon_product_status_synced_at = None
+    catalog.amazon_product_status_error = None
     catalog.updated_at = now
 
     product = catalog.source_product
@@ -1688,6 +1764,9 @@ async def clear_catalog_asin(catalog_id: int, db: AsyncSession = Depends(get_db)
         product.asin_sync_status = "not_synced"
         product.asin_sync_error = None
         product.asin_synced_at = now
+        product.amazon_product_status = None
+        product.amazon_product_status_synced_at = None
+        product.amazon_product_status_error = None
         product.updated_at = now
 
     await db.commit()
@@ -1697,7 +1776,7 @@ async def clear_catalog_asin(catalog_id: int, db: AsyncSession = Depends(get_db)
 
 @router.post("/catalog/asin-sync", response_model=AsinSyncBatchResponse)
 async def create_asin_sync_batch(body: AsinSyncCreateRequest, db: AsyncSession = Depends(get_db)):
-    """为选中的商品资料创建 ASIN 同步批次，并在后台按 UPC/商品编码查询领星 Listing。"""
+    """为选中的商品资料创建 ASIN 同步批次，并在后台按 UPC/商品编码或 MSKU 查询领星 Listing。"""
     result = await db.execute(
         select(CatalogProduct)
         .options(selectinload(CatalogProduct.source_product).selectinload(Product.data))
@@ -1798,9 +1877,7 @@ async def create_aplus_upload_batch(body: AplusUploadCreateRequest, db: AsyncSes
         upload_item = build_upload_item(catalog)
         upload_item.batch_id = batch.id
         product = catalog.source_product
-        if not upload_item.amazon_asin:
-            upload_item.status = "skipped"
-            upload_item.error_message = "缺少真实 ASIN，请先同步 ASIN"
+        if upload_item.status == "skipped":
             catalog.aplus_upload_status = "skipped"
             catalog.aplus_upload_error = upload_item.error_message
             catalog.aplus_uploaded_at = datetime.now()
@@ -1856,7 +1933,7 @@ async def confirm_product(product_id: int, db: AsyncSession = Depends(get_db)):
     """人工确认商品生成结果，并同步进入商品列表。"""
     result = await db.execute(
         select(Product)
-        .options(selectinload(Product.data), selectinload(Product.catalog_item))
+        .options(selectinload(Product.data), selectinload(Product.aplus), selectinload(Product.catalog_item))
         .where(Product.id == product_id)
     )
     product = result.scalar_one_or_none()
@@ -1864,6 +1941,8 @@ async def confirm_product(product_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "Product not found")
     if is_running(product.id):
         raise HTTPException(400, "任务还在运行中，完成后再确认")
+    if _aplus_regeneration_running(product):
+        raise HTTPException(400, "A+重新生成还在进行中，完成后再确认入库")
     if product.status not in {PENDING_REVIEW, COMPLETED}:
         raise HTTPException(400, "只有生成完成、待人工确认的商品可以确认入库")
     if product.current_step < 10:
@@ -1989,7 +2068,7 @@ async def update_product(
     """更新商品任务"""
     result = await db.execute(
         select(Product)
-        .options(selectinload(Product.data), selectinload(Product.catalog_item))
+        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.catalog_item))
         .where(Product.id == product_id)
     )
     product = result.scalar_one_or_none()
@@ -2004,6 +2083,8 @@ async def update_product(
             raise HTTPException(400, "UPC由UPC池子绑定后不可手动修改")
     categories_value = update_data.pop("categories", None)
     leaf_category_value = update_data.pop("leaf_category", None)
+    main_image_path_value = update_data.pop("main_image_path", None)
+    gallery_images_value = update_data.pop("gallery_images", None)
     product_data_updates = {
         key: update_data.pop(key)
         for key in list(update_data.keys())
@@ -2049,11 +2130,55 @@ async def update_product(
                 setattr(product.data, key, json.dumps(normalized, ensure_ascii=False))
             else:
                 setattr(product.data, key, str(value).strip() if value is not None else None)
+    if main_image_path_value is not None or gallery_images_value is not None:
+        if not product.images:
+            product.images = ProductImage(product_id=product.id)
+            db.add(product.images)
+        gallery_input = gallery_images_value if gallery_images_value is not None else json.loads(product.images.gallery_images or "[]")
+        if not isinstance(gallery_input, list):
+            raise HTTPException(400, "副图列表格式不正确")
+        main_path, gallery_paths = _normalize_listing_image_paths(
+            main_image_path_value if main_image_path_value is not None else product.images.main_image_path,
+            gallery_input,
+        )
+        product.images.main_image_path = main_path
+        product.images.main_image_source = "manual_selected"
+        product.images.gallery_images = json.dumps(gallery_paths, ensure_ascii=False)
     product.updated_at = datetime.now()
     _sync_catalog_item(product, db)
     await db.commit()
     await db.refresh(product)
     return product
+
+
+@router.put("/{product_id}/listing-images", response_model=ProductImageResponse)
+async def update_product_listing_images(
+    product_id: int,
+    body: ProductListingImagesUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """保存商品主图/副图选择。"""
+    result = await db.execute(
+        select(Product)
+        .options(selectinload(Product.images))
+        .where(Product.id == product_id)
+    )
+    product = result.scalar_one_or_none()
+    if not product:
+        raise HTTPException(404, "Product not found")
+
+    main_path, gallery_paths = _normalize_listing_image_paths(body.main_image_path, body.gallery_images)
+    if not product.images:
+        product.images = ProductImage(product_id=product.id)
+        db.add(product.images)
+
+    product.images.main_image_path = main_path
+    product.images.main_image_source = "manual_selected"
+    product.images.gallery_images = json.dumps(gallery_paths, ensure_ascii=False)
+    product.updated_at = datetime.now()
+    await db.commit()
+    await db.refresh(product.images)
+    return product.images
 
 
 @router.delete("/{product_id}", status_code=204)
