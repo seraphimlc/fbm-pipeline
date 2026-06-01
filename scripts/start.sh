@@ -5,27 +5,57 @@ set -e
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BACKEND_DIR="$PROJECT_DIR/backend"
 FRONTEND_DIR="$PROJECT_DIR/frontend"
+ENV_FILE="$BACKEND_DIR/.env"
+
+read_env() {
+  local key="$1"
+  local fallback="$2"
+  if [ -f "$ENV_FILE" ]; then
+    local value
+    value="$(grep -E "^${key}=" "$ENV_FILE" | tail -1 | cut -d= -f2- | sed 's/^"//; s/"$//')"
+    if [ -n "$value" ]; then
+      echo "$value"
+      return
+    fi
+  fi
+  echo "$fallback"
+}
+
+BACKEND_PORT="$(read_env BACKEND_PORT 8190)"
+FRONTEND_PORT="$(read_env FRONTEND_PORT 3190)"
 
 echo "📦 FBM Pipeline 启动中..."
 
+if [ ! -f "$BACKEND_DIR/.venv/bin/activate" ]; then
+  echo "❌ 未找到后端虚拟环境: $BACKEND_DIR/.venv"
+  echo "   请先运行: ./scripts/setup_local.sh"
+  exit 1
+fi
+
+if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
+  echo "❌ 未找到前端依赖: $FRONTEND_DIR/node_modules"
+  echo "   请先运行: ./scripts/setup_local.sh"
+  exit 1
+fi
+
 # 启动后端
-echo "🔧 启动后端 (port 8190)..."
+echo "🔧 启动后端 (port $BACKEND_PORT)..."
 cd "$BACKEND_DIR"
 source .venv/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 8190 &
+uvicorn app.main:app --host 0.0.0.0 --port "$BACKEND_PORT" &
 BACKEND_PID=$!
 
 # 启动前端
-echo "🎨 启动前端 (port 3190)..."
+echo "🎨 启动前端 (port $FRONTEND_PORT)..."
 cd "$FRONTEND_DIR"
-npx vite --port 3190 &
+FRONTEND_PORT="$FRONTEND_PORT" BACKEND_PORT="$BACKEND_PORT" npx vite --host 0.0.0.0 --port "$FRONTEND_PORT" &
 FRONTEND_PID=$!
 
 echo ""
 echo "✅ FBM Pipeline 已启动!"
-echo "   前端: http://localhost:3190"
-echo "   后端: http://localhost:8190"
-echo "   API文档: http://localhost:8190/docs"
+echo "   前端: http://localhost:$FRONTEND_PORT"
+echo "   后端: http://localhost:$BACKEND_PORT"
+echo "   API文档: http://localhost:$BACKEND_PORT/docs"
 echo ""
 echo "按 Ctrl+C 停止所有服务"
 

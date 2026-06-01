@@ -5,13 +5,18 @@
 ## 快速开始
 
 ```bash
+# 首次 clone 后先初始化本地环境
+./scripts/setup_local.sh
+
 # 一键启动（后端 8190 + 前端 3190）
 ./scripts/start.sh
 
 # 或分别启动
-cd backend && source .venv/bin/activate && uvicorn app.main:app --port 8190
-cd frontend && npm run dev
+cd backend && source .venv/bin/activate && uvicorn app.main:app --host 0.0.0.0 --port 8190
+cd frontend && npm run dev -- --host 0.0.0.0 --port 3190
 ```
+
+`scripts/setup_local.sh` 会创建 `backend/.env`、`backend/.venv`、`data/products` 并安装前后端依赖。真实 API Key、OSS、卖家精灵 Token 和本机商品素材路径放在 `backend/.env`，不要提交。
 
 ## 常用命令
 
@@ -84,5 +89,7 @@ fbm-pipeline/
 │   └── package.json
 ├── data/                    # 商品数据目录
 ├── docs/                    # 设计文档
-└── scripts/start.sh         # 一键启动
+└── scripts/
+    ├── setup_local.sh       # 首次本地初始化
+    └── start.sh             # 一键启动
 ```

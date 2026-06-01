@@ -5,6 +5,10 @@ from openai import AsyncOpenAI
 import ssl
 
 
+BACKEND_DIR = Path(__file__).resolve().parents[1]
+REPO_ROOT = BACKEND_DIR.parent
+
+
 class Settings(BaseSettings):
     # 项目
     PROJECT_NAME: str = "FBM Pipeline"
@@ -12,7 +16,7 @@ class Settings(BaseSettings):
     DEBUG: bool = True
 
     # 数据库
-    DATA_DIR: Path = Path.home() / "code" / "fbm-pipeline" / "data"
+    DATA_DIR: Path = REPO_ROOT / "data"
     DATABASE_URL: str = ""  # 动态生成
 
     # 服务端口
@@ -20,7 +24,7 @@ class Settings(BaseSettings):
     FRONTEND_PORT: int = 3190
 
     # 商品文件存储根目录
-    PRODUCT_BASE_DIR: Path = Path.home() / "Documents" / "F" / "亚马逊工作目录" / "亚马逊商品" / "大健云仓"
+    PRODUCT_BASE_DIR: Path = REPO_ROOT / "data" / "products"
 
     # 默认品牌
     DEFAULT_BRAND: str = "Vindhvisk"
@@ -105,7 +109,7 @@ class Settings(BaseSettings):
             self.DATA_DIR.mkdir(parents=True, exist_ok=True)
             self.DATABASE_URL = f"sqlite+aiosqlite:///{self.DATA_DIR / 'fbm.db'}"
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": BACKEND_DIR / ".env", "env_file_encoding": "utf-8"}
 
     def get_llm_client(self) -> AsyncOpenAI:
         """创建LLM OpenAI客户端（处理SSL问题）"""

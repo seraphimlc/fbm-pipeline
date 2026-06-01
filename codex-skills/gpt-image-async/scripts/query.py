@@ -2,14 +2,33 @@
 """查询异步生图任务状态（使用curl避免代理问题）"""
 import argparse
 import json
+import os
 import subprocess
 from pathlib import Path
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
+LOCAL_CONFIG_PATH = Path(__file__).parent / "config.local.json"
 
 def load_config():
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
+    config_path = LOCAL_CONFIG_PATH if LOCAL_CONFIG_PATH.exists() else CONFIG_PATH
+    with open(config_path) as f:
+        config = json.load(f)
+
+    env_overrides = {
+        "api_key": os.getenv("GPT_IMAGE_API_KEY"),
+        "base_url": os.getenv("GPT_IMAGE_API_BASE"),
+        "model": os.getenv("GPT_IMAGE_MODEL"),
+        "default_size": os.getenv("GPT_IMAGE_DEFAULT_SIZE"),
+    }
+    for key, value in env_overrides.items():
+        if value:
+            config[key] = value
+
+    if not config.get("api_key") or config.get("api_key") == "YOUR_API_KEY_HERE":
+        raise RuntimeError(
+            "Missing GPT image API key. Set GPT_IMAGE_API_KEY or create scripts/config.local.json."
+        )
+    return config
 
 def query(task_id: str) -> dict:
     """查询任务状态"""
