@@ -63,6 +63,47 @@ npm install
 
 环境变量模板在 `backend/.env.example`。真实 `backend/.env` 不应提交到 GitHub。没有 `.env` 时，后端默认把数据库和商品素材放到仓库内的 `data/` 和 `data/products/`，保证新 clone 能启动。
 
+### 3.1 新机器最小配置
+
+其他人下载代码后，正常流程是：
+
+```bash
+git clone git@github.com:seraphimlc/fbm-pipeline.git
+cd fbm-pipeline
+./scripts/setup_local.sh
+```
+
+初始化完成后，主要编辑 `backend/.env`。`frontend/.env` 一般不需要动，除非更改后端端口或要连接远程后端。
+
+`backend/.env` 里最常需要确认的配置：
+
+```text
+PRODUCT_BASE_DIR
+LLM_API_KEY
+GPT_IMAGE_API_KEY
+GPT_IMAGE_USE_LLM_API
+OSS_ACCESS_KEY_ID
+OSS_ACCESS_KEY_SECRET
+OSS_BUCKET
+OSS_ENDPOINT
+SELLERSPRITE_TOKEN
+```
+
+配置要求按使用场景区分：
+
+- 只打开页面、看接口、做普通前后端开发：可以先不填 API key。
+- 跑 Listing、图片分析、A+ 规划或 A+ 脚本：需要 `LLM_API_KEY`。
+- 跑 A+ 出图：需要 `GPT_IMAGE_API_KEY`，或设置 `GPT_IMAGE_USE_LLM_API=true` 复用 LLM 通道。
+- 生成带图片 URL 的 Amazon 导入表：需要 OSS 配置。
+- 跑卖家精灵关键词：需要 `SELLERSPRITE_TOKEN` 或可用浏览器登录态。
+- 采集真实商品素材：`PRODUCT_BASE_DIR` 必须改成当前机器存在的商品素材根目录。
+
+配置好后启动：
+
+```bash
+./scripts/start.sh
+```
+
 ## 4. 快速启动
 
 一键启动：
