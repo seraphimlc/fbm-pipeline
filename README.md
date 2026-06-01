@@ -31,6 +31,7 @@ make test-project-rules
 
 - `AGENTS.md`：项目级协作规则。
 - `.cursor/rules/projectRule.mdc`：Cursor Project Rule，默认全项目生效。
+- `docs/configuration.md`：正式配置归属、读取顺序和本地初始化规则。
 - `docs/template-mapping-spec.md`：Amazon 模板映射规范。
 - `docs/add-category-template-sop.md`：新增类目模板 SOP。
 - `docs/runbook.md`：Pipeline 操作与故障手册。

@@ -8,8 +8,9 @@
 
 1. `AGENTS.md`
 2. `README.md`
-3. `docs/runbook.md`
-4. 涉及 Amazon 导入模板、类目、字段名或上架检查时，再读：
+3. `docs/configuration.md`
+4. `docs/runbook.md`
+5. 涉及 Amazon 导入模板、类目、字段名或上架检查时，再读：
    - `docs/template-mapping-spec.md`
    - `docs/add-category-template-sop.md`
    - `docs/template-mapping-change-log.md`
@@ -39,6 +40,7 @@
 
 - 如果缺失，则从 `backend/.env.example` 创建 `backend/.env`
 - 创建 `backend/.venv`
+- 如果缺失，则从 `frontend/.env.example` 创建 `frontend/.env`
 - 安装后端依赖
 - 安装前端依赖
 - 创建 `data/products` 和 `logs`
@@ -174,6 +176,7 @@ logs/frontend-3190.log
 - 后端主配置：`backend/.env`
 - 后端默认模板：`backend/.env.example`
 - 生图 skill 环境变量：`GPT_IMAGE_API_KEY`、`GPT_IMAGE_API_BASE`、`GPT_IMAGE_MODEL`
+- 生图 skill 也会读取 `backend/.env`
 - 生图 skill 本地文件：`codex-skills/gpt-image-async/scripts/config.local.json`
 - 生图 skill 默认模板：`codex-skills/gpt-image-async/scripts/config.json`
 

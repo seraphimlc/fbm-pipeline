@@ -17,6 +17,13 @@ else
   echo "ℹ️  backend/.env already exists; left unchanged"
 fi
 
+if [ ! -f "$FRONTEND_DIR/.env" ]; then
+  cp "$FRONTEND_DIR/.env.example" "$FRONTEND_DIR/.env"
+  echo "✅ Created frontend/.env from frontend/.env.example"
+else
+  echo "ℹ️  frontend/.env already exists; left unchanged"
+fi
+
 if [ ! -d "$BACKEND_DIR/.venv" ]; then
   python3 -m venv "$BACKEND_DIR/.venv"
   echo "✅ Created backend/.venv"

@@ -9,6 +9,14 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = BACKEND_DIR.parent
 
 
+def _resolve_local_path(path: Path) -> Path:
+    """Resolve user paths and backend/.env relative paths to absolute paths."""
+    expanded = path.expanduser()
+    if expanded.is_absolute():
+        return expanded
+    return (BACKEND_DIR / expanded).resolve()
+
+
 class Settings(BaseSettings):
     # 项目
     PROJECT_NAME: str = "FBM Pipeline"
@@ -105,6 +113,9 @@ class Settings(BaseSettings):
     POLL_INTERVAL: int = 3         # 前端轮询间隔(秒)
 
     def model_post_init(self, __context):
+        self.DATA_DIR = _resolve_local_path(self.DATA_DIR)
+        self.PRODUCT_BASE_DIR = _resolve_local_path(self.PRODUCT_BASE_DIR)
+        self.PRICE_QUANTITY_TEMPLATE_PATH = _resolve_local_path(self.PRICE_QUANTITY_TEMPLATE_PATH)
         if not self.DATABASE_URL:
             self.DATA_DIR.mkdir(parents=True, exist_ok=True)
             self.DATABASE_URL = f"sqlite+aiosqlite:///{self.DATA_DIR / 'fbm.db'}"
