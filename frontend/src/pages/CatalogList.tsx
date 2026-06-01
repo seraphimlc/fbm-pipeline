@@ -215,16 +215,17 @@ const CatalogList: React.FC = () => {
       .map((id) => selectedItemMap[Number(id)] || items.find((item) => item.id === Number(id)))
       .filter(Boolean) as CatalogProduct[];
     const asins = selectedRecords
+      .filter((item) => item.amazon_asin?.trim() && !isUnavailableAmazonStatus(item.amazon_product_status))
       .map((item) => item.amazon_asin?.trim())
       .filter((asin): asin is string => Boolean(asin));
     if (!asins.length) {
-      message.info('勾选商品没有真实 ASIN，已跳过');
+      message.info('没有可复制的真实 ASIN，空 ASIN 或不可售商品已跳过');
       return;
     }
     try {
       await copyText(asins.join('\n'));
       const missingCount = selectedIds.length - asins.length;
-      message.success(`已复制 ${asins.length} 个真实 ASIN${missingCount ? `，跳过 ${missingCount} 个空 ASIN` : ''}`);
+      message.success(`已复制 ${asins.length} 个真实 ASIN${missingCount ? `，跳过 ${missingCount} 个空 ASIN 或不可售商品` : ''}`);
     } catch {
       message.error('复制失败，请检查浏览器剪贴板权限');
     }
@@ -316,13 +317,19 @@ const CatalogList: React.FC = () => {
     return <Tag>未上传</Tag>;
   };
 
-  const amazonProductStatusTag = (status?: string | null, error?: string | null) => {
-    const text = status || '未同步';
+  const isUnavailableAmazonStatus = (status?: string | null) => {
+    const normalized = String(status || '').toLowerCase();
+    return ['不可售', '停售', '已删除', '下架', 'suppressed', 'inactive', 'deleted', 'not sellable', 'unavailable'].some((keyword) => normalized.includes(keyword));
+  };
+
+  const amazonProductStatusTag = (status?: string | null, error?: string | null, record?: CatalogProduct) => {
+    const text = status || (record?.amazon_asin || record?.asin_sync_status === 'synced' ? '状态未返回' : '未同步');
     const normalized = String(status || '').toLowerCase();
     const sellable = ['售卖', '在售', '可售', 'active', 'buyable', '正常'].some((keyword) => normalized.includes(keyword));
+    const unavailable = isUnavailableAmazonStatus(status);
     return (
       <Space direction="vertical" size={2}>
-        <Tag color={sellable ? 'success' : status ? 'warning' : 'default'}>{text}</Tag>
+        <Tag color={sellable ? 'success' : unavailable ? 'error' : status ? 'warning' : 'default'}>{text}</Tag>
         {error && <Text type="secondary" ellipsis style={{ maxWidth: 150 }}>{error}</Text>}
       </Space>
     );
@@ -518,7 +525,7 @@ const CatalogList: React.FC = () => {
       title: '亚马逊商品状态',
       dataIndex: 'amazon_product_status',
       width: 150,
-      render: (value: string, record: CatalogProduct) => amazonProductStatusTag(value, record.amazon_product_status_error),
+      render: (value: string, record: CatalogProduct) => amazonProductStatusTag(value, record.amazon_product_status_error, record),
     },
     {
       title: 'A+上传',

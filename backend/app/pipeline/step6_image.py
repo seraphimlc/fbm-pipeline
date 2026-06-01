@@ -48,6 +48,7 @@ Amazon slot 01 MAIN hard rejects:
 - Text overlays, icons, badges, measurements, logos, watermarks, or promotional claims.
 - Props/accessories not included in the offer, unless unambiguously contextual and category-allowed.
 - Lifestyle scene, model/hand use, packaging-only photo, collage, multi-panel layout, or comparison graphic.
+- Box-label-first images, shipping labels/waybills, raw warehouse snapshots, unretouched casual phone photos, and mailing/outer shipping packaging.
 - Wrong variant, wrong quantity, mismatched color, cropped product, blur, low resolution, or unclear product identity.
 
 Supporting images slots 02-09 should answer buyer doubts: exact set/variant, alternate angle, size/scale, material/detail, function/use process, usage scenario, installation/storage/cleaning, package/included parts, or strongest remaining proof.
@@ -55,7 +56,7 @@ Supporting images slots 02-09 should answer buyer doubts: exact set/variant, alt
 Use a clear conversion_role for each image. Prefer one of:
 exact_set, alternate_angle, size_scale, material_detail, function_use, lifestyle, setup_storage, package_contents, proof, exclude.
 
-When there are not enough distinct image types, still rank every remaining image honestly so the system can fill slots with the best available data up to 9. Mark weak, blurry, wrong-variant, watermarked, duplicate, or risky images clearly in risk_flags and decision_reason instead of omitting them silently.
+When there are not enough distinct image types, still rank every remaining image honestly so the system can fill slots with the best available data up to 9. Avoid box-label-first images, raw casual snapshots, and mailing outer packaging for supporting slots too unless no better product image exists. Mark weak, blurry, wrong-variant, watermarked, duplicate, box-label, casual snapshot, mailing packaging, or risky images clearly in risk_flags and decision_reason instead of omitting them silently.
 
 Do not invent material, certification, capacity, waterproofing, safety, or included accessories unless visible or supported by the product facts. Mark uncertainty.
 Output valid JSON only, no markdown fences."""
@@ -687,6 +688,56 @@ def _image_text(item: dict) -> str:
     return " ".join(str(part or "") for part in parts).lower()
 
 
+def _has_any_marker(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+BOX_LABEL_MARKERS = (
+    "box label", "carton label", "package label", "packaging label", "label on box",
+    "label on carton", "barcode label", "warehouse label", "sku label", "shipping label",
+    "waybill", "tracking label", "sticker label", "sticker on box", "sticker on carton",
+    "箱标", "纸箱标签", "外箱标签", "条码标签", "物流标签", "快递面单", "面单",
+)
+
+CASUAL_RAW_PHOTO_MARKERS = (
+    "casual photo", "casual snapshot", "snapshot", "random shot", "quick photo",
+    "raw photo", "unretouched", "un-retouched", "unprocessed", "unpolished",
+    "unstyled", "no editing", "no retouch", "poor lighting", "harsh lighting",
+    "cluttered background", "messy background", "warehouse floor", "warehouse photo",
+    "phone photo", "amateur photo", "随手拍", "实拍随手", "未修图", "未修饰",
+    "无修饰", "杂乱背景", "仓库地面", "手机拍摄",
+)
+
+MAILING_PACKAGING_MARKERS = (
+    "shipping carton", "shipping box", "mailing box", "mailing package", "outer carton",
+    "outer packaging", "delivery box", "delivery package", "postal package", "parcel",
+    "poly mailer", "shipping bag", "corrugated shipping", "logistics packaging",
+    "transport packaging", "快递外包装", "邮寄外包装", "物流外包装", "运输外包装",
+    "发货纸箱", "快递箱", "包裹外包装",
+)
+
+
+def _discouraged_image_reasons(item: dict) -> list[str]:
+    text = _image_text(item)
+    reasons = []
+    if _has_any_marker(text, BOX_LABEL_MARKERS):
+        reasons.append("box_label")
+    if _has_any_marker(text, CASUAL_RAW_PHOTO_MARKERS):
+        reasons.append("casual_raw_photo")
+    if _has_any_marker(text, MAILING_PACKAGING_MARKERS):
+        reasons.append("mailing_packaging")
+    return reasons
+
+
+def _discouraged_image_penalty(item: dict, *, for_main: bool) -> float:
+    penalties = {
+        "box_label": 7.0 if for_main else 4.0,
+        "casual_raw_photo": 5.0 if for_main else 2.0,
+        "mailing_packaging": 8.0 if for_main else 5.0,
+    }
+    return sum(penalties.get(reason, 0.0) for reason in _discouraged_image_reasons(item))
+
+
 def _token_set(text: str) -> set[str]:
     stop_words = {
         "the", "and", "for", "with", "this", "that", "from", "image", "product",
@@ -764,6 +815,7 @@ def _main_candidate_score(item: dict) -> float:
     )
     if any(word in text for word in reject_words):
         score -= 4
+    score -= _discouraged_image_penalty(item, for_main=True)
     return score
 
 
@@ -774,6 +826,9 @@ def _main_reject_reasons(item: dict) -> list[str]:
         ("text_or_graphics", ("text overlay", "badge", "measurement", "watermark", "logo", "icons", "infographic")),
         ("lifestyle_or_model", ("lifestyle", "scene", "model", "hand", "person", "human", "room")),
         ("props_or_packaging", ("props", "accessories not included", "packaging", "package-only", "box only")),
+        ("box_label", BOX_LABEL_MARKERS),
+        ("casual_raw_photo", CASUAL_RAW_PHOTO_MARKERS),
+        ("mailing_packaging", MAILING_PACKAGING_MARKERS),
         ("wrong_variant", ("wrong variant", "wrong color", "mismatched", "different product")),
         ("quality_or_crop", ("cropped", "blur", "blurry", "low resolution", "unclear product")),
         ("collage_or_comparison", ("collage", "multi-panel", "comparison")),
@@ -797,6 +852,10 @@ def _substitute_main_score(item: dict) -> float:
     for reason in reasons:
         if reason in {"wrong_variant", "quality_or_crop"}:
             score -= 6
+        elif reason in {"box_label", "mailing_packaging"}:
+            score -= 7
+        elif reason == "casual_raw_photo":
+            score -= 4
         elif reason in {"text_or_graphics", "collage_or_comparison"}:
             score -= 3
         elif reason in {"non_white_background", "lifestyle_or_model", "props_or_packaging"}:
@@ -853,6 +912,7 @@ def _select_main_image(reviews: list[dict]) -> tuple[dict | None, dict]:
 def _role_candidate_score(item: dict, role: str) -> float:
     score = _score(item.get("gallery_score"))
     text = _image_text(item)
+    score -= _discouraged_image_penalty(item, for_main=False)
     if role == "size_scale":
         if any(word in text for word in ("dimension", "dimensions", "measurement", "measurements", "width", "height", "depth", "exact dimensions", "fit")):
             score += 2
@@ -872,6 +932,8 @@ def _role_candidate_score(item: dict, role: str) -> float:
     elif role == "package_contents":
         if any(word in text for word in ("package", "included", "parts", "box")):
             score += 1.5
+        if _has_any_marker(text, MAILING_PACKAGING_MARKERS) or _has_any_marker(text, BOX_LABEL_MARKERS):
+            score -= 4
     return score
 
 
@@ -892,6 +954,9 @@ def _is_usable_gallery_item(item: dict) -> bool:
         "logo",
     )
     if any(flag in text for flag in hard_rejects):
+        return False
+    discouraged = set(_discouraged_image_reasons(item))
+    if discouraged & {"box_label", "mailing_packaging"}:
         return False
     return _score(item.get("gallery_score")) >= 5
 
@@ -917,6 +982,7 @@ def _gallery_fallback_score(item: dict) -> float:
     for marker, penalty in penalties.items():
         if marker in text:
             score -= penalty
+    score -= _discouraged_image_penalty(item, for_main=False)
     if any(word in text for word in ("product shot", "front", "side", "back", "detail", "dimension", "lifestyle", "room")):
         score += 1
     return score
@@ -1468,22 +1534,29 @@ def _restore_cached_image_analysis(
     cached: dict,
     images: list[Path],
     image_analysis_model: str,
+    pd: ProductData,
+    strategy: dict,
+    material_dir: Path,
 ) -> dict:
     reviews = cached.get("image_reviews") or cached.get("images") or []
-    gallery_selection = cached.get("gallery_selection") or []
-    diagnostics = cached.get("selection_diagnostics") or {}
+    previous_diagnostics = cached.get("selection_diagnostics") or {}
     contact_sheets = cached.get("contact_sheets") or []
     sheet_payloads = cached.get("sheet_payloads") or []
-    strategy_name = (
-        cached.get("gallery_strategy")
-        or (diagnostics.get("image_strategy") or {}).get("name")
-        or "cached"
-    )
+    strategy_name = strategy.get("name") or cached.get("gallery_strategy") or "cached"
 
-    main_item = next(
-        (item for item in gallery_selection if str(item.get("slot") or "").zfill(2) == "01"),
-        gallery_selection[0] if gallery_selection else None,
-    )
+    main_item, gallery_selection, diagnostics = _select_gallery(reviews, strategy)
+    if previous_diagnostics.get("analysis_warnings"):
+        diagnostics["analysis_warnings"] = previous_diagnostics.get("analysis_warnings")
+    diagnostics["listing_image_alignment"] = _listing_image_alignment(pd, gallery_selection)
+    diagnostics["image_strategy"] = {
+        "name": strategy.get("name"),
+        "buyer_focus": strategy.get("buyer_focus") or [],
+        "critical_roles": strategy.get("critical_roles") or [],
+        "high_risk_missing_roles": strategy.get("high_risk_missing_roles") or [],
+        "high_risk_claim_roles": strategy.get("high_risk_claim_roles") or [],
+    }
+    diagnostics["image_health"] = _image_health(diagnostics, strategy)
+
     main_image_path = main_item.get("path") if isinstance(main_item, dict) else None
     gallery_items = [
         item for item in gallery_selection
@@ -1503,6 +1576,15 @@ def _restore_cached_image_analysis(
             selling_points.append(mm.get("aplus_reference_value"))
     selling_points = list(dict.fromkeys(selling_points))[:15]
 
+    _write_image_analysis_files(
+        material_dir,
+        contact_sheets,
+        reviews,
+        gallery_selection,
+        diagnostics,
+        source_images=cached.get("source_images") or _image_fingerprint(images),
+    )
+
     pi.contact_sheet_path = str(contact_sheets[0].get("sheet_path")) if contact_sheets else pi.contact_sheet_path
     pi.image_analysis = json.dumps({
         "contact_sheets": contact_sheets,
@@ -1512,7 +1594,8 @@ def _restore_cached_image_analysis(
         "selection_diagnostics": diagnostics,
         "gallery_strategy": strategy_name,
         "cache_source": "image_selling_points.json",
-        "source_images": cached.get("source_images") or [],
+        "cache_reselected": True,
+        "source_images": cached.get("source_images") or _image_fingerprint(images),
     }, ensure_ascii=False)
     pi.image_selling_points = json.dumps(selling_points, ensure_ascii=False)
     pi.category_style = f"multi_sheet:{strategy_name}"
@@ -1522,7 +1605,13 @@ def _restore_cached_image_analysis(
     pi.gallery_order = json.dumps(gallery_order, ensure_ascii=False)
     pi.main_image_summary = (
         f"复用图片分析缓存，覆盖 {len(reviews)}/{len(images)} 张图片，"
-        f"选择 {len(gallery_selection)} 张主/副图。"
+        f"按当前规则重新选择 {len(gallery_selection)} 张主/副图。"
+        + f" 图片健康等级: {diagnostics.get('image_health', {}).get('label', '未知')}。"
+        + (
+            " 主图使用替代素材: " + "；".join(diagnostics.get("main_image_warnings") or [])
+            if diagnostics.get("main_image_status") == "fallback_substitute"
+            else ""
+        )
     )
     pi.analyzed_at = datetime.now()
     pi.vlm_model = image_analysis_model
@@ -1537,7 +1626,59 @@ def _restore_cached_image_analysis(
         "selection_diagnostics": diagnostics,
         "gallery_strategy": strategy_name,
         "cache_hit": True,
+        "cache_reselected": True,
     }
+
+
+async def reselect_image_gallery_from_cache(product_id: int) -> dict:
+    """复用已有图片分析结果，仅按当前选择规则重排主图/副图。"""
+    async with async_session() as db:
+        result = await db.execute(
+            select(Product)
+            .options(selectinload(Product.data), selectinload(Product.images))
+            .where(Product.id == product_id)
+        )
+        product = result.scalar_one_or_none()
+        if not product or not product.data or not product.images:
+            raise ValueError(f"Product {product_id} not found or no image cache")
+
+        pd = product.data
+        if not pd.material_dir:
+            raise ValueError("未设置素材目录，无法重选图片")
+
+        material_dir = Path(pd.material_dir)
+        images = _scan_images(pd.material_dir)
+        cached = _load_cached_image_analysis(material_dir, images) if images else None
+        if not cached and product.images.image_analysis:
+            payload = _json_loads(product.images.image_analysis, {})
+            reviews = payload.get("images") if isinstance(payload, dict) else None
+            if isinstance(reviews, list) and reviews:
+                cached = {
+                    "contact_sheets": payload.get("contact_sheets") or [],
+                    "sheet_payloads": payload.get("sheet_payloads") or [],
+                    "image_reviews": reviews,
+                    "gallery_selection": payload.get("gallery_selection") or [],
+                    "selection_diagnostics": payload.get("selection_diagnostics") or {},
+                    "gallery_strategy": payload.get("gallery_strategy"),
+                    "source_images": payload.get("source_images") or _image_fingerprint(images),
+                }
+
+        if not cached:
+            raise ValueError("未找到可复用的图片分析缓存")
+
+        category = pd.leaf_category or "General"
+        strategy = _image_strategy(category, pd)
+        result_payload = _restore_cached_image_analysis(
+            product.images,
+            cached,
+            images,
+            settings.VLM_MODEL,
+            pd,
+            strategy,
+            material_dir,
+        )
+        await db.commit()
+        return result_payload
 
 
 async def run_image_analysis(product_id: int) -> dict:
@@ -1578,13 +1719,23 @@ async def run_image_analysis(product_id: int) -> dict:
 
         material_dir = Path(pd.material_dir)
         image_analysis_model = settings.VLM_MODEL
+        category = pd.leaf_category or "General"
+        strategy = _image_strategy(category, pd)
         cached_analysis = _load_cached_image_analysis(material_dir, images)
         if cached_analysis:
-            result_payload = _restore_cached_image_analysis(pi, cached_analysis, images, image_analysis_model)
+            result_payload = _restore_cached_image_analysis(
+                pi,
+                cached_analysis,
+                images,
+                image_analysis_model,
+                pd,
+                strategy,
+                material_dir,
+            )
             await db.commit()
             logger.info(
                 f"[Step6] 命中图片分析缓存: product={product_id}, images={len(images)}, "
-                f"source=image_selling_points.json"
+                f"source=image_selling_points.json, reselected=True"
             )
             return result_payload
 
@@ -1602,9 +1753,7 @@ async def run_image_analysis(product_id: int) -> dict:
         # 调用 VLM 分析
         client = settings.get_image_analysis_client()
 
-        category = pd.leaf_category or "General"
         facts = _facts_from_product(pd)
-        strategy = _image_strategy(category, pd)
         gallery_strategy = _gallery_strategy_prompt(strategy)
         all_reviews: list[dict] = []
         sheet_payloads: list[dict] = []

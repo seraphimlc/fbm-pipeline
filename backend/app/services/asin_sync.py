@@ -228,7 +228,7 @@ async def _finish_item(
                 target.asin_synced_at = datetime.now()
                 target.amazon_product_status = amazon_product_status
                 target.amazon_product_status_synced_at = datetime.now()
-                target.amazon_product_status_error = None
+                target.amazon_product_status_error = None if amazon_product_status else "领星 Listing 接口未返回亚马逊商品状态"
             elif status in {"not_found", "multiple_found", "failed", "skipped"}:
                 target.asin_synced_at = datetime.now()
                 target.amazon_product_status_synced_at = datetime.now()
@@ -371,6 +371,9 @@ def _listing_status_text(row: dict) -> str | None:
         value = row.get(key)
         if value not in (None, ""):
             return str(value).strip()
+    numeric_status = row.get("status")
+    if str(numeric_status) == "0":
+        return "停售"
     return None
 
 

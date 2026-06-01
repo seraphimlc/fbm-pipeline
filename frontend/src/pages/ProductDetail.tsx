@@ -266,7 +266,7 @@ const ProductDetail: React.FC = () => {
     ? keywordItems
       .map((kw) => typeof kw === 'string' ? kw : kw?.keyword)
       .filter(Boolean)
-      .join(' ')
+      .join(', ')
     : '';
   const referenceImagePool = Array.from(new Set([
     ...(Array.isArray(galleryImagePaths) ? galleryImagePaths.map((item) => typeof item === 'string' ? item : item?.path) : []),
