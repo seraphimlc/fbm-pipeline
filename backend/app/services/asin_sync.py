@@ -445,10 +445,9 @@ async def _lookup_asin(
 def build_sync_item(catalog: CatalogProduct) -> AsinSyncItem:
     product = catalog.source_product
     item_code = product.data.item_code if product and product.data else catalog.item_code
-    asin = (catalog.amazon_asin or (product.amazon_asin if product else None) or "").strip()
     upc = (catalog.upc or (product.upc if product else None) or "").strip()
-    lookup_code = (asin or upc or item_code or "").strip()
-    lookup_type = "ASIN" if asin else ("商品编码" if upc else "MSKU")
+    lookup_code = (upc or item_code or "").strip()
+    lookup_type = "商品编码" if upc else "MSKU"
     return AsinSyncItem(
         catalog_product_id=catalog.id,
         product_id=catalog.source_product_id,
