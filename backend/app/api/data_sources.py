@@ -30,7 +30,7 @@ def _normalize_site(value: str | None) -> str:
 def _normalize_platform(value: str | None) -> str:
     platform = (value or "giga").strip().lower()
     if platform not in VALID_PLATFORMS:
-        raise HTTPException(400, f"暂不支持的数据源平台: {platform}")
+        raise HTTPException(400, f"暂不支持的店铺平台: {platform}")
     return platform
 
 
@@ -59,13 +59,13 @@ def _validate_source_ready(
     shipping_cost_mode: str,
 ) -> None:
     if fulfillment_mode == "self_ship" and shipping_cost_mode != "packing_fee":
-        raise HTTPException(400, "自发货数据源的运费口径应为 packing_fee")
+        raise HTTPException(400, "自发货店铺的运费口径应为 packing_fee")
     if fulfillment_mode == "dropship" and shipping_cost_mode != "giga_shipping_fee":
-        raise HTTPException(400, "代发货数据源的运费口径应为 giga_shipping_fee")
+        raise HTTPException(400, "代发货店铺的运费口径应为 giga_shipping_fee")
     if enabled and not (api_base or "").strip():
-        raise HTTPException(400, "启用的数据源需要配置 Open API 地址")
+        raise HTTPException(400, "启用的店铺需要配置 Open API 地址")
     if enabled and (not (client_id or "").strip() or not (client_secret or "").strip()):
-        raise HTTPException(400, "启用的数据源需要配置 AK/SK")
+        raise HTTPException(400, "启用的店铺需要配置 AK/SK")
 
 
 def _mask_secret(secret: str | None) -> str | None:
@@ -138,7 +138,7 @@ async def create_product_data_source(body: ProductDataSourceCreate, db: AsyncSes
     name = body.name.strip()
     existing_result = await db.execute(select(ProductDataSource).where(ProductDataSource.name == name))
     if existing_result.scalar_one_or_none():
-        raise HTTPException(400, f"数据源名称已存在: {name}")
+        raise HTTPException(400, f"店铺名称已存在: {name}")
 
     platform = _normalize_platform(body.platform)
     site = _normalize_site(body.site)
@@ -189,7 +189,7 @@ async def update_product_data_source(
     result = await db.execute(select(ProductDataSource).where(ProductDataSource.id == source_id))
     source = result.scalar_one_or_none()
     if not source:
-        raise HTTPException(404, "数据源不存在")
+        raise HTTPException(404, "店铺不存在")
 
     if body.name is not None:
         name = body.name.strip()
@@ -197,7 +197,7 @@ async def update_product_data_source(
             select(ProductDataSource).where(ProductDataSource.name == name, ProductDataSource.id != source_id)
         )
         if existing_result.scalar_one_or_none():
-            raise HTTPException(400, f"数据源名称已存在: {name}")
+            raise HTTPException(400, f"店铺名称已存在: {name}")
         source.name = name
     if body.platform is not None:
         source.platform = _normalize_platform(body.platform)
@@ -244,7 +244,7 @@ async def delete_product_data_source(source_id: int, db: AsyncSession = Depends(
     result = await db.execute(select(ProductDataSource).where(ProductDataSource.id == source_id))
     source = result.scalar_one_or_none()
     if not source:
-        raise HTTPException(404, "数据源不存在")
+        raise HTTPException(404, "店铺不存在")
     usage_result = await db.execute(
         select(func.count(GigaSyncBatch.id)).where(GigaSyncBatch.data_source_id == source_id)
     )

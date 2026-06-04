@@ -218,12 +218,26 @@ export interface CatalogExportCategorySummary {
   template_name: string | null;
   template_path: string | null;
   template_error: string | null;
+  uploaded_template_name: string | null;
+  uploaded_template_cache_path: string | null;
+  uploaded_template_oss_url: string | null;
+  uploaded_template_object_key: string | null;
+  uploaded_template_uploaded_at: string | null;
   sample_item_codes: string[];
 }
 
 export interface CatalogExportCategories {
   pending: CatalogExportCategorySummary[];
   exported: CatalogExportCategorySummary[];
+}
+
+export interface CatalogTemplateUploadResult {
+  category: string;
+  filename: string;
+  cache_path: string;
+  object_key: string | null;
+  oss_url: string | null;
+  uploaded_at: string;
 }
 
 export interface InventorySyncBatch {
@@ -970,6 +984,16 @@ export const exportCatalogProducts = (ids: number[]) =>
 export const exportCatalogProductsByCategory = (category: string) =>
   api.post<Blob>('/products/catalog/export-by-category', { category }, { responseType: 'blob', timeout: 300000 });
 
+export const uploadCatalogCategoryTemplate = (category: string, file: File) => {
+  const formData = new FormData();
+  formData.append('category', category);
+  formData.append('file', file);
+  return api.post<CatalogTemplateUploadResult>('/products/catalog/category-template-upload', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' },
+    timeout: 120000,
+  });
+};
+
 export const exportInventoryUpdateTemplate = (ids: number[]) =>
   api.post<Blob>('/products/catalog/inventory-template/export', ids, { responseType: 'blob', timeout: 300000 });
 
@@ -996,6 +1020,12 @@ export const syncMissingGigaProductsBackground = (body: { site?: string; data_so
 
 export const createGigaPullOfflineTask = (body: { data_source_ids: number[]; current_category?: string | null; page_size?: number | null; max_pages?: number | null }) =>
   api.post<OfflineTaskQueuedResult>('/offline-tasks/giga-pull', body, { timeout: 30000 });
+
+export const createGigaInventorySyncOfflineTask = (body: { data_source_ids: number[]; sku_codes?: string[] | null }) =>
+  api.post<OfflineTaskQueuedResult>('/offline-tasks/giga-inventory-sync', body, { timeout: 30000 });
+
+export const createGigaPriceSyncOfflineTask = (body: { data_source_ids: number[]; sku_codes?: string[] | null }) =>
+  api.post<OfflineTaskQueuedResult>('/offline-tasks/giga-price-sync', body, { timeout: 30000 });
 
 export const listOfflineTasks = (params?: { page?: number; page_size?: number; task_type?: string; status?: string }) =>
   api.get<PaginatedOfflineTasks>('/offline-tasks', { params });

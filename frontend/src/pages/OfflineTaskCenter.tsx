@@ -22,13 +22,17 @@ const statusLabel = (status: string) => {
 };
 
 const taskTypeLabel = (type: string) => {
-  if (type === 'giga_pull') return '拉取大健商品';
+  if (type === 'giga_pull') return '同步店铺商品';
+  if (type === 'giga_inventory_sync') return '同步大健库存';
+  if (type === 'giga_price_sync') return '同步大健价格';
   return type;
 };
 
 const stepTypeLabel = (type: string) => {
-  if (type === 'giga_sync') return '拉品';
+  if (type === 'giga_sync') return '同步商品';
   if (type === 'giga_image_download') return '下载图片';
+  if (type === 'giga_inventory_sync') return '库存同步';
+  if (type === 'giga_price_sync') return '价格同步';
   return type;
 };
 
@@ -39,6 +43,9 @@ const progressText = (record: OfflineTaskStep) => {
     return `已下载 ${record.progress_current}/${record.progress_total}`;
   }
   if (record.step_type === 'giga_sync' && record.progress_total > 0) {
+    return `SKU ${record.progress_current}/${record.progress_total}`;
+  }
+  if (['giga_inventory_sync', 'giga_price_sync'].includes(record.step_type) && record.progress_total > 0) {
     return `SKU ${record.progress_current}/${record.progress_total}`;
   }
   return record.status === 'running' ? '执行中，正在统计...' : '-';
@@ -138,7 +145,7 @@ const OfflineTaskCenter: React.FC = () => {
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <div>
           <Title level={4} style={{ margin: 0 }}>任务中心</Title>
-          <Text type="secondary">承载拉品、图片下载、导出等离线操作；商品工作台只负责提交和查看商品状态。</Text>
+          <Text type="secondary">承载店铺商品同步、库存同步、价格同步、图片下载、导出等离线操作；商品工作台只负责提交和查看商品状态。</Text>
         </div>
         <Button icon={<ReloadOutlined />} onClick={fetchTasks}>刷新</Button>
       </div>

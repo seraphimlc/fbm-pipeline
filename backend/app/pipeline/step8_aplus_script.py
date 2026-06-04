@@ -4,6 +4,7 @@
 将模块7的规划转化为具体的 GPT Image 出图指令（prompt + 尺寸 + 风格）
 """
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -17,6 +18,20 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 logger = logging.getLogger(__name__)
+
+
+def _is_transient_llm_error(exc: Exception) -> bool:
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    return (
+        "apiconnectionerror" in name
+        or "apitimeouterror" in name
+        or "timeout" in name
+        or "remoteprotocolerror" in name
+        or "connection error" in text
+        or "server disconnected" in text
+        or "temporarily unavailable" in text
+    )
 
 
 def _is_remote_url(value: str | None) -> bool:
@@ -1016,6 +1031,65 @@ def _normalize_script_count_and_size(scripts_data: dict) -> dict:
     return scripts_data
 
 
+def _fallback_aplus_scripts(plan: dict, product: Product, pd: ProductData) -> dict:
+    modules = plan.get("modules") if isinstance(plan.get("modules"), list) else []
+    title = pd.listing_title or pd.title or "Product"
+    category = pd.leaf_category or "General"
+    color = pd.color or "the original product color"
+    material = pd.material or "the visible original material"
+    scripts: list[dict] = []
+    for idx in range(1, 6):
+        module = modules[idx - 1] if idx - 1 < len(modules) and isinstance(modules[idx - 1], dict) else {}
+        headline = module.get("headline") or module.get("type") or f"A+ Module {idx}"
+        key_message = module.get("key_message") or module.get("conversion_goal") or "Explain a visible product benefit using selected reference images."
+        image_concept = module.get("image_concept") or module.get("experience_angle") or "Create a clean Amazon A+ product image using selected references."
+        scripts.append(
+            {
+                "module_position": idx,
+                "fallback_script": True,
+                "prompt": (
+                    f"Create Amazon A+ module {idx} for {title}. Module headline: {headline}. "
+                    f"Product category: {category}. Preserve the product as shown in the selected reference images: "
+                    f"same product type, shape, proportions, key parts, {color}, {material}, surface finish, and visible construction. "
+                    f"Visual concept: {image_concept}. Conversion message: {key_message}. "
+                    "Use a professional ecommerce composition with clean lighting, clear product visibility, and restrained on-image text. "
+                    "Do not invent unsupported features, accessories, certifications, safety claims, age claims, or performance claims. "
+                    f"Output size requirement: exactly {settings.APLUS_IMAGE_WIDTH} x {settings.APLUS_IMAGE_HEIGHT} pixels."
+                ),
+                "negative_prompt": (
+                    "brand name text, brand logo, wordmark, cropped people, deformed product, wrong product type, wrong color, "
+                    "wrong scale, altered proportions, changed material, invented accessories, invented product features, "
+                    "unsupported safety claims, unsupported age claims, changed construction"
+                ),
+                "width": settings.APLUS_IMAGE_WIDTH,
+                "height": settings.APLUS_IMAGE_HEIGHT,
+                "style": "photography" if idx in (1, 2, 5) else "infographic",
+                "conversion_goal": module.get("conversion_goal") or key_message,
+                "buyer_objection": module.get("buyer_objection") or "Help shoppers understand the product clearly before purchase.",
+                "evidence_source": module.get("evidence_source") or "Use only product facts and selected reference images.",
+                "experience_angle": module.get("experience_angle") or image_concept,
+                "gallery_overlap_avoidance": module.get("gallery_overlap_avoidance") or "Add context and clarity beyond the gallery images.",
+                "risk_guardrails": module.get("risk_guardrails") or [
+                    "Keep claims truthful and supported by product facts or visible reference images.",
+                    "Preserve product identity, color, material, scale, proportions, and visible construction.",
+                ],
+                "visual_do_not_claim": module.get("visual_do_not_claim") or [
+                    "Do not show unsupported accessories, functions, certifications, safety claims, or material changes.",
+                ],
+                "text_overlays": [
+                    {"text": str(headline)[:48], "position": "top-center", "font_size": "large"},
+                ],
+            }
+        )
+    return {
+        "scripts": scripts,
+        "summary": "A+脚本由保底逻辑生成：LLM连接超时，已按A+规划生成可继续出图的结构化脚本；如需更高质量，可重跑A+脚本。",
+        "fallback": True,
+        "fallback_reason": "LLM timeout while generating A+ scripts",
+        "llm_model": settings.LLM_MODEL,
+    }
+
+
 async def run_aplus_script(product_id: int) -> dict:
     """
     执行 A+ 脚本生成
@@ -1063,27 +1137,60 @@ async def run_aplus_script(product_id: int) -> dict:
 
         # 调用 LLM
         client = settings.get_llm_client()
+        max_attempts = 2
+        request_client = client.with_options(timeout=45, max_retries=0) if hasattr(client, "with_options") else client
 
         logger.info(f"[Step8] 调用LLM生成A+脚本: {len(plan.get('modules', []))} 个模块")
-        response = await client.chat.completions.create(
-            model=settings.LLM_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.7,
-            max_tokens=4000,
-            response_format={"type": "json_object"},
-        )
+        response = None
+        last_transient_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = await request_client.chat.completions.create(
+                    model=settings.LLM_MODEL,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.7,
+                    max_tokens=4000,
+                    response_format={"type": "json_object"},
+                )
+                break
+            except Exception as exc:
+                if not _is_transient_llm_error(exc):
+                    raise
+                last_transient_error = exc
+                if attempt >= max_attempts:
+                    logger.warning(
+                        "[Step8] A+脚本LLM连接连续失败，使用保底脚本: error=%s: %s",
+                        type(exc).__name__,
+                        exc,
+                    )
+                    response = None
+                    break
+                wait_seconds = attempt * 5
+                logger.warning(
+                    "[Step8] A+脚本LLM连接异常，准备重试: attempt=%s/%s, wait=%ss, error=%s: %s",
+                    attempt,
+                    max_attempts,
+                    wait_seconds,
+                    type(exc).__name__,
+                    exc,
+                )
+                await asyncio.sleep(wait_seconds)
+        if response is None:
+            scripts_data = _fallback_aplus_scripts(plan, product, pd)
+            if last_transient_error:
+                scripts_data["fallback_error"] = f"{type(last_transient_error).__name__}: {last_transient_error}"
+        else:
+            content = response.choices[0].message.content
+            if not content:
+                raise RuntimeError("LLM 返回空结果")
 
-        content = response.choices[0].message.content
-        if not content:
-            raise RuntimeError("LLM 返回空结果")
-
-        try:
-            scripts_data = json.loads(content)
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"A+脚本JSON解析失败: {e}")
+            try:
+                scripts_data = json.loads(content)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"A+脚本JSON解析失败: {e}")
 
         brand = product.brand or settings.DEFAULT_BRAND
         scripts_data = _normalize_script_count_and_size(scripts_data)

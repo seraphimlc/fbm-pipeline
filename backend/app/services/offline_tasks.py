@@ -6,11 +6,13 @@ from datetime import datetime
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.schemas import OfflineTaskGigaPullRequest
+from app.api.schemas import OfflineTaskGigaDynamicSyncRequest, OfflineTaskGigaPullRequest
 from app.database import async_session
 from app.models import OfflineTask, OfflineTaskStep, ProductDataSource
+from app.services.giga_inventory_sync import GigaInventorySyncOptions, sync_giga_inventory_snapshot
 from app.services.giga_image_download_tasks import download_giga_batch_images
 from app.services.giga_openapi import GigaSyncOptions, resolve_giga_data_source_context, sync_giga_products
+from app.services.giga_price_sync import GigaPriceSyncOptions, sync_giga_price_snapshot
 from app.services.stylesnap_product_tasks import upsert_product_drafts_from_giga_batch
 
 logger = logging.getLogger(__name__)
@@ -21,6 +23,7 @@ TASK_STATUS_ACTIVE = {"pending", "running"}
 STEP_STATUS_SUCCESS = "done"
 STEP_STATUS_FAILURES = {"failed", "interrupted"}
 STEP_STATUS_RESUMABLE = {"pending", "running", "paused", "interrupted"}
+SUPPORTED_TASK_TYPES = {"giga_pull", "giga_inventory_sync", "giga_price_sync"}
 
 
 def _json_dumps(value: object) -> str:
@@ -222,7 +225,65 @@ async def _run_sync_step(db: AsyncSession, step: OfflineTaskStep) -> None:
         await _set_step_status(db, step, "failed", error=f"{type(exc).__name__}: {exc}")
 
 
-async def _execute_giga_pull_task(task_id: int, step_ids: list[int] | None = None) -> None:
+async def _run_inventory_sync_step(db: AsyncSession, step: OfflineTaskStep) -> None:
+    await _set_step_status(db, step, "running")
+    payload = json.loads(step.payload_json or "{}")
+    try:
+        result = await sync_giga_inventory_snapshot(
+            db,
+            GigaInventorySyncOptions(
+                task_id=f"offline-task-{step.task_id}-step-{step.id}",
+                batch_id=step.batch_id or "",
+                site=step.site or "US",
+                data_source_id=step.data_source_id or 0,
+                sku_codes=payload.get("sku_codes") or [],
+            ),
+        )
+        await _set_step_status(
+            db,
+            step,
+            "done" if result.failed_count == 0 else "failed",
+            result=result.__dict__,
+            error=None if result.failed_count == 0 else f"{result.failed_count} 个 SKU 库存同步失败",
+            progress_current=result.success_count,
+            progress_total=result.total_skus,
+        )
+    except Exception as exc:
+        await db.rollback()
+        logger.exception("[OfflineTask] GIGA inventory sync step failed: task=%s step=%s", step.task_id, step.id)
+        await _set_step_status(db, step, "failed", error=f"{type(exc).__name__}: {exc}")
+
+
+async def _run_price_sync_step(db: AsyncSession, step: OfflineTaskStep) -> None:
+    await _set_step_status(db, step, "running")
+    payload = json.loads(step.payload_json or "{}")
+    try:
+        result = await sync_giga_price_snapshot(
+            db,
+            GigaPriceSyncOptions(
+                task_id=f"offline-task-{step.task_id}-step-{step.id}",
+                batch_id=step.batch_id or "",
+                site=step.site or "US",
+                data_source_id=step.data_source_id or 0,
+                sku_codes=payload.get("sku_codes") or [],
+            ),
+        )
+        await _set_step_status(
+            db,
+            step,
+            "done" if result.failed_count == 0 else "failed",
+            result=result.__dict__,
+            error=None if result.failed_count == 0 else f"{result.failed_count} 个 SKU 价格同步失败",
+            progress_current=result.success_count,
+            progress_total=result.total_skus,
+        )
+    except Exception as exc:
+        await db.rollback()
+        logger.exception("[OfflineTask] GIGA price sync step failed: task=%s step=%s", step.task_id, step.id)
+        await _set_step_status(db, step, "failed", error=f"{type(exc).__name__}: {exc}")
+
+
+async def _execute_offline_task(task_id: int, step_ids: list[int] | None = None) -> None:
     try:
         async with async_session() as db:
             query = select(OfflineTaskStep).where(OfflineTaskStep.task_id == task_id)
@@ -249,6 +310,10 @@ async def _execute_giga_pull_task(task_id: int, step_ids: list[int] | None = Non
                     await _run_sync_step(db, step)
                 elif step.step_type == "giga_image_download":
                     await _run_image_step(db, step)
+                elif step.step_type == "giga_inventory_sync":
+                    await _run_inventory_sync_step(db, step)
+                elif step.step_type == "giga_price_sync":
+                    await _run_price_sync_step(db, step)
             await _refresh_task_stats(db, task_id)
             await db.commit()
     finally:
@@ -259,7 +324,7 @@ def _schedule_offline_task(task_id: int, step_ids: list[int] | None = None) -> N
     existing = _active_offline_tasks.get(task_id)
     if existing and not existing.done():
         return
-    _active_offline_tasks[task_id] = asyncio.create_task(_execute_giga_pull_task(task_id, step_ids))
+    _active_offline_tasks[task_id] = asyncio.create_task(_execute_offline_task(task_id, step_ids))
 
 
 async def _cancel_active_offline_task(task_id: int) -> None:
@@ -282,8 +347,8 @@ async def _load_task_detail(db: AsyncSession, task_id: int) -> OfflineTask:
     task = await db.get(OfflineTask, task_id)
     if not task:
         raise ValueError("任务不存在")
-    if task.task_type != "giga_pull":
-        raise ValueError("当前只支持控制大健拉品任务")
+    if task.task_type not in SUPPORTED_TASK_TYPES:
+        raise ValueError("当前任务类型暂不支持控制")
     return task
 
 
@@ -350,22 +415,27 @@ async def resume_offline_task(db: AsyncSession, task_id: int) -> OfflineTask:
     return task
 
 
-async def create_giga_pull_task(db: AsyncSession, body: OfflineTaskGigaPullRequest) -> OfflineTask:
-    data_source_ids = list(dict.fromkeys(body.data_source_ids))
+async def _load_enabled_sources(db: AsyncSession, data_source_ids: list[int]) -> tuple[list[int], list[ProductDataSource]]:
+    deduped_ids = list(dict.fromkeys(data_source_ids))
     result = await db.execute(
         select(ProductDataSource)
-        .where(ProductDataSource.id.in_(data_source_ids), ProductDataSource.enabled == 1)
+        .where(ProductDataSource.id.in_(deduped_ids), ProductDataSource.enabled == 1)
         .order_by(ProductDataSource.id.asc())
     )
     sources = result.scalars().all()
     found_ids = {source.id for source in sources}
-    missing_ids = [source_id for source_id in data_source_ids if source_id not in found_ids]
+    missing_ids = [source_id for source_id in deduped_ids if source_id not in found_ids]
     if missing_ids:
-        raise ValueError(f"数据源不存在或未启用: {', '.join(map(str, missing_ids))}")
+        raise ValueError(f"店铺不存在或未启用: {', '.join(map(str, missing_ids))}")
+    return deduped_ids, sources
+
+
+async def create_giga_pull_task(db: AsyncSession, body: OfflineTaskGigaPullRequest) -> OfflineTask:
+    data_source_ids, sources = await _load_enabled_sources(db, body.data_source_ids)
 
     task = OfflineTask(
         task_type="giga_pull",
-        title=f"拉取大健商品（{len(sources)} 个数据源）",
+        title=f"同步店铺商品（{len(sources)} 个店铺）",
         status="pending",
         total_steps=len(sources),
         success_steps=0,
@@ -390,7 +460,7 @@ async def create_giga_pull_task(db: AsyncSession, body: OfflineTaskGigaPullReque
             OfflineTaskStep(
                 task_id=task.id,
                 step_type="giga_sync",
-                title=f"拉品：{context.name}",
+                title=f"同步商品：{context.name}",
                 status="pending",
                 data_source_id=context.id,
                 data_source_name=context.name,
@@ -416,12 +486,78 @@ async def create_giga_pull_task(db: AsyncSession, body: OfflineTaskGigaPullReque
     return task
 
 
+async def create_giga_dynamic_sync_task(
+    db: AsyncSession,
+    body: OfflineTaskGigaDynamicSyncRequest,
+    *,
+    kind: str,
+) -> OfflineTask:
+    if kind not in {"inventory", "price"}:
+        raise ValueError(f"不支持的同步类型: {kind}")
+    data_source_ids, sources = await _load_enabled_sources(db, body.data_source_ids)
+    sku_codes = list(dict.fromkeys(str(sku).strip() for sku in (body.sku_codes or []) if str(sku or "").strip()))
+    is_inventory = kind == "inventory"
+    task_type = "giga_inventory_sync" if is_inventory else "giga_price_sync"
+    step_type = task_type
+    title_prefix = "同步大健库存" if is_inventory else "同步大健价格"
+    step_prefix = "库存同步" if is_inventory else "价格同步"
+
+    task = OfflineTask(
+        task_type=task_type,
+        title=f"{title_prefix}（{len(sources)} 个店铺）",
+        status="pending",
+        total_steps=len(sources),
+        success_steps=0,
+        failed_steps=0,
+        running_steps=0,
+        payload_json=_json_dumps({
+            "data_source_ids": data_source_ids,
+            "sku_codes": sku_codes,
+        }),
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+    )
+    db.add(task)
+    await db.flush()
+
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    for source in sources:
+        context = await resolve_giga_data_source_context(db, source.id, source.site)
+        batch_kind = "inventory" if is_inventory else "price"
+        batch_id = f"giga-{batch_kind}-t{task.id}-ds{context.id}-{timestamp}"
+        db.add(
+            OfflineTaskStep(
+                task_id=task.id,
+                step_type=step_type,
+                title=f"{step_prefix}：{context.name}",
+                status="pending",
+                data_source_id=context.id,
+                data_source_name=context.name,
+                site=context.site,
+                batch_id=batch_id,
+                progress_current=0,
+                progress_total=0,
+                payload_json=_json_dumps({
+                    "batch_id": batch_id,
+                    "site": context.site,
+                    "data_source_id": context.id,
+                    "sku_codes": sku_codes,
+                }),
+                updated_at=datetime.now(),
+            )
+        )
+    await db.commit()
+    await db.refresh(task)
+    _schedule_offline_task(task.id)
+    return task
+
+
 async def rerun_offline_task(db: AsyncSession, task_id: int) -> OfflineTask:
     task = await db.get(OfflineTask, task_id)
     if not task:
         raise ValueError("任务不存在")
-    if task.task_type != "giga_pull":
-        raise ValueError("当前只支持重跑大健拉品任务")
+    if task.task_type not in SUPPORTED_TASK_TYPES:
+        raise ValueError("当前任务类型暂不支持重跑")
     result = await db.execute(
         select(OfflineTaskStep).where(
             OfflineTaskStep.task_id == task_id,

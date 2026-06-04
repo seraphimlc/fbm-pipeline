@@ -495,6 +495,14 @@ async def search_and_store_stylesnap_candidates(
     if asins:
         try:
             seller_data = await competitor_lookup(asins, marketplace=site, size=max(len(asins), 10))
+            missing_asins = [asin for asin in asins if asin not in seller_data]
+            for asin in missing_asins:
+                try:
+                    single_data = await competitor_lookup([asin], marketplace=site, size=1)
+                except (SellerSpriteOpenApiError, httpx.HTTPError, json.JSONDecodeError, ValueError):
+                    continue
+                if single_data.get(asin):
+                    seller_data[asin] = single_data[asin]
         except (SellerSpriteOpenApiError, httpx.HTTPError, json.JSONDecodeError, ValueError) as exc:
             seller_data = {}
             parsed["sellersprite_error"] = str(exc)

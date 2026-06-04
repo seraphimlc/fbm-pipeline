@@ -70,6 +70,7 @@ class Settings(BaseSettings):
     OSS_BUCKET: str = ""
     OSS_ENDPOINT: str = ""
     OSS_UPLOAD_PREFIX: str = "main_image/"
+    OSS_TEMPLATE_UPLOAD_PREFIX: str = "category_templates/"
     OSS_SIGNED_URL_EXPIRES_SECONDS: int = 30 * 24 * 60 * 60
     OSS_UPLOAD_TIMEOUT_SECONDS: int = 15
 

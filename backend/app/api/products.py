@@ -6,7 +6,7 @@ from copy import copy
 from io import BytesIO
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook, load_workbook
 from sqlalchemy import delete, select, func
@@ -48,7 +48,7 @@ from app.api.schemas import (
     AplusUploadBatchDetail, AplusUploadBatchResponse, AplusUploadCreateRequest,
     BulkImportResponse, BulkStartRequest, BulkStartResponse,
     PaginatedAsinSyncBatches, PaginatedCatalogProducts, CatalogProductResponse,
-    CatalogExportByCategoryRequest, CatalogExportCategoriesResponse, CatalogExportCategorySummary,
+    CatalogExportByCategoryRequest, CatalogExportCategoriesResponse, CatalogExportCategorySummary, CatalogTemplateUploadResponse,
     PaginatedAplusUploadBatches, WorkbenchOverview, CatalogAsinUpdateRequest,
     InventorySyncBatchDetail, InventorySyncBatchResponse, InventorySyncCreateRequest,
     PaginatedInventorySyncBatches, PaginatedUpcPoolItems, UpcPoolImportRequest,
@@ -81,6 +81,7 @@ from app.services.material_assets import (
     folder_summary,
     organize_video_files,
 )
+from app.services.oss_uploader import upload_private_file
 from app.services.asin_sync import build_sync_item, start_asin_sync_batch
 from app.services.inventory_sync import (
     InventorySyncLoginRequired,
@@ -186,7 +187,7 @@ def _is_legacy_giga_browser_collect_error(product: Product) -> bool:
 
 
 def _legacy_giga_browser_collect_message() -> str:
-    return "旧浏览器采集已停用，请在详情页点击“重新拉取大健数据”，选择数据源后用 GIGA OpenAPI 刷新。"
+    return "旧浏览器采集已停用，请通过商品工作台的“同步店铺商品”使用 GIGA OpenAPI 刷新商品源数据。"
 
 
 def _product_snapshot(product: Product) -> dict:
@@ -672,7 +673,7 @@ def _mark_pipeline_starting(product: Product) -> None:
 def _raise_step1_browser_collect_removed() -> None:
     raise HTTPException(
         400,
-        "商品中心不再通过浏览器访问大健页面采集商品数据。请先通过商品数据源/OpenAPI拉品，生成商品草稿后再在详情页确认图片和竞品。",
+        "商品中心不再通过浏览器访问大健页面采集商品数据。请先通过店铺/OpenAPI 同步商品，生成商品草稿后再在详情页确认图片和竞品。",
     )
 
 
@@ -740,6 +741,37 @@ def _safe_export_name(value: str | None, fallback: str = "未分类") -> str:
     return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in raw)[:90] or fallback
 
 
+def _category_template_cache_dir() -> Path:
+    path = settings.DATA_DIR / "category_templates"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _category_template_manifest_path() -> Path:
+    return _category_template_cache_dir() / "manifest.json"
+
+
+def _load_category_template_manifest() -> dict[str, dict]:
+    path = _category_template_manifest_path()
+    if not path.is_file():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _save_category_template_manifest(manifest: dict[str, dict]) -> None:
+    path = _category_template_manifest_path()
+    path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _category_template_upload_for(category: str) -> dict | None:
+    upload = _load_category_template_manifest().get(category)
+    return upload if isinstance(upload, dict) else None
+
+
 def _catalog_category(product: Product | None, item: CatalogProduct | None) -> str:
     pd = product.data if product else None
     return (pd.leaf_category if pd else None) or (item.leaf_category if item else None) or "未分类"
@@ -782,10 +814,22 @@ def _collect_export_category(
             "template_name": None,
             "template_path": None,
             "template_error": None,
+            "uploaded_template_name": None,
+            "uploaded_template_cache_path": None,
+            "uploaded_template_oss_url": None,
+            "uploaded_template_object_key": None,
+            "uploaded_template_uploaded_at": None,
             "sample_item_codes": [],
             "_template_errors": [],
         },
     )
+    upload = _category_template_upload_for(category)
+    if upload:
+        group["uploaded_template_name"] = upload.get("filename")
+        group["uploaded_template_cache_path"] = upload.get("cache_path")
+        group["uploaded_template_oss_url"] = upload.get("oss_url")
+        group["uploaded_template_object_key"] = upload.get("object_key")
+        group["uploaded_template_uploaded_at"] = upload.get("uploaded_at")
     group["count"] += 1
     code = (product.data.item_code if product and product.data else None) or item.item_code
     if code and len(group["sample_item_codes"]) < 5 and code not in group["sample_item_codes"]:
@@ -1205,8 +1249,8 @@ async def _resolve_giga_refresh_data_source_id(
     if len(sources) == 1:
         return sources[0].id
     if not sources:
-        raise HTTPException(400, f"站点 {site} 没有启用的 GIGA 商品数据源")
-    raise HTTPException(400, "该商品无法自动确定 GIGA 数据源，请选择数据源后重新拉取")
+        raise HTTPException(400, f"站点 {site} 没有启用的 GIGA 店铺")
+    raise HTTPException(400, "该商品无法自动确定 GIGA 店铺，请在商品工作台选择店铺后同步")
 
 
 async def _giga_refresh_sku_codes(
@@ -1904,6 +1948,62 @@ async def list_catalog_export_categories(db: AsyncSession = Depends(get_db)):
     return CatalogExportCategoriesResponse(
         pending=_export_category_summaries(pending_groups),
         exported=_export_category_summaries(exported_groups),
+    )
+
+
+@router.post("/catalog/category-template-upload", response_model=CatalogTemplateUploadResponse)
+async def upload_catalog_category_template(
+    category: str = Form(..., min_length=1),
+    file: UploadFile = File(...),
+):
+    """缓存并上传类目模板文件。字段映射仍由 template_mappings 控制，上传结果供导出中心追踪模板准备状态。"""
+    normalized_category = category.strip()
+    if not normalized_category:
+        raise HTTPException(400, "类目不能为空")
+    filename = Path(file.filename or "").name
+    suffix = Path(filename).suffix.lower()
+    if suffix not in {".xls", ".xlsx", ".xlsm"}:
+        raise HTTPException(400, "只支持上传 .xls / .xlsx / .xlsm 模板文件")
+
+    content = await file.read()
+    max_bytes = 50 * 1024 * 1024
+    if not content:
+        raise HTTPException(400, "上传文件为空")
+    if len(content) > max_bytes:
+        raise HTTPException(400, "模板文件不能超过 50MB")
+
+    now = datetime.now()
+    safe_category = _safe_export_name(normalized_category, "category")
+    safe_filename = _safe_export_name(Path(filename).stem, "template") + suffix
+    category_dir = _category_template_cache_dir() / safe_category
+    category_dir.mkdir(parents=True, exist_ok=True)
+    cache_path = category_dir / f"{now.strftime('%Y%m%d_%H%M%S')}_{safe_filename}"
+    cache_path.write_bytes(content)
+
+    prefix = settings.OSS_TEMPLATE_UPLOAD_PREFIX.strip().strip("/")
+    object_key = f"{prefix}/{safe_category}/{cache_path.name}" if prefix else f"{safe_category}/{cache_path.name}"
+    try:
+        uploaded = upload_private_file(cache_path, object_key)
+    except Exception as exc:
+        raise HTTPException(400, f"模板已缓存到本地，但上传 OSS 失败: {type(exc).__name__}: {exc}")
+
+    manifest = _load_category_template_manifest()
+    manifest[normalized_category] = {
+        "category": normalized_category,
+        "filename": filename,
+        "cache_path": str(cache_path),
+        "object_key": uploaded.get("object_key"),
+        "oss_url": uploaded.get("url"),
+        "uploaded_at": now.isoformat(),
+    }
+    _save_category_template_manifest(manifest)
+    return CatalogTemplateUploadResponse(
+        category=normalized_category,
+        filename=filename,
+        cache_path=str(cache_path),
+        object_key=uploaded.get("object_key"),
+        oss_url=uploaded.get("url"),
+        uploaded_at=now,
     )
 
 
@@ -2770,12 +2870,13 @@ async def update_product(
 async def update_product_listing_images(
     product_id: int,
     body: ProductListingImagesUpdate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """保存商品主图/副图选择。"""
     result = await db.execute(
         select(Product)
-        .options(selectinload(Product.images), selectinload(Product.data))
+        .options(selectinload(Product.images), selectinload(Product.data), selectinload(Product.catalog_item))
         .where(Product.id == product_id)
     )
     product = result.scalar_one_or_none()
@@ -2783,20 +2884,82 @@ async def update_product_listing_images(
         raise HTTPException(404, "Product not found")
 
     main_path, gallery_paths = _normalize_listing_image_paths(body.main_image_path, body.gallery_images)
+    old_main_path = product.images.main_image_path if product.images else None
+    main_image_changed = bool(old_main_path and old_main_path != main_path)
     if not product.images:
         product.images = ProductImage(product_id=product.id)
         db.add(product.images)
+
+    if main_image_changed:
+        await _delete_product_competitor_records(db, product)
+        if product.data:
+            product.data.gigab2b_raw_snapshot = _strip_competitor_snapshot(product.data.gigab2b_raw_snapshot)
+        product.competitor_asin = None
 
     product.images.main_image_path = main_path
     product.images.main_image_source = "manual_selected"
     product.images.gallery_images = json.dumps(gallery_paths, ensure_ascii=False)
     now = datetime.now()
-    if product.status == "created" and product.current_step <= 0:
+    snapshot = _json_loads(product.data.gigab2b_raw_snapshot, {}) if product.data else {}
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    batch_id = snapshot.get("batch_id")
+    site = str(snapshot.get("site") or "US").strip().upper()
+    item_code = product.data.item_code if product.data else None
+    representative_sku = snapshot.get("representative_sku") or item_code
+    existing_candidate_count = 0
+    if batch_id and item_code:
+        candidate_count_query = select(func.count(AmazonStyleSnapCandidate.id)).where(
+            AmazonStyleSnapCandidate.batch_id == batch_id,
+            AmazonStyleSnapCandidate.site == site,
+            AmazonStyleSnapCandidate.item_code == item_code,
+        )
+        if representative_sku:
+            candidate_count_query = candidate_count_query.where(AmazonStyleSnapCandidate.sku_code == representative_sku)
+        existing_candidate_count = int((await db.execute(candidate_count_query)).scalar_one() or 0)
+    should_search_candidates = bool(
+        product.status == "created"
+        and not product.competitor_asin
+        and batch_id
+        and item_code
+        and existing_candidate_count == 0
+    )
+    if should_search_candidates:
+        product.status = "competitor_searching"
+        product.current_step = 2
+        product.error_message = "商品图片已确认：正在用主图自动搜索 Amazon 候选竞品"
+        if product.data:
+            product.data.gigab2b_raw_snapshot = json.dumps(
+                {
+                    **snapshot,
+                    "batch_id": batch_id,
+                    "site": site,
+                    "representative_sku": representative_sku or item_code,
+                    "stylesnap_search": {
+                        "status": "running",
+                        "started_at": now.isoformat(),
+                        "source_image_path": main_path,
+                        "append": False,
+                        "previous_count": 0,
+                        "auto_started": True,
+                    },
+                },
+                ensure_ascii=False,
+            )
+    elif product.status == "created" and product.current_step <= 0:
         product.current_step = 1
         product.error_message = None
     product.updated_at = now
+    if product.catalog_item:
+        product.catalog_item.status = product.status
+        product.catalog_item.competitor_asin = product.competitor_asin
+        product.catalog_item.updated_at = now
     await db.commit()
     await db.refresh(product.images)
+    if should_search_candidates:
+        from app.api.amazon_stylesnap import _run_product_competitor_search_background
+
+        background_tasks.add_task(_run_product_competitor_search_background, product.id)
     return product.images
 
 

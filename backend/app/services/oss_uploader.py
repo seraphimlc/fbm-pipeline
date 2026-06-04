@@ -57,3 +57,25 @@ def upload_private_image(path: Path, product_key: str, slot: str) -> dict:
         "status": result.status,
         "expires_seconds": settings.OSS_SIGNED_URL_EXPIRES_SECONDS,
     }
+
+
+def upload_private_file(path: Path, object_key: str) -> dict:
+    if not oss_configured():
+        raise RuntimeError("OSS 未配置，无法上传文件。")
+    if not path.is_file():
+        raise FileNotFoundError(f"文件不存在: {path}")
+    cleaned_key = object_key.strip().lstrip("/")
+    if not cleaned_key:
+        raise ValueError("OSS object_key 不能为空")
+
+    content_type = mimetypes.types_map.get(path.suffix.lower(), "application/octet-stream")
+    bucket = _bucket()
+    result = bucket.put_object_from_file(cleaned_key, str(path), headers={"Content-Type": content_type})
+    signed_url = bucket.sign_url("GET", cleaned_key, settings.OSS_SIGNED_URL_EXPIRES_SECONDS, slash_safe=True)
+    return {
+        "path": str(path),
+        "object_key": cleaned_key,
+        "url": signed_url,
+        "status": result.status,
+        "expires_seconds": settings.OSS_SIGNED_URL_EXPIRES_SECONDS,
+    }

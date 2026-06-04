@@ -17,6 +17,7 @@ from app.services.amazon_listing_capture import (
     capture_listing_for_candidate,
 )
 from app.services.amazon_stylesnap_search import AmazonStyleSnapSearchInput, search_and_store_stylesnap_candidates
+from app.services.seller_sprite_openapi import competitor_lookup
 from app.services.stylesnap_product_tasks import (
     _category_path_from_candidate,
     _category_path_from_listing_capture,
@@ -355,8 +356,54 @@ async def _load_product_candidate_group(
     if not candidates:
         raise HTTPException(404, "当前商品未找到 StyleSnap 候选竞品")
 
+    await _enrich_candidate_images_from_sellersprite(db, candidates, site)
     captures = await _captures_by_candidate(db, [candidate.id for candidate in candidates])
     return _build_group(candidates, captures, {item_code: product})
+
+
+async def _enrich_candidate_images_from_sellersprite(
+    db: AsyncSession,
+    candidates: list[AmazonStyleSnapCandidate],
+    site: str,
+) -> None:
+    missing = [
+        candidate.asin
+        for candidate in candidates
+        if candidate.asin and not candidate.amazon_image_url
+    ]
+    missing = list(dict.fromkeys(missing))[:40]
+    if not missing:
+        return
+    try:
+        seller_data = await competitor_lookup(missing, marketplace=site, size=max(len(missing), 10))
+    except Exception:
+        return
+    for asin in [asin for asin in missing if asin not in seller_data]:
+        try:
+            single_data = await competitor_lookup([asin], marketplace=site, size=1)
+        except Exception:
+            continue
+        if single_data.get(asin):
+            seller_data[asin] = single_data[asin]
+
+    changed = False
+    now = datetime.now()
+    for candidate in candidates:
+        if candidate.amazon_image_url:
+            continue
+        item = seller_data.get(candidate.asin)
+        if not item or not item.get("imageUrl"):
+            continue
+        candidate.amazon_image_url = str(item.get("imageUrl")).strip() or None
+        candidate.brand = candidate.brand or item.get("brand")
+        candidate.seller = candidate.seller or item.get("sellerName")
+        candidate.delivery = candidate.delivery or item.get("fulfillment")
+        candidate.updated_at = now
+        changed = True
+    if changed:
+        await db.commit()
+        for candidate in candidates:
+            await db.refresh(candidate)
 
 
 async def _sync_product_competitor_snapshot(

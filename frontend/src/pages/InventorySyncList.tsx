@@ -1,7 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Alert, Button, Input, Popconfirm, Select, Space, Table, Tag, Typography, message } from 'antd';
 import { CloudSyncOutlined, DollarOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
-import { listGigaInventory, listProductDataSources, syncGigaInventory, syncGigaPrice } from '../api';
+import { useNavigate } from 'react-router-dom';
+import {
+  createGigaInventorySyncOfflineTask,
+  createGigaPriceSyncOfflineTask,
+  listGigaInventory,
+  listProductDataSources,
+} from '../api';
 import type { GigaInventory, ProductDataSource } from '../api';
 
 const { Text, Title } = Typography;
@@ -27,15 +33,8 @@ const distributionText = (value?: string | null) => {
   }
 };
 
-const defaultDynamicBatchId = (site: string, kind: 'inventory' | 'price') => {
-  const now = new Date();
-  const yyyy = now.getFullYear();
-  const mm = String(now.getMonth() + 1).padStart(2, '0');
-  const dd = String(now.getDate()).padStart(2, '0');
-  return `${yyyy}${mm}${dd}-${site.toLowerCase()}-${kind}`;
-};
-
 const InventorySyncList: React.FC = () => {
+  const navigate = useNavigate();
   const [items, setItems] = useState<GigaInventory[]>([]);
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -114,17 +113,13 @@ const InventorySyncList: React.FC = () => {
     }
     setSyncing(true);
     try {
-      const { data } = await syncGigaInventory({
-        site: activeSite,
-        data_source_id: selectedDataSourceId,
-        batch_id: defaultDynamicBatchId(activeSite, 'inventory'),
-        task_id: 'manual-giga-inventory',
+      const { data } = await createGigaInventorySyncOfflineTask({
+        data_source_ids: [selectedDataSourceId],
       });
-      message.success(`库存已同步：${data.success_count}/${data.total_skus}，告警 ${data.alert_count}`);
-      setPage(1);
-      await fetchInventory();
+      message.success(`已创建库存同步任务 #${data.task.id}`);
+      navigate('/offline-tasks');
     } catch (error: any) {
-      message.error(error?.response?.data?.detail || '库存同步失败');
+      message.error(error?.response?.data?.detail || '创建库存同步任务失败');
     } finally {
       setSyncing(false);
     }
@@ -137,15 +132,13 @@ const InventorySyncList: React.FC = () => {
     }
     setPriceSyncing(true);
     try {
-      const { data } = await syncGigaPrice({
-        site: activeSite,
-        data_source_id: selectedDataSourceId,
-        batch_id: defaultDynamicBatchId(activeSite, 'price'),
-        task_id: 'manual-giga-price',
+      const { data } = await createGigaPriceSyncOfflineTask({
+        data_source_ids: [selectedDataSourceId],
       });
-      message.success(`价格已同步：${data.success_count}/${data.total_skus}，变价告警 ${data.price_changed_count}`);
+      message.success(`已创建价格同步任务 #${data.task.id}`);
+      navigate('/offline-tasks');
     } catch (error: any) {
-      message.error(error?.response?.data?.detail || '价格同步失败');
+      message.error(error?.response?.data?.detail || '创建价格同步任务失败');
     } finally {
       setPriceSyncing(false);
     }

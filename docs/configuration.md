@@ -92,7 +92,7 @@ When adding a new setting:
 
 ## GIGA Open API Sync
 
-GIGA 拉品使用 Open API，不依赖 Chrome 页面爬取。店铺 API 地址、AK/SK、站点和履约方式只在「数据源维护」里配置，不再写入全局 `backend/.env`：
+GIGA 拉品使用 Open API，不依赖 Chrome 页面爬取。店铺 API 地址、AK/SK、站点和履约方式只在「店铺维护」里配置，不再写入全局 `backend/.env`：
 
 ```env
 GIGA_SYNC_PAGE_SIZE=200
@@ -125,7 +125,7 @@ python scripts/giga_inventory_sync.py --site US --data-source-id 1 --task-id dai
 python scripts/giga_price_sync.py --site US --data-source-id 1 --task-id daily-giga-price
 ```
 
-建议在服务器 cron 中每天执行一次，必须显式传 `--site US` 或 `--site JP`，并传 `--data-source-id` 指向对应数据源。不传 `--batch-id` 时脚本会生成 `YYYYMMDD-{site}-inventory` 或 `YYYYMMDD-{site}-price`，同一天重跑会覆盖同一个动态快照批次，不会覆盖其它日期或其它站点。
+建议在服务器 cron 中每天执行一次，必须显式传 `--site US` 或 `--site JP`，并传 `--data-source-id` 指向对应店铺。不传 `--batch-id` 时脚本会生成 `YYYYMMDD-{site}-inventory` 或 `YYYYMMDD-{site}-price`，同一天重跑会覆盖同一个动态快照批次，不会覆盖其它日期或其它站点。
 
 库存和价格真源为数据库：
 

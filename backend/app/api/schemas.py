@@ -185,6 +185,11 @@ class OfflineTaskGigaPullRequest(BaseModel):
     max_pages: int | None = Field(default=None, ge=1)
 
 
+class OfflineTaskGigaDynamicSyncRequest(BaseModel):
+    data_source_ids: list[int] = Field(..., min_length=1, max_length=20)
+    sku_codes: list[str] | None = Field(default=None, max_length=5000)
+
+
 class OfflineTaskQueuedResponse(BaseModel):
     task: OfflineTaskResponse
     steps: list[OfflineTaskStepResponse] = Field(default_factory=list)
@@ -846,6 +851,11 @@ class CatalogExportCategorySummary(BaseModel):
     template_name: str | None = None
     template_path: str | None = None
     template_error: str | None = None
+    uploaded_template_name: str | None = None
+    uploaded_template_cache_path: str | None = None
+    uploaded_template_oss_url: str | None = None
+    uploaded_template_object_key: str | None = None
+    uploaded_template_uploaded_at: datetime | None = None
     sample_item_codes: list[str] = Field(default_factory=list)
 
 
@@ -856,6 +866,15 @@ class CatalogExportCategoriesResponse(BaseModel):
 
 class CatalogExportByCategoryRequest(BaseModel):
     category: str = Field(..., min_length=1)
+
+
+class CatalogTemplateUploadResponse(BaseModel):
+    category: str
+    filename: str
+    cache_path: str
+    object_key: str | None = None
+    oss_url: str | None = None
+    uploaded_at: datetime
 
 
 class InventorySyncCreateRequest(BaseModel):

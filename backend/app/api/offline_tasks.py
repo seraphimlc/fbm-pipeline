@@ -5,16 +5,36 @@ from sqlalchemy.orm import selectinload
 
 from app.api.schemas import (
     OfflineTaskDetailResponse,
+    OfflineTaskGigaDynamicSyncRequest,
     OfflineTaskGigaPullRequest,
     OfflineTaskQueuedResponse,
     PaginatedOfflineTasks,
 )
 from app.database import get_db
 from app.models import OfflineTask
-from app.services.offline_tasks import create_giga_pull_task, pause_offline_task, rerun_offline_task, resume_offline_task
+from app.services.offline_tasks import (
+    create_giga_dynamic_sync_task,
+    create_giga_pull_task,
+    pause_offline_task,
+    rerun_offline_task,
+    resume_offline_task,
+)
 
 
 router = APIRouter(prefix="/api/offline-tasks", tags=["offline-tasks"])
+
+
+async def _load_task_with_steps(db: AsyncSession, task_id: int) -> OfflineTask:
+    result = await db.execute(
+        select(OfflineTask)
+        .where(OfflineTask.id == task_id)
+        .options(selectinload(OfflineTask.steps))
+    )
+    task = result.scalar_one_or_none()
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    task.steps.sort(key=lambda step: step.id)
+    return task
 
 
 @router.get("", response_model=PaginatedOfflineTasks)
@@ -45,16 +65,7 @@ async def list_offline_tasks(
 
 @router.get("/{task_id}", response_model=OfflineTaskDetailResponse)
 async def get_offline_task(task_id: int, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(OfflineTask)
-        .where(OfflineTask.id == task_id)
-        .options(selectinload(OfflineTask.steps))
-    )
-    task = result.scalar_one_or_none()
-    if not task:
-        raise HTTPException(404, "任务不存在")
-    task.steps.sort(key=lambda step: step.id)
-    return task
+    return await _load_task_with_steps(db, task_id)
 
 
 @router.post("/giga-pull", response_model=OfflineTaskQueuedResponse)
@@ -66,13 +77,33 @@ async def create_giga_pull_offline_task(
         task = await create_giga_pull_task(db, body)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    result = await db.execute(
-        select(OfflineTask)
-        .where(OfflineTask.id == task.id)
-        .options(selectinload(OfflineTask.steps))
-    )
-    created = result.scalar_one()
-    created.steps.sort(key=lambda step: step.id)
+    created = await _load_task_with_steps(db, task.id)
+    return OfflineTaskQueuedResponse(task=created, steps=created.steps)
+
+
+@router.post("/giga-inventory-sync", response_model=OfflineTaskQueuedResponse)
+async def create_giga_inventory_sync_offline_task(
+    body: OfflineTaskGigaDynamicSyncRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        task = await create_giga_dynamic_sync_task(db, body, kind="inventory")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    created = await _load_task_with_steps(db, task.id)
+    return OfflineTaskQueuedResponse(task=created, steps=created.steps)
+
+
+@router.post("/giga-price-sync", response_model=OfflineTaskQueuedResponse)
+async def create_giga_price_sync_offline_task(
+    body: OfflineTaskGigaDynamicSyncRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        task = await create_giga_dynamic_sync_task(db, body, kind="price")
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    created = await _load_task_with_steps(db, task.id)
     return OfflineTaskQueuedResponse(task=created, steps=created.steps)
 
 
@@ -82,14 +113,7 @@ async def rerun_offline_task_api(task_id: int, db: AsyncSession = Depends(get_db
         task = await rerun_offline_task(db, task_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    result = await db.execute(
-        select(OfflineTask)
-        .where(OfflineTask.id == task.id)
-        .options(selectinload(OfflineTask.steps))
-    )
-    refreshed = result.scalar_one()
-    refreshed.steps.sort(key=lambda step: step.id)
-    return refreshed
+    return await _load_task_with_steps(db, task.id)
 
 
 @router.post("/{task_id}/pause", response_model=OfflineTaskDetailResponse)
@@ -98,14 +122,7 @@ async def pause_offline_task_api(task_id: int, db: AsyncSession = Depends(get_db
         task = await pause_offline_task(db, task_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    result = await db.execute(
-        select(OfflineTask)
-        .where(OfflineTask.id == task.id)
-        .options(selectinload(OfflineTask.steps))
-    )
-    refreshed = result.scalar_one()
-    refreshed.steps.sort(key=lambda step: step.id)
-    return refreshed
+    return await _load_task_with_steps(db, task.id)
 
 
 @router.post("/{task_id}/resume", response_model=OfflineTaskDetailResponse)
@@ -114,11 +131,4 @@ async def resume_offline_task_api(task_id: int, db: AsyncSession = Depends(get_d
         task = await resume_offline_task(db, task_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    result = await db.execute(
-        select(OfflineTask)
-        .where(OfflineTask.id == task.id)
-        .options(selectinload(OfflineTask.steps))
-    )
-    refreshed = result.scalar_one()
-    refreshed.steps.sort(key=lambda step: step.id)
-    return refreshed
+    return await _load_task_with_steps(db, task.id)

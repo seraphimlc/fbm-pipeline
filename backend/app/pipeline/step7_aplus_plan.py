@@ -282,6 +282,92 @@ def _normalize_module_strategy(module: dict, index: int) -> dict:
     return module
 
 
+def _fallback_aplus_plan(product: Product, pd: ProductData, pi: ProductImage | None, selling_points: list) -> dict:
+    title = pd.listing_title or pd.title or "Product"
+    category = pd.leaf_category or pd.amazon_category or "General"
+    feature_items: list[str] = []
+    if pd.features:
+        try:
+            parsed_features = json.loads(pd.features)
+            if isinstance(parsed_features, list):
+                feature_items = [str(item) for item in parsed_features if item][:5]
+            else:
+                feature_items = [str(parsed_features)]
+        except Exception:
+            feature_items = [str(pd.features)]
+    if not feature_items and selling_points:
+        feature_items = [str(item) for item in selling_points[:5] if item]
+    if not feature_items:
+        feature_items = [
+            "Show the product clearly from the selected main image.",
+            "Highlight visible details and usage context without unsupported claims.",
+        ]
+
+    modules = [
+        {
+            "position": 1,
+            "type": "Standard Image Header",
+            "headline": title[:90],
+            "key_message": f"Introduce the {category} product with a clean hero composition.",
+            "image_concept": "Use the confirmed product image as the identity anchor, with a simple lifestyle context and conservative copy.",
+        },
+        {
+            "position": 2,
+            "type": "Standard Single Image + Text",
+            "headline": "Designed for Everyday Use",
+            "key_message": feature_items[0],
+            "image_concept": "Show a realistic usage scene that keeps the product shape, color, and visible material faithful to the references.",
+        },
+        {
+            "position": 3,
+            "type": "Standard 4 Image / Text",
+            "headline": "Visible Details",
+            "key_message": "; ".join(feature_items[1:4]) or feature_items[0],
+            "image_concept": "Use detail-focused reference images to explain visible construction, finish, or functional parts.",
+        },
+        {
+            "position": 4,
+            "type": "Standard Comparison Chart",
+            "headline": "Product Specifications",
+            "key_message": "Present dimensions, material, use case, and included details only when supported by product facts.",
+            "image_concept": "Create a clean specification layout without inventing certifications, safety claims, or unsupported performance claims.",
+        },
+        {
+            "position": 5,
+            "type": "Standard Multiple Image + Text",
+            "headline": "Complete the Setup",
+            "key_message": feature_items[-1],
+            "image_concept": "Close with a practical ownership scene that reinforces the most visible selling point from the selected images.",
+        },
+    ]
+    for idx, module in enumerate(modules, 1):
+        _normalize_module_strategy(module, idx)
+    reference_candidate_count = 0
+    if pi:
+        reference_paths = [pi.main_image_path] if pi.main_image_path else []
+        if pi.gallery_images:
+            try:
+                parsed_gallery = json.loads(pi.gallery_images)
+                if isinstance(parsed_gallery, list):
+                    reference_paths.extend(
+                        item.get("path") if isinstance(item, dict) else item
+                        for item in parsed_gallery
+                    )
+            except Exception:
+                pass
+        reference_candidate_count = len({str(path) for path in reference_paths if path})
+    return {
+        "modules": modules,
+        "plan_summary": "A+规划由保底逻辑生成：LLM连接超时，已先生成可继续执行的结构化草案；如需更高质量，可重跑A+规划。",
+        "tone": "professional",
+        "color_palette": ["#FFFFFF", "#111827", "#2563EB"],
+        "fallback": True,
+        "fallback_reason": "LLM timeout while generating A+ plan",
+        "llm_model": settings.LLM_MODEL,
+        "reference_candidate_count": reference_candidate_count,
+    }
+
+
 async def run_aplus_plan(product_id: int) -> dict:
     """
     执行 A+ 规划
@@ -336,11 +422,13 @@ async def run_aplus_plan(product_id: int) -> dict:
 
         # 调用 LLM
         client = settings.get_llm_client()
-        request_client = client.with_options(timeout=60, max_retries=0) if hasattr(client, "with_options") else client
+        max_attempts = 2
+        request_client = client.with_options(timeout=35, max_retries=0) if hasattr(client, "with_options") else client
 
         logger.info(f"[Step7] 调用LLM生成A+规划: {pd.title}")
         response = None
-        for attempt in range(1, 4):
+        last_transient_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
             try:
                 response = await request_client.chat.completions.create(
                     model=settings.LLM_MODEL,
@@ -354,28 +442,40 @@ async def run_aplus_plan(product_id: int) -> dict:
                 )
                 break
             except Exception as exc:
-                if not _is_transient_llm_error(exc) or attempt >= 3:
+                if not _is_transient_llm_error(exc):
                     raise
+                last_transient_error = exc
+                if attempt >= max_attempts:
+                    logger.warning(
+                        "[Step7] A+规划LLM连接连续失败，使用保底规划: error=%s: %s",
+                        type(exc).__name__,
+                        exc,
+                    )
+                    response = None
+                    break
                 wait_seconds = attempt * 5
                 logger.warning(
-                    "[Step7] A+规划LLM连接异常，准备重试: attempt=%s/3, wait=%ss, error=%s: %s",
+                    "[Step7] A+规划LLM连接异常，准备重试: attempt=%s/%s, wait=%ss, error=%s: %s",
                     attempt,
+                    max_attempts,
                     wait_seconds,
                     type(exc).__name__,
                     exc,
                 )
                 await asyncio.sleep(wait_seconds)
         if response is None:
-            raise RuntimeError("LLM 未返回 A+规划响应")
+            plan = _fallback_aplus_plan(product, pd, pi, selling_points)
+            if last_transient_error:
+                plan["fallback_error"] = f"{type(last_transient_error).__name__}: {last_transient_error}"
+        else:
+            content = response.choices[0].message.content
+            if not content:
+                raise RuntimeError("LLM 返回空结果")
 
-        content = response.choices[0].message.content
-        if not content:
-            raise RuntimeError("LLM 返回空结果")
-
-        try:
-            plan = json.loads(content)
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"A+规划JSON解析失败: {e}")
+            try:
+                plan = json.loads(content)
+            except json.JSONDecodeError as e:
+                raise RuntimeError(f"A+规划JSON解析失败: {e}")
 
         modules = plan.get("modules", [])
         if not isinstance(modules, list) or len(modules) < 5:

@@ -19,7 +19,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import httpx
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from app.config import settings
 from app.database import async_session
@@ -575,6 +575,69 @@ def _upload_generated_image_to_oss(output_path: Path, product_key: str, position
     }
 
 
+def _create_fallback_aplus_image(output_path: Path, script: dict, ref_sources: list[str], width: int, height: int) -> dict:
+    canvas = Image.new("RGB", (width, height), "#f8fafc")
+    draw = ImageDraw.Draw(canvas)
+    title = str(script.get("conversion_goal") or script.get("prompt") or "A+ content image")[:120]
+    headline = f"A+ Module {script.get('module_position') or ''}".strip()
+    try:
+        font_title = ImageFont.truetype("Arial.ttf", 56)
+        font_body = ImageFont.truetype("Arial.ttf", 34)
+        font_small = ImageFont.truetype("Arial.ttf", 24)
+    except Exception:
+        font_title = font_body = font_small = ImageFont.load_default()
+
+    draw.rectangle((0, 0, width, 118), fill="#111827")
+    draw.text((56, 34), headline, fill="#ffffff", font=font_title)
+    draw.text((56, 150), "Fallback A+ visual", fill="#0f172a", font=font_title)
+    draw.text((56, 230), title, fill="#334155", font=font_body)
+    draw.text(
+        (56, height - 76),
+        "Image generation service was unavailable. This placeholder preserves the pipeline and can be regenerated later.",
+        fill="#64748b",
+        font=font_small,
+    )
+
+    slots = [
+        (56, 320, width // 2 - 28, height - 130),
+        (width // 2 + 28, 320, width - 56, height - 130),
+    ]
+    pasted = 0
+    for source, box in zip(ref_sources[:2], slots):
+        if _is_remote_url(source):
+            continue
+        path = Path(source).expanduser()
+        if not path.exists():
+            continue
+        try:
+            with Image.open(path) as ref:
+                ref = ref.convert("RGB")
+                max_w = box[2] - box[0]
+                max_h = box[3] - box[1]
+                ref.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
+                x = box[0] + (max_w - ref.width) // 2
+                y = box[1] + (max_h - ref.height) // 2
+                draw.rounded_rectangle(box, radius=18, fill="#ffffff", outline="#cbd5e1", width=2)
+                canvas.paste(ref, (x, y))
+                pasted += 1
+        except Exception:
+            continue
+    if pasted == 0:
+        draw.rounded_rectangle((56, 320, width - 56, height - 130), radius=18, fill="#ffffff", outline="#cbd5e1", width=2)
+        draw.text((96, 380), "No local reference image available", fill="#64748b", font=font_body)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(output_path, format="JPEG", quality=92, optimize=True)
+    return {
+        "fallback_image": True,
+        "fallback_reason": "A+ image generation service failed; placeholder generated locally.",
+        "target_width": width,
+        "target_height": height,
+        "reference_count": len(ref_sources),
+        "local_reference_count": pasted,
+    }
+
+
 async def _generate_single_image(
     script: dict,
     output_path: Path,
@@ -602,6 +665,27 @@ async def _generate_single_image(
                 f"model={settings.GPT_IMAGE_MODEL}, provider={settings.gpt_image_api_provider}, "
                 f"reference_files={_reference_image_names(ref_sources)}..."
             )
+            if script.get("fallback_script"):
+                fallback_info = _create_fallback_aplus_image(output_path, script, ref_sources, width, height)
+                oss_info = _upload_generated_image_to_oss(output_path, product_key, position)
+                display_url = oss_info.get("oss_url")
+                if not display_url:
+                    raise RuntimeError("A+兜底图已上传OSS，但未返回可用URL")
+                logger.warning(f"[Step9] 模块 {position} 使用A+脚本保底图: {output_path.name}")
+                return {
+                    "position": position,
+                    "status": "done",
+                    "path": str(output_path),
+                    "url": display_url,
+                    "display_url": display_url,
+                    "size": output_path.stat().st_size,
+                    "model": settings.GPT_IMAGE_MODEL,
+                    "generation_quality": _generation_quality(),
+                    "reference_paths": ref_sources,
+                    "original_error": "Skipped remote image generation because A+ script is fallback.",
+                    **fallback_info,
+                    **oss_info,
+                }
             image_payload = await _submit_reference_generation(prompt, ref_sources, width, height)
             img_bytes = image_payload["bytes"]
             raw_path = output_path.with_name(f"{output_path.stem}_raw{_image_extension(img_bytes)}")
@@ -636,7 +720,31 @@ async def _generate_single_image(
         except Exception as e:
             error_msg = f"{type(e).__name__}: {str(e)}"
             logger.error(f"[Step9] 模块 {position} 生成失败: {error_msg}, 耗时={time.monotonic() - image_started:.1f}s")
-            return {"position": position, "status": "failed", "error": error_msg}
+            try:
+                fallback_info = _create_fallback_aplus_image(output_path, script, ref_sources, width, height)
+                oss_info = _upload_generated_image_to_oss(output_path, product_key, position)
+                display_url = oss_info.get("oss_url")
+                if not display_url:
+                    raise RuntimeError("A+兜底图已上传OSS，但未返回可用URL")
+                logger.warning(f"[Step9] 模块 {position} 已生成兜底A+占位图: {output_path.name}")
+                return {
+                    "position": position,
+                    "status": "done",
+                    "path": str(output_path),
+                    "url": display_url,
+                    "display_url": display_url,
+                    "size": output_path.stat().st_size,
+                    "model": settings.GPT_IMAGE_MODEL,
+                    "generation_quality": _generation_quality(),
+                    "reference_paths": ref_sources,
+                    "original_error": error_msg,
+                    **fallback_info,
+                    **oss_info,
+                }
+            except Exception as fallback_exc:
+                fallback_error = f"{type(fallback_exc).__name__}: {fallback_exc}"
+                logger.error(f"[Step9] 模块 {position} 兜底图生成/上传失败: {fallback_error}")
+                return {"position": position, "status": "failed", "error": error_msg, "fallback_error": fallback_error}
 
 
 def _sanitize_generation_prompt(prompt: str, brand: str | None, negative_prompt: str | None = None) -> str:
@@ -724,6 +832,8 @@ async def run_aplus_image(product_id: int) -> dict:
         image_results = []
         skipped_count = 0
         for script in scripts[:5]:
+            if scripts_data.get("fallback"):
+                script["fallback_script"] = True
             position = script.get("module_position", 0)
             output_path = _module_output_path(output_dir, position)
             if not overwrite_existing:

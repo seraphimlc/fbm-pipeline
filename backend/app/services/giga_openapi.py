@@ -254,9 +254,9 @@ class GigaOpenApiClient:
         self.client_secret = (client_secret or "").strip()
         self.base_url = str(api_base or "").strip().rstrip("/")
         if not self.client_id or not self.client_secret:
-            raise GigaOpenApiError("商品数据源缺少 AK/SK")
+            raise GigaOpenApiError("店铺缺少 AK/SK")
         if not self.base_url:
-            raise GigaOpenApiError("商品数据源缺少 Open API 地址")
+            raise GigaOpenApiError("店铺缺少 Open API 地址")
 
     async def call(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         timestamp = str(int(time.time() * 1000))
@@ -504,25 +504,25 @@ async def resolve_giga_data_source_context(
     fallback_site: str | None,
 ) -> GigaDataSourceContext:
     if not data_source_id:
-        raise GigaOpenApiError("请先选择商品数据源，GIGA AK/SK 不再从全局配置读取")
+        raise GigaOpenApiError("请先选择店铺，GIGA AK/SK 不再从全局配置读取")
     result = await db.execute(select(ProductDataSource).where(ProductDataSource.id == data_source_id))
     source = result.scalar_one_or_none()
     if not source:
-        raise GigaOpenApiError(f"商品数据源不存在: {data_source_id}")
+        raise GigaOpenApiError(f"店铺不存在: {data_source_id}")
     if not source.enabled:
-        raise GigaOpenApiError(f"商品数据源已停用: {source.name}")
+        raise GigaOpenApiError(f"店铺已停用: {source.name}")
     if (source.platform or "giga").lower() != "giga":
-        raise GigaOpenApiError(f"商品数据源平台暂不支持 GIGA 同步: {source.platform}")
+        raise GigaOpenApiError(f"店铺平台暂不支持 GIGA 同步: {source.platform}")
     client_id = (source.client_id or "").strip()
     client_secret = (source.client_secret or "").strip()
     api_base = (source.api_base or "").strip()
     if not client_id or not client_secret:
-        raise GigaOpenApiError(f"商品数据源 {source.name} 缺少 AK/SK")
+        raise GigaOpenApiError(f"店铺 {source.name} 缺少 AK/SK")
     if not api_base:
-        raise GigaOpenApiError(f"商品数据源 {source.name} 缺少 Open API 地址")
+        raise GigaOpenApiError(f"店铺 {source.name} 缺少 Open API 地址")
     site = (source.site or fallback_site or "").strip().upper()
     if not site:
-        raise GigaOpenApiError(f"商品数据源 {source.name} 缺少站点")
+        raise GigaOpenApiError(f"店铺 {source.name} 缺少站点")
     return GigaDataSourceContext(
         id=source.id,
         name=source.name,

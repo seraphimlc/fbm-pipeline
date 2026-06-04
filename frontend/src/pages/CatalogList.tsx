@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, Card, Empty, Input, message, Modal, Popconfirm, Segmented, Select, Space, Table, Tag, Typography } from 'antd';
-import { CloudSyncOutlined, CopyOutlined, DeleteOutlined, DownloadOutlined, FileExcelOutlined, HistoryOutlined, PictureOutlined, ReloadOutlined, SyncOutlined } from '@ant-design/icons';
+import { Button, Card, Empty, Input, message, Modal, Popconfirm, Segmented, Select, Space, Table, Tag, Typography, Upload } from 'antd';
+import { CloudSyncOutlined, CopyOutlined, DeleteOutlined, DownloadOutlined, FileExcelOutlined, HistoryOutlined, PictureOutlined, ReloadOutlined, SyncOutlined, UploadOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { clearCatalogAsin, createAplusUploadBatch, createAsinSyncBatch, createInventorySyncBatch, deleteProduct, exportCatalogProductsByCategory, exportInventoryUpdateTemplate, getWorkbenchOverview, listCatalogExportCategories, listCatalogProducts, updateCatalogAsin } from '../api';
+import { clearCatalogAsin, createAplusUploadBatch, createAsinSyncBatch, createInventorySyncBatch, deleteProduct, exportCatalogProductsByCategory, exportInventoryUpdateTemplate, getWorkbenchOverview, listCatalogExportCategories, listCatalogProducts, updateCatalogAsin, uploadCatalogCategoryTemplate } from '../api';
 import type { CatalogExportCategorySummary, CatalogProduct, WorkbenchOverview } from '../api';
 
 const { Title, Text } = Typography;
@@ -30,6 +30,7 @@ const CatalogList: React.FC = () => {
   const [selectedCategory, setSelectedCategory] = useState<string | undefined>();
   const [exportCategories, setExportCategories] = useState<{ pending: CatalogExportCategorySummary[]; exported: CatalogExportCategorySummary[] }>({ pending: [], exported: [] });
   const [categoriesLoading, setCategoriesLoading] = useState(false);
+  const [templateUploading, setTemplateUploading] = useState(false);
   const [overview, setOverview] = useState<WorkbenchOverview | null>(null);
 
   const fetchItems = async () => {
@@ -176,6 +177,28 @@ const CatalogList: React.FC = () => {
     } finally {
       hideLoading();
       setExporting(false);
+    }
+  };
+
+  const uploadTemplateForCategory = async (file: File) => {
+    if (!selectedCategorySummary?.category) {
+      message.warning('请先选择类目');
+      return;
+    }
+    const suffix = file.name.split('.').pop()?.toLowerCase();
+    if (!suffix || !['xls', 'xlsx', 'xlsm'].includes(suffix)) {
+      message.warning('只支持上传 .xls / .xlsx / .xlsm 模板文件');
+      return;
+    }
+    setTemplateUploading(true);
+    try {
+      const { data } = await uploadCatalogCategoryTemplate(selectedCategorySummary.category, file);
+      message.success(`模板已上传 OSS，并缓存到本地：${data.filename}`);
+      await fetchExportCategories();
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '模板上传失败');
+    } finally {
+      setTemplateUploading(false);
     }
   };
 
@@ -624,6 +647,19 @@ const CatalogList: React.FC = () => {
           >
             导出Amazon表格{selectedCategorySummary?.exportable_count ? `(${selectedCategorySummary.exportable_count})` : ''}
           </Button>
+          <Upload
+            showUploadList={false}
+            accept=".xls,.xlsx,.xlsm"
+            customRequest={({ file, onSuccess, onError }) => {
+              uploadTemplateForCategory(file as File)
+                .then(() => onSuccess?.('ok'))
+                .catch((error) => onError?.(error));
+            }}
+          >
+            <Button icon={<UploadOutlined />} loading={templateUploading} disabled={!selectedCategorySummary}>
+              上传类目模板
+            </Button>
+          </Upload>
         </Space>
       </div>
       <Card size="small" style={{ marginBottom: 16 }}>
@@ -652,7 +688,7 @@ const CatalogList: React.FC = () => {
               }))}
             />
             {selectedCategorySummary ? (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(110px, 1fr))', gap: 8 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, minmax(110px, 1fr))', gap: 8 }}>
                 <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 12 }}>{categoryOptionLabel(selectedCategorySummary)}</div>
                 <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 12 }}>
                   <Text type="secondary">商品数</Text>
@@ -667,6 +703,22 @@ const CatalogList: React.FC = () => {
                   <Typography.Paragraph ellipsis={{ rows: 2 }} style={{ marginBottom: 0 }}>
                     {selectedCategorySummary.sample_item_codes.join('、') || '-'}
                   </Typography.Paragraph>
+                </div>
+                <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 12 }}>
+                  <Text type="secondary">上传模板</Text>
+                  {selectedCategorySummary.uploaded_template_name ? (
+                    <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                      <Space size={4} wrap>
+                        <Tag color="success">已缓存</Tag>
+                        {selectedCategorySummary.uploaded_template_oss_url && <Tag color="blue">OSS</Tag>}
+                      </Space>
+                      <Typography.Paragraph ellipsis={{ rows: 1 }} copyable={{ text: selectedCategorySummary.uploaded_template_cache_path || '' }} style={{ marginBottom: 0 }}>
+                        {selectedCategorySummary.uploaded_template_name}
+                      </Typography.Paragraph>
+                    </Space>
+                  ) : (
+                    <Text type="secondary">未上传</Text>
+                  )}
                 </div>
               </div>
             ) : (

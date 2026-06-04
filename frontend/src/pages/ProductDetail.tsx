@@ -839,6 +839,16 @@ const ProductDetail: React.FC = () => {
     setDraftListingImagePaths(nextPaths);
   };
 
+  const handleListingImageDoubleClick = (
+    event: React.MouseEvent,
+    path: string | null | undefined,
+    action: (path: string | null | undefined) => void,
+  ) => {
+    event.preventDefault();
+    event.stopPropagation();
+    action(path);
+  };
+
   const openCategoryEditor = async () => {
     setSelectedCategoryKey(undefined);
     setCategoryEditOpen(true);
@@ -2175,7 +2185,8 @@ const ProductDetail: React.FC = () => {
                               }}
                               onDrop={(event) => replaceListingImageSlot(event, i)}
                               onDragEnd={() => setImageDragPayload(null)}
-                              onDoubleClick={() => removeListingImageFromSelected(item.path)}
+                              onDoubleClickCapture={(event) => handleListingImageDoubleClick(event, item.path, removeListingImageFromSelected)}
+                              onDoubleClick={(event) => handleListingImageDoubleClick(event, item.path, removeListingImageFromSelected)}
                               style={{
                                 cursor: imageOrderSaving ? 'default' : 'grab',
                                 border: isMain ? '2px solid #1677ff' : '1px solid #d9d9d9',
@@ -2195,6 +2206,7 @@ const ProductDetail: React.FC = () => {
                                   width="100%"
                                   alt={isMain ? '主图' : `副图${i}`}
                                   preview={false}
+                                  onDoubleClick={(event) => handleListingImageDoubleClick(event, item.path, removeListingImageFromSelected)}
                                   style={{ aspectRatio: '1 / 1', objectFit: 'cover', background: '#f5f5f5' }}
                                 />
                                 {item.meta && (
@@ -2247,7 +2259,8 @@ const ProductDetail: React.FC = () => {
                             draggable={!imageOrderSaving}
                             onDragStart={(event) => startListingImageDrag(event, { source: 'pool', path: item.path })}
                             onDragEnd={() => setImageDragPayload(null)}
-                            onDoubleClick={() => addListingImageFromPool(item.path)}
+                            onDoubleClickCapture={(event) => handleListingImageDoubleClick(event, item.path, addListingImageFromPool)}
+                            onDoubleClick={(event) => handleListingImageDoubleClick(event, item.path, addListingImageFromPool)}
                             style={{
                               cursor: imageOrderSaving ? 'default' : 'grab',
                               border: '1px solid #eee',
@@ -2266,6 +2279,7 @@ const ProductDetail: React.FC = () => {
                                 width="100%"
                                 alt={item.filename || `图片${i + 1}`}
                                 preview={false}
+                                onDoubleClick={(event) => handleListingImageDoubleClick(event, item.path, addListingImageFromPool)}
                                 style={{ aspectRatio: '1 / 1', objectFit: 'cover', background: '#f5f5f5' }}
                               />
                               <Typography.Paragraph
