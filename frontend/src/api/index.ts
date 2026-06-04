@@ -110,9 +110,11 @@ export interface ProductData {
   leaf_category: string | null;
   listing_title: string | null;
   listing_bullets: string | null;
+  listing_description: string | null;
   listing_search_terms: string | null;
   listing_title_zh: string | null;
   listing_bullets_zh: string | null;
+  listing_description_zh: string | null;
   listing_search_terms_zh: string | null;
   listing_check: string | null;
   listing_primary_keyword: string | null;
@@ -207,6 +209,23 @@ export interface PaginatedCatalogProducts {
   page_size: number;
 }
 
+export interface CatalogExportCategorySummary {
+  category: string;
+  count: number;
+  exportable_count: number;
+  blocked_count: number;
+  template_available: boolean;
+  template_name: string | null;
+  template_path: string | null;
+  template_error: string | null;
+  sample_item_codes: string[];
+}
+
+export interface CatalogExportCategories {
+  pending: CatalogExportCategorySummary[];
+  exported: CatalogExportCategorySummary[];
+}
+
 export interface InventorySyncBatch {
   id: number;
   status: string;
@@ -246,6 +265,373 @@ export interface PaginatedInventorySyncBatches {
   total: number;
   page: number;
   page_size: number;
+}
+
+export interface GigaSyncBatch {
+  id: number;
+  task_id: string | null;
+  batch_id: string;
+  site: string;
+  data_source_id?: number | null;
+  data_source_name?: string | null;
+  fulfillment_mode?: string | null;
+  current_category: string | null;
+  status: string;
+  raw_sku_count: number;
+  sku_count: number;
+  item_count: number;
+  price_count: number;
+  inventory_count: number;
+  group_count: number;
+  deleted_single_sku_group_count: number;
+  error_message: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface GigaItem {
+  id: number;
+  batch_id: string;
+  site: string;
+  data_source_id?: number | null;
+  data_source_name?: string | null;
+  fulfillment_mode?: string | null;
+  item_code: string;
+  parent_sku_code: string | null;
+  item_name: string | null;
+  category: string | null;
+  sku_count: number;
+  sku_codes_json: string | null;
+  missing_related_skus_json: string | null;
+  raw_group_json: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface GigaSku {
+  id: number;
+  batch_id: string;
+  site: string;
+  data_source_id?: number | null;
+  data_source_name?: string | null;
+  fulfillment_mode?: string | null;
+  sku_code: string;
+  item_code: string | null;
+  parent_sku_code: string | null;
+  parentage: string | null;
+  child_sequence: number | null;
+  is_primary_child: number | null;
+  product_name: string | null;
+  main_image_url: string | null;
+  attributes_json: string | null;
+  variation_attributes_json: string | null;
+  currency: string | null;
+  price: number | null;
+  effective_price: number | null;
+  exclusive_price: number | null;
+  discounted_price: number | null;
+  shipping_fee: number | null;
+  estimated_shipping_fee: number | null;
+  seller_available_inventory: number | null;
+  total_buyer_available_inventory: number | null;
+  availability_status: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface GigaInventorySyncResult {
+  batch_id: string;
+  site: string;
+  data_source_id: number | null;
+  data_source_name: string | null;
+  task_id: string | null;
+  total_skus: number;
+  success_count: number;
+  failed_count: number;
+  alert_count: number;
+  out_of_stock_count: number;
+  restocked_count: number;
+  previous_batch_id: string | null;
+  pulled_at: string;
+  failed_skus: Array<{ sku_code: string; error: string }>;
+}
+
+export interface GigaPriceSyncResult {
+  batch_id: string;
+  site: string;
+  data_source_id: number | null;
+  data_source_name: string | null;
+  task_id: string | null;
+  total_skus: number;
+  success_count: number;
+  failed_count: number;
+  alert_count: number;
+  price_changed_count: number;
+  previous_batch_id: string | null;
+  pulled_at: string;
+  failed_skus: Array<{ sku_code: string; error: string }>;
+}
+
+export interface GigaProductSyncResult {
+  batch_id: string;
+  site: string;
+  data_source_id?: number | null;
+  data_source_name?: string | null;
+  raw_sku_count: number;
+  sku_count: number;
+  item_count: number;
+  price_count: number;
+  inventory_count: number;
+  group_count: number;
+  deleted_single_sku_group_count: number;
+  skipped_existing_count: number;
+}
+
+export interface GigaSyncQueuedResult {
+  batch_id: string;
+  site: string;
+  data_source_id: number | null;
+  data_source_name: string | null;
+  status: string;
+  started: boolean;
+}
+
+export interface ProductDataSource {
+  id: number;
+  name: string;
+  platform: string;
+  site: string;
+  country?: string | null;
+  fulfillment_mode: string;
+  api_base: string | null;
+  client_id: string | null;
+  client_secret_masked: string | null;
+  shipping_cost_mode: string;
+  packing_fee: number | null;
+  inventory_mode: string;
+  enabled: boolean;
+  remark: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface PaginatedProductDataSources {
+  items: ProductDataSource[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface OfflineTaskStep {
+  id: number;
+  task_id: number;
+  step_type: string;
+  title: string;
+  status: string;
+  data_source_id: number | null;
+  data_source_name: string | null;
+  site: string | null;
+  batch_id: string | null;
+  progress_current: number;
+  progress_total: number;
+  payload_json: string | null;
+  result_json: string | null;
+  error_message: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string | null;
+}
+
+export interface OfflineTask {
+  id: number;
+  task_type: string;
+  title: string;
+  status: string;
+  total_steps: number;
+  success_steps: number;
+  failed_steps: number;
+  running_steps: number;
+  created_by: string | null;
+  payload_json: string | null;
+  result_json: string | null;
+  error_message: string | null;
+  created_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  updated_at: string | null;
+}
+
+export interface OfflineTaskDetail extends OfflineTask {
+  steps: OfflineTaskStep[];
+}
+
+export interface PaginatedOfflineTasks {
+  items: OfflineTask[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface OfflineTaskQueuedResult {
+  task: OfflineTask;
+  steps: OfflineTaskStep[];
+}
+
+export interface AmazonStyleSnapCandidate {
+  id: number;
+  batch_id: string;
+  site: string;
+  item_code: string;
+  sku_code: string;
+  product_name: string | null;
+  source_image_url: string | null;
+  source_image_path: string | null;
+  rank: number;
+  asin: string;
+  url: string | null;
+  brand: string | null;
+  seller: string | null;
+  delivery: string | null;
+  price: string | null;
+  rating: string | null;
+  category_rank: string | null;
+  color: string | null;
+  size: string | null;
+  style: string | null;
+  amazon_image_url: string | null;
+  raw_snippet: string | null;
+  is_selected: number;
+  selected_at: string | null;
+  listing_capture_id: number | null;
+  listing_capture_status: string | null;
+  listing_captured_at: string | null;
+  captured_at: string | null;
+  imported_at: string | null;
+  updated_at: string | null;
+}
+
+export interface AmazonStyleSnapCandidateGroup {
+  batch_id: string;
+  site: string;
+  item_code: string;
+  sku_code: string;
+  product_name: string | null;
+  source_image_url: string | null;
+  source_image_path: string | null;
+  selected_candidate_id: number | null;
+  product_task_id: number | null;
+  product_task_status: string | null;
+  task_ready: boolean;
+  task_ready_reason: string | null;
+  candidates: AmazonStyleSnapCandidate[];
+}
+
+export interface GigaInventoryAlert {
+  id: number;
+  batch_id: string;
+  site: string;
+  data_source_id: number | null;
+  sku_code: string;
+  item_code: string | null;
+  product_name: string | null;
+  previous_batch_id: string | null;
+  previous_stock_qty: number | null;
+  current_stock_qty: number | null;
+  previous_status: string | null;
+  current_status: string | null;
+  change_type: string;
+  message: string;
+  created_at: string | null;
+}
+
+export interface GigaPriceAlert {
+  id: number;
+  batch_id: string;
+  site: string;
+  data_source_id: number | null;
+  sku_code: string;
+  item_code: string | null;
+  product_name: string | null;
+  previous_batch_id: string | null;
+  previous_effective_price: number | null;
+  current_effective_price: number | null;
+  previous_price: number | null;
+  current_price: number | null;
+  previous_exclusive_price: number | null;
+  current_exclusive_price: number | null;
+  previous_discounted_price: number | null;
+  current_discounted_price: number | null;
+  previous_shipping_fee: number | null;
+  current_shipping_fee: number | null;
+  change_type: string;
+  message: string;
+  created_at: string | null;
+}
+
+export interface GigaInventory {
+  id: number;
+  site: string;
+  data_source_id: number | null;
+  fulfillment_mode: string | null;
+  inventory_mode: string | null;
+  sku_code: string;
+  item_code: string | null;
+  product_name: string | null;
+  stock_qty: number | null;
+  seller_available_inventory: number | null;
+  total_buyer_available_inventory: number | null;
+  seller_inventory_distribution: string | null;
+  buyer_inventory_distribution: string | null;
+  next_arrival_inventory: string | null;
+  availability_status: string | null;
+  pulled_at: string | null;
+  updated_at: string | null;
+}
+
+export interface PaginatedGigaSyncBatches {
+  items: GigaSyncBatch[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface PaginatedGigaItems {
+  items: GigaItem[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface PaginatedGigaSkus {
+  items: GigaSku[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface PaginatedGigaInventoryAlerts {
+  items: GigaInventoryAlert[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface PaginatedGigaPriceAlerts {
+  items: GigaPriceAlert[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface PaginatedGigaInventory {
+  items: GigaInventory[];
+  total: number;
+  page: number;
+  page_size: number;
+  latest_batch_id: string | null;
+  pulled_at: string | null;
 }
 
 export interface WorkbenchOverview {
@@ -483,8 +869,8 @@ export const STEP_LABELS: Record<number, string> = {
   2: '利润计算',
   3: '关键词获取',
   4: '类目获取',
-  5: 'Listing构建',
-  6: '主图分析',
+  5: '图片分析',
+  6: 'Listing构建',
   7: 'A+规划',
   8: 'A+脚本',
   9: 'A+出图',
@@ -525,7 +911,7 @@ export const STATUS_COLORS: Record<string, string> = {
 export const createProduct = (data: { gigab2b_url: string; competitor_asin?: string; upc?: string; brand?: string }) =>
   api.post<Product>('/products', data);
 
-export const listProducts = (params?: { page?: number; page_size?: number; status?: string; item_id?: string; competitor_asin?: string; upc?: string; created_from?: string; created_to?: string }) =>
+export const listProducts = (params?: { page?: number; page_size?: number; status?: string; item_id?: string; data_source_id?: number; competitor_asin?: string; upc?: string; created_from?: string; created_to?: string }) =>
   api.get<PaginatedProducts>('/products', { params });
 
 export const downloadImportTemplate = () =>
@@ -568,14 +954,21 @@ export const listCatalogProducts = (params?: {
   template_risk_level?: string;
   upc?: string;
   category?: string;
+  export_status?: 'pending' | 'exported';
   imported_from?: string;
   imported_to?: string;
   stock_synced_from?: string;
   stock_synced_to?: string;
 }) => api.get<PaginatedCatalogProducts>('/products/catalog', { params });
 
+export const listCatalogExportCategories = () =>
+  api.get<CatalogExportCategories>('/products/catalog/export-categories');
+
 export const exportCatalogProducts = (ids: number[]) =>
   api.post<Blob>('/products/catalog/export', ids, { responseType: 'blob', timeout: 300000 });
+
+export const exportCatalogProductsByCategory = (category: string) =>
+  api.post<Blob>('/products/catalog/export-by-category', { category }, { responseType: 'blob', timeout: 300000 });
 
 export const exportInventoryUpdateTemplate = (ids: number[]) =>
   api.post<Blob>('/products/catalog/inventory-template/export', ids, { responseType: 'blob', timeout: 300000 });
@@ -591,6 +984,83 @@ export const createInventorySyncBatch = (catalogProductIds?: number[]) =>
 
 export const listInventorySyncBatches = (params?: { page?: number; page_size?: number }) =>
   api.get<PaginatedInventorySyncBatches>('/products/inventory-sync-batches', { params });
+
+export const listGigaBatches = (params?: { page?: number; page_size?: number; site?: string; data_source_id?: number; status?: string }) =>
+  api.get<PaginatedGigaSyncBatches>('/giga/batches', { params });
+
+export const syncMissingGigaProducts = (body: { site?: string; data_source_id: number; task_id?: string | null; current_category?: string | null; page_size?: number | null; max_pages?: number | null }) =>
+  api.post<GigaProductSyncResult>('/giga/sync-missing', body, { timeout: 600000 });
+
+export const syncMissingGigaProductsBackground = (body: { site?: string; data_source_id: number; task_id?: string | null; current_category?: string | null; page_size?: number | null; max_pages?: number | null }) =>
+  api.post<GigaSyncQueuedResult>('/giga/sync-missing/background', body, { timeout: 30000 });
+
+export const createGigaPullOfflineTask = (body: { data_source_ids: number[]; current_category?: string | null; page_size?: number | null; max_pages?: number | null }) =>
+  api.post<OfflineTaskQueuedResult>('/offline-tasks/giga-pull', body, { timeout: 30000 });
+
+export const listOfflineTasks = (params?: { page?: number; page_size?: number; task_type?: string; status?: string }) =>
+  api.get<PaginatedOfflineTasks>('/offline-tasks', { params });
+
+export const getOfflineTask = (id: number) =>
+  api.get<OfflineTaskDetail>(`/offline-tasks/${id}`);
+
+export const rerunOfflineTask = (id: number) =>
+  api.post<OfflineTaskDetail>(`/offline-tasks/${id}/rerun`);
+
+export const pauseOfflineTask = (id: number) =>
+  api.post<OfflineTaskDetail>(`/offline-tasks/${id}/pause`);
+
+export const resumeOfflineTask = (id: number) =>
+  api.post<OfflineTaskDetail>(`/offline-tasks/${id}/resume`);
+
+export const listGigaItems = (params: { batch_id?: string; site?: string; data_source_id?: number; page?: number; page_size?: number; sku_code?: string }) =>
+  api.get<PaginatedGigaItems>('/giga/items', { params });
+
+export const listGigaSkus = (params: { batch_id: string; site?: string; data_source_id?: number; item_code?: string; page?: number; page_size?: number }) =>
+  api.get<PaginatedGigaSkus>('/giga/skus', { params });
+
+export const listProductDataSources = (params?: { page?: number; page_size?: number; platform?: string; site?: string; enabled?: boolean }) =>
+  api.get<PaginatedProductDataSources>('/product-data-sources', { params });
+
+export const createProductDataSource = (body: Partial<ProductDataSource> & { name: string; site: string; client_secret?: string | null }) =>
+  api.post<ProductDataSource>('/product-data-sources', body);
+
+export const updateProductDataSource = (id: number, body: Partial<ProductDataSource> & { client_secret?: string | null }) =>
+  api.patch<ProductDataSource>(`/product-data-sources/${id}`, body);
+
+export const deleteProductDataSource = (id: number) =>
+  api.delete<ProductDataSource>(`/product-data-sources/${id}`);
+
+export const listGigaInventory = (params: { site: string; data_source_id?: number; page?: number; page_size?: number; sku_code?: string; availability_status?: string }) =>
+  api.get<PaginatedGigaInventory>('/giga/inventory', { params });
+
+export const syncGigaInventory = (body: { batch_id: string; site: string; data_source_id: number; task_id?: string | null; sku_codes?: string[] | null }) =>
+  api.post<GigaInventorySyncResult>('/giga/inventory/sync', body, { timeout: 300000 });
+
+export const syncGigaPrice = (body: { batch_id: string; site: string; data_source_id: number; task_id?: string | null; sku_codes?: string[] | null }) =>
+  api.post<GigaPriceSyncResult>('/giga/price/sync', body, { timeout: 300000 });
+
+export const listGigaInventoryAlerts = (params: { site: string; data_source_id?: number; batch_id?: string; change_type?: string; page?: number; page_size?: number }) =>
+  api.get<PaginatedGigaInventoryAlerts>('/giga/inventory/alerts', { params });
+
+export const listGigaPriceAlerts = (params: { site: string; data_source_id?: number; batch_id?: string; change_type?: string; page?: number; page_size?: number }) =>
+  api.get<PaginatedGigaPriceAlerts>('/giga/price/alerts', { params });
+
+export const listProductCompetitorCandidates = (productId: number) =>
+  api.get<AmazonStyleSnapCandidateGroup>(`/amazon-stylesnap/products/${productId}/competitor-candidates`);
+
+export const searchProductCompetitorCandidates = (productId: number, force = false) =>
+  api.post<Product>(
+    `/amazon-stylesnap/products/${productId}/competitor-candidates/search`,
+    null,
+    { params: { force }, timeout: 60000 },
+  );
+
+export const selectProductCompetitorCandidate = (productId: number, candidateId: number, forceCapture = false) =>
+  api.post<AmazonStyleSnapCandidateGroup>(
+    `/amazon-stylesnap/products/${productId}/competitor-candidates/${candidateId}/select`,
+    null,
+    { params: { force_capture: forceCapture }, timeout: 180000 },
+  );
 
 export const getInventorySyncBatch = (id: number) =>
   api.get<InventorySyncBatchDetail>(`/products/inventory-sync-batches/${id}`);
@@ -621,9 +1091,11 @@ export const updateProduct = (id: number, data: Partial<Product> & {
   leaf_category?: string;
   listing_title?: string;
   listing_bullets?: string | string[];
+  listing_description?: string;
   listing_search_terms?: string;
   listing_title_zh?: string;
   listing_bullets_zh?: string | string[];
+  listing_description_zh?: string;
   listing_search_terms_zh?: string;
   listing_primary_keyword?: string;
   main_image_path?: string | null;
@@ -643,14 +1115,17 @@ export const confirmProduct = (id: number) =>
 export const deleteProduct = (id: number) =>
   api.delete(`/products/${id}`);
 
-export const startPipeline = (id: number) =>
-  api.post<Product>(`/products/${id}/start`);
+export const refreshProductFromGiga = (id: number, data?: { data_source_id?: number | null; item_code?: string | null; sku_codes?: string[] }) =>
+  api.post<Product>(`/products/${id}/refresh-giga`, data || {});
 
 export const restartPipeline = (id: number) =>
   api.post<Product>(`/products/${id}/restart`);
 
 export const retryStep = (id: number) =>
   api.post<Product>(`/products/${id}/retry`);
+
+export const runProductFromStep = (id: number, startStep = 5) =>
+  api.post<Product>(`/products/${id}/run-from-step`, null, { params: { start_step: startStep } });
 
 export const resumePipeline = (id: number) =>
   api.post<Product>(`/products/${id}/resume`);

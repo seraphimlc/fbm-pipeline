@@ -19,11 +19,11 @@ from openpyxl import load_workbook
 
 from app.config import settings
 from app.database import async_session
-from app.models import Product, ProductData, ProductFile
+from app.models import AmazonStyleSnapCandidate, Product, ProductData, ProductFile
 from app.pipeline.ride_on_category import RIDE_ON_CATEGORY_MARKERS, select_ride_on_category
 from app.pipeline.search_terms import normalize_search_terms
 from app.services.oss_uploader import oss_configured, upload_private_image
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import selectinload
 
 logger = logging.getLogger(__name__)
@@ -125,6 +125,7 @@ def _mapping_has_category_marker(mapping_path: Path, category_text: str) -> bool
 def _load_template_mapping(product: Product, pd: ProductData) -> dict:
     key = (product.brand or "", pd.leaf_category or "")
     mapping_path = BRAND_TEMPLATE_MAPPINGS.get(key)
+    selected_stylesnap_text = _selected_stylesnap_category_text(pd)
     category_text = " ".join(
         str(item or "")
         for item in (
@@ -132,6 +133,7 @@ def _load_template_mapping(product: Product, pd: ProductData) -> dict:
             pd.categories,
             pd.product_type,
             pd.title,
+            selected_stylesnap_text,
         )
     ).lower()
     if not mapping_path and (product.brand or "") == "Vindhvisk" and _mapping_has_category_marker(BICYCLE_MAPPING, category_text):
@@ -166,6 +168,27 @@ def _json_loads(value: str | None, fallback: Any) -> Any:
         return json.loads(value)
     except Exception:
         return fallback
+
+
+def _selected_stylesnap_category_text(pd: ProductData) -> str:
+    values = [
+        getattr(pd, "amazon_stylesnap_selected_category_rank", None),
+        getattr(pd, "amazon_stylesnap_selected_raw_snippet", None),
+    ]
+    return " ".join(str(value or "") for value in values if value)
+
+
+def _selected_stylesnap_summary(pd: ProductData) -> str | None:
+    asin = getattr(pd, "amazon_stylesnap_selected_asin", None)
+    category_rank = getattr(pd, "amazon_stylesnap_selected_category_rank", None)
+    if not asin and not category_rank:
+        return None
+    parts = []
+    if asin:
+        parts.append(f"ASIN {asin}")
+    if category_rank:
+        parts.append(str(category_rank))
+    return " / ".join(parts)
 
 
 def _information_workbook_values(pd: ProductData) -> dict[str, Any]:
@@ -439,12 +462,18 @@ def _inventory_template_warnings(pd: ProductData) -> list[str]:
 
 def _aplus_template_warnings(product: Product) -> list[str]:
     if not product.aplus:
-        return ["未生成 A+ 内容，导入表格只包含 Listing 和图片信息。"]
+        return ["A+规划、脚本和图片均未生成，导入表格只包含 Listing 和图片信息。"]
+    warnings: list[str] = []
+    if not product.aplus.aplus_plan:
+        warnings.append("A+规划未生成，后续上架前需要补 A+ 规划。")
+    if product.aplus.aplus_plan and not product.aplus.aplus_scripts:
+        warnings.append("A+规划已生成，但 A+脚本未生成，后续可从脚本节点继续。")
+    if product.aplus.aplus_scripts and not product.aplus.aplus_images:
+        warnings.append("A+脚本已生成，但 A+图片未生成，后续可从出图节点继续。")
     images = _json_loads(product.aplus.aplus_images, [])
     if not isinstance(images, list) or not images:
-        return ["未生成 A+ 图片，后续上架前需要人工补 A+。"]
+        return warnings or ["未生成 A+ 图片，后续上架前需要人工补 A+。"]
     done_count = sum(1 for item in images if isinstance(item, dict) and item.get("status", "done") == "done")
-    warnings: list[str] = []
     if done_count < 5:
         warnings.append(f"A+ 图片仅完成 {done_count}/5 张，发布前需要人工补齐或确认。")
     if product.aplus.aplus_status and product.aplus.aplus_status not in {"done", "regen_done"}:
@@ -500,13 +529,17 @@ def _build_fill_summary(
     }
 
 
-def _gallery_paths(product: Product) -> list[Path]:
+def _is_remote_url(value: str | None) -> bool:
+    return bool(value and str(value).strip().lower().startswith(("http://", "https://")))
+
+
+def _gallery_sources(product: Product) -> list[str]:
     if not product.images:
         return []
-    paths = _json_loads(product.images.gallery_images, [])
-    if not isinstance(paths, list):
+    sources = _json_loads(product.images.gallery_images, [])
+    if not isinstance(sources, list):
         return []
-    return [Path(str(path)).expanduser() for path in paths if path]
+    return [str(source).strip() for source in sources if str(source or "").strip()]
 
 
 def _image_field_sequence(mapping: dict) -> list[str]:
@@ -585,25 +618,28 @@ def _upload_listing_images(
             warnings.append("缺少Step6选定主图，主图/副图URL未写入导入模板。")
         return existing_fill, warnings, uploaded
 
-    if not oss_configured():
-        if not existing_fill:
-            warnings.append("OSS 未配置，主图/副图URL未写入导入模板。")
-        return existing_fill, warnings, uploaded
-
-    fill: dict[str, str] = {}
+    fill: dict[str, str] = dict(existing_fill)
     product_key = pd.item_code or f"product-{product.id}"
-    image_paths = [Path(product.images.main_image_path).expanduser()]
+    image_sources = [str(product.images.main_image_path).strip()]
     other_fields = mapping.get("image_fields", {}).get("others", [])
-    image_paths.extend(_gallery_paths(product)[:len(other_fields)])
+    image_sources.extend(_gallery_sources(product)[:len(other_fields)])
 
-    for idx, path in enumerate(image_paths[:1 + len(other_fields)]):
+    for idx, source in enumerate(image_sources[:1 + len(other_fields)]):
         slot = "main" if idx == 0 else f"other_{idx}"
         field = mapping.get("image_fields", {}).get("main") if idx == 0 else other_fields[idx - 1]
-        if not field:
+        if not field or not source:
+            continue
+        if _is_remote_url(source):
+            fill[field] = source
+            uploaded.append({"slot": slot, "path": source, "url": source, "status": "remote_url"})
             continue
         if field in fill:
-            uploaded.append({"slot": slot, "path": str(path), "url": fill[field], "status": "reused"})
+            uploaded.append({"slot": slot, "path": source, "url": fill[field], "status": "reused"})
             continue
+        if not oss_configured():
+            warnings.append(f"OSS 未配置，本地图片未上传 {slot}。")
+            continue
+        path = Path(source).expanduser()
         try:
             result = upload_private_image(path, product_key, slot)
         except Exception as exc:
@@ -615,8 +651,8 @@ def _upload_listing_images(
     main_field = mapping.get("image_fields", {}).get("main")
     if main_field and main_field not in fill:
         warnings.append("主图上传失败或缺失，导入模板未填写主图URL。")
-    if len(fill) < len(image_paths[:9]):
-        warnings.append(f"Listing图片URL仅填写 {len(fill)}/{len(image_paths[:9])} 个。")
+    if len(fill) < len(image_sources[:9]):
+        warnings.append(f"Listing图片URL仅填写 {len(fill)}/{len(image_sources[:9])} 个。")
     warnings.extend(_image_health_warnings(product))
     return fill, warnings, uploaded
 
@@ -746,19 +782,20 @@ def _fabric_value(pd: ProductData) -> str:
 
 
 def _description(pd: ProductData) -> str:
+    if pd.listing_description:
+        return str(pd.listing_description).strip()[:1900]
     parts = []
     if pd.listing_title:
         parts.append(pd.listing_title)
     bullets = _json_loads(pd.listing_bullets, [])
     if isinstance(bullets, list):
         parts.extend(str(item) for item in bullets if item)
-    if pd.description:
-        parts.append(pd.description)
     return "\n".join(parts)[:1900]
 
 
 def _facts_text(pd: ProductData) -> str:
     values = [
+        _selected_stylesnap_category_text(pd),
         pd.title,
         pd.listing_title,
         pd.color,
@@ -921,6 +958,7 @@ def _amazon_item_type_keyword(option: dict[str, Any]) -> str:
 
 def _furniture_match_text(pd: ProductData) -> str:
     text_values = [
+        _selected_stylesnap_category_text(pd),
         pd.leaf_category,
         pd.categories,
         pd.product_type,
@@ -941,7 +979,12 @@ def _find_browse_option(options: list[Any], node: str) -> dict[str, Any] | None:
 
 
 def _source_category_text(pd: ProductData) -> str:
-    return " ".join(str(value or "") for value in (pd.leaf_category, pd.categories, pd.product_type)).lower()
+    return " ".join(str(value or "") for value in (
+        _selected_stylesnap_category_text(pd),
+        pd.leaf_category,
+        pd.categories,
+        pd.product_type,
+    )).lower()
 
 
 def _source_selected_furniture_option(options: list[Any], pd: ProductData) -> dict[str, Any] | None:
@@ -1334,6 +1377,7 @@ def _set_sequence_fields(fill: dict[str, Any], field_names: Any, values: list[An
 
 def _bicycle_match_text(pd: ProductData) -> str:
     text_values = [
+        _selected_stylesnap_category_text(pd),
         pd.leaf_category,
         pd.categories,
         pd.product_type,
@@ -2029,6 +2073,9 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
     columns = _index_template_columns(ws)
     data_row = _mapping_data_row(mapping)
     warnings: list[str] = []
+    stylesnap_summary = _selected_stylesnap_summary(pd)
+    if stylesnap_summary:
+        warnings.append(f"Amazon 导入类目参考已选同款候选: {stylesnap_summary}")
 
     # 清空模板数据行的示例/偏好默认值，保留表头和验证规则。
     for cell in ws[data_row]:
@@ -2190,6 +2237,29 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
     }
 
 
+async def _selected_stylesnap_candidate_for_product(db, pd: ProductData) -> AmazonStyleSnapCandidate | None:
+    item_code = (pd.item_code or "").strip()
+    if not item_code:
+        return None
+    result = await db.execute(
+        select(AmazonStyleSnapCandidate)
+        .where(
+            AmazonStyleSnapCandidate.is_selected == 1,
+            or_(
+                AmazonStyleSnapCandidate.item_code == item_code,
+                AmazonStyleSnapCandidate.sku_code == item_code,
+            ),
+        )
+        .order_by(
+            AmazonStyleSnapCandidate.selected_at.is_(None).asc(), AmazonStyleSnapCandidate.selected_at.desc(),
+            AmazonStyleSnapCandidate.updated_at.desc(),
+            AmazonStyleSnapCandidate.id.desc(),
+        )
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def run_amazon_template(product_id: int) -> dict:
     """生成 Amazon 类目导入模板。"""
     async with async_session() as db:
@@ -2203,6 +2273,11 @@ async def run_amazon_template(product_id: int) -> dict:
             raise ValueError(f"Product {product_id} not found or no data")
 
         pd = product.data
+        selected_stylesnap_candidate = await _selected_stylesnap_candidate_for_product(db, pd)
+        if selected_stylesnap_candidate:
+            pd.amazon_stylesnap_selected_asin = selected_stylesnap_candidate.asin
+            pd.amazon_stylesnap_selected_category_rank = selected_stylesnap_candidate.category_rank
+            pd.amazon_stylesnap_selected_raw_snippet = selected_stylesnap_candidate.raw_snippet
         mapping = _load_template_mapping(product, pd)
         template_path = Path(mapping["template_path"])
         if not template_path.is_file():
@@ -2217,6 +2292,10 @@ async def run_amazon_template(product_id: int) -> dict:
         product_snapshot.images = _snapshot_model(product.images)
         product_snapshot.aplus = _snapshot_model(product.aplus)
         pd_snapshot = product_snapshot.data
+        if selected_stylesnap_candidate:
+            pd_snapshot.amazon_stylesnap_selected_asin = selected_stylesnap_candidate.asin
+            pd_snapshot.amazon_stylesnap_selected_category_rank = selected_stylesnap_candidate.category_rank
+            pd_snapshot.amazon_stylesnap_selected_raw_snippet = selected_stylesnap_candidate.raw_snippet
 
     template_result = await asyncio.to_thread(_build_amazon_template_file, product_snapshot, pd_snapshot, mapping)
     output_path = Path(template_result["path"])

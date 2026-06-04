@@ -16,6 +16,7 @@ import time
 from io import BytesIO
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 import httpx
 from PIL import Image
@@ -23,6 +24,7 @@ from PIL import Image
 from app.config import settings
 from app.database import async_session
 from app.models import Product, ProductAplus
+from app.services.oss_uploader import oss_configured, upload_private_image
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -34,20 +36,34 @@ def _aspect_ratio(width: int, height: int) -> str:
     return f"{width // divisor}:{height // divisor}"
 
 
-def _reference_image_paths(script: dict) -> list[Path]:
+def _is_remote_url(value: str | None) -> bool:
+    return bool(value and str(value).strip().lower().startswith(("http://", "https://")))
+
+
+def _reference_image_sources(script: dict) -> list[str]:
     refs = script.get("reference_images") or []
-    paths: list[Path] = []
+    sources: list[str] = []
     if not isinstance(refs, list):
-        return paths
+        return sources
     for ref in refs:
         path = ref if isinstance(ref, str) else ref.get("path") if isinstance(ref, dict) else None
         if path:
-            paths.append(Path(path).expanduser())
-    return paths
+            sources.append(str(path).strip())
+    return sources
 
 
-def _reference_image_names(paths: list[Path]) -> str:
-    return ", ".join(path.name for path in paths)
+def _reference_image_paths(script: dict) -> list[Path]:
+    return [Path(source).expanduser() for source in _reference_image_sources(script) if not _is_remote_url(source)]
+
+
+def _reference_image_name(source: str) -> str:
+    if _is_remote_url(source):
+        return Path(unquote(urlparse(source).path)).name or "remote-reference.jpg"
+    return Path(source).expanduser().name
+
+
+def _reference_image_names(sources: list[str]) -> str:
+    return ", ".join(_reference_image_name(source) for source in sources)
 
 
 def _reference_image_upload(path: Path, max_side: int = 1200, quality: int = 88) -> tuple[str, bytes, str]:
@@ -62,6 +78,28 @@ def _reference_image_upload(path: Path, max_side: int = 1200, quality: int = 88)
 def _reference_image_data_url(path: Path, max_side: int = 1200, quality: int = 88) -> str:
     _, img_bytes, _ = _reference_image_upload(path, max_side, quality)
     return "data:image/jpeg;base64," + base64.b64encode(img_bytes).decode("ascii")
+
+
+def _reference_image_generation_input(source: str) -> str:
+    if _is_remote_url(source):
+        return source
+    return _reference_image_data_url(Path(source).expanduser())
+
+
+async def _reference_image_upload_source(source: str) -> tuple[str, bytes, str]:
+    if not _is_remote_url(source):
+        return _reference_image_upload(Path(source).expanduser())
+    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=30, write=20, pool=20), follow_redirects=True) as client:
+        response = await client.get(source)
+        response.raise_for_status()
+        content_type = response.headers.get("content-type") or "image/jpeg"
+        content = response.content
+    with Image.open(BytesIO(content)) as image:
+        image = image.convert("RGB")
+        image.thumbnail((1200, 1200))
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=88, optimize=True)
+    return f"{Path(unquote(urlparse(source).path)).stem or 'remote-reference'}.jpg", buffer.getvalue(), "image/jpeg"
 
 
 def _generation_quality() -> str:
@@ -161,17 +199,22 @@ def _existing_result_map(pa: ProductAplus | None) -> dict[int, dict]:
     return result
 
 
-def _file_result(output_path: Path, position: int, script: dict, reused_from: str) -> dict:
+def _file_result(output_path: Path, position: int, script: dict, reused_from: str, oss_info: dict | None = None) -> dict:
+    oss_info = oss_info or {}
+    display_url = oss_info.get("oss_url") or str(output_path)
     return {
         "position": position,
         "status": "done",
         "path": str(output_path),
+        "url": display_url,
+        "display_url": display_url,
         "size": output_path.stat().st_size,
         "model": settings.GPT_IMAGE_MODEL,
         "target_width": settings.APLUS_IMAGE_WIDTH,
         "target_height": settings.APLUS_IMAGE_HEIGHT,
-        "reference_count": len(_reference_image_paths(script)),
-        "reference_paths": [str(path) for path in _reference_image_paths(script)],
+        "reference_count": len(_reference_image_sources(script)),
+        "reference_paths": _reference_image_sources(script),
+        **oss_info,
         "skipped": True,
         "reused_existing": True,
         "reused_from": reused_from,
@@ -179,17 +222,21 @@ def _file_result(output_path: Path, position: int, script: dict, reused_from: st
     }
 
 
-def _existing_success_result(position: int, script: dict, output_path: Path, old_results: dict[int, dict]) -> dict | None:
+def _existing_success_result(position: int, script: dict, output_path: Path, old_results: dict[int, dict], product_key: str) -> dict | None:
     old = old_results.get(position)
     if old and old.get("status") == "done":
         old_path = Path(str(old.get("path") or output_path)).expanduser()
         if old_path.is_file():
+            oss_info = old if old.get("oss_url") else _upload_generated_image_to_oss(old_path, product_key, position)
             result = {**old}
             result.update({
                 "position": position,
                 "status": "done",
                 "path": str(old_path),
+                "url": oss_info.get("oss_url") or result.get("url") or str(old_path),
+                "display_url": oss_info.get("oss_url") or result.get("display_url") or result.get("url") or str(old_path),
                 "size": old_path.stat().st_size,
+                **oss_info,
                 "skipped": True,
                 "reused_existing": True,
                 "reused_from": "database",
@@ -197,7 +244,7 @@ def _existing_success_result(position: int, script: dict, output_path: Path, old
             })
             return result
     if output_path.is_file():
-        return _file_result(output_path, position, script, "file")
+        return _file_result(output_path, position, script, "file", _upload_generated_image_to_oss(output_path, product_key, position))
     return None
 
 
@@ -268,7 +315,7 @@ async def _poll_image_task(client: httpx.AsyncClient, task_id: str) -> dict:
     raise TimeoutError(f"图片任务超时: {task_id}")
 
 
-async def _image_bytes_from_result(client: httpx.AsyncClient, result: dict) -> bytes:
+async def _image_payload_from_result(client: httpx.AsyncClient, result: dict) -> dict:
     task_id = result.get("task_id") or result.get("id")
     data = result.get("data")
     if isinstance(data, dict):
@@ -278,21 +325,33 @@ async def _image_bytes_from_result(client: httpx.AsyncClient, result: dict) -> b
 
     b64_images = _extract_b64_images(result)
     if b64_images:
-        return base64.b64decode(b64_images[0])
+        return {
+            "bytes": base64.b64decode(b64_images[0]),
+            "provider_source": "b64_json",
+        }
 
     urls = _extract_image_urls(result)
     if urls:
         data_url_image = _decode_data_image_url(urls[0])
         if data_url_image:
-            return data_url_image
+            return {
+                "bytes": data_url_image,
+                "provider_source": "data_url",
+            }
         image_response = await client.get(urls[0])
         image_response.raise_for_status()
-        return image_response.content
+        return {
+            "bytes": image_response.content,
+            "provider_url": urls[0],
+            "provider_url_accessible": True,
+            "provider_source": "url",
+            "provider_content_type": image_response.headers.get("content-type"),
+        }
 
     raise RuntimeError(f"图片接口未返回图片: {json.dumps(result, ensure_ascii=False)[:800]}")
 
 
-async def _submit_reference_generations(prompt: str, ref_paths: list[Path], quality: str = "high") -> bytes:
+async def _submit_reference_generations(prompt: str, ref_sources: list[str], quality: str = "high") -> dict:
     generation_quality = quality if quality in {"high", "auto"} else _generation_quality()
     payload = {
         "model": settings.GPT_IMAGE_MODEL,
@@ -301,7 +360,7 @@ async def _submit_reference_generations(prompt: str, ref_paths: list[Path], qual
         "quality": generation_quality,
         "n": 1,
         "response_format": "url",
-        "image": [_reference_image_data_url(path) for path in ref_paths],
+        "image": [_reference_image_generation_input(source) for source in ref_sources],
     }
     url = f"{settings.resolved_gpt_image_api_base.rstrip('/')}/images/generations"
     headers = {
@@ -320,20 +379,20 @@ async def _submit_reference_generations(prompt: str, ref_paths: list[Path], qual
                     f"[Step9] 提交A+参考图生图: model={settings.GPT_IMAGE_MODEL}, "
                     f"provider={settings.gpt_image_api_provider}, "
                     f"endpoint=images/generations, aspect_ratio={payload['aspect_ratio']}, "
-                    f"quality={payload['quality']}, references={len(ref_paths)}, attempt={attempt}/{retries}"
+                    f"quality={payload['quality']}, references={len(ref_sources)}, attempt={attempt}/{retries}"
                 )
                 response = await http.post(url, headers=headers, json=payload)
                 if response.status_code >= 400:
                     if response.status_code == 429:
                         rate_limit_count += 1
                     raise RuntimeError(f"图片接口请求失败 {response.status_code}: {response.text[:1000]}")
-                img_bytes = await _image_bytes_from_result(http, response.json())
+                image_payload = await _image_payload_from_result(http, response.json())
                 logger.info(
                     f"[Step9] generations 生图返回成功: quality={payload['quality']}, "
                     f"attempt={attempt}/{retries}, 耗时={time.monotonic() - attempt_started:.1f}s, "
                     f"429次数={rate_limit_count}"
                 )
-                return img_bytes
+                return image_payload
             except Exception as e:
                 last_error = str(e)
                 if attempt >= retries:
@@ -348,14 +407,14 @@ async def _submit_reference_generations(prompt: str, ref_paths: list[Path], qual
     raise RuntimeError(last_error or "图片接口未返回图片")
 
 
-def _ensure_provider_image_large_enough(img_bytes: bytes, width: int, height: int, label: str) -> bytes:
-    raw_width, raw_height = _image_size(img_bytes)
+def _ensure_provider_image_large_enough(image_payload: dict, width: int, height: int, label: str) -> dict:
+    raw_width, raw_height = _image_size(image_payload["bytes"])
     if raw_width < width or raw_height < height:
         raise RuntimeError(f"{label} 返回图片尺寸过小: {raw_width}x{raw_height}, 目标 {width}x{height}")
-    return img_bytes
+    return image_payload
 
 
-async def _submit_reference_edits(prompt: str, ref_paths: list[Path], width: int, height: int) -> bytes:
+async def _submit_reference_edits(prompt: str, ref_sources: list[str], width: int, height: int) -> dict:
     data = {
         "model": settings.GPT_IMAGE_MODEL,
         "prompt": prompt,
@@ -363,7 +422,7 @@ async def _submit_reference_edits(prompt: str, ref_paths: list[Path], width: int
         "n": "1",
         "response_format": "url",
     }
-    files = [("image", _reference_image_upload(path)) for path in ref_paths]
+    files = [("image", await _reference_image_upload_source(source)) for source in ref_sources]
     url = f"{settings.resolved_gpt_image_api_base.rstrip('/')}/images/edits"
     headers = {
         "Authorization": f"Bearer {settings.resolved_gpt_image_api_key}",
@@ -380,20 +439,20 @@ async def _submit_reference_edits(prompt: str, ref_paths: list[Path], width: int
                     f"[Step9] 提交A+参考图生图: model={settings.GPT_IMAGE_MODEL}, "
                     f"provider={settings.gpt_image_api_provider}, "
                     f"endpoint=images/edits, size={data['size']}, "
-                    f"references={len(ref_paths)}, attempt={attempt}/{retries}"
+                    f"references={len(ref_sources)}, attempt={attempt}/{retries}"
                 )
                 response = await http.post(url, headers=headers, data=data, files=files)
                 if response.status_code >= 400:
                     if response.status_code == 429:
                         rate_limit_count += 1
                     raise RuntimeError(f"图片接口请求失败 {response.status_code}: {response.text[:1000]}")
-                img_bytes = await _image_bytes_from_result(http, response.json())
+                image_payload = await _image_payload_from_result(http, response.json())
                 logger.info(
                     f"[Step9] edits 生图返回成功: size={data['size']}, "
                     f"attempt={attempt}/{retries}, 耗时={time.monotonic() - attempt_started:.1f}s, "
                     f"429次数={rate_limit_count}"
                 )
-                return img_bytes
+                return image_payload
             except Exception as e:
                 last_error = str(e)
                 if attempt >= retries:
@@ -408,11 +467,11 @@ async def _submit_reference_edits(prompt: str, ref_paths: list[Path], width: int
     raise RuntimeError(last_error or "图片接口未返回图片")
 
 
-async def _submit_reference_generation(prompt: str, ref_paths: list[Path], width: int, height: int) -> bytes:
-    missing = [str(path) for path in ref_paths if not path.is_file()]
+async def _submit_reference_generation(prompt: str, ref_sources: list[str], width: int, height: int) -> dict:
+    missing = [source for source in ref_sources if not _is_remote_url(source) and not Path(source).expanduser().is_file()]
     if missing:
         raise FileNotFoundError("参考图不存在: " + "; ".join(missing))
-    if not ref_paths:
+    if not ref_sources:
         raise ValueError("A+生图缺少 reference_images，停止纯文字生图；请先重新执行 Step8 生成带参考图的脚本")
 
     preferred_mode = _api_mode()
@@ -425,9 +484,8 @@ async def _submit_reference_generation(prompt: str, ref_paths: list[Path], width
                 quality_attempts = _generation_quality_attempts()
                 for quality in quality_attempts:
                     try:
-                        img_bytes = await _submit_reference_generations(prompt, ref_paths, quality)
                         return _ensure_provider_image_large_enough(
-                            img_bytes,
+                            await _submit_reference_generations(prompt, ref_sources, quality),
                             width,
                             height,
                             f"generations/{quality}",
@@ -438,8 +496,12 @@ async def _submit_reference_generation(prompt: str, ref_paths: list[Path], width
                             logger.warning(f"[Step9] A+ generations/{quality} 失败，切换 auto 重试: {generation_error}")
                 if last_generation_error:
                     raise last_generation_error
-            img_bytes = await _submit_reference_edits(prompt, ref_paths, width, height)
-            return _ensure_provider_image_large_enough(img_bytes, width, height, "edits")
+            return _ensure_provider_image_large_enough(
+                await _submit_reference_edits(prompt, ref_sources, width, height),
+                width,
+                height,
+                "edits",
+            )
         except Exception as e:
             error_msg = f"{mode}: {type(e).__name__}: {e}"
             errors.append(error_msg)
@@ -497,10 +559,27 @@ def _save_exact_size_image(img_bytes: bytes, raw_path: Path, final_path: Path, w
     }
 
 
+def _upload_generated_image_to_oss(output_path: Path, product_key: str, position: int) -> dict:
+    if not oss_configured():
+        raise RuntimeError("OSS 未配置，A+生成图无法上传到OSS。")
+    try:
+        result = upload_private_image(output_path, product_key, f"aplus_{position:02d}")
+    except Exception as exc:
+        logger.warning(f"[Step9] A+生成图上传OSS失败: position={position}, path={output_path}, error={exc}")
+        raise RuntimeError(f"A+生成图上传OSS失败: {type(exc).__name__}: {exc}") from exc
+    return {
+        "oss_status": "uploaded",
+        "oss_url": result.get("url"),
+        "oss_object_key": result.get("object_key"),
+        "oss_expires_seconds": result.get("expires_seconds"),
+    }
+
+
 async def _generate_single_image(
     script: dict,
     output_path: Path,
     semaphore: asyncio.Semaphore,
+    product_key: str,
     brand: str | None = None,
 ) -> dict:
     """
@@ -515,30 +594,42 @@ async def _generate_single_image(
         height = settings.APLUS_IMAGE_HEIGHT
         prompt = _sanitize_generation_prompt(script.get("prompt", ""), brand, script.get("negative_prompt"))
         position = script.get("module_position", 0)
-        ref_paths = _reference_image_paths(script)
+        ref_sources = _reference_image_sources(script)
 
         try:
             logger.info(
-                f"[Step9] 生成模块 {position} 图片 ({width}x{height}), references={len(ref_paths)}, "
+                f"[Step9] 生成模块 {position} 图片 ({width}x{height}), references={len(ref_sources)}, "
                 f"model={settings.GPT_IMAGE_MODEL}, provider={settings.gpt_image_api_provider}, "
-                f"reference_files={_reference_image_names(ref_paths)}..."
+                f"reference_files={_reference_image_names(ref_sources)}..."
             )
-            img_bytes = await _submit_reference_generation(prompt, ref_paths, width, height)
+            image_payload = await _submit_reference_generation(prompt, ref_sources, width, height)
+            img_bytes = image_payload["bytes"]
             raw_path = output_path.with_name(f"{output_path.stem}_raw{_image_extension(img_bytes)}")
             size_info = _save_exact_size_image(img_bytes, raw_path, output_path, width, height)
+            oss_info = _upload_generated_image_to_oss(output_path, product_key, position)
+            display_url = oss_info.get("oss_url")
+            if not display_url:
+                raise RuntimeError("A+生成图已上传OSS，但未返回可用URL")
 
             logger.info(f"[Step9] 模块 {position} 图片已保存: {output_path.name}, 耗时={time.monotonic() - image_started:.1f}s")
             return {
                 "position": position,
                 "status": "done",
                 "path": str(output_path),
+                "url": display_url,
+                "display_url": display_url,
+                "provider_url": image_payload.get("provider_url"),
+                "provider_url_accessible": image_payload.get("provider_url_accessible"),
+                "provider_source": image_payload.get("provider_source"),
+                "provider_content_type": image_payload.get("provider_content_type"),
                 "size": output_path.stat().st_size,
                 "model": settings.GPT_IMAGE_MODEL,
                 "generation_quality": _generation_quality(),
                 "target_width": width,
                 "target_height": height,
-                "reference_count": len(ref_paths),
-                "reference_paths": [str(path) for path in ref_paths],
+                "reference_count": len(ref_sources),
+                "reference_paths": ref_sources,
+                **oss_info,
                 **size_info,
             }
 
@@ -620,6 +711,7 @@ async def run_aplus_image(product_id: int) -> dict:
         material_dir = Path(pd.material_dir) if pd.material_dir else Path("/tmp/fbm_unknown")
         output_dir = material_dir / "new aplus image"
         output_dir.mkdir(parents=True, exist_ok=True)
+        product_key = pd.item_code or f"product-{product.id}"
 
         old_results = _existing_result_map(pa)
         overwrite_existing = _should_overwrite_existing()
@@ -635,12 +727,12 @@ async def run_aplus_image(product_id: int) -> dict:
             position = script.get("module_position", 0)
             output_path = _module_output_path(output_dir, position)
             if not overwrite_existing:
-                existing = _existing_success_result(position, script, output_path, old_results)
+                existing = _existing_success_result(position, script, output_path, old_results, product_key)
                 if existing:
                     image_results.append(existing)
                     skipped_count += 1
                     continue
-            tasks.append(_generate_single_image(script, output_path, semaphore, product.brand or settings.DEFAULT_BRAND))
+            tasks.append(_generate_single_image(script, output_path, semaphore, product_key, product.brand or settings.DEFAULT_BRAND))
 
         logger.info(
             f"[Step9] 开始生成 {len(tasks)} 张A+图片，跳过 {skipped_count} 张，"
@@ -731,6 +823,7 @@ async def regenerate_aplus_module_image(product_id: int, module_position: int) -
         output_dir = material_dir / "new aplus image"
         output_dir.mkdir(parents=True, exist_ok=True)
         output_path = _module_output_path(output_dir, module_position)
+        product_key = pd.item_code or f"product-{product.id}"
 
         _backup_existing_module_images(output_dir, module_position)
 
@@ -738,6 +831,7 @@ async def regenerate_aplus_module_image(product_id: int, module_position: int) -
             script,
             output_path,
             asyncio.Semaphore(1),
+            product_key,
             product.brand or settings.DEFAULT_BRAND,
         )
 

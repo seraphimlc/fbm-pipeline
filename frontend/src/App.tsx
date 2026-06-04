@@ -11,6 +11,8 @@ import InventorySyncList from './pages/InventorySyncList';
 import AsinSyncList from './pages/AsinSyncList';
 import AplusUploadList from './pages/AplusUploadList';
 import ConfigPage from './pages/ConfigPage';
+import ProductDataSourceList from './pages/ProductDataSourceList';
+import OfflineTaskCenter from './pages/OfflineTaskCenter';
 import UpcPoolPage from './pages/UpcPoolPage';
 
 const App: React.FC = () => (
@@ -20,12 +22,16 @@ const App: React.FC = () => (
         <MainLayout>
           <Routes>
             <Route path="/" element={<Navigate to="/products" replace />} />
+            <Route path="/giga-items" element={<Navigate to="/products" replace />} />
+            <Route path="/amazon-stylesnap" element={<Navigate to="/products" replace />} />
             <Route path="/products" element={<ProductList />} />
+            <Route path="/offline-tasks" element={<OfflineTaskCenter />} />
             <Route path="/catalog" element={<CatalogList />} />
             <Route path="/inventory-sync" element={<InventorySyncList />} />
             <Route path="/asin-sync" element={<AsinSyncList />} />
             <Route path="/aplus-upload" element={<AplusUploadList />} />
             <Route path="/upc-pool" element={<UpcPoolPage />} />
+            <Route path="/data-sources" element={<ProductDataSourceList />} />
             <Route path="/config" element={<ConfigPage />} />
             <Route path="/products/new" element={<CreateProduct />} />
             <Route path="/products/:id" element={<ProductDetail />} />

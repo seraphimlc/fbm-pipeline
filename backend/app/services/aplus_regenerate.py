@@ -50,8 +50,10 @@ async def _set_product_regen_status(product_id: int, status: str) -> None:
         )
         product = result.scalar_one_or_none()
         if product and product.aplus:
+            now = datetime.now()
             product.aplus.aplus_status = _regen_aplus_status(status)
-            product.aplus.generated_at = datetime.now()
+            product.aplus.generated_at = now
+            product.updated_at = now
             await db.commit()
 
 

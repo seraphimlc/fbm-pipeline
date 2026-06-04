@@ -110,10 +110,25 @@ A+ 上传：
 - 只对已确认商品执行。
 - 失败时先看上传错误，再确认领星登录状态和模块图片是否存在。
 
+GIGA 库存与价格同步：
+
+- 页面 `/inventory-sync` 展示最新 GIGA 库存快照，按 SKU 分页，不展示旧批次列表。
+- 手动同步命令：
+  `backend/.venv/bin/python scripts/giga_inventory_sync.py --site US --task-id manual-giga-inventory`
+- 手动同步价格：
+  `backend/.venv/bin/python scripts/giga_price_sync.py --site US --task-id manual-giga-price`
+- 每日同步应由 cron 或 systemd timer 触发；结果以数据库为准。
+- 库存事实表是 `giga_inventory`，价格事实表是 `giga_prices`，同步日志当前复用 `giga_sync_batches`，告警表是 `giga_inventory_alerts` / `giga_price_alerts`。
+- 有货/无货切换看 `/api/giga/inventory/alerts?site=US`。
+- 价格变化看 `/api/giga/price/alerts?site=US`。
+- 商品池 SKU 展开会读取最新价格快照。
+
 导出 Amazon 导入表格：
 
 - 已有真实 Amazon ASIN 的商品不能再次导出导入表格。
 - 批量导出会按模板路径和类目拆分。
+- 数量字段读取最新 `giga_inventory.stock_qty`，不再依赖 `catalog_products.stock`。
+- 如果最新库存快照缺少目标 SKU，导出报告会提示跳过或停止该商品。
 
 ## 模板映射维护
 

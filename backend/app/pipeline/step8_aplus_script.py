@@ -8,6 +8,7 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 from app.config import settings
 from app.database import async_session
@@ -16,6 +17,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 logger = logging.getLogger(__name__)
+
+
+def _is_remote_url(value: str | None) -> bool:
+    return bool(value and str(value).strip().lower().startswith(("http://", "https://")))
+
+
+def _reference_filename(path: str) -> str:
+    if _is_remote_url(path):
+        return Path(unquote(urlparse(path).path)).name or "remote-reference.jpg"
+    return Path(path).name
 
 SYSTEM_PROMPT = """You are an expert at writing image generation prompts for Amazon A+ Content.
 You create detailed, specific prompts for GPT Image API that produce:
@@ -326,7 +337,7 @@ def _load_reference_candidates(product: Product) -> list[dict]:
         candidate = {
             "image_id": review.get("image_id"),
             "slot": selected.get("slot") or review.get("slot"),
-            "filename": selected.get("filename") or review.get("filename") or Path(path).name,
+            "filename": selected.get("filename") or review.get("filename") or _reference_filename(path),
             "path": path,
             "image_type": review.get("image_type"),
             "conversion_role": selected.get("role") or selected.get("conversion_role") or review.get("conversion_role"),
@@ -577,13 +588,13 @@ def _format_reference(candidate: dict, label: str, module: dict, script: dict) -
         "label": label,
         "slot": candidate.get("slot"),
         "image_id": candidate.get("image_id"),
-        "filename": candidate.get("filename") or Path(path).name,
+        "filename": candidate.get("filename") or _reference_filename(path),
         "path": path,
         "use_for": _reference_use_for(candidate, module, script),
         "visible_selling_point": _reference_visible_selling_point(candidate),
         "preserve": "Preserve the visible selling point, product type, material, texture, color, silhouette, proportions, key parts, accessories, packaging, surface finish, and distinctive construction shown in this reference.",
         "avoid_copying": "Do not copy supplier text overlays, logos, watermarks, exact infographic layout, or unsupported props/claims. Do not invent new accessories, mechanisms, construction details, or product features that are not visible here.",
-        "path_exists": Path(path).is_file() if path else False,
+        "path_exists": _is_remote_url(path) or (Path(path).is_file() if path else False),
     }
 
 

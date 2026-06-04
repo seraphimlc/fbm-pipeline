@@ -54,6 +54,7 @@ class ConfigUpdateRequest(BaseModel):
     aplus_image_jpeg_quality: int | None = Field(default=None, ge=40, le=100)
     aplus_image_api_retries: int | None = Field(default=None, ge=0, le=10)
     aplus_image_overwrite_policy: str | None = Field(default=None, pattern="^(skip_success|overwrite_all)$")
+    giga_sync_page_size: int | None = Field(default=None, ge=1, le=200)
 
     @model_validator(mode="after")
     def validate_pricing_rates(self):
@@ -108,6 +109,7 @@ UPDATE_FIELD_MAP = {
     "aplus_image_jpeg_quality": "APLUS_IMAGE_JPEG_QUALITY",
     "aplus_image_api_retries": "APLUS_IMAGE_API_RETRIES",
     "aplus_image_overwrite_policy": "APLUS_IMAGE_OVERWRITE_POLICY",
+    "giga_sync_page_size": "GIGA_SYNC_PAGE_SIZE",
 }
 
 
@@ -270,6 +272,7 @@ async def get_config():
         "vlm_api_configured": bool(settings.LLM_API_KEY if settings.VLM_USE_LLM_API else settings.VLM_API_KEY),
         "gpt_image_api_configured": bool(settings.resolved_gpt_image_api_key),
         "sellersprite_configured": bool(settings.SELLERSPRITE_TOKEN),
+        "giga_sync_page_size": settings.GIGA_SYNC_PAGE_SIZE,
         "env_file": str(ENV_FILE),
     }
 

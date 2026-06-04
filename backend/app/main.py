@@ -10,9 +10,16 @@ from contextlib import asynccontextmanager
 from app.database import init_db
 from app.api.products import router as products_router
 from app.api.config_api import router as config_router
+from app.api.data_sources import router as data_sources_router
+from app.api.giga import router as giga_router
+from app.api.amazon_stylesnap import router as amazon_stylesnap_router
+from app.api.offline_tasks import router as offline_tasks_router
 from app.config import settings
 from app.pipeline.engine import cancel_all_pipelines, recover_interrupted_pipelines
 from app.services.aplus_regenerate import cancel_active_regenerate_tasks, recover_regenerate_tasks
+from app.services.giga_image_download_tasks import cancel_active_giga_image_downloads
+from app.services.giga_sync_tasks import cancel_active_giga_sync_tasks
+from app.services.offline_tasks import cancel_active_offline_tasks, recover_offline_tasks
 
 
 logging.basicConfig(
@@ -26,10 +33,14 @@ logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 async def lifespan(app: FastAPI):
     # Startup
     await init_db()
+    await recover_offline_tasks()
     await recover_interrupted_pipelines()
     await recover_regenerate_tasks()
     yield
     # Shutdown
+    await cancel_active_offline_tasks()
+    await cancel_active_giga_sync_tasks()
+    await cancel_active_giga_image_downloads()
     await cancel_all_pipelines()
     await cancel_active_regenerate_tasks()
 
@@ -51,6 +62,10 @@ app.add_middleware(
 
 app.include_router(products_router)
 app.include_router(config_router)
+app.include_router(data_sources_router)
+app.include_router(giga_router)
+app.include_router(amazon_stylesnap_router)
+app.include_router(offline_tasks_router)
 
 
 # ─── 静态文件服务：代理本地图片给前端 ───

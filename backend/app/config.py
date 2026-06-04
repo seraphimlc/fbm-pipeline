@@ -78,6 +78,10 @@ class Settings(BaseSettings):
 
     # 卖家精灵
     SELLERSPRITE_TOKEN: str = ""
+    SELLERSPRITE_OPENAPI_SECRET_KEY: str = ""
+
+    # GIGA Open API runtime options. Store/API credentials are maintained in product_data_sources.
+    GIGA_SYNC_PAGE_SIZE: int = 200
 
     # Chrome 控制
     CHROME_LOCK_TIMEOUT: int = 300  # Chrome串行操作锁超时(秒)
@@ -120,7 +124,7 @@ class Settings(BaseSettings):
             self.DATA_DIR.mkdir(parents=True, exist_ok=True)
             self.DATABASE_URL = f"sqlite+aiosqlite:///{self.DATA_DIR / 'fbm.db'}"
 
-    model_config = {"env_file": BACKEND_DIR / ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": BACKEND_DIR / ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     def get_llm_client(self) -> AsyncOpenAI:
         """创建LLM OpenAI客户端（处理SSL问题）"""

@@ -1,15 +1,15 @@
 // @ts-nocheck
 import React, { useEffect, useState, useRef } from 'react';
 import { useLocation, useParams, useNavigate } from 'react-router-dom';
-import { Alert, Card, Descriptions, Tag, Steps, Tabs, Button, Space, Typography, Spin, message, Popconfirm, Image, Table, List, Modal, Input, Select } from 'antd';
+import { Alert, Card, Descriptions, Tag, Steps, Tabs, Button, Space, Typography, Spin, message, Popconfirm, Image, Table, List, Modal, Input, Select, Empty } from 'antd';
 import {
   ArrowLeftOutlined, PlayCircleOutlined, RedoOutlined,
   PauseOutlined, ReloadOutlined, DeleteOutlined,
   FolderOpenOutlined, FileZipOutlined, InboxOutlined, FileExcelOutlined,
-  CheckOutlined, DragOutlined,
+  CheckOutlined, DragOutlined, CopyOutlined, ExportOutlined,
 } from '@ant-design/icons';
-import { getProduct, startPipeline, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, runPipelineStep, updateProduct, updateProductListingImages, confirmProduct, listCategoryOptions, STEP_LABELS } from '../api';
-import type { CategoryOption, ProductDetail } from '../api';
+import { getProduct, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, updateProduct, updateProductListingImages, confirmProduct, listCategoryOptions, listProductCompetitorCandidates, searchProductCompetitorCandidates, selectProductCompetitorCandidate } from '../api';
+import type { AmazonStyleSnapCandidateGroup, CategoryOption, ProductDetail } from '../api';
 
 const { Title, Text } = Typography;
 const PRODUCT_LIST_RETURN_KEY = 'fbm.productList.returnPath';
@@ -30,8 +30,10 @@ const APLUS_STATUS_LABELS: Record<string, { color: string; text: string }> = {
 /** 将本地文件路径转为后端图片代理URL */
 const imgUrl = (localPath: string | null | undefined) => {
   if (!localPath) return '';
+  if (/^https?:\/\//i.test(String(localPath))) return String(localPath);
   return `/api/images/${localPath}`;
 };
+const isRemoteUrl = (value: string | null | undefined) => /^https?:\/\//i.test(String(value || ''));
 
 const parseJson = (value: string | null | undefined, fallback: any = null) => {
   if (!value) return fallback;
@@ -63,6 +65,15 @@ const fileSize = (bytes: number | null | undefined) => {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 };
+const valueText = (value: string | null | undefined) => value || '-';
+const captureStatusTag = (status: string | null | undefined) => {
+  if (!status) return <Tag>未抓详情</Tag>;
+  if (status === 'captured') return <Tag color="success">已抓详情</Tag>;
+  if (status === 'queued') return <Tag color="processing">等待抓详情</Tag>;
+  if (status === 'running') return <Tag color="processing">抓详情中</Tag>;
+  if (status === 'failed') return <Tag color="error">详情抓取失败</Tag>;
+  return <Tag color="processing">{status}</Tag>;
+};
 
 const ProductDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -76,21 +87,28 @@ const ProductDetail: React.FC = () => {
   const [regenLoading, setRegenLoading] = useState(false);
   const [regenRetryLoading, setRegenRetryLoading] = useState(false);
   const [restartLoading, setRestartLoading] = useState(false);
+  const [activeTabKey, setActiveTabKey] = useState('basic');
   const [categoryEditOpen, setCategoryEditOpen] = useState(false);
   const [categoryOptions, setCategoryOptions] = useState<CategoryOption[]>([]);
   const [selectedCategoryKey, setSelectedCategoryKey] = useState<string | undefined>();
   const [categoryOptionsLoading, setCategoryOptionsLoading] = useState(false);
   const [categorySaving, setCategorySaving] = useState(false);
+  const [competitorModalOpen, setCompetitorModalOpen] = useState(false);
+  const [competitorGroup, setCompetitorGroup] = useState<AmazonStyleSnapCandidateGroup | null>(null);
+  const [competitorLoading, setCompetitorLoading] = useState(false);
+  const [competitorSearchLoading, setCompetitorSearchLoading] = useState(false);
+  const [selectingCompetitorId, setSelectingCompetitorId] = useState<number | null>(null);
   const [listingEditOpen, setListingEditOpen] = useState(false);
   const [listingTitleInput, setListingTitleInput] = useState('');
   const [listingBulletsInput, setListingBulletsInput] = useState('');
+  const [listingDescriptionInput, setListingDescriptionInput] = useState('');
   const [listingSearchTermsInput, setListingSearchTermsInput] = useState('');
   const [listingTitleZhInput, setListingTitleZhInput] = useState('');
   const [listingBulletsZhInput, setListingBulletsZhInput] = useState('');
+  const [listingDescriptionZhInput, setListingDescriptionZhInput] = useState('');
   const [listingSearchTermsZhInput, setListingSearchTermsZhInput] = useState('');
   const [listingPrimaryKeywordInput, setListingPrimaryKeywordInput] = useState('');
   const [listingSaving, setListingSaving] = useState(false);
-  const [amazonTemplateLoading, setAmazonTemplateLoading] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [imageOrderSaving, setImageOrderSaving] = useState(false);
   const [imageDragPayload, setImageDragPayload] = useState<any | null>(null);
@@ -99,11 +117,35 @@ const ProductDetail: React.FC = () => {
   const [listingImageDraftProductId, setListingImageDraftProductId] = useState<number | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  const refreshCompetitorGroupFromProduct = async (detail: ProductDetail) => {
+    const snapshot = parseJson(detail.data?.gigab2b_raw_snapshot, {});
+    const searchStatus = snapshot?.stylesnap_search?.status;
+    const shouldLoadCandidates = Boolean(
+      detail.images?.main_image_path
+      && (
+        searchStatus === 'captured'
+        || detail.status === 'competitor_searching'
+        || detail.competitor_asin
+        || Number(detail.current_step || 0) >= 2
+      )
+    );
+    if (!shouldLoadCandidates) {
+      return;
+    }
+    try {
+      const { data: group } = await listProductCompetitorCandidates(detail.id);
+      setCompetitorGroup(group);
+    } catch {
+      setCompetitorGroup(null);
+    }
+  };
+
   const fetchDetail = async () => {
     if (!id) return;
     try {
       const { data } = await getProduct(Number(id));
       setProduct(data);
+      await refreshCompetitorGroupFromProduct(data);
     } catch {
       message.error('加载失败');
     }
@@ -169,6 +211,11 @@ const ProductDetail: React.FC = () => {
   const aplusFolder = product.aplus_folder;
   const packages = parseJson(data?.packages, []);
   const rawSnapshot = parseJson(data?.gigab2b_raw_snapshot, null);
+  const selectedStyleSnap = rawSnapshot?.selected_stylesnap || null;
+  const amazonListingCapture = rawSnapshot?.amazon_listing_capture || null;
+  const amazonCompetitorBullets = Array.isArray(amazonListingCapture?.bullets)
+    ? amazonListingCapture.bullets.filter((item: any) => String(item || '').trim())
+    : [];
   const exportPreview = product.amazon_export_preview || null;
   const exportPackage = exportPreview?.package_aggregate || null;
   const rawProductDimensions = rawSnapshot?.specification?.product_dimensions?.assemble_info || {};
@@ -178,19 +225,43 @@ const ProductDetail: React.FC = () => {
   const rawQuantity = rawPricing?.quantity || {};
   const features = parseJson(data?.features, []);
   const variants = parseJson(data?.variants, []);
+  const variantAttributeEntries = (value: any) => (
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? Object.entries(value).filter(([key, item]) => String(key || '').trim() && String(item ?? '').trim())
+      : []
+  );
+  const variantImageUrl = (record: any) => record?.main_image_url || record?.image_url || record?.image || '';
+  const renderVariantTags = (value: any, color: string | undefined = undefined, mutedKeys: string[] = []) => {
+    const entries = variantAttributeEntries(value).filter(([key]) => !mutedKeys.includes(String(key)));
+    if (!entries.length) return <Text type="secondary">-</Text>;
+    return (
+      <Space size={[4, 4]} wrap>
+        {entries.map(([key, item]) => (
+          <Tag key={`${key}-${item}`} color={color} style={{ marginInlineEnd: 0 }}>
+            <Text strong style={{ fontSize: 12 }}>{String(key)}: </Text>
+            <span>{String(item)}</span>
+          </Tag>
+        ))}
+      </Space>
+    );
+  };
+  const commonVariantAttributeEntries = (() => {
+    if (!Array.isArray(variants) || variants.length < 2) return [];
+    const variationKeys = new Set<string>();
+    variants.forEach((variant: any) => {
+      variantAttributeEntries(variant?.variation_attributes).forEach(([key]) => variationKeys.add(String(key)));
+    });
+    const firstEntries = variantAttributeEntries(variants[0]?.attributes)
+      .filter(([key]) => !variationKeys.has(String(key)));
+    return firstEntries.filter(([key, value]) => (
+      variants.every((variant: any) => String(variant?.attributes?.[String(key)] ?? '') === String(value ?? ''))
+    ));
+  })();
   const pricingDetail = parseJson(data?.pricing_detail, null);
   const categories = parseJson(data?.categories, []);
   const categoryPath = Array.isArray(categories) ? categories.join(' > ') : (data?.categories || '');
-  const amazonTemplateWarnings = parseJson(data?.amazon_template_warnings, []);
-  const amazonTemplateFillSummary = parseJson(data?.amazon_template_fill_summary, null);
-  const amazonTemplateRisk = amazonTemplateFillSummary?.risk_level || '';
-  const amazonTemplateRiskMap: Record<string, { color: string; label: string }> = {
-    pass: { color: 'success', label: '可复核上传' },
-    warning: { color: 'warning', label: '需复核' },
-    high_risk: { color: 'error', label: '高风险' },
-  };
-  const amazonTemplateRiskDisplay = amazonTemplateRiskMap[amazonTemplateRisk] || { color: 'default', label: '未检查' };
   const generatedFiles = product.generated_files || [];
+  const visibleGeneratedFiles = generatedFiles.filter((file: any) => file?.file_type !== 'amazon_import_template');
   const dimensionLine = (length?: number | string | null, width?: number | string | null, height?: number | string | null, unit = 'in') => (
     length != null && width != null && height != null ? `${length} × ${width} × ${height} ${unit}` : '-'
   );
@@ -215,6 +286,7 @@ const ProductDetail: React.FC = () => {
     reviews: imageReviews.filter((review) => review?.contact_sheet_evidence?.sheet_path === sheet.sheet_path || sheet.image_ids?.includes(review.image_id)),
   }));
   const galleryImagePaths = parseJson(images?.gallery_images, []);
+  const galleryOrderPaths = parseJson((images as any)?.gallery_order, []);
   const galleryOnlyImages = Array.isArray(galleryImagePaths)
     ? galleryImagePaths.filter((item) => {
       const path = normalizeImagePath(item);
@@ -236,6 +308,7 @@ const ProductDetail: React.FC = () => {
     label: index === 0 ? '主图' : `副图 ${index}`,
     meta: imageMetaByPath.get(path) || (index === 0 ? 'manual selected' : 'gallery image'),
   })).filter((item) => item.path);
+  const listingImageCount = selectedListingImages.length || (images?.main_image_path ? 1 + galleryOnlyImages.length : data?.image_count);
   const imageResourceItems = (() => {
     const items: any[] = [];
     const seen = new Set<string>();
@@ -253,14 +326,31 @@ const ProductDetail: React.FC = () => {
       });
     };
     imageReviews.forEach((item: any) => addItem(item));
+    if (Array.isArray(galleryOrderPaths)) {
+      galleryOrderPaths.forEach((item: any, index: number) => {
+        const path = normalizeImagePath(item);
+        addItem({ path }, {
+          image_id: `#${index + 1}`,
+          image_type: index === 0 ? '主图素材' : '副图素材',
+          reason: index === 0 ? '大健 listing 首图' : `大健 listing 第 ${index + 1} 张`,
+        });
+      });
+    }
     selectedListingImages.forEach((item: any) => addItem(item, { image_type: item.label, reason: item.meta }));
     return items;
   })();
+  const selectedListingPathSet = new Set(selectedListingImages.map((item: any) => item.path));
+  const unusedImageResourceItems = imageResourceItems.filter((item: any) => item?.path && !selectedListingPathSet.has(item.path));
   const aplusScriptsPayload = parseJson(aplus?.aplus_scripts, null);
   const aplusScripts = Array.isArray(aplusScriptsPayload?.scripts) ? aplusScriptsPayload.scripts.slice(0, 5) : [];
   const aplusPlanPayload = parseJson(aplus?.aplus_plan, {});
   const aplusPlanModules = Array.isArray(aplusPlanPayload?.modules) ? aplusPlanPayload.modules : [];
   const aplusGeneratedImages = parseJson(aplus?.aplus_images, []);
+  const aplusPlanReady = Boolean(aplus?.aplus_plan);
+  const aplusScriptReady = Boolean(aplus?.aplus_scripts);
+  const aplusImageDoneCount = Array.isArray(aplusGeneratedImages)
+    ? aplusGeneratedImages.filter((item: any) => item?.status === 'done').length
+    : 0;
   const keywordItems = parseJson(data?.keywords_top, []);
   const keywordCopyLine = Array.isArray(keywordItems)
     ? keywordItems
@@ -291,14 +381,27 @@ const ProductDetail: React.FC = () => {
     }
     return refs;
   };
-  const aplusModules = aplusScripts.map((script) => ({
-    script,
-    plan: aplusPlanModules.find((item: any) => item?.position === script?.module_position || item?.module_position === script?.module_position) || {},
-    references: getModuleReferenceImages(script),
-    generated: Array.isArray(aplusGeneratedImages)
-      ? aplusGeneratedImages.find((img) => img?.position === script?.module_position)
-      : null,
-  }));
+  const aplusModulePositions = Array.from(new Set([
+    ...aplusPlanModules.map((item: any) => item?.position || item?.module_position),
+    ...aplusScripts.map((item: any) => item?.module_position || item?.position),
+    ...(Array.isArray(aplusGeneratedImages) ? aplusGeneratedImages.map((item: any) => item?.position || item?.module_position) : []),
+  ].filter(Boolean))).sort((a: any, b: any) => Number(a) - Number(b));
+  const aplusModules = aplusModulePositions.map((position: any) => {
+    const plan = aplusPlanModules.find((item: any) => item?.position === position || item?.module_position === position) || {};
+    const script = aplusScripts.find((item: any) => item?.module_position === position || item?.position === position) || {
+      module_position: position,
+    };
+    return {
+      position,
+      plan,
+      script,
+      hasScript: Boolean(script?.prompt),
+      references: getModuleReferenceImages(script),
+      generated: Array.isArray(aplusGeneratedImages)
+        ? aplusGeneratedImages.find((img) => img?.position === position || img?.module_position === position)
+        : null,
+    };
+  });
   const listingCheck = parseJson(data?.listing_check, {});
   const keywordPlan = listingCheck?.keyword_plan || {};
   const positioning = listingCheck?.positioning || {};
@@ -335,6 +438,8 @@ const ProductDetail: React.FC = () => {
       kind: '主图',
       label: '选定主图',
       path: images.main_image_path,
+      url: images.main_image_path,
+      previewable: true,
       meta: images?.main_image_source || 'main image',
     },
     ...galleryOnlyImages.map((item, index) => {
@@ -344,6 +449,8 @@ const ProductDetail: React.FC = () => {
         kind: '副图',
         label: `副图 ${index + 1}`,
         path,
+        url: path,
+        previewable: true,
         meta: typeof item === 'string' ? 'gallery image' : (item?.role || item?.label || 'gallery image'),
       };
     }),
@@ -352,14 +459,24 @@ const ProductDetail: React.FC = () => {
       kind: '分析图',
       label: `Contact Sheet ${sheet.sheet_page || index + 1}`,
       path: sheet.sheet_path,
+      url: imgUrl(sheet.sheet_path),
+      localPath: sheet.sheet_path,
+      previewable: true,
       meta: `${sheet.image_ids?.length || 0} 张图`,
     }),
-    ...(Array.isArray(aplusGeneratedImages) ? aplusGeneratedImages.map((item, index) => item?.path && {
-      key: `aplus-image-${index}-${item.path}`,
-      kind: 'A+图片',
-      label: `A+ 模块 ${item.position || index + 1}`,
-      path: item.path,
-      meta: item.status || fileSize(item.size),
+    ...(Array.isArray(aplusGeneratedImages) ? aplusGeneratedImages.map((item, index) => {
+      const displayUrl = item?.display_url || item?.url || item?.oss_url || item?.provider_url || item?.path;
+      return displayUrl && {
+        key: `aplus-image-${index}-${displayUrl}`,
+        kind: 'A+图片',
+        label: `A+ 模块 ${item.position || index + 1}`,
+        path: displayUrl,
+        url: displayUrl,
+        oss_url: item?.oss_url,
+        localPath: item?.path,
+        previewable: true,
+        meta: item?.oss_url ? 'OSS' : (item?.status || fileSize(item?.size)),
+      };
     }) : []),
   ].filter(Boolean);
 
@@ -370,6 +487,122 @@ const ProductDetail: React.FC = () => {
     } catch {
       message.error('打开失败');
     }
+  };
+
+  const copyText = async (value?: string | null) => {
+    const text = String(value || '').trim();
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      message.success('已复制');
+    } catch {
+      message.error('复制失败');
+    }
+  };
+
+  const loadCompetitorCandidates = async (silent = false) => {
+    setCompetitorLoading(true);
+    try {
+      const { data: group } = await listProductCompetitorCandidates(product.id);
+      setCompetitorGroup(group);
+    } catch (error: any) {
+      setCompetitorGroup(null);
+      if (!silent) message.error(error?.response?.data?.detail || '加载候选竞品失败');
+    } finally {
+      setCompetitorLoading(false);
+    }
+  };
+
+  const searchCompetitorCandidates = async (force = false) => {
+    setCompetitorSearchLoading(true);
+    message.loading({ content: '正在启动 Amazon StyleSnap 同款搜索', key: 'competitor-search', duration: 0 });
+    try {
+      await searchProductCompetitorCandidates(product.id, force);
+      message.success({ content: '已提交同款搜索，Chrome 会在后台用主图搜索 Amazon', key: 'competitor-search' });
+      await fetchDetail();
+      if (!force) {
+        try {
+          const { data: group } = await listProductCompetitorCandidates(product.id);
+          setCompetitorGroup(group);
+        } catch {
+          setCompetitorGroup(null);
+        }
+      }
+    } catch (error: any) {
+      message.destroy('competitor-search');
+      message.error(error?.response?.data?.detail || '启动同款搜索失败');
+    } finally {
+      setCompetitorSearchLoading(false);
+    }
+  };
+
+  const chooseCompetitorCandidate = async (candidate: any) => {
+    const selectedId = competitorGroup?.selected_candidate_id;
+    const isSwitching = selectedId && selectedId !== candidate.id;
+    const forceCapture = selectedId === candidate.id || candidate.listing_capture_status === 'failed';
+    const hasDownstreamOutput = hasListingContent || hasListingImages || hasImageAnalysis || hasAplusOutput || product.current_step >= 5;
+    const doSelect = async () => {
+      setSelectingCompetitorId(candidate.id);
+      message.loading({ content: '正在提交选择，竞品详情抓取会在后台执行', key: 'competitor-select', duration: 0 });
+      try {
+        const { data: group } = await selectProductCompetitorCandidate(product.id, candidate.id, forceCapture);
+        setCompetitorGroup(group);
+        message.success({ content: `${forceCapture ? '已重新提交' : '已选择'}参考竞品 ${candidate.asin}，竞品详情抓取已转后台执行`, key: 'competitor-select' });
+        await fetchDetail();
+      } catch (error: any) {
+        message.destroy('competitor-select');
+        message.error(error?.response?.data?.detail || '选择竞品失败');
+      } finally {
+        setSelectingCompetitorId(null);
+      }
+    };
+    if (isSwitching && hasDownstreamOutput) {
+      Modal.confirm({
+        title: '确认切换参考竞品？',
+        content: '切换后会记录新的 ASIN，并在后台抓取这个竞品的详情页。当前商品后续的 Listing 文案、图片分析、A+ 需要重新生成。',
+        okText: '切换并抓详情',
+        cancelText: '取消',
+        onOk: doSelect,
+      });
+      return;
+    }
+    if (forceCapture && hasDownstreamOutput) {
+      Modal.confirm({
+        title: '确认重新抓取竞品详情？',
+        content: '重新抓取后会刷新选中竞品的标题、五点、描述、类目等参考数据；后续生成内容需要重新确认或重跑。',
+        okText: '重新抓详情',
+        cancelText: '取消',
+        onOk: doSelect,
+      });
+      return;
+    }
+    await doSelect();
+  };
+
+  const retrySelectedCompetitorCapture = async () => {
+    const selectedId = competitorGroup?.selected_candidate_id || rawSnapshot?.selected_stylesnap?.candidate_id;
+    let group = competitorGroup;
+    if (!group) {
+      setCompetitorLoading(true);
+      try {
+        const { data } = await listProductCompetitorCandidates(product.id);
+        group = data;
+        setCompetitorGroup(data);
+      } catch (error: any) {
+        message.error(error?.response?.data?.detail || '加载候选竞品失败，无法重新抓取');
+        return;
+      } finally {
+        setCompetitorLoading(false);
+      }
+    }
+    const selected = group?.candidates?.find((candidate: any) => (
+      candidate.id === selectedId || candidate.is_selected === 1
+    ));
+    if (!selected) {
+      message.warning('当前未找到已选竞品，请先在候选竞品中选择一个');
+      return;
+    }
+    await chooseCompetitorCandidate({ ...selected, listing_capture_status: 'failed' });
   };
 
   const extractZip = async (path: string) => {
@@ -419,19 +652,6 @@ const ProductDetail: React.FC = () => {
     }
   };
 
-  const generateAmazonTemplate = async () => {
-    setAmazonTemplateLoading(true);
-    try {
-      await runPipelineStep(product.id, 10);
-      message.success(data?.amazon_template_path ? '导入表格已重新生成' : '导入表格已生成');
-      await fetchDetail();
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || '导入表格生成失败');
-    } finally {
-      setAmazonTemplateLoading(false);
-    }
-  };
-
   const setDraftListingImagePaths = (paths: string[]) => {
     setListingImageDraftPaths(paths.filter((path, index) => path && paths.indexOf(path) === index));
     setListingImageDirty(true);
@@ -446,7 +666,7 @@ const ProductDetail: React.FC = () => {
         main_image_path: orderedPaths[0],
         gallery_images: orderedPaths.slice(1),
       });
-      message.success('主图/副图已保存');
+      message.success('商品图片已确认');
       setListingImageDirty(false);
       await fetchDetail();
     } catch (e: any) {
@@ -487,6 +707,7 @@ const ProductDetail: React.FC = () => {
 
   const replaceListingImageSlot = (event: React.DragEvent, toIndex: number) => {
     event.preventDefault();
+    event.stopPropagation();
     const payload = dragPayloadFromEvent(event);
     if (!payload) return;
     if (payload.source === 'selected') {
@@ -495,12 +716,37 @@ const ProductDetail: React.FC = () => {
     }
     const nextPaths = selectedListingImages.map((item: any) => item?.path).filter(Boolean);
     const nextPath = payload.path;
-    if (!nextPath || nextPaths[toIndex] === nextPath) {
+    if (!nextPath) {
       setImageDragPayload(null);
       return;
     }
-    nextPaths[toIndex] = nextPath;
-    setDraftListingImagePaths(nextPaths.filter((path, index) => nextPaths.indexOf(path) === index));
+    const withoutDragged = nextPaths.filter((path) => path !== nextPath);
+    withoutDragged.splice(Math.min(toIndex, withoutDragged.length), 0, nextPath);
+    setDraftListingImagePaths(withoutDragged);
+    setImageDragPayload(null);
+  };
+
+  const dropListingImageToSelected = (event: React.DragEvent) => {
+    event.preventDefault();
+    const payload = dragPayloadFromEvent(event);
+    if (!payload) return;
+    if (payload.source === 'pool' && payload.path) {
+      const nextPaths = selectedListingImages.map((item: any) => item?.path).filter(Boolean);
+      setDraftListingImagePaths([...nextPaths.filter((path) => path !== payload.path), payload.path]);
+    }
+    setImageDragPayload(null);
+  };
+
+  const dropListingImageToUnusedPool = (event: React.DragEvent) => {
+    event.preventDefault();
+    const payload = dragPayloadFromEvent(event);
+    if (!payload) return;
+    if (payload.source === 'selected') {
+      const nextPaths = selectedListingImages
+        .map((item: any) => item?.path)
+        .filter((path) => path && path !== payload.path);
+      setDraftListingImagePaths(nextPaths);
+    }
     setImageDragPayload(null);
   };
 
@@ -514,6 +760,20 @@ const ProductDetail: React.FC = () => {
     nextImages.splice(toIndex, 0, moved);
     saveListingImageOrder(nextImages);
     setImageDragPayload(null);
+  };
+
+  const addListingImageFromPool = (path: string | null | undefined) => {
+    if (imageOrderSaving || !path) return;
+    const nextPaths = selectedListingImages.map((item: any) => item?.path).filter(Boolean);
+    setDraftListingImagePaths([...nextPaths.filter((itemPath) => itemPath !== path), path]);
+  };
+
+  const removeListingImageFromSelected = (path: string | null | undefined) => {
+    if (imageOrderSaving || !path) return;
+    const nextPaths = selectedListingImages
+      .map((item: any) => item?.path)
+      .filter((itemPath) => itemPath && itemPath !== path);
+    setDraftListingImagePaths(nextPaths);
   };
 
   const openCategoryEditor = async () => {
@@ -562,9 +822,11 @@ const ProductDetail: React.FC = () => {
   const openListingEditor = () => {
     setListingTitleInput(data?.listing_title || '');
     setListingBulletsInput(parseJson(data?.listing_bullets, []).join('\n'));
+    setListingDescriptionInput(data?.listing_description || '');
     setListingSearchTermsInput(data?.listing_search_terms || '');
     setListingTitleZhInput(data?.listing_title_zh || '');
     setListingBulletsZhInput(parseJson(data?.listing_bullets_zh, []).join('\n'));
+    setListingDescriptionZhInput(data?.listing_description_zh || '');
     setListingSearchTermsZhInput(data?.listing_search_terms_zh || '');
     setListingPrimaryKeywordInput((data?.listing_primary_keyword as string) || '');
     setListingEditOpen(true);
@@ -580,9 +842,11 @@ const ProductDetail: React.FC = () => {
       await updateProduct(product.id, {
         listing_title: listingTitleInput.trim(),
         listing_bullets: listingBulletsInput,
+        listing_description: listingDescriptionInput.trim(),
         listing_search_terms: listingSearchTermsInput.trim(),
         listing_title_zh: listingTitleZhInput.trim(),
         listing_bullets_zh: listingBulletsZhInput,
+        listing_description_zh: listingDescriptionZhInput.trim(),
         listing_search_terms_zh: listingSearchTermsZhInput.trim(),
         listing_primary_keyword: listingPrimaryKeywordInput.trim(),
       });
@@ -667,13 +931,10 @@ const ProductDetail: React.FC = () => {
     ) },
     { title: '类型', dataIndex: 'file_type', width: 160, render: (value) => <Tag>{value}</Tag> },
     { title: '更新时间', dataIndex: 'updated_at', width: 180, render: (value) => value ? new Date(value).toLocaleString('zh-CN') : '-' },
-    { title: '操作', width: 320, render: (_, record) => (
+    { title: '操作', width: 240, render: (_, record) => (
       <Space size="small">
         <Button size="small" icon={<FileExcelOutlined />} onClick={() => openPath(record.path)}>打开文件</Button>
         <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(record.path, true)}>打开文件夹</Button>
-        {record.file_type === 'amazon_import_template' && (
-          <Button size="small" icon={<ReloadOutlined />} loading={amazonTemplateLoading} onClick={generateAmazonTemplate}>重新生成</Button>
-        )}
       </Space>
     ) },
   ];
@@ -682,55 +943,296 @@ const ProductDetail: React.FC = () => {
     { title: '分类', dataIndex: 'kind', width: 110, render: (value) => <Tag>{value}</Tag> },
     { title: '名称', dataIndex: 'label', width: 180, render: (value) => <Text strong>{value}</Text> },
     {
-      title: '路径',
+      title: '资源',
       dataIndex: 'path',
-      ellipsis: true,
-      render: (value) => <Text copyable style={{ maxWidth: '100%' }}>{value || '-'}</Text>,
+      render: (value, record) => {
+        const resourceUrl = record.url || record.displayUrl || value;
+        if (record.previewable && resourceUrl) {
+          return (
+            <Space align="start">
+              <Image
+                src={imgUrl(resourceUrl)}
+                width={76}
+                height={56}
+                alt={record.label}
+                style={{ objectFit: 'cover', borderRadius: 4, border: '1px solid #eee' }}
+              />
+              <Space direction="vertical" size={2} style={{ maxWidth: 520 }}>
+                <Text copyable style={{ fontSize: 12 }} ellipsis>
+                  {resourceUrl}
+                </Text>
+                {record.oss_url && <Tag color="success">OSS</Tag>}
+              </Space>
+            </Space>
+          );
+        }
+        return <Text copyable style={{ maxWidth: '100%' }}>{value || '-'}</Text>;
+      },
     },
     { title: '说明', dataIndex: 'meta', width: 180, render: (value) => value || '-' },
     {
       title: '操作',
       width: 220,
-      render: (_, record) => (
-        <Space size="small">
-          <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(record.path, record.directory)}>打开</Button>
-          {!record.directory && <Button size="small" onClick={() => openPath(record.path, true)}>文件夹</Button>}
-        </Space>
-      ),
+      render: (_, record) => {
+        const resourceUrl = record.url || record.displayUrl || record.path;
+        const localPath = record.localPath || (!isRemoteUrl(record.path) ? record.path : null);
+        return (
+          <Space size="small">
+            {isRemoteUrl(resourceUrl) ? (
+              <Button size="small" icon={<ExportOutlined />} onClick={() => window.open(resourceUrl, '_blank', 'noopener,noreferrer')}>
+                打开URL
+              </Button>
+            ) : (
+              <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(record.path, record.directory)}>打开</Button>
+            )}
+            {localPath && !record.directory && <Button size="small" onClick={() => openPath(localPath, true)}>文件夹</Button>}
+          </Space>
+        );
+      },
     },
   ];
 
-  // Pipeline Steps
-  const pipelineSteps = [
-    { title: '采集', description: STEP_LABELS[1] },
-    { title: '计算', description: STEP_LABELS[2] },
-    { title: '关键词+类目', description: `${STEP_LABELS[3]} & ${STEP_LABELS[4]}` },
-    { title: 'Listing', description: STEP_LABELS[5] },
-    { title: '主图', description: STEP_LABELS[6] },
-    { title: 'A+规划', description: STEP_LABELS[7] },
-    { title: 'A+脚本', description: STEP_LABELS[8] },
-    { title: 'A+出图', description: STEP_LABELS[9] },
-    { title: '导入表格', description: STEP_LABELS[10] },
-  ];
-
-  // 当前步骤映射到 Steps 组件的 index
-  const currentStepIndex = (() => {
-    const s = product.current_step;
-    if (s <= 1) return 0;
-    if (s === 2) return 1;
-    if (s <= 4) return 2;
-    if (s === 5) return 3;
-    if (s === 6) return 4;
-    if (s === 7) return 5;
-    if (s === 8) return 6;
-    if (s === 9) return 7;
-    if (s === 10) return 8;
-    return 8; // completed
-  })();
-
   const stoppedStatuses = ['failed', 'unavailable', 'source_unavailable'];
   const stepStatus = stoppedStatuses.includes(product.status) ? 'error' : ['completed', 'pending_review'].includes(product.status) ? 'finish' : 'process';
+  const isStopped = stoppedStatuses.includes(product.status);
+  const isPaused = product.status === 'paused';
+  const isReadyToExport = ['completed', 'pending_review'].includes(product.status) && product.current_step >= 9;
+  const stylesnapSearch = rawSnapshot?.stylesnap_search || {};
+  const stylesnapSearchStatus = stylesnapSearch?.status || '';
+  const competitorCandidateCount = competitorGroup?.candidates?.length || Number(stylesnapSearch?.count || 0);
+  const referenceAsin = selectedStyleSnap?.asin || product.competitor_asin || '';
+  const hasConfirmedSearchImage = Boolean(
+    images?.main_image_path
+    || selectedStyleSnap?.source_image_path
+  );
+  const hasReferenceCompetitor = Boolean(referenceAsin);
+  const isCompetitorSearching = product.status === 'competitor_searching';
+  const isCompetitorSearchFailed = Boolean(
+    stylesnapSearchStatus === 'failed'
+    || (product.status === 'failed' && /同款搜索|StyleSnap/i.test(product.error_message || ''))
+  );
+  const hasCompetitorCandidates = Boolean(
+    competitorCandidateCount > 0
+    && !isCompetitorSearching
+    && !isCompetitorSearchFailed
+  );
+  const isLegacyGigaBrowserCollectError = Boolean(
+    product.status === 'failed'
+    && Number(product.current_step || 0) <= 1
+    && /大健商品核心信息采集失败|index\.php\?route=product\/product|Step1 浏览器采集已停用/.test(product.error_message || '')
+  );
+  const productErrorMessage = isLegacyGigaBrowserCollectError
+    ? '旧浏览器采集已停用。请回到商品工作台或任务中心，通过店铺/OpenAPI 同步商品源数据。'
+    : product.error_message;
+  const failedStep = Number(product.current_step || 0);
+  const listingCaptureErrorPattern = /竞品详情|竞品 Listing|Amazon Listing 详情|Amazon Listing 抓取|抓取选中竞品|选中竞品.*抓取|Amazon.*详情抓取/i;
+  const isImageAnalysisPrerequisiteFailed = Boolean(
+    product.status === 'failed'
+    && /图片分析节点未完成|不能进入 Listing 文案/.test(product.error_message || '')
+  );
+  const isListingCaptureFailed = Boolean(
+    amazonListingCapture?.status === 'failed'
+    || (
+      product.status === 'failed'
+      && !isImageAnalysisPrerequisiteFailed
+      && listingCaptureErrorPattern.test(product.error_message || '')
+    )
+  );
+  const isImageAnalysisFailed = Boolean(
+    isImageAnalysisPrerequisiteFailed
+    || (
+      product.status === 'failed'
+      && failedStep === 5
+      && !isListingCaptureFailed
+    )
+  );
+  const isHardStopped = isStopped && !isCompetitorSearchFailed && !isListingCaptureFailed && !isImageAnalysisFailed;
+  const isListingCaptureRunning = Boolean(
+    product.status === 'step5_listing'
+    && /竞品.*抓取中|Listing.*抓取中/i.test(product.error_message || '')
+  );
+  const showTopProductError = Boolean(
+    productErrorMessage
+    && !isListingCaptureFailed
+    && !isListingCaptureRunning
+  );
+  const hasListingCapture = Boolean(
+    amazonListingCapture?.status === 'captured'
+    || (amazonListingCapture?.title && amazonListingCapture?.status !== 'failed')
+  );
+  const hasListingContent = Boolean(
+    data?.listing_title
+    || data?.listing_bullets
+    || data?.listing_search_terms
+    || data?.listing_description_zh
+  );
+  const hasListingImages = Boolean(images?.main_image_path);
+  const hasImageAnalysis = Boolean(
+    images?.image_analysis
+    || images?.image_selling_points
+    || contactSheets.length
+    || product.current_step > 5
+    || isReadyToExport
+  );
+  const hasAplusOutput = Boolean(
+    aplus?.aplus_status === 'done'
+    || aplus?.aplus_status === 'regen_done'
+    || product.current_step >= 9
+    || (Array.isArray(aplusGeneratedImages) && aplusGeneratedImages.length)
+  );
+  const aplusProgressText = [
+    aplusPlanReady ? '规划已完成' : '待规划',
+    aplusScriptReady ? '脚本已完成' : '待脚本',
+    aplusImageDoneCount ? `出图 ${aplusImageDoneCount}/5` : '待出图',
+  ].join('，');
+  const statusSuffix = isPaused ? '，已挂起' : '';
+  const nodeErrorAt = (node: string) => {
+    if (isCompetitorSearchFailed) return node === 'find-competitors';
+    if (isListingCaptureFailed) return node === 'capture-competitor-detail';
+    if (isImageAnalysisFailed) return node === 'image-analysis';
+    if (!isStopped) return false;
+    const step = failedStep;
+    if (node === 'find-competitors') return step <= 2;
+    if (node === 'choose-competitor') return step <= 4;
+    if (node === 'capture-competitor-detail') return step <= 4;
+    if (node === 'image-analysis') return step === 5;
+    if (node === 'listing') return step === 6;
+    if (node === 'aplus') return step >= 7;
+    return false;
+  };
+  const nodeActiveAt = (node: string) => {
+    if (isHardStopped || isReadyToExport) return false;
+    const step = Number(product.current_step || 0);
+    if (node === 'search-image') return !hasConfirmedSearchImage;
+    if (node === 'find-competitors') return isCompetitorSearching || (hasConfirmedSearchImage && !hasReferenceCompetitor && !hasCompetitorCandidates && !isCompetitorSearchFailed);
+    if (node === 'choose-competitor') return hasConfirmedSearchImage && !hasReferenceCompetitor && hasCompetitorCandidates;
+    if (node === 'capture-competitor-detail') return isListingCaptureRunning || (hasReferenceCompetitor && !hasListingCapture);
+    if (node === 'image-analysis') return !isListingCaptureRunning && hasListingCapture && hasListingImages && !hasImageAnalysis;
+    if (node === 'listing') return !isListingCaptureRunning && hasReferenceCompetitor && hasListingCapture && hasImageAnalysis && !hasListingContent;
+    if (node === 'aplus') return step >= 7 && step <= 9 && !hasAplusOutput;
+    if (node === 'export') return ['completed', 'pending_review'].includes(product.status);
+    return false;
+  };
+  const toWorkflowItem = (item: any) => ({
+    title: item.title,
+    description: item.description,
+    status: item.error ? 'error' : item.done ? 'finish' : item.active ? 'process' : 'wait',
+  });
+
+  // 商品详情页展示业务节点，不再展示旧的内部技术 Pipeline。
+  const pipelineSteps = [
+    {
+      title: '确认商品图片',
+      description: hasConfirmedSearchImage ? `已确认主图和 Listing 图片，已选 ${listingImageCount || 1} 张` : `等待确认主图和 Listing 图片${statusSuffix}`,
+      done: hasConfirmedSearchImage || hasReferenceCompetitor || hasListingCapture || product.current_step >= 5,
+      active: nodeActiveAt('search-image'),
+    },
+    {
+      title: '搜索候选竞品',
+      description: isCompetitorSearchFailed
+        ? (stylesnapSearch?.error || product.error_message || 'Amazon 同款搜索失败，可重新搜索候选')
+        : isCompetitorSearching
+          ? (product.error_message || '正在用主图搜索 Amazon 同款')
+        : hasReferenceCompetitor
+          ? '已完成候选搜索，可重新搜索候选'
+          : hasCompetitorCandidates
+            ? `已找到 ${competitorCandidateCount} 个候选；不合适可重新搜索候选`
+            : hasConfirmedSearchImage
+              ? `等待用主图搜索 Amazon 同款${statusSuffix}`
+              : `等待先确认商品图片${statusSuffix}`,
+      done: (hasReferenceCompetitor || hasCompetitorCandidates || hasListingCapture) && !isCompetitorSearchFailed && !isCompetitorSearching,
+      active: nodeActiveAt('find-competitors'),
+      error: nodeErrorAt('find-competitors'),
+    },
+    {
+      title: '选择竞品',
+      description: referenceAsin
+        ? `已选参考竞品 ${referenceAsin}`
+        : hasCompetitorCandidates
+          ? `等待从 ${competitorCandidateCount} 个候选中选择一个竞品${statusSuffix}`
+          : `等待先搜索候选竞品${statusSuffix}`,
+      done: hasReferenceCompetitor,
+      active: nodeActiveAt('choose-competitor'),
+      error: nodeErrorAt('choose-competitor') && !hasReferenceCompetitor,
+    },
+    {
+      title: '抓取竞品详情',
+      description: isListingCaptureFailed
+        ? (amazonListingCapture?.capture_error || product.error_message || '竞品详情抓取失败')
+        : isListingCaptureRunning
+          ? (product.error_message || '正在抓取选中竞品详情')
+          : hasListingCapture
+            ? '已抓取选中竞品的标题、五点、描述、类目和图片链接'
+            : hasReferenceCompetitor
+              ? `等待抓取选中竞品详情${statusSuffix}`
+              : hasCompetitorCandidates
+                ? `等待先选择竞品${statusSuffix}`
+                : `等待先搜索并选择竞品${statusSuffix}`,
+      done: hasListingCapture && !isListingCaptureFailed && !isListingCaptureRunning,
+      active: nodeActiveAt('capture-competitor-detail'),
+      error: nodeErrorAt('capture-competitor-detail'),
+    },
+    {
+      title: '图片分析',
+      description: isImageAnalysisFailed
+        ? (product.error_message || '图片分析未完成，请重试当前节点')
+        : hasImageAnalysis ? '图片分析和卖点提取已完成' : `等待分析主图、副图和图片卖点${statusSuffix}`,
+      done: hasImageAnalysis,
+      active: nodeActiveAt('image-analysis'),
+      error: nodeErrorAt('image-analysis'),
+    },
+    {
+      title: 'Listing文案',
+      description: hasListingContent
+        ? '标题、五点、描述已生成'
+        : hasListingCapture
+          ? `竞品详情已抓取，等待结合图片分析生成文案${statusSuffix}`
+          : `等待竞品详情抓取完成${statusSuffix}`,
+      done: hasListingContent || product.current_step > 6 || isReadyToExport,
+      active: nodeActiveAt('listing'),
+      error: nodeErrorAt('listing'),
+    },
+    {
+      title: 'A+规划/脚本/出图',
+      description: `${aplusProgressText}${isAplusRegenerating && aplusStatus ? `，${aplusStatus.text}` : statusSuffix}`,
+      done: hasAplusOutput || isReadyToExport,
+      active: nodeActiveAt('aplus') || isAplusRegenerating,
+      error: nodeErrorAt('aplus') || canRetryAplusRegeneration,
+    },
+    {
+      title: '待导出',
+      description: isReadyToExport ? '已具备导出条件' : '等待生成结果通过复核',
+      done: isReadyToExport,
+      active: nodeActiveAt('export'),
+    },
+  ].map(toWorkflowItem);
+
+  const currentStepIndex = (() => {
+    const activeIndex = pipelineSteps.findIndex((item) => item.status === 'process' || item.status === 'error');
+    if (activeIndex >= 0) return activeIndex;
+    const firstWaitingIndex = pipelineSteps.findIndex((item) => item.status === 'wait');
+    if (firstWaitingIndex >= 0) return firstWaitingIndex;
+    return pipelineSteps.length - 1;
+  })();
+
   const isPipelineRunning = !['completed', 'pending_review', 'failed', 'unavailable', 'source_unavailable', 'created', 'paused'].includes(product.status);
+  const canSuspendProduct = product.status !== 'paused'
+    && !['completed', 'unavailable', 'source_unavailable'].includes(product.status)
+    && !(product.status === 'pending_review' && product.current_step >= 9);
+  const canOperateCompetitor = product.status !== 'completed'
+    && !isListingCaptureRunning
+    && (!isPipelineRunning || isListingCaptureFailed);
+  const canSwitchCompetitor = canOperateCompetitor;
+  const competitorCandidateActionDisabled = Boolean(selectingCompetitorId)
+    || !canSwitchCompetitor
+    || isCompetitorSearching
+    || isListingCaptureRunning;
+  const competitorCandidateButtonText = (selected: boolean) => {
+    if (isListingCaptureRunning && selected) return '抓取中';
+    return selected ? '重新抓详情' : '选择并抓详情';
+  };
+  const shouldForceCompetitorSearch = Boolean(hasCompetitorCandidates || isCompetitorSearchFailed || hasReferenceCompetitor);
+  const competitorSearchButtonText = shouldForceCompetitorSearch ? '重新搜索候选' : '搜索候选';
 
   // 安全解析JSON
   const tabItems = [
@@ -739,152 +1241,142 @@ const ProductDetail: React.FC = () => {
       label: '📋 基本信息',
       children: (
         <div>
-          <Descriptions
-            bordered
-            className="basic-info-descriptions"
-            column={{ xs: 1, sm: 1, md: 2 }}
-            size="small"
-            style={{ marginBottom: 16 }}
-          >
-            <Descriptions.Item label="来源商品ID">{product.source_item_id || product.gigab2b_product_id || '-'}</Descriptions.Item>
-            <Descriptions.Item label="商品Code">{data?.item_code || '-'}</Descriptions.Item>
-            <Descriptions.Item label="原始数据链接" span={2}>
-              {product.source_url || product.gigab2b_url ? (
-                <Typography.Link href={product.source_url || product.gigab2b_url} target="_blank" copyable>
-                  {product.source_url || product.gigab2b_url}
-                </Typography.Link>
-              ) : '-'}
-            </Descriptions.Item>
-            <Descriptions.Item label="竞品 ASIN">{product.competitor_asin || '-'}</Descriptions.Item>
-            <Descriptions.Item label="真实 ASIN">{product.amazon_asin || '-'}</Descriptions.Item>
-            <Descriptions.Item label="UPC">{product.upc || '-'}</Descriptions.Item>
-            <Descriptions.Item label="ASIN同步状态">
-              {product.amazon_asin ? <Tag color="success">已同步</Tag> : product.asin_sync_status === 'not_found' ? <Tag color="warning">未查到</Tag> : product.asin_sync_status === 'failed' ? <Tag color="error">失败</Tag> : product.asin_sync_status === 'pending' || product.asin_sync_status === 'running' ? <Tag color="processing">同步中</Tag> : <Tag>未同步</Tag>}
-            </Descriptions.Item>
-            <Descriptions.Item label="亚马逊商品状态">
-              {product.amazon_product_status ? <Tag color={String(product.amazon_product_status).includes('售') ? 'success' : 'warning'}>{product.amazon_product_status}</Tag> : '-'}
-            </Descriptions.Item>
-            <Descriptions.Item label="品牌">{product.brand || '-'}</Descriptions.Item>
-            {product.asin_sync_error && <Descriptions.Item label="ASIN同步信息" span={2}>{product.asin_sync_error}</Descriptions.Item>}
-            {product.amazon_product_status_error && <Descriptions.Item label="亚马逊商品状态同步信息" span={2}>{product.amazon_product_status_error}</Descriptions.Item>}
-            <Descriptions.Item label="Amazon类目" span={2}>
-              <Space>
-                <span>{categoryPath || '-'}</span>
-                <Button size="small" onClick={openCategoryEditor}>编辑类目</Button>
-              </Space>
-            </Descriptions.Item>
-            <Descriptions.Item label="叶子类目">{data?.leaf_category || '-'}</Descriptions.Item>
-            <Descriptions.Item label="标题" span={2}>{data?.title || '-'}</Descriptions.Item>
-            <Descriptions.Item label="颜色">{data?.color || '-'}</Descriptions.Item>
-            <Descriptions.Item label="材质">{data?.material || '-'}</Descriptions.Item>
-            <Descriptions.Item label="填充物">{data?.filler || '-'}</Descriptions.Item>
-            <Descriptions.Item label="产品类型">{data?.product_type || '-'}</Descriptions.Item>
-            <Descriptions.Item label="组装尺寸">{data ? `${numberText(data.dimension_length)} × ${numberText(data.dimension_width)} × ${numberText(data.dimension_height)} 英寸` : '-'}</Descriptions.Item>
-            <Descriptions.Item label="产品重量">{numberText(data?.weight, ' 磅')}</Descriptions.Item>
-            <Descriptions.Item label="货值">{money(data?.value_total)}</Descriptions.Item>
-            <Descriptions.Item label="含运费成本">{money(data?.estimated_total)}</Descriptions.Item>
-            <Descriptions.Item label="一件代发物流费">{money(data?.shipping_cost)}</Descriptions.Item>
-            <Descriptions.Item label="云送仓物流费">{data?.shipping_cost_min != null || data?.shipping_cost_max != null ? `${money(data?.shipping_cost_min)} - ${money(data?.shipping_cost_max)}` : '-'}</Descriptions.Item>
-            <Descriptions.Item label="建议售价">{money(data?.suggested_price)}</Descriptions.Item>
-            <Descriptions.Item label="总成本">{money(data?.cost_total)}</Descriptions.Item>
-            <Descriptions.Item label="利润">{money(data?.profit)}</Descriptions.Item>
-            <Descriptions.Item label="净利率">{data?.profit_rate != null ? `${data.profit_rate.toFixed(1)}%` : '-'}</Descriptions.Item>
-            {pricingDetail && (
-              <>
-                <Descriptions.Item label="定价依据">
-                  {pricingDetail.selected_rule === 'target_margin' ? '目标净利率' : '最低利润'}
+          <Card title="商品摘要" size="small" style={{ marginBottom: 16 }}>
+            <Space direction="vertical" style={{ width: '100%' }} size={12}>
+              <div>
+                <Text type="secondary">商品标题</Text>
+                <Typography.Paragraph
+                  style={{ marginBottom: 0, marginTop: 4, fontWeight: 500 }}
+                  ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}
+                >
+                  {data?.title || '-'}
+                </Typography.Paragraph>
+              </div>
+              <div>
+                <Text type="secondary">Amazon类目</Text>
+                <Space style={{ marginTop: 4 }} wrap>
+                  <Typography.Paragraph style={{ marginBottom: 0 }} ellipsis={{ rows: 1, expandable: true, symbol: '展开' }}>
+                    {categoryPath || '-'}
+                  </Typography.Paragraph>
+                  <Button size="small" onClick={openCategoryEditor}>编辑类目</Button>
+                </Space>
+              </div>
+              <Descriptions
+                bordered
+                className="basic-info-descriptions"
+                column={{ xs: 1, sm: 1, md: 3 }}
+                size="small"
+              >
+                <Descriptions.Item label="来源商品ID">{product.source_item_id || product.gigab2b_product_id || '-'}</Descriptions.Item>
+                <Descriptions.Item label="商品Code">{data?.item_code || '-'}</Descriptions.Item>
+                <Descriptions.Item label="品牌">{product.brand || '-'}</Descriptions.Item>
+                <Descriptions.Item label="UPC">{product.upc || '-'}</Descriptions.Item>
+                <Descriptions.Item label="竞品 ASIN">{product.competitor_asin || '-'}</Descriptions.Item>
+                <Descriptions.Item label="真实 ASIN">{product.amazon_asin || '-'}</Descriptions.Item>
+                <Descriptions.Item label="颜色">{data?.color || '-'}</Descriptions.Item>
+                <Descriptions.Item label="材质">{data?.material || '-'}</Descriptions.Item>
+                <Descriptions.Item label="填充物">{data?.filler || '-'}</Descriptions.Item>
+                <Descriptions.Item label="产品类型">{data?.product_type || '-'}</Descriptions.Item>
+                <Descriptions.Item label="组装尺寸">{data ? `${numberText(data.dimension_length)} × ${numberText(data.dimension_width)} × ${numberText(data.dimension_height)} 英寸` : '-'}</Descriptions.Item>
+                <Descriptions.Item label="产品重量">{numberText(data?.weight, ' 磅')}</Descriptions.Item>
+                <Descriptions.Item label="供应商">{data?.seller || '-'}</Descriptions.Item>
+                <Descriptions.Item label="产地">{data?.origin || '-'}</Descriptions.Item>
+                <Descriptions.Item label="Listing图片">{listingImageCount ?? '-'}</Descriptions.Item>
+                <Descriptions.Item label="采集时间">{data?.collected_at ? new Date(data.collected_at).toLocaleString('zh-CN') : '-'}</Descriptions.Item>
+                <Descriptions.Item label="素材目录">
+                  {data?.material_dir ? (
+                    <Space>
+                      <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(data.material_dir)}>打开</Button>
+                      <Button size="small" icon={<CopyOutlined />} onClick={() => copyText(data.material_dir)}>复制</Button>
+                    </Space>
+                  ) : '-'}
                 </Descriptions.Item>
-                <Descriptions.Item label="净收入">{money(pricingDetail.net_revenue)}</Descriptions.Item>
-                <Descriptions.Item label="变动费用">{money(pricingDetail.variable_fee)}</Descriptions.Item>
-                <Descriptions.Item label="固定成本">{money(pricingDetail.fixed_cost)}</Descriptions.Item>
-                <Descriptions.Item label="退货抵扣">{money(pricingDetail.return_credit)}</Descriptions.Item>
-                <Descriptions.Item label="目标净利率">{pricingDetail.target_margin_rate != null ? `${pricingDetail.target_margin_rate}%` : '-'}</Descriptions.Item>
-                <Descriptions.Item label="最低利润">{money(pricingDetail.min_profit)}</Descriptions.Item>
-                <Descriptions.Item label="净利率线价格">{money(pricingDetail.price_for_margin)}</Descriptions.Item>
-                <Descriptions.Item label="最低利润线价格">{money(pricingDetail.price_for_min_profit)}</Descriptions.Item>
-              </>
-            )}
-            <Descriptions.Item label="库存">{data?.stock ?? '-'}</Descriptions.Item>
-            <Descriptions.Item label="供应商">{data?.seller || '-'}</Descriptions.Item>
-            <Descriptions.Item label="产地">{data?.origin || '-'}</Descriptions.Item>
-            <Descriptions.Item label="图片数量">{data?.image_count ?? '-'}</Descriptions.Item>
-            <Descriptions.Item label="采集时间">{data?.collected_at ? new Date(data.collected_at).toLocaleString('zh-CN') : '-'}</Descriptions.Item>
-            <Descriptions.Item label="素材目录" span={2}>
-              <Space>
-                <Text copyable>{data?.material_dir || '-'}</Text>
-                {data?.material_dir && <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(data.material_dir)}>打开</Button>}
-              </Space>
-            </Descriptions.Item>
-            <Descriptions.Item label="视频素材" span={2}>
-              {videoFolder?.exists ? (
-                <Space wrap>
-                  <Text copyable>{videoFolder.path}</Text>
-                  <Tag color="processing">{videoFolder.file_count} 个视频</Tag>
-                  <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(videoFolder.path)}>打开</Button>
-                </Space>
-              ) : <Text type="secondary">暂无视频素材</Text>}
-            </Descriptions.Item>
-            <Descriptions.Item label="new a plus" span={2}>
-              {aplusFolder?.exists ? (
-                <Space wrap>
-                  <Text copyable>{aplusFolder.path}</Text>
-                  <Tag color="success">{aplusFolder.file_count} 张图片</Tag>
-                  <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(aplusFolder.path)}>打开</Button>
-                </Space>
-              ) : <Text type="secondary">尚未生成 A+ 图片</Text>}
-            </Descriptions.Item>
-            <Descriptions.Item label="大健描述" span={2}>{data?.description || '-'}</Descriptions.Item>
-          </Descriptions>
-
-          <Card title="外包装信息" size="small" style={{ marginBottom: 16 }}>
-            <Table
-              size="small"
-              columns={packageColumns}
-              dataSource={Array.isArray(packages) ? packages : []}
-              rowKey={(record, index) => `${record.code || 'package'}-${index}`}
-              pagination={false}
-              locale={{ emptyText: '暂无外包装信息' }}
-            />
+                <Descriptions.Item label="视频素材">
+                  {videoFolder?.exists ? (
+                    <Space wrap>
+                      <Tag color="processing">{videoFolder.file_count} 个视频</Tag>
+                      <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(videoFolder.path)}>打开</Button>
+                      <Button size="small" icon={<CopyOutlined />} onClick={() => copyText(videoFolder.path)}>复制</Button>
+                    </Space>
+                  ) : <Text type="secondary">暂无</Text>}
+                </Descriptions.Item>
+                <Descriptions.Item label="A+图片" span="filled">
+                  {aplusFolder?.exists ? (
+                    <Space wrap>
+                      <Tag color="success">{aplusFolder.file_count} 张</Tag>
+                      <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(aplusFolder.path)}>打开</Button>
+                      <Button size="small" icon={<CopyOutlined />} onClick={() => copyText(aplusFolder.path)}>复制</Button>
+                    </Space>
+                  ) : <Text type="secondary">未生成</Text>}
+                </Descriptions.Item>
+              </Descriptions>
+              {(product.asin_sync_error || product.amazon_product_status_error) && (
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="同步提醒"
+                  description={[product.asin_sync_error, product.amazon_product_status_error].filter(Boolean).join('；')}
+                />
+              )}
+            </Space>
           </Card>
 
-          <Card title="采集原始数据 / 导出预览" size="small" style={{ marginBottom: 16 }}>
+          <Card title="销售与定价" size="small" style={{ marginBottom: 16 }}>
+            <Descriptions bordered className="basic-info-descriptions" size="small" column={{ xs: 1, md: 2 }}>
+              <Descriptions.Item label="ASIN同步状态">
+                {product.amazon_asin ? <Tag color="success">已同步</Tag> : product.asin_sync_status === 'not_found' ? <Tag color="warning">未查到</Tag> : product.asin_sync_status === 'failed' ? <Tag color="error">失败</Tag> : product.asin_sync_status === 'pending' || product.asin_sync_status === 'running' ? <Tag color="processing">同步中</Tag> : <Tag>未同步</Tag>}
+              </Descriptions.Item>
+              <Descriptions.Item label="亚马逊状态">
+                {product.amazon_product_status ? <Tag color={String(product.amazon_product_status).includes('售') ? 'success' : 'warning'}>{product.amazon_product_status}</Tag> : '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="库存">{data?.stock ?? '-'}</Descriptions.Item>
+              <Descriptions.Item label="建议售价">{money(data?.suggested_price)}</Descriptions.Item>
+              <Descriptions.Item label="利润">{money(data?.profit)}</Descriptions.Item>
+              <Descriptions.Item label="净利率">{data?.profit_rate != null ? `${data.profit_rate.toFixed(1)}%` : '-'}</Descriptions.Item>
+              <Descriptions.Item label="货值">{money(data?.value_total)}</Descriptions.Item>
+              <Descriptions.Item label="含运费成本">{money(data?.estimated_total)}</Descriptions.Item>
+              <Descriptions.Item label="总成本">{money(data?.cost_total)}</Descriptions.Item>
+              <Descriptions.Item label="一件代发物流">{money(data?.shipping_cost)}</Descriptions.Item>
+              <Descriptions.Item label="云送仓物流">
+                {data?.shipping_cost_min != null || data?.shipping_cost_max != null ? `${money(data?.shipping_cost_min)} - ${money(data?.shipping_cost_max)}` : '-'}
+              </Descriptions.Item>
+              <Descriptions.Item label="定价依据">
+                {pricingDetail?.selected_rule === 'target_margin' ? '目标净利率' : pricingDetail?.selected_rule ? '最低利润' : '-'}
+              </Descriptions.Item>
+              {pricingDetail && (
+                <>
+                  <Descriptions.Item label="净收入">{money(pricingDetail.net_revenue)}</Descriptions.Item>
+                  <Descriptions.Item label="变动费用">{money(pricingDetail.variable_fee)}</Descriptions.Item>
+                  <Descriptions.Item label="固定成本">{money(pricingDetail.fixed_cost)}</Descriptions.Item>
+                  <Descriptions.Item label="退货抵扣">{money(pricingDetail.return_credit)}</Descriptions.Item>
+                  <Descriptions.Item label="目标净利率">{pricingDetail.target_margin_rate != null ? `${pricingDetail.target_margin_rate}%` : '-'}</Descriptions.Item>
+                  <Descriptions.Item label="最低利润">{money(pricingDetail.min_profit)}</Descriptions.Item>
+                  <Descriptions.Item label="净利率线价格">{money(pricingDetail.price_for_margin)}</Descriptions.Item>
+                  <Descriptions.Item label="最低利润线价格">{money(pricingDetail.price_for_min_profit)}</Descriptions.Item>
+                </>
+              )}
+            </Descriptions>
+          </Card>
+
+          <Card title="包装与履约" size="small" style={{ marginBottom: 16 }}>
             <Space direction="vertical" style={{ width: '100%' }} size={12}>
               <Descriptions bordered size="small" column={{ xs: 1, md: 2 }}>
-                <Descriptions.Item label="大建产品尺寸">
-                  {dimensionLine(rawProductDimensions.length_show, rawProductDimensions.width_show, rawProductDimensions.height_show, rawSnapshot?.specification?.product_dimensions?.unit_length || '英寸')}
-                </Descriptions.Item>
-                <Descriptions.Item label="大建产品重量">
-                  {rawProductDimensions.weight_show ? `${rawProductDimensions.weight_show} ${rawSnapshot?.specification?.product_dimensions?.unit_weight || '磅'}` : '-'}
-                </Descriptions.Item>
-                <Descriptions.Item label="系统存储尺寸">
+                <Descriptions.Item label="产品尺寸">
                   {dimensionLine(data?.dimension_length, data?.dimension_width, data?.dimension_height, '英寸')}
                 </Descriptions.Item>
-                <Descriptions.Item label="系统存储重量">{numberText(data?.weight, ' 磅')}</Descriptions.Item>
-                <Descriptions.Item label="导出包装合计">
+                <Descriptions.Item label="产品重量">{numberText(data?.weight, ' 磅')}</Descriptions.Item>
+                <Descriptions.Item label="包裹尺寸合计">
                   {exportPackage?.length != null ? dimensionLine(exportPackage.length, exportPackage.width, exportPackage.height, '英寸') : '-'}
                 </Descriptions.Item>
-                <Descriptions.Item label="导出包装重量">
+                <Descriptions.Item label="包裹重量合计">
                   {exportPackage?.weight != null ? `${exportPackage.weight} 磅` : '-'}
                 </Descriptions.Item>
-                <Descriptions.Item label="Amazon模板">{exportPreview?.output_filename || '-'}</Descriptions.Item>
-                <Descriptions.Item label="配送模板">{exportPreview?.offer?.shipping_template || '-'}</Descriptions.Item>
-                <Descriptions.Item label="导出价格">{money(exportPreview?.offer?.price)}</Descriptions.Item>
-                <Descriptions.Item label="导出库存">{exportPreview?.offer?.quantity ?? '-'}</Descriptions.Item>
-              </Descriptions>
-              <Descriptions bordered size="small" column={{ xs: 1, md: 3 }}>
-                <Descriptions.Item label="货值">{money(data?.value_total)}</Descriptions.Item>
-                <Descriptions.Item label="一件代发物流">{money(data?.shipping_cost)}</Descriptions.Item>
-                <Descriptions.Item label="云送仓物流">
-                  {data?.shipping_cost_min != null || data?.shipping_cost_max != null ? `${money(data?.shipping_cost_min)} - ${money(data?.shipping_cost_max)}` : '-'}
-                </Descriptions.Item>
-                <Descriptions.Item label="大建折扣价">{money(rawPricing?.base_price_info?.discount_price)}</Descriptions.Item>
                 <Descriptions.Item label="处理时效">
                   {rawFulfillment?.drop_ship?.handling_time ? `${rawFulfillment.drop_ship.handling_time.min_day}-${rawFulfillment.drop_ship.handling_time.max_day} 天` : '-'}
                 </Descriptions.Item>
                 <Descriptions.Item label="发货时效">
                   {rawFulfillment?.drop_ship?.estimated_ship_day ? `${rawFulfillment.drop_ship.estimated_ship_day.min_day}-${rawFulfillment.drop_ship.estimated_ship_day.max_day} 天` : '-'}
                 </Descriptions.Item>
-                <Descriptions.Item label="大建库存">{rawQuantity?.quantity ?? '-'}</Descriptions.Item>
                 <Descriptions.Item label="组合商品">{rawFulfillment?.is_combo ? '是' : '否'}</Descriptions.Item>
                 <Descriptions.Item label="Retail Ready">{rawSnapshot?.product?.retail_ready_flag ? '是' : '否'}</Descriptions.Item>
               </Descriptions>
@@ -892,47 +1384,396 @@ const ProductDetail: React.FC = () => {
                 <Alert
                   type="warning"
                   showIcon
-                  message="导出提醒"
+                  message="包装提醒"
                   description={exportPackage.warnings.join('；')}
                 />
               )}
               <Table
                 size="small"
-                columns={[
-                  { title: '子 SKU', dataIndex: 'sku', width: 180, render: (v, r) => v || r.code || '-' },
-                  { title: '数量', dataIndex: 'qty', width: 80, render: (v) => v ?? '-' },
-                  { title: '长', dataIndex: 'length', width: 90, render: (v, r) => numberText(v ?? r.length_inch) },
-                  { title: '宽', dataIndex: 'width', width: 90, render: (v, r) => numberText(v ?? r.width_inch) },
-                  { title: '高', dataIndex: 'height', width: 90, render: (v, r) => numberText(v ?? r.height_inch) },
-                  { title: '重量', dataIndex: 'weight', width: 110, render: (v, r) => numberText(r.weight_value ?? v) },
-                  { title: '箱名', dataIndex: 'box_name', render: (v) => v || '-' },
-                ]}
+                columns={packageColumns}
                 dataSource={Array.isArray(rawPackageSize.combo) && rawPackageSize.combo.length ? rawPackageSize.combo : (Array.isArray(packages) ? packages : [])}
-                rowKey={(record, index) => `${record.sku || record.code || 'package'}-${index}`}
+                rowKey={(record) => record.sku || record.code || record.package_id || JSON.stringify(record)}
                 pagination={false}
-                locale={{ emptyText: '暂无大建包装明细' }}
+                locale={{ emptyText: '暂无包装明细' }}
               />
             </Space>
           </Card>
 
-          <Card title="采集特征" size="small" style={{ marginBottom: 16 }}>
-            {Array.isArray(features) && features.length ? (
-              <List size="small" dataSource={features} renderItem={(item) => <List.Item>{typeof item === 'string' ? item : JSON.stringify(item)}</List.Item>} />
-            ) : <Text type="secondary">暂无特征</Text>}
-          </Card>
-
           <Card title="变体信息" size="small" style={{ marginBottom: 16 }}>
             {Array.isArray(variants) && variants.length ? (
-              <Table
-                size="small"
-                dataSource={variants}
-                columns={Object.keys(variants[0] || {}).map((key) => ({ title: key, dataIndex: key, render: (value) => value == null ? '-' : String(value) }))}
-                rowKey={(_, index) => `variant-${index}`}
-                pagination={false}
-              />
+              <Space direction="vertical" style={{ width: '100%' }} size={12}>
+                {commonVariantAttributeEntries.length > 0 && (
+                  <div>
+                    <Text type="secondary">共同属性</Text>
+                    <div style={{ marginTop: 6 }}>
+                      {renderVariantTags(Object.fromEntries(commonVariantAttributeEntries))}
+                    </div>
+                  </div>
+                )}
+                <Table
+                  size="small"
+                  dataSource={variants}
+                  columns={[
+                    {
+                      title: '图片',
+                      dataIndex: 'main_image_url',
+                      width: 86,
+                      render: (_value, record) => {
+                        const url = variantImageUrl(record);
+                        return url ? (
+                          <Image
+                            src={url}
+                            width={56}
+                            height={56}
+                            style={{ objectFit: 'cover', borderRadius: 4, border: '1px solid #f0f0f0' }}
+                            preview={{ src: url }}
+                          />
+                        ) : <Text type="secondary">-</Text>;
+                      },
+                    },
+                    {
+                      title: 'SKU',
+                      dataIndex: 'sku',
+                      width: 150,
+                      render: (value) => value ? <Text copyable>{value}</Text> : '-',
+                    },
+                    {
+                      title: '变体属性',
+                      dataIndex: 'variation_attributes',
+                      render: (value, record) => renderVariantTags(value || {
+                        ...(record?.color ? { Color: record.color } : {}),
+                      }, 'blue'),
+                    },
+                    {
+                      title: '价格',
+                      dataIndex: 'price',
+                      width: 110,
+                      render: (value) => money(value),
+                    },
+                    {
+                      title: '物流',
+                      dataIndex: 'shipping_fee',
+                      width: 110,
+                      render: (value) => money(value),
+                    },
+                    {
+                      title: '库存',
+                      dataIndex: 'stock',
+                      width: 90,
+                      render: (value) => value ?? '-',
+                    },
+                  ]}
+                  rowKey={(record) => record?.sku || record?.asin || record?.code || JSON.stringify(record)}
+                  pagination={false}
+                />
+              </Space>
             ) : <Text type="secondary">暂无变体</Text>}
           </Card>
 
+          {Array.isArray(features) && features.length > 0 && (
+            <Card title="采集特征" size="small" style={{ marginBottom: 16 }}>
+              <details>
+                <summary style={{ cursor: 'pointer' }}>展开查看原始采集特征</summary>
+                <List
+                  size="small"
+                  style={{ marginTop: 8 }}
+                  dataSource={features}
+                  renderItem={(item) => <List.Item>{typeof item === 'string' ? item : JSON.stringify(item)}</List.Item>}
+                />
+              </details>
+            </Card>
+          )}
+
+        </div>
+      ),
+    },
+    {
+      key: 'competitor',
+      label: '🎴 竞品',
+      children: (
+        <div>
+          <Card
+            title="当前参考竞品"
+            size="small"
+            style={{ marginBottom: 16 }}
+          >
+            <Space direction="vertical" style={{ width: '100%' }} size={12}>
+              {isListingCaptureFailed && (
+                <Alert
+                  type="error"
+                  showIcon
+                  message="竞品详情抓取失败"
+                  description={amazonListingCapture?.capture_error || product.error_message || '可以重新抓取当前竞品，或在下方候选中切换其它竞品。'}
+                  action={
+                    <Button
+                      size="small"
+                      danger
+                      icon={<RedoOutlined />}
+                      loading={Boolean(selectingCompetitorId)}
+                      disabled={isListingCaptureRunning || isCompetitorSearching || isPipelineRunning}
+                      onClick={retrySelectedCompetitorCapture}
+                    >
+                      重新抓取当前竞品
+                    </Button>
+                  }
+                />
+              )}
+              <div>
+                <Text type="secondary">Amazon标题</Text>
+                <Typography.Paragraph
+                  style={{ marginBottom: 0, marginTop: 4 }}
+                  ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}
+                >
+                  {amazonListingCapture?.title || '-'}
+                </Typography.Paragraph>
+              </div>
+              <Descriptions bordered column={{ xs: 1, sm: 1, md: 2 }} size="small">
+                <Descriptions.Item label="选中 ASIN">
+                  {selectedStyleSnap?.url || product.competitor_asin ? (
+                    <Space size={8}>
+                      <Typography.Link href={selectedStyleSnap?.url || `https://www.amazon.com/dp/${product.competitor_asin}`} target="_blank">
+                        {selectedStyleSnap?.asin || product.competitor_asin}
+                      </Typography.Link>
+                      <Button size="small" icon={<CopyOutlined />} onClick={() => copyText(selectedStyleSnap?.asin || product.competitor_asin)}>复制</Button>
+                    </Space>
+                  ) : '-'}
+                </Descriptions.Item>
+                <Descriptions.Item label="抽卡排名">{selectedStyleSnap?.rank ?? '-'}</Descriptions.Item>
+                <Descriptions.Item label="Amazon品牌">{amazonListingCapture?.brand || '-'}</Descriptions.Item>
+                <Descriptions.Item label="卖家">{amazonListingCapture?.seller || '-'}</Descriptions.Item>
+                <Descriptions.Item label="Amazon价格">{amazonListingCapture?.price || '-'}</Descriptions.Item>
+                <Descriptions.Item label="评分/评论">
+                  {[amazonListingCapture?.rating, amazonListingCapture?.review_count ? `${amazonListingCapture.review_count} reviews` : null].filter(Boolean).join(' / ') || '-'}
+                </Descriptions.Item>
+                <Descriptions.Item label="可售状态">{amazonListingCapture?.availability || '-'}</Descriptions.Item>
+                <Descriptions.Item label="Amazon主图">
+                  {amazonListingCapture?.main_image_url ? (
+                    <Image
+                      src={amazonListingCapture.main_image_url}
+                      width={72}
+                      height={72}
+                      style={{ objectFit: 'cover', borderRadius: 4, border: '1px solid #f0f0f0' }}
+                      preview={{ src: amazonListingCapture.main_image_url }}
+                    />
+                  ) : '-'}
+                </Descriptions.Item>
+                <Descriptions.Item label="类目排名" span="filled">
+                  <Typography.Paragraph style={{ marginBottom: 0 }} ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}>
+                    {amazonListingCapture?.category_rank || selectedStyleSnap?.category_rank || '-'}
+                  </Typography.Paragraph>
+                </Descriptions.Item>
+              </Descriptions>
+              <div>
+                <Text type="secondary">竞品五点</Text>
+                {amazonCompetitorBullets.length ? (
+                  <List
+                    size="small"
+                    dataSource={amazonCompetitorBullets.slice(0, 5)}
+                    renderItem={(item: string) => (
+                      <List.Item style={{ paddingLeft: 0, paddingRight: 0 }}>
+                        <Typography.Paragraph style={{ marginBottom: 0 }} copyable>
+                          {item}
+                        </Typography.Paragraph>
+                      </List.Item>
+                    )}
+                  />
+                ) : <Text type="secondary"> 未抓到竞品五点</Text>}
+              </div>
+            </Space>
+          </Card>
+
+          <Card
+            title={`候选竞品${competitorCandidateCount ? `（${competitorCandidateCount} 个）` : ''}`}
+            size="small"
+            extra={
+              <Button
+                size="small"
+                icon={shouldForceCompetitorSearch ? <ReloadOutlined /> : <PlayCircleOutlined />}
+                loading={competitorSearchLoading || isCompetitorSearching}
+                disabled={!hasConfirmedSearchImage || !canOperateCompetitor || isHardStopped || isReadyToExport}
+                onClick={() => searchCompetitorCandidates(shouldForceCompetitorSearch)}
+              >
+                {competitorSearchButtonText}
+              </Button>
+            }
+          >
+            <Spin spinning={competitorLoading}>
+              {competitorGroup ? (
+                <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                  {isCompetitorSearching && (
+                    <Alert
+                      type="info"
+                      showIcon
+                      message="正在追加搜索候选"
+                      description="原有候选会保留在页面上；新一轮搜索完成后会追加到列表末尾。"
+                    />
+                  )}
+                  {hasListingContent && (
+                    <Alert
+                      type="warning"
+                      showIcon
+                      message="切换竞品后要重走后续流程"
+                      description="切换后会记录新的 ASIN、Amazon 类目，并重新抓取竞品详情。当前商品后续的 Listing 文案、图片分析、A+ 需要重新生成。"
+                    />
+                  )}
+                  <div style={{ display: 'grid', gridTemplateColumns: '180px minmax(0, 1fr)', gap: 16 }}>
+                    <div>
+                      <div
+                        style={{
+                          height: 180,
+                          border: '1px solid #e5e7eb',
+                          borderRadius: 8,
+                          background: '#f8fafc',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          overflow: 'hidden',
+                          marginBottom: 10,
+                        }}
+                      >
+                        {(competitorGroup.source_image_path || competitorGroup.source_image_url) ? (
+                          <Image
+                            src={competitorGroup.source_image_path ? imgUrl(competitorGroup.source_image_path) : competitorGroup.source_image_url || ''}
+                            height={178}
+                            style={{ objectFit: 'contain' }}
+                            preview={{ src: competitorGroup.source_image_path ? imgUrl(competitorGroup.source_image_path) : competitorGroup.source_image_url || '' }}
+                          />
+                        ) : (
+                          <Text type="secondary">无源图</Text>
+                        )}
+                      </div>
+                      <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                        <Text strong>{competitorGroup.product_name || competitorGroup.item_code}</Text>
+                        <Text type="secondary">SKU：{competitorGroup.sku_code || '-'}</Text>
+                        <Text type="secondary">{competitorGroup.task_ready_reason || '从候选中选择一个 Item 级参考竞品'}</Text>
+                      </Space>
+                    </div>
+                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(185px, 1fr))', gap: 12 }}>
+                      {competitorGroup.candidates.map((candidate: any) => {
+                        const selected = competitorGroup.selected_candidate_id === candidate.id || candidate.is_selected === 1;
+                        return (
+                          <div
+                            key={candidate.id}
+                            style={{
+                              border: selected ? '2px solid #16a34a' : '1px solid #d9e1ec',
+                              background: selected ? '#f0fdf4' : '#fff',
+                              borderRadius: 8,
+                              padding: 10,
+                              minHeight: 340,
+                              display: 'flex',
+                              flexDirection: 'column',
+                              gap: 8,
+                            }}
+                          >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6, alignItems: 'center' }}>
+                              <Space size={4}>
+                                <Tag color={selected ? 'success' : 'blue'}>#{candidate.rank}</Tag>
+                                <Text strong>{candidate.asin}</Text>
+                              </Space>
+                              {selected ? <Tag color="success">已选</Tag> : null}
+                            </div>
+                            <div
+                              style={{
+                                height: 110,
+                                borderRadius: 6,
+                                background: '#f5f7fb',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                overflow: 'hidden',
+                              }}
+                            >
+                              {candidate.amazon_image_url ? (
+                                <Image
+                                  src={candidate.amazon_image_url}
+                                  height={110}
+                                  style={{ objectFit: 'contain' }}
+                                  preview={{ src: candidate.amazon_image_url }}
+                                />
+                              ) : (
+                                <Text type="secondary">{candidate.asin}</Text>
+                              )}
+                            </div>
+                            <Space size={[4, 4]} wrap>
+                              <Tag>{valueText(candidate.brand)}</Tag>
+                              <Tag color={candidate.seller === 'Amazon' ? 'green' : 'default'}>{valueText(candidate.seller)}</Tag>
+                              {candidate.price ? <Tag color="gold">{candidate.price}</Tag> : null}
+                            </Space>
+                            <div style={{ display: 'grid', gap: 4, fontSize: 12 }}>
+                              <Text type="secondary">评分：{valueText(candidate.rating)}</Text>
+                              <Text type="secondary">类目：{valueText(candidate.category_rank)}</Text>
+                              {(candidate.color || candidate.size || candidate.style) ? (
+                                <Text type="secondary">
+                                  变体：{[candidate.color, candidate.size, candidate.style].filter(Boolean).join(' / ')}
+                                </Text>
+                              ) : null}
+                              {captureStatusTag(candidate.listing_capture_status)}
+                            </div>
+                            <Typography.Paragraph
+                              type="secondary"
+                              ellipsis={{ rows: 3, expandable: false }}
+                              style={{ fontSize: 12, margin: 0, minHeight: 54 }}
+                            >
+                              {candidate.raw_snippet || ''}
+                            </Typography.Paragraph>
+                            <div style={{ marginTop: 'auto', display: 'flex', gap: 8 }}>
+                              <Button
+                                type={selected ? 'primary' : 'default'}
+                                icon={<CheckOutlined />}
+                                loading={selectingCompetitorId === candidate.id}
+                                disabled={competitorCandidateActionDisabled}
+                                onClick={() => chooseCompetitorCandidate(candidate)}
+                                block
+                              >
+                                {competitorCandidateButtonText(selected)}
+                              </Button>
+                              <Button
+                                icon={<ExportOutlined />}
+                                href={candidate.url || `https://www.amazon.com/dp/${candidate.asin}`}
+                                target="_blank"
+                              />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </Space>
+              ) : (
+                <Empty description={
+                  isCompetitorSearching
+                    ? '正在用主图搜索 Amazon 同款'
+                    : competitorLoading
+                      ? '正在加载候选竞品'
+                      : isCompetitorSearchFailed
+                        ? (stylesnapSearch?.error || productErrorMessage || '候选竞品搜索失败，请重新搜索')
+                      : hasCompetitorCandidates
+                        ? '候选已生成，加载候选列表'
+                        : '暂无候选竞品'
+                }>
+                  {hasCompetitorCandidates ? (
+                    <Button
+                      icon={<ReloadOutlined />}
+                      loading={competitorLoading}
+                      onClick={() => loadCompetitorCandidates()}
+                    >
+                      加载候选列表
+                    </Button>
+                  ) : (
+                    <Button
+                      type="primary"
+                      icon={<PlayCircleOutlined />}
+                      loading={competitorSearchLoading || isCompetitorSearching}
+                      disabled={!hasConfirmedSearchImage || !canOperateCompetitor || isHardStopped || isReadyToExport}
+                      onClick={() => searchCompetitorCandidates(shouldForceCompetitorSearch)}
+                    >
+                      {competitorSearchButtonText}
+                    </Button>
+                  )}
+                </Empty>
+              )}
+            </Spin>
+          </Card>
         </div>
       ),
     },
@@ -972,6 +1813,18 @@ const ProductDetail: React.FC = () => {
               } catch { return <Text type="secondary">解析失败</Text>; }
             })() : <Text type="secondary">（未生成）</Text>}
           </Card>
+          <Card title="商品描述" size="small" style={{ marginBottom: 12 }}>
+            <Space direction="vertical" style={{ width: '100%' }}>
+              <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>
+                {data?.listing_description || '（未生成）'}
+              </Typography.Paragraph>
+              {data?.listing_description_zh && (
+                <Typography.Paragraph type="secondary" style={{ whiteSpace: 'pre-wrap', marginBottom: 0 }}>
+                  中文：{data.listing_description_zh}
+                </Typography.Paragraph>
+              )}
+            </Space>
+          </Card>
           <Card title="Search Terms" size="small" style={{ marginBottom: 12 }}>
             <Space direction="vertical" style={{ width: '100%' }}>
               <Text>{data?.listing_search_terms || '（未生成）'}</Text>
@@ -984,7 +1837,7 @@ const ProductDetail: React.FC = () => {
                 <Descriptions bordered size="small" column={2}>
                   <Descriptions.Item label="主关键词">{data?.listing_primary_keyword || keywordPlan.primary_keyword || '-'}</Descriptions.Item>
                   <Descriptions.Item label="目标买家">{positioning.target_buyer || '-'}</Descriptions.Item>
-                  <Descriptions.Item label="点击理由" span={2}>{positioning.main_click_reason || '-'}</Descriptions.Item>
+                  <Descriptions.Item label="点击理由" span="filled">{positioning.main_click_reason || '-'}</Descriptions.Item>
                 </Descriptions>
                 <div>
                   <Text strong>标题关键词</Text>
@@ -1073,30 +1926,15 @@ const ProductDetail: React.FC = () => {
       label: '🖼️ 图片素材',
       children: (
         <div>
-          <Card title="主图" size="small" style={{ marginBottom: 12 }}>
-            {imageSelectionDiagnostics?.main_image_status === 'fallback_substitute' && (
-              <Alert
-                type="warning"
-                showIcon
-                style={{ marginBottom: 12 }}
-                message="当前主图为替代素材"
-                description={(imageSelectionDiagnostics.main_image_warnings || []).join('；') || images?.main_image_summary}
-              />
-            )}
-            {images?.main_image_path ? (
-              <Space direction="vertical">
-                <Space>
-                  <Image src={imgUrl(images.main_image_path)} width={200} alt="主图" />
-                  {images?.main_image_source && (
-                    <Tag color={images.main_image_source === 'fallback_substitute' ? 'warning' : 'success'}>
-                      {images.main_image_source === 'fallback_substitute' ? '替代主图' : images.main_image_source}
-                    </Tag>
-                  )}
-                </Space>
-                {images?.main_image_summary && <Text type="secondary">{images.main_image_summary}</Text>}
-              </Space>
-            ) : <Text type="secondary">（未选择）</Text>}
-          </Card>
+          {imageSelectionDiagnostics?.main_image_status === 'fallback_substitute' && (
+            <Alert
+              type="warning"
+              showIcon
+              style={{ marginBottom: 12 }}
+              message="当前第一张已使用图片为替代素材"
+              description={(imageSelectionDiagnostics.main_image_warnings || []).join('；') || images?.main_image_summary}
+            />
+          )}
           <Card title="图库诊断" size="small" style={{ marginBottom: 12 }}>
             <Space direction="vertical" style={{ width: '100%' }} size={12}>
               {imageHealth?.level && (
@@ -1198,9 +2036,9 @@ const ProductDetail: React.FC = () => {
             </Space>
           </Card>
           <Card
-            title="主图 / 副图排序"
+            title="商品图片确认"
             size="small"
-            extra={selectedListingImages.length ? (
+            extra={imageResourceItems.length ? (
               <Space>
                 {listingImageDirty && <Tag color="warning">未保存</Tag>}
                 <Button
@@ -1216,7 +2054,7 @@ const ProductDetail: React.FC = () => {
                   type="primary"
                   icon={<CheckOutlined />}
                   loading={imageOrderSaving}
-                  disabled={!listingImageDirty}
+                  disabled={!listingImageDirty || !selectedListingImages.length}
                   onClick={saveListingImagePaths}
                 >
                   保存
@@ -1224,77 +2062,136 @@ const ProductDetail: React.FC = () => {
               </Space>
             ) : null}
           >
-            {selectedListingImages.length ? (
+            <Spin spinning={imageOrderSaving}>
               <Space direction="vertical" size={16} style={{ width: '100%' }}>
-                <Spin spinning={imageOrderSaving}>
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 12 }}>
-                    {selectedListingImages.map((item, i) => {
-                      const isMain = i === 0;
-                      const isDropTarget = imageDragPayload?.source && imageDragPayload?.path !== item.path;
-                      return (
-                        <div
-                          key={item.path || i}
-                          draggable={!imageOrderSaving}
-                          onDragStart={(event) => startListingImageDrag(event, { source: 'selected', index: i, path: item.path })}
-                          onDragOver={(event) => event.preventDefault()}
-                          onDrop={(event) => replaceListingImageSlot(event, i)}
-                          onDragEnd={() => setImageDragPayload(null)}
-                          style={{
-                            cursor: imageOrderSaving ? 'default' : 'grab',
-                            border: isMain ? '2px solid #1677ff' : '1px solid #d9d9d9',
-                            borderRadius: 8,
-                            padding: 8,
-                            background: imageDragPayload?.source === 'selected' && imageDragPayload?.index === i ? '#f0f7ff' : '#fff',
-                            boxShadow: isDropTarget ? '0 0 0 2px rgba(22, 119, 255, 0.12)' : 'none',
-                          }}
-                        >
-                          <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                            <Space style={{ justifyContent: 'space-between', width: '100%' }}>
-                              <Tag color={isMain ? 'blue' : 'default'}>{isMain ? '主图' : `副图 ${i}`}</Tag>
-                              <DragOutlined style={{ color: '#999' }} />
-                            </Space>
-                            <Image src={imgUrl(item.path)} width="100%" alt={isMain ? '主图' : `副图${i}`} preview={false} />
-                            {item.meta && (
-                              <Typography.Paragraph
-                                type="secondary"
-                                ellipsis={{ rows: 1 }}
-                                style={{ fontSize: 12, marginBottom: 0 }}
-                              >
-                                {item.meta}
-                              </Typography.Paragraph>
-                            )}
-                          </Space>
-                        </div>
-                      );
-                    })}
+                <div>
+                  <Space style={{ justifyContent: 'space-between', width: '100%', marginBottom: 8 }}>
+                    <Text strong>已使用图片</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>第一张为主图，其余为副图</Text>
+                  </Space>
+                  <div
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = 'move';
+                    }}
+                    onDrop={dropListingImageToSelected}
+                    style={{
+                      minHeight: selectedListingImages.length ? 0 : 132,
+                      border: selectedListingImages.length ? 'none' : '1px dashed #91caff',
+                      borderRadius: 8,
+                      padding: selectedListingImages.length ? 0 : 16,
+                      background: selectedListingImages.length ? 'transparent' : '#f6fbff',
+                    }}
+                  >
+                    {selectedListingImages.length ? (
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 12 }}>
+                        {selectedListingImages.map((item, i) => {
+                          const isMain = i === 0;
+                          const isDropTarget = imageDragPayload?.source && imageDragPayload?.path !== item.path;
+                          return (
+                            <div
+                              key={item.path || i}
+                              draggable={!imageOrderSaving}
+                              onDragStart={(event) => startListingImageDrag(event, { source: 'selected', index: i, path: item.path })}
+                              onDragOver={(event) => {
+                                event.preventDefault();
+                                event.dataTransfer.dropEffect = 'move';
+                              }}
+                              onDrop={(event) => replaceListingImageSlot(event, i)}
+                              onDragEnd={() => setImageDragPayload(null)}
+                              onDoubleClick={() => removeListingImageFromSelected(item.path)}
+                              style={{
+                                cursor: imageOrderSaving ? 'default' : 'grab',
+                                border: isMain ? '2px solid #1677ff' : '1px solid #d9d9d9',
+                                borderRadius: 8,
+                                padding: 8,
+                                background: imageDragPayload?.source === 'selected' && imageDragPayload?.index === i ? '#f0f7ff' : '#fff',
+                                boxShadow: isDropTarget ? '0 0 0 2px rgba(22, 119, 255, 0.12)' : 'none',
+                              }}
+                            >
+                              <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                                <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+                                  <Tag color={isMain ? 'blue' : 'default'}>{isMain ? '主图' : `副图 ${i}`}</Tag>
+                                  <DragOutlined style={{ color: '#999' }} />
+                                </Space>
+                                <Image
+                                  src={imgUrl(item.path)}
+                                  width="100%"
+                                  alt={isMain ? '主图' : `副图${i}`}
+                                  preview={false}
+                                  style={{ aspectRatio: '1 / 1', objectFit: 'cover', background: '#f5f5f5' }}
+                                />
+                                {item.meta && (
+                                  <Typography.Paragraph
+                                    type="secondary"
+                                    ellipsis={{ rows: 1 }}
+                                    style={{ fontSize: 12, marginBottom: 0 }}
+                                  >
+                                    {item.meta}
+                                  </Typography.Paragraph>
+                                )}
+                              </Space>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <Space direction="vertical" size={4} style={{ width: '100%', alignItems: 'center', justifyContent: 'center', minHeight: 96 }}>
+                        <Text type="secondary">把未选图片拖到这里，或双击未选图片作为主图/副图</Text>
+                        <Text type="secondary" style={{ fontSize: 12 }}>至少保留一张主图后才能保存</Text>
+                      </Space>
+                    )}
                   </div>
-                </Spin>
-                {imageResourceItems.length ? (
-                  <div>
-                    <Text strong>全部图片资源</Text>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))', gap: 10, marginTop: 8, maxHeight: 460, overflow: 'auto', paddingRight: 4 }}>
-                      {imageResourceItems.map((item, i) => {
-                        const selectedIndex = selectedListingImages.findIndex((selected: any) => selected.path === item.path);
-                        return (
+                </div>
+
+                <div>
+                  <Space style={{ justifyContent: 'space-between', width: '100%', marginBottom: 8 }}>
+                    <Text strong>未选图片</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>拖回这里或双击已使用图片表示不使用</Text>
+                  </Space>
+                  <div
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = 'move';
+                    }}
+                    onDrop={dropListingImageToUnusedPool}
+                    style={{
+                      minHeight: 132,
+                      border: unusedImageResourceItems.length ? 'none' : '1px dashed #d9d9d9',
+                      borderRadius: 8,
+                      padding: unusedImageResourceItems.length ? 0 : 16,
+                      background: unusedImageResourceItems.length ? 'transparent' : '#fafafa',
+                    }}
+                  >
+                    {unusedImageResourceItems.length ? (
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))', gap: 10, maxHeight: 460, overflow: 'auto', paddingRight: 4 }}>
+                        {unusedImageResourceItems.map((item, i) => (
                           <div
                             key={item.path || i}
                             draggable={!imageOrderSaving}
                             onDragStart={(event) => startListingImageDrag(event, { source: 'pool', path: item.path })}
                             onDragEnd={() => setImageDragPayload(null)}
+                            onDoubleClick={() => addListingImageFromPool(item.path)}
                             style={{
                               cursor: imageOrderSaving ? 'default' : 'grab',
-                              border: selectedIndex >= 0 ? '1px solid #91caff' : '1px solid #eee',
+                              border: '1px solid #eee',
                               borderRadius: 8,
                               padding: 8,
-                              background: selectedIndex >= 0 ? '#f0f7ff' : '#fff',
+                              background: '#fff',
                             }}
                           >
                             <Space direction="vertical" size={6} style={{ width: '100%' }}>
                               <Space style={{ justifyContent: 'space-between', width: '100%' }}>
                                 <Text strong style={{ fontSize: 12 }}>{item.image_id || `#${i + 1}`}</Text>
-                                {selectedIndex >= 0 && <Tag color={selectedIndex === 0 ? 'blue' : 'default'}>{selectedIndex === 0 ? '主图' : `副图 ${selectedIndex}`}</Tag>}
+                                <DragOutlined style={{ color: '#bbb' }} />
                               </Space>
-                              <Image src={imgUrl(item.path)} width="100%" alt={item.filename || `图片${i + 1}`} preview={false} />
+                              <Image
+                                src={imgUrl(item.path)}
+                                width="100%"
+                                alt={item.filename || `图片${i + 1}`}
+                                preview={false}
+                                style={{ aspectRatio: '1 / 1', objectFit: 'cover', background: '#f5f5f5' }}
+                              />
                               <Typography.Paragraph
                                 type="secondary"
                                 ellipsis={{ rows: 2 }}
@@ -1304,13 +2201,18 @@ const ProductDetail: React.FC = () => {
                               </Typography.Paragraph>
                             </Space>
                           </div>
-                        );
-                      })}
-                    </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <Space direction="vertical" size={4} style={{ width: '100%', alignItems: 'center', justifyContent: 'center', minHeight: 96 }}>
+                        <Text type="secondary">全部图片都已使用</Text>
+                        <Text type="secondary" style={{ fontSize: 12 }}>把上方图片拖到这里，或双击已使用图片即可移出使用区</Text>
+                      </Space>
+                    )}
                   </div>
-                ) : <Text type="secondary">暂无可替换图片资源</Text>}
+                </div>
               </Space>
-            ) : <Text type="secondary">（未选择）</Text>}
+            </Spin>
           </Card>
           <Card title="Contact Sheet 与分析" size="small" style={{ marginTop: 12 }}>
             {reviewsBySheet.length ? (
@@ -1351,14 +2253,73 @@ const ProductDetail: React.FC = () => {
       label: '🎨 A+内容',
       children: (
         <div>
-          <Card title="A+规划" size="small" style={{ marginBottom: 12 }}>
-            <Text>{aplus?.aplus_plan_summary || '（未规划）'}</Text>
+          <Card
+            title="A+规划"
+            size="small"
+            style={{ marginBottom: 12 }}
+            extra={<Tag color={aplusPlanReady ? 'success' : 'default'}>{aplusPlanReady ? '已规划' : '未规划'}</Tag>}
+          >
+            {aplusPlanReady ? (
+              <Space direction="vertical" style={{ width: '100%' }} size={12}>
+                <Typography.Paragraph style={{ marginBottom: 0 }}>
+                  {aplus?.aplus_plan_summary || aplusPlanPayload?.plan_summary || '已生成 A+ 规划'}
+                </Typography.Paragraph>
+                <Table
+                  size="small"
+                  rowKey={(record: any) => record.position || record.module_position}
+                  dataSource={aplusPlanModules}
+                  pagination={false}
+                  columns={[
+                    { title: '模块', width: 80, render: (_: any, record: any, index: number) => record.position || record.module_position || index + 1 },
+                    { title: '标题', dataIndex: 'headline', width: 220, render: (value: any, record: any) => value || record.module_type || '-' },
+                    { title: '转化目标', dataIndex: 'conversion_goal', render: (value: any, record: any) => value || record.key_message || '-' },
+                    { title: '证据来源', dataIndex: 'evidence_source', render: (value: any) => value || '-' },
+                  ]}
+                />
+              </Space>
+            ) : (
+              <Text type="secondary">（未规划）</Text>
+            )}
           </Card>
           <Card
-            title="A+图片"
+            title="A+脚本"
+            size="small"
+            style={{ marginBottom: 12 }}
+            extra={<Tag color={aplusScriptReady ? 'success' : 'default'}>{aplusScriptReady ? `${aplusScripts.length} 个脚本` : '未生成脚本'}</Tag>}
+          >
+            {aplusScriptReady ? (
+              <Table
+                size="small"
+                rowKey={(record: any) => record.module_position || record.position}
+                dataSource={aplusScripts}
+                pagination={false}
+                columns={[
+                  { title: '模块', width: 80, render: (_: any, record: any, index: number) => record.module_position || record.position || index + 1 },
+                  { title: '用途', dataIndex: 'conversion_goal', width: 220, render: (value: any, record: any) => value || record.experience_angle || '-' },
+                  { title: '参考图', dataIndex: 'reference_images', width: 160, render: (refs: any[]) => Array.isArray(refs) ? `${refs.length} 张` : '0 张' },
+                  {
+                    title: 'Prompt',
+                    dataIndex: 'prompt',
+                    render: (value: any) => (
+                      <Typography.Paragraph copyable ellipsis={{ rows: 2 }} style={{ marginBottom: 0 }}>
+                        {value || '-'}
+                      </Typography.Paragraph>
+                    ),
+                  },
+                ]}
+              />
+            ) : (
+              <Text type="secondary">{aplusPlanReady ? '已有规划，等待生成脚本。' : '请先完成 A+ 规划。'}</Text>
+            )}
+          </Card>
+          <Card
+            title="A+出图"
             size="small"
             extra={(
               <Space>
+                <Tag color={aplusImageDoneCount >= 5 ? 'success' : aplusImageDoneCount > 0 ? 'warning' : 'default'}>
+                  {aplusImageDoneCount ? `${aplusImageDoneCount}/5 已出图` : '未出图'}
+                </Tag>
                 {aplusStatus && <Tag color={aplusStatus.color}>{aplusStatus.text}</Tag>}
                 {canRetryAplusRegeneration && (
                   <Button size="small" icon={<RedoOutlined />} loading={regenRetryLoading} onClick={retryInterruptedAplus}>
@@ -1370,7 +2331,7 @@ const ProductDetail: React.FC = () => {
           >
             {aplusModules.length ? (
               <Space direction="vertical" style={{ width: '100%' }} size={16}>
-                {aplusModules.map(({ script, generated, references, plan }) => {
+                {aplusModules.map(({ script, generated, references, plan, hasScript }) => {
                   const conversionGoal = script.conversion_goal || plan.conversion_goal;
                   const buyerObjection = script.buyer_objection || plan.buyer_objection;
                   const evidenceSource = script.evidence_source || plan.evidence_source;
@@ -1391,6 +2352,7 @@ const ProductDetail: React.FC = () => {
                         <Button
                           size="small"
                           icon={<ReloadOutlined />}
+                          disabled={!hasScript}
                           onClick={() => {
                             setRegenTarget(script);
                             setRegenReason('');
@@ -1476,6 +2438,7 @@ const ProductDetail: React.FC = () => {
                             <Button
                               size="small"
                               icon={<ReloadOutlined />}
+                              disabled={!hasScript}
                               onClick={() => {
                                 setRegenTarget(script);
                                 setRegenReason('');
@@ -1492,7 +2455,11 @@ const ProductDetail: React.FC = () => {
 	                                {generated.skipped && <Tag color="processing">已复用</Tag>}
 	                                {generated.size && <Text type="secondary">{fileSize(generated.size)}</Text>}
 	                              </Space>
-	                              <Image src={imgUrl(generated.path)} width={780} alt={`A+模块${script.module_position}`} />
+	                              <Image
+                                  src={imgUrl(generated.display_url || generated.oss_url || generated.provider_url || generated.path)}
+                                  width={780}
+                                  alt={`A+模块${script.module_position}`}
+                                />
 	                            </Space>
 	                          ) : generated?.status === 'failed' ? (
 	                            <Alert type="error" showIcon message="生成失败" description={generated.error || '未知错误'} />
@@ -1517,7 +2484,7 @@ const ProductDetail: React.FC = () => {
                             lineHeight: 1.45,
                           }}
                         >
-                          {script.prompt || '无 prompt'}
+                          {script.prompt || '脚本尚未生成，当前只保存了 A+ 规划。'}
                         </Typography.Paragraph>
                         {script.negative_prompt && (
                           <>
@@ -1567,67 +2534,19 @@ const ProductDetail: React.FC = () => {
       children: (
         <div>
           <Card
-            title="商品导入表格和生成文件"
+            title="生成文件"
             size="small"
             style={{ marginBottom: 16 }}
-            extra={
-              <Button size="small" icon={<FileExcelOutlined />} loading={amazonTemplateLoading} onClick={generateAmazonTemplate}>
-                {data?.amazon_template_path ? '重新生成导入表格' : '生成导入表格'}
-              </Button>
-            }
           >
             <Table
               size="small"
               columns={generatedFileColumns}
-              dataSource={generatedFiles}
+              dataSource={visibleGeneratedFiles}
               rowKey="id"
               pagination={false}
               scroll={{ x: 920 }}
               locale={{ emptyText: '暂无文件' }}
             />
-            {amazonTemplateFillSummary && (
-              <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid #f0f0f0' }}>
-                <Text strong>导入表格检查</Text>
-                <Descriptions bordered size="small" column={3}>
-                  <Descriptions.Item label="风险等级">
-                    <Tag color={amazonTemplateRiskDisplay.color}>{amazonTemplateRiskDisplay.label}</Tag>
-                  </Descriptions.Item>
-                  <Descriptions.Item label="已填字段">{amazonTemplateFillSummary.filled_count ?? '-'}</Descriptions.Item>
-                  <Descriptions.Item label="图片URL">{amazonTemplateFillSummary.image_url_count ?? '-'}</Descriptions.Item>
-                  <Descriptions.Item label="缺关键字段">{amazonTemplateFillSummary.missing_required_count ?? 0}</Descriptions.Item>
-                  <Descriptions.Item label="未映射字段">{amazonTemplateFillSummary.unmapped_count ?? 0}</Descriptions.Item>
-                  <Descriptions.Item label="提醒数量">{amazonTemplateFillSummary.warnings_count ?? 0}</Descriptions.Item>
-                </Descriptions>
-                {Array.isArray(amazonTemplateFillSummary.missing_required_fields) && amazonTemplateFillSummary.missing_required_fields.length > 0 && (
-                  <div style={{ marginTop: 12 }}>
-                    <Text type="danger">缺少关键字段</Text>
-                    <List
-                      size="small"
-                      dataSource={amazonTemplateFillSummary.missing_required_fields.slice(0, 8)}
-                      renderItem={(item: string) => <List.Item><Text copyable>{item}</Text></List.Item>}
-                    />
-                  </div>
-                )}
-                {Array.isArray(amazonTemplateFillSummary.unmapped_fields) && amazonTemplateFillSummary.unmapped_fields.length > 0 && (
-                  <div style={{ marginTop: 12 }}>
-                    <Text type="secondary">模板未找到字段</Text>
-                    <List
-                      size="small"
-                      dataSource={amazonTemplateFillSummary.unmapped_fields.slice(0, 8)}
-                      renderItem={(item: string) => <List.Item><Text copyable>{item}</Text></List.Item>}
-                    />
-                  </div>
-                )}
-              </div>
-            )}
-            {Array.isArray(amazonTemplateWarnings) && amazonTemplateWarnings.length > 0 && (
-              <div style={{ marginTop: 12 }}>
-                <Text strong>上架前风险提醒</Text>
-                <div style={{ marginTop: 8 }}>
-                  {amazonTemplateWarnings.map((item, i) => <Tag color="warning" key={i}>{item}</Tag>)}
-                </div>
-              </div>
-            )}
           </Card>
 
           <Card title="文件夹入口" size="small" style={{ marginBottom: 16 }}>
@@ -1682,12 +2601,7 @@ const ProductDetail: React.FC = () => {
         </Title>
         <Space>
           <Button icon={<ReloadOutlined />} onClick={fetchDetail}>刷新</Button>
-          {product.status === 'created' && (
-            <Button type="primary" icon={<PlayCircleOutlined />} onClick={async () => { await startPipeline(product.id); fetchDetail(); }}>
-              启动Pipeline
-            </Button>
-          )}
-          {product.status === 'failed' && (
+          {product.status === 'failed' && !isLegacyGigaBrowserCollectError && (
             <Button icon={<RedoOutlined />} onClick={async () => { await retryStep(product.id); fetchDetail(); }}>
               重试
             </Button>
@@ -1697,21 +2611,21 @@ const ProductDetail: React.FC = () => {
               继续
             </Button>
           )}
-          {product.status === 'pending_review' && product.current_step < 10 && (
+          {product.status === 'pending_review' && product.current_step < 9 && (
             <Button type="primary" icon={<PlayCircleOutlined />} onClick={async () => { await resumePipeline(product.id); fetchDetail(); }}>
               继续
             </Button>
           )}
-          {product.status === 'pending_review' && product.current_step >= 10 && (
+          {product.status === 'pending_review' && product.current_step >= 9 && (
             <Popconfirm
-              title="确认同步到商品列表？"
-              description={isAplusRegenerating ? 'A+重新生成还在进行中，完成后才能确认入库。' : '确认后，这个商品会进入商品列表，可继续同步 ASIN 和上传 A+。'}
-              okText="确认入库"
+              title="确认加入待导出？"
+              description={isAplusRegenerating ? 'A+重新生成还在进行中，完成后才能确认。' : '确认后，这个 Item 会进入待导出，后续在导出中心批量生成 Excel。'}
+              okText="加入待导出"
               cancelText="再看看"
               disabled={isAplusRegenerating}
-              onConfirm={async () => { await confirmProduct(product.id); message.success('已同步到商品列表'); fetchDetail(); }}
+              onConfirm={async () => { await confirmProduct(product.id); message.success('已加入待导出'); fetchDetail(); }}
             >
-              <Button type="primary" icon={<CheckOutlined />} disabled={isAplusRegenerating}>确认入库</Button>
+              <Button type="primary" icon={<CheckOutlined />} disabled={isAplusRegenerating}>加入待导出</Button>
             </Popconfirm>
           )}
           {canRetryAplusRegeneration && (
@@ -1721,13 +2635,24 @@ const ProductDetail: React.FC = () => {
           )}
           {isPipelineRunning && (
             <Button icon={<PauseOutlined />} onClick={async () => { await pausePipeline(product.id); fetchDetail(); }}>
-              暂停
+              挂起
             </Button>
+          )}
+          {canSuspendProduct && !isPipelineRunning && (
+            <Popconfirm
+              title="挂起这个商品？"
+              description="挂起后不会继续执行后续自动流程，之后可以点继续恢复。"
+              okText="挂起"
+              cancelText="取消"
+              onConfirm={async () => { await pausePipeline(product.id); fetchDetail(); }}
+            >
+              <Button icon={<PauseOutlined />}>挂起</Button>
+            </Popconfirm>
           )}
           {!isPipelineRunning && (
             <Popconfirm
               title="确定重新开始？"
-              description="会删除旧素材文件和已生成结果，并从商品采集重新拉取。"
+              description="会保留商品源数据和图片选择，清理后续生成结果，并回到详情页流程起点。"
               okText="重新开始"
               cancelText="取消"
               onConfirm={() => doRestart()}
@@ -1751,7 +2676,7 @@ const ProductDetail: React.FC = () => {
       {/* Pipeline 进度条 */}
       <Card size="small" style={{ marginBottom: 16 }}>
         <Steps
-          current={['completed', 'pending_review'].includes(product.status) ? pipelineSteps.length : currentStepIndex}
+          current={isReadyToExport ? pipelineSteps.length : currentStepIndex}
           status={stepStatus}
           items={pipelineSteps}
           size="small"
@@ -1759,15 +2684,201 @@ const ProductDetail: React.FC = () => {
       </Card>
 
       {/* 状态信息 */}
-          {product.error_message && (
+      {product.status === 'paused' && (
+        <Card size="small" style={{ marginBottom: 16, borderColor: '#d9d9d9' }}>
+          <Text type="secondary">已挂起：不会继续执行后续自动流程，点击继续后从当前步骤恢复。</Text>
+        </Card>
+      )}
+      {product.status === 'step5_listing' && /竞品.*抓取中|Listing.*抓取中/i.test(product.error_message || '') && (
+        <Card size="small" style={{ marginBottom: 16, borderColor: '#1677ff' }}>
+          <Text type="secondary">{product.error_message}</Text>
+        </Card>
+      )}
+      {showTopProductError && (
         <Card size="small" style={{ marginBottom: 16, borderColor: '#ff4d4f' }}>
-          <Text type="danger">{product.status === 'source_unavailable' ? '原商品下架停止采集：' : '❌ '}{product.error_message}</Text>
+          <Text type="danger">{product.status === 'source_unavailable' ? '原商品下架停止采集：' : '❌ '}{productErrorMessage}</Text>
         </Card>
       )}
 
       {/* 内容 Tabs */}
-      <Tabs items={tabItems} />
+      <Tabs
+        activeKey={activeTabKey}
+        items={tabItems}
+        onChange={(key) => {
+          setActiveTabKey(key);
+          if (key === 'competitor' && !competitorGroup && !competitorLoading) {
+            loadCompetitorCandidates();
+          }
+        }}
+      />
     </div>
+    <Modal
+      title={`选择参考竞品${data?.item_code ? `：${data.item_code}` : ''}`}
+      open={competitorModalOpen}
+      onCancel={() => {
+        if (!selectingCompetitorId) {
+          setCompetitorModalOpen(false);
+        }
+      }}
+      footer={null}
+      width={1180}
+      destroyOnHidden
+    >
+      <Spin spinning={competitorLoading}>
+        {competitorGroup ? (
+          <Space direction="vertical" size={12} style={{ width: '100%' }}>
+            {hasListingContent && (
+              <Alert
+                type="warning"
+                showIcon
+                message="更换竞品后需要重新生成 Listing"
+                description="当前商品已经有生成文案。选择新竞品会记录 ASIN、类目并抓取竞品详情，但不会自动覆盖已有文案和 A+，需要手动重跑生成。"
+              />
+            )}
+            <div style={{ display: 'grid', gridTemplateColumns: '180px minmax(0, 1fr)', gap: 16 }}>
+              <div>
+                <div
+                  style={{
+                    height: 180,
+                    border: '1px solid #e5e7eb',
+                    borderRadius: 8,
+                    background: '#f8fafc',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    overflow: 'hidden',
+                    marginBottom: 10,
+                  }}
+                >
+                  {(competitorGroup.source_image_path || competitorGroup.source_image_url) ? (
+                    <Image
+                      src={competitorGroup.source_image_path ? imgUrl(competitorGroup.source_image_path) : competitorGroup.source_image_url || ''}
+                      height={178}
+                      style={{ objectFit: 'contain' }}
+                      preview={{ src: competitorGroup.source_image_path ? imgUrl(competitorGroup.source_image_path) : competitorGroup.source_image_url || '' }}
+                    />
+                  ) : (
+                    <Text type="secondary">无源图</Text>
+                  )}
+                </div>
+                <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                  <Text strong>{competitorGroup.product_name || competitorGroup.item_code}</Text>
+                  <Text type="secondary">SKU：{competitorGroup.sku_code || '-'}</Text>
+                  <Text type="secondary">{competitorGroup.task_ready_reason || '从候选中选择一个 Item 级参考竞品'}</Text>
+                </Space>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(185px, 1fr))', gap: 12 }}>
+                {competitorGroup.candidates.map((candidate: any) => {
+                  const selected = competitorGroup.selected_candidate_id === candidate.id || candidate.is_selected === 1;
+                  return (
+                    <div
+                      key={candidate.id}
+                      style={{
+                        border: selected ? '2px solid #16a34a' : '1px solid #d9e1ec',
+                        background: selected ? '#f0fdf4' : '#fff',
+                        borderRadius: 8,
+                        padding: 10,
+                        minHeight: 340,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 8,
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6, alignItems: 'center' }}>
+                        <Space size={4}>
+                          <Tag color={selected ? 'success' : 'blue'}>#{candidate.rank}</Tag>
+                          <Text strong>{candidate.asin}</Text>
+                        </Space>
+                        {selected ? <Tag color="success">已选</Tag> : null}
+                      </div>
+                      <div
+                        style={{
+                          height: 110,
+                          borderRadius: 6,
+                          background: '#f5f7fb',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          overflow: 'hidden',
+                        }}
+                      >
+                        {candidate.amazon_image_url ? (
+                          <Image
+                            src={candidate.amazon_image_url}
+                            height={110}
+                            style={{ objectFit: 'contain' }}
+                            preview={{ src: candidate.amazon_image_url }}
+                          />
+                        ) : (
+                          <Text type="secondary">{candidate.asin}</Text>
+                        )}
+                      </div>
+                      <Space size={[4, 4]} wrap>
+                        <Tag>{valueText(candidate.brand)}</Tag>
+                        <Tag color={candidate.seller === 'Amazon' ? 'green' : 'default'}>{valueText(candidate.seller)}</Tag>
+                        {candidate.price ? <Tag color="gold">{candidate.price}</Tag> : null}
+                      </Space>
+                      <div style={{ display: 'grid', gap: 4, fontSize: 12 }}>
+                        <Text type="secondary">评分：{valueText(candidate.rating)}</Text>
+                        <Text type="secondary">类目：{valueText(candidate.category_rank)}</Text>
+                        {(candidate.color || candidate.size || candidate.style) ? (
+                          <Text type="secondary">
+                            变体：{[candidate.color, candidate.size, candidate.style].filter(Boolean).join(' / ')}
+                          </Text>
+                        ) : null}
+                        {captureStatusTag(candidate.listing_capture_status)}
+                      </div>
+                      <Typography.Paragraph
+                        type="secondary"
+                        ellipsis={{ rows: 3, expandable: false }}
+                        style={{ fontSize: 12, margin: 0, minHeight: 54 }}
+                      >
+                        {candidate.raw_snippet || ''}
+                      </Typography.Paragraph>
+                      <div style={{ marginTop: 'auto', display: 'flex', gap: 8 }}>
+                        <Button
+                          type={selected ? 'primary' : 'default'}
+                          icon={<CheckOutlined />}
+                          loading={selectingCompetitorId === candidate.id}
+                          disabled={competitorCandidateActionDisabled}
+                          onClick={() => chooseCompetitorCandidate(candidate)}
+                          block
+                        >
+                          {competitorCandidateButtonText(selected)}
+                        </Button>
+                        <Button
+                          icon={<ExportOutlined />}
+                          href={candidate.url || `https://www.amazon.com/dp/${candidate.asin}`}
+                          target="_blank"
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </Space>
+        ) : (
+          <Empty description={
+            competitorLoading
+              ? '正在加载候选竞品'
+              : isCompetitorSearchFailed
+                ? (stylesnapSearch?.error || productErrorMessage || '候选竞品搜索失败，请重新搜索')
+                : '暂无候选竞品'
+          }>
+            <Button
+              type="primary"
+              icon={<PlayCircleOutlined />}
+              loading={competitorSearchLoading || isCompetitorSearching}
+              disabled={!hasConfirmedSearchImage || !canOperateCompetitor || isHardStopped || isReadyToExport}
+              onClick={() => searchCompetitorCandidates(shouldForceCompetitorSearch)}
+            >
+              {competitorSearchButtonText}
+            </Button>
+          </Empty>
+        )}
+      </Spin>
+    </Modal>
     <Modal
       title={`重新生成A+模块 ${regenTarget?.module_position || ''}`}
       open={!!regenTarget}
@@ -1860,6 +2971,16 @@ const ProductDetail: React.FC = () => {
           />
         </div>
         <div>
+          <Text type="secondary">商品描述</Text>
+          <Input.TextArea
+            value={listingDescriptionInput}
+            onChange={(event) => setListingDescriptionInput(event.target.value)}
+            rows={5}
+            maxLength={1900}
+            showCount
+          />
+        </div>
+        <div>
           <Text type="secondary">Search Terms</Text>
           <Input.TextArea
             value={listingSearchTermsInput}
@@ -1888,6 +3009,16 @@ const ProductDetail: React.FC = () => {
             value={listingBulletsZhInput}
             onChange={(event) => setListingBulletsZhInput(event.target.value)}
             rows={6}
+          />
+        </div>
+        <div>
+          <Text type="secondary">中文商品描述</Text>
+          <Input.TextArea
+            value={listingDescriptionZhInput}
+            onChange={(event) => setListingDescriptionZhInput(event.target.value)}
+            rows={5}
+            maxLength={1900}
+            showCount
           />
         </div>
         <div>

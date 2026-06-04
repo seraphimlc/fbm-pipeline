@@ -63,16 +63,25 @@ def normalize_item_code(value: str | None) -> str | None:
     return normalized or None
 
 
+def _data_source_snapshot_filter(data_source_id: int):
+    spaced = f'%"data_source_id": {data_source_id}%'
+    compact = f'%"data_source_id":{data_source_id}%'
+    return ProductData.gigab2b_raw_snapshot.ilike(spaced) | ProductData.gigab2b_raw_snapshot.ilike(compact)
+
+
 async def find_duplicate_by_gigab2b_product_id(
     db: AsyncSession,
     gigab2b_product_id: str | None,
     *,
+    data_source_id: int | None = None,
     exclude_product_id: int | None = None,
 ) -> ProductDuplicate | None:
     if not gigab2b_product_id:
         return None
 
     query = select(Product).where(Product.gigab2b_product_id == gigab2b_product_id)
+    if data_source_id is not None:
+        query = query.join(ProductData, ProductData.product_id == Product.id).where(_data_source_snapshot_filter(data_source_id))
     if exclude_product_id is not None:
         query = query.where(Product.id != exclude_product_id)
     result = await db.execute(query.order_by(Product.id.asc()).limit(1))
@@ -81,6 +90,8 @@ async def find_duplicate_by_gigab2b_product_id(
         return ProductDuplicate(product=product, field="gigab2b_product_id", value=gigab2b_product_id)
 
     fallback_query = select(Product).where(Product.gigab2b_product_id.is_(None))
+    if data_source_id is not None:
+        fallback_query = fallback_query.join(ProductData, ProductData.product_id == Product.id).where(_data_source_snapshot_filter(data_source_id))
     if exclude_product_id is not None:
         fallback_query = fallback_query.where(Product.id != exclude_product_id)
     fallback_result = await db.execute(fallback_query.order_by(Product.id.asc()))
@@ -94,6 +105,7 @@ async def find_duplicate_by_item_code(
     db: AsyncSession,
     item_code: str | None,
     *,
+    data_source_id: int | None = None,
     exclude_product_id: int | None = None,
 ) -> ProductDuplicate | None:
     normalized = normalize_item_code(item_code)
@@ -105,6 +117,8 @@ async def find_duplicate_by_item_code(
         .join(ProductData, ProductData.product_id == Product.id)
         .where(ProductData.item_code == normalized)
     )
+    if data_source_id is not None:
+        query = query.where(_data_source_snapshot_filter(data_source_id))
     if exclude_product_id is not None:
         query = query.where(Product.id != exclude_product_id)
     result = await db.execute(query.order_by(Product.id.asc()).limit(1))
@@ -117,6 +131,9 @@ async def find_duplicate_by_item_code(
         .join(CatalogProduct, CatalogProduct.source_product_id == Product.id)
         .where(CatalogProduct.item_code == normalized)
     )
+    if data_source_id is not None:
+        catalog_query = catalog_query.join(ProductData, ProductData.product_id == Product.id)
+        catalog_query = catalog_query.where(_data_source_snapshot_filter(data_source_id))
     if exclude_product_id is not None:
         catalog_query = catalog_query.where(Product.id != exclude_product_id)
     catalog_result = await db.execute(catalog_query.order_by(Product.id.asc()).limit(1))

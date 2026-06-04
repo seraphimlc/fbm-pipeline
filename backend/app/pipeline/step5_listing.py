@@ -101,6 +101,9 @@ LISTING_PROMPT_TEMPLATE = """Generate an Amazon product listing based on the fol
 ## Category-Specific Selling Strategy
 {category_strategy}
 
+## Selected Amazon Competitor Reference
+{competitor_reference}
+
 ## Strategic Requirements
 Before writing copy, build a keyword and positioning strategy. Keywords serve Amazon search relevance; the copy serves buyer click-through and conversion.
 
@@ -114,9 +117,15 @@ Keyword rules:
 Copy rules:
 1. **Title** (max 200 chars): Optimize for click-through and algorithm clarity. Use this shape where possible: brand + primary keyword + key type/configuration + strongest factual differentiators + suitable use/room + size/count + color suffix. Put the color at the very end in parentheses, for example "(Brown)"; do not put the color elsewhere if it can be avoided. Avoid more than two commas.
 2. **Five Bullets** (each max 500 chars): Each bullet must have one clear selling job and should not repeat the same claim in different words. Turn facts into buyer-relevant outcomes without exaggeration.
-3. **Search Terms** (max 250 bytes total, comma-separated): Algorithm-only field. Separate keyword phrases with ", ". Do not repeat words already used in title/bullets. Do not include punctuation except the comma separators, or claims not supported by facts.
-4. **Compliance Check**: Flag risky claims, unsupported keywords, prohibited words, length/clarity issues, and any conversion risk.
-5. **Chinese Translation**: Provide faithful Chinese translations for the title, five bullets, and search terms. Keep meaning accurate; do not add claims.
+3. **Product Description** (max 1900 chars): Write a concise Amazon product description that can stand alone before A+ content exists. Use 1-3 short paragraphs in plain text, summarize the product identity, main benefits, use scenes, and important fit/setup boundaries. Do not simply repeat the five bullets verbatim.
+4. **Search Terms** (max 250 bytes total, comma-separated): Algorithm-only field. Separate keyword phrases with ", ". Do not repeat words already used in title/bullets/description. Do not include punctuation except the comma separators, or claims not supported by facts.
+5. **Compliance Check**: Flag risky claims, unsupported keywords, prohibited words, length/clarity issues, and any conversion risk.
+6. **Chinese Translation**: Provide faithful Chinese translations for the title, five bullets, product description, and search terms. Keep meaning accurate; do not add claims.
+
+Competitor reference rules:
+- Use the selected Amazon competitor only as market reference for buyer concerns, listing structure, and positioning cues.
+- Do not copy competitor wording, sentence order, brand names, trademarks, or unsupported claims.
+- Any spec, mode, size, age range, certification, safety, durability, waterproof, material, compatibility, or included-part claim must be supported by our Product Attributes.
 
 Bullet structure guidance:
 - Bullet 1: strongest purchase reason and product identity.
@@ -141,9 +150,11 @@ Output JSON:
   }},
   "title": "...",
   "bullets": ["...", "...", "...", "...", "..."],
+  "description": "...",
   "search_terms": "...",
   "title_zh": "...",
   "bullets_zh": ["...", "...", "...", "...", "..."],
+  "description_zh": "...",
   "search_terms_zh": "...",
   "primary_keyword": "...",
   "compliance_check": {{
@@ -152,6 +163,67 @@ Output JSON:
   }},
   "removed_keywords": ["keywords intentionally excluded and why"]
 }}"""
+
+
+def _compact_text(value: str | None, limit: int = 1200) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip(" ,;-") + "..."
+
+
+def _competitor_reference(pd: ProductData) -> str:
+    snapshot = {}
+    if pd.gigab2b_raw_snapshot:
+        try:
+            snapshot = json.loads(pd.gigab2b_raw_snapshot)
+        except Exception:
+            snapshot = {}
+    capture = snapshot.get("amazon_listing_capture") if isinstance(snapshot, dict) else None
+    selected = snapshot.get("selected_stylesnap") if isinstance(snapshot, dict) else None
+    if not isinstance(capture, dict) and not isinstance(selected, dict):
+        return "N/A"
+    capture = capture if isinstance(capture, dict) else {}
+    selected = selected if isinstance(selected, dict) else {}
+
+    bullets = capture.get("bullets")
+    if not isinstance(bullets, list):
+        bullets = []
+    bullet_lines = []
+    for bullet in bullets[:5]:
+        text = _compact_text(str(bullet), 500)
+        if text:
+            bullet_lines.append(f"  - {text}")
+
+    product_details = capture.get("product_details")
+    if isinstance(product_details, dict) and product_details:
+        detail_items = list(product_details.items())[:12]
+        details_text = "; ".join(
+            f"{_compact_text(str(key), 80)}: {_compact_text(str(value), 160)}"
+            for key, value in detail_items
+            if str(key).strip() and str(value).strip()
+        )
+    else:
+        details_text = ""
+
+    lines = [
+        f"- ASIN: {capture.get('asin') or selected.get('asin') or 'N/A'}",
+        f"- URL: {capture.get('url') or selected.get('url') or 'N/A'}",
+        f"- Title: {_compact_text(capture.get('title'), 600) or 'N/A'}",
+        f"- Brand: {capture.get('brand') or 'N/A'}",
+        f"- Seller: {capture.get('seller') or 'N/A'}",
+        f"- Price: {capture.get('price') or 'N/A'}",
+        f"- Rating/Reviews: {' / '.join(str(item) for item in [capture.get('rating'), capture.get('review_count')] if item) or 'N/A'}",
+        f"- Category Rank: {_compact_text(capture.get('category_rank'), 600) or selected.get('category_rank') or 'N/A'}",
+        "- Bullet Points:",
+        *(bullet_lines or ["  - N/A"]),
+        f"- Description: {_compact_text(capture.get('description'), 1200) or 'N/A'}",
+        f"- Product Details: {details_text or 'N/A'}",
+    ]
+    aplus_text = _compact_text(capture.get("aplus_text"), 1600)
+    if aplus_text:
+        lines.append(f"- A+ Highlights: {aplus_text}")
+    return "\n".join(lines)
 
 
 def _build_prompt(product: Product, pd: ProductData) -> str:
@@ -184,6 +256,7 @@ def _build_prompt(product: Product, pd: ProductData) -> str:
 
     keywords_json = json.dumps(keywords, ensure_ascii=False, indent=2) if keywords else "[]"
     category_strategy = _listing_strategy(pd, category_path)
+    competitor_reference = _competitor_reference(pd)
 
     return LISTING_PROMPT_TEMPLATE.format(
         title=pd.title or "N/A",
@@ -202,6 +275,7 @@ def _build_prompt(product: Product, pd: ProductData) -> str:
         keywords_json=keywords_json,
         category_path=category_path,
         category_strategy=category_strategy,
+        competitor_reference=competitor_reference,
         search_terms_max_keywords=SEARCH_TERMS_MAX_KEYWORDS,
     )
 
@@ -280,7 +354,17 @@ def _normalize_listing(listing: dict, color: str | None) -> dict:
     bullets_zh = _as_text_list(listing.get("bullets_zh"))[:5]
     listing["bullets_zh"] = bullets_zh
 
-    visible_copy = " ".join([title or "", *normalized_bullets])
+    description, changed = _trim_chars(listing.get("description"), 1900)
+    if changed:
+        adjustments.append("description_trimmed_to_1900_chars")
+    listing["description"] = description
+
+    description_zh, changed = _trim_chars(listing.get("description_zh"), 1900)
+    if changed:
+        adjustments.append("description_zh_trimmed_to_1900_chars")
+    listing["description_zh"] = description_zh
+
+    visible_copy = " ".join([title or "", *normalized_bullets, description or ""])
     search_terms, changed, search_terms_count = normalize_search_terms(
         listing.get("search_terms"),
         visible_copy=visible_copy,
@@ -297,6 +381,9 @@ def _normalize_listing(listing: dict, color: str | None) -> dict:
         check = {"status": "warning", "issues": ["LLM compliance_check missing or invalid"]}
     if len(normalized_bullets) != 5:
         check.setdefault("issues", []).append(f"Expected 5 bullets, got {len(normalized_bullets)}")
+        check["status"] = "warning"
+    if not description:
+        check.setdefault("issues", []).append("Product description is missing")
         check["status"] = "warning"
     keyword_plan = listing.get("keyword_plan") if isinstance(listing.get("keyword_plan"), dict) else {}
     positioning = listing.get("positioning") if isinstance(listing.get("positioning"), dict) else {}
@@ -378,9 +465,11 @@ async def run_listing(product_id: int) -> dict:
         # 保存到数据库
         pd.listing_title = listing.get("title")
         pd.listing_bullets = json.dumps(listing.get("bullets", []), ensure_ascii=False)
+        pd.listing_description = listing.get("description")
         pd.listing_search_terms = listing.get("search_terms")
         pd.listing_title_zh = listing.get("title_zh")
         pd.listing_bullets_zh = json.dumps(listing.get("bullets_zh", []), ensure_ascii=False)
+        pd.listing_description_zh = listing.get("description_zh")
         pd.listing_search_terms_zh = listing.get("search_terms_zh")
         pd.listing_check = json.dumps(listing.get("compliance_check", {}), ensure_ascii=False)
         pd.listing_primary_keyword = listing.get("primary_keyword")

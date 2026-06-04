@@ -27,7 +27,9 @@ class ProductUpdate(BaseModel):
     listing_search_terms: str | None = None
     listing_title_zh: str | None = None
     listing_bullets_zh: Any | None = None
+    listing_description: str | None = None
     listing_search_terms_zh: str | None = None
+    listing_description_zh: str | None = None
     listing_primary_keyword: str | None = None
     main_image_path: str | None = None
     gallery_images: Any | None = None
@@ -36,6 +38,12 @@ class ProductUpdate(BaseModel):
 class ProductListingImagesUpdate(BaseModel):
     main_image_path: str
     gallery_images: list[str] = Field(default_factory=list)
+
+
+class ProductGigaRefreshRequest(BaseModel):
+    data_source_id: int | None = None
+    item_code: str | None = None
+    sku_codes: list[str] = Field(default_factory=list)
 
 
 class UpcPoolImportRequest(BaseModel):
@@ -62,6 +70,516 @@ class UpcPoolSummary(BaseModel):
     total: int
     available: int
     bound: int
+
+
+class ProductDataSourceBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    platform: str = Field(default="giga", max_length=30)
+    site: str = Field(..., min_length=1, max_length=20)
+    country: str | None = Field(default=None, min_length=1, max_length=20)
+    fulfillment_mode: str = Field(default="dropship", max_length=30)
+    api_base: str | None = None
+    client_id: str | None = None
+    shipping_cost_mode: str = Field(default="giga_shipping_fee", max_length=30)
+    packing_fee: float | None = Field(default=None, ge=0)
+    inventory_mode: str = Field(default="available_qty", max_length=30)
+    enabled: bool = True
+    remark: str | None = None
+
+
+class ProductDataSourceCreate(ProductDataSourceBase):
+    client_secret: str | None = None
+
+
+class ProductDataSourceUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    platform: str | None = Field(default=None, max_length=30)
+    site: str | None = Field(default=None, min_length=1, max_length=20)
+    country: str | None = Field(default=None, min_length=1, max_length=20)
+    fulfillment_mode: str | None = Field(default=None, max_length=30)
+    api_base: str | None = None
+    client_id: str | None = None
+    client_secret: str | None = None
+    shipping_cost_mode: str | None = Field(default=None, max_length=30)
+    packing_fee: float | None = Field(default=None, ge=0)
+    inventory_mode: str | None = Field(default=None, max_length=30)
+    enabled: bool | None = None
+    remark: str | None = None
+
+
+class ProductDataSourceResponse(ProductDataSourceBase):
+    id: int
+    client_secret_masked: str | None = None
+    enabled: bool = True
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class PaginatedProductDataSources(BaseModel):
+    items: list[ProductDataSourceResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class OfflineTaskStepResponse(BaseModel):
+    id: int
+    task_id: int
+    step_type: str
+    title: str
+    status: str
+    data_source_id: int | None = None
+    data_source_name: str | None = None
+    site: str | None = None
+    batch_id: str | None = None
+    progress_current: int = 0
+    progress_total: int = 0
+    payload_json: str | None = None
+    result_json: str | None = None
+    error_message: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class OfflineTaskResponse(BaseModel):
+    id: int
+    task_type: str
+    title: str
+    status: str
+    total_steps: int = 0
+    success_steps: int = 0
+    failed_steps: int = 0
+    running_steps: int = 0
+    created_by: str | None = None
+    payload_json: str | None = None
+    result_json: str | None = None
+    error_message: str | None = None
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class OfflineTaskDetailResponse(OfflineTaskResponse):
+    steps: list[OfflineTaskStepResponse] = Field(default_factory=list)
+
+
+class PaginatedOfflineTasks(BaseModel):
+    items: list[OfflineTaskResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class OfflineTaskGigaPullRequest(BaseModel):
+    data_source_ids: list[int] = Field(..., min_length=1, max_length=20)
+    current_category: str | None = Field(default=None, max_length=200)
+    page_size: int | None = Field(default=None, ge=1, le=200)
+    max_pages: int | None = Field(default=None, ge=1)
+
+
+class OfflineTaskQueuedResponse(BaseModel):
+    task: OfflineTaskResponse
+    steps: list[OfflineTaskStepResponse] = Field(default_factory=list)
+
+
+class GigaSyncRequest(BaseModel):
+    batch_id: str = Field(..., min_length=1, max_length=100)
+    site: str = Field(default="US", min_length=1, max_length=20)
+    data_source_id: int = Field(..., ge=1)
+    task_id: str | None = Field(default=None, max_length=100)
+    current_category: str | None = Field(default=None, max_length=200)
+    page_size: int | None = Field(default=None, ge=1, le=200)
+    max_pages: int | None = Field(default=None, ge=1)
+    skip_existing: bool = False
+
+
+class GigaSyncMissingRequest(BaseModel):
+    batch_id: str | None = Field(default=None, min_length=1, max_length=100)
+    site: str = Field(default="US", min_length=1, max_length=20)
+    data_source_id: int = Field(..., ge=1)
+    task_id: str | None = Field(default=None, max_length=100)
+    current_category: str | None = Field(default=None, max_length=200)
+    page_size: int | None = Field(default=None, ge=1, le=200)
+    max_pages: int | None = Field(default=None, ge=1)
+
+
+class GigaSyncResponse(BaseModel):
+    batch_id: str
+    site: str
+    data_source_id: int | None = None
+    data_source_name: str | None = None
+    raw_sku_count: int
+    sku_count: int
+    item_count: int
+    price_count: int
+    inventory_count: int
+    group_count: int
+    deleted_single_sku_group_count: int
+    skipped_existing_count: int = 0
+
+
+class GigaSyncQueuedResponse(BaseModel):
+    batch_id: str
+    site: str
+    data_source_id: int | None = None
+    data_source_name: str | None = None
+    status: str
+    started: bool
+
+
+class GigaInventorySyncRequest(BaseModel):
+    batch_id: str = Field(..., min_length=1, max_length=100)
+    site: str = Field(..., min_length=1, max_length=20)
+    data_source_id: int = Field(..., ge=1)
+    task_id: str | None = Field(default=None, max_length=100)
+    sku_codes: list[str] | None = Field(default=None, max_length=5000)
+
+
+class GigaInventorySyncResponse(BaseModel):
+    batch_id: str
+    site: str
+    data_source_id: int | None = None
+    data_source_name: str | None = None
+    task_id: str | None = None
+    total_skus: int
+    success_count: int
+    failed_count: int
+    alert_count: int
+    out_of_stock_count: int
+    restocked_count: int
+    previous_batch_id: str | None = None
+    pulled_at: datetime
+    failed_skus: list[dict[str, str]] = Field(default_factory=list)
+
+
+class GigaPriceSyncRequest(BaseModel):
+    batch_id: str = Field(..., min_length=1, max_length=100)
+    site: str = Field(..., min_length=1, max_length=20)
+    data_source_id: int = Field(..., ge=1)
+    task_id: str | None = Field(default=None, max_length=100)
+    sku_codes: list[str] | None = Field(default=None, max_length=5000)
+
+
+class GigaPriceSyncResponse(BaseModel):
+    batch_id: str
+    site: str
+    data_source_id: int | None = None
+    data_source_name: str | None = None
+    task_id: str | None = None
+    total_skus: int
+    success_count: int
+    failed_count: int
+    alert_count: int = 0
+    price_changed_count: int = 0
+    previous_batch_id: str | None = None
+    pulled_at: datetime
+    failed_skus: list[dict[str, str]] = Field(default_factory=list)
+
+
+class GigaSyncBatchResponse(BaseModel):
+    id: int
+    task_id: str | None = None
+    batch_id: str
+    site: str
+    data_source_id: int | None = None
+    data_source_name: str | None = None
+    fulfillment_mode: str | None = None
+    current_category: str | None = None
+    status: str
+    raw_sku_count: int = 0
+    sku_count: int = 0
+    item_count: int = 0
+    price_count: int = 0
+    inventory_count: int = 0
+    group_count: int = 0
+    deleted_single_sku_group_count: int = 0
+    error_message: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class PaginatedGigaSyncBatches(BaseModel):
+    items: list[GigaSyncBatchResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class GigaGroupResponse(BaseModel):
+    id: int
+    batch_id: str
+    site: str
+    data_source_id: int | None = None
+    data_source_name: str | None = None
+    fulfillment_mode: str | None = None
+    group_code: str
+    parent_sku_code: str | None = None
+    current_category: str | None = None
+    item_codes_json: str
+    sku_codes_json: str
+    variation_keys_json: str | None = None
+    group_size: int
+    deleted_single_sku_group: int
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class PaginatedGigaGroups(BaseModel):
+    items: list[GigaGroupResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class GigaItemResponse(BaseModel):
+    id: int
+    batch_id: str
+    site: str
+    data_source_id: int | None = None
+    data_source_name: str | None = None
+    fulfillment_mode: str | None = None
+    item_code: str
+    parent_sku_code: str | None = None
+    item_name: str | None = None
+    category: str | None = None
+    sku_count: int
+    sku_codes_json: str | None = None
+    missing_related_skus_json: str | None = None
+    raw_group_json: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class PaginatedGigaItems(BaseModel):
+    items: list[GigaItemResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class GigaSkuResponse(BaseModel):
+    id: int
+    giga_item_id: int | None = None
+    batch_id: str
+    site: str
+    data_source_id: int | None = None
+    data_source_name: str | None = None
+    fulfillment_mode: str | None = None
+    sku_code: str
+    item_code: str | None = None
+    parent_sku_code: str | None = None
+    parentage: str | None = None
+    child_sequence: int | None = None
+    is_primary_child: int | None = None
+    product_name: str | None = None
+    main_image_url: str | None = None
+    description: str | None = None
+    attributes_json: str | None = None
+    variation_attributes_json: str | None = None
+    currency: str | None = None
+    price: float | None = None
+    effective_price: float | None = None
+    exclusive_price: float | None = None
+    discounted_price: float | None = None
+    shipping_fee: float | None = None
+    estimated_shipping_fee: float | None = None
+    seller_available_inventory: int | None = None
+    total_buyer_available_inventory: int | None = None
+    availability_status: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class PaginatedGigaSkus(BaseModel):
+    items: list[GigaSkuResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class GigaProductImageResponse(BaseModel):
+    id: int
+    batch_id: str
+    site: str
+    data_source_id: int | None = None
+    item_code: str | None = None
+    sku_code: str
+    image_url: str
+    local_path: str | None = None
+    image_type: str | None = None
+    sort_order: int | None = None
+    file_size: int | None = None
+    mime_type: str | None = None
+    download_status: str
+    error_message: str | None = None
+    pulled_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class PaginatedGigaProductImages(BaseModel):
+    items: list[GigaProductImageResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class GigaInventoryAlertResponse(BaseModel):
+    id: int
+    batch_id: str
+    site: str
+    data_source_id: int | None = None
+    sku_code: str
+    item_code: str | None = None
+    product_name: str | None = None
+    previous_batch_id: str | None = None
+    previous_stock_qty: int | None = None
+    current_stock_qty: int | None = None
+    previous_status: str | None = None
+    current_status: str | None = None
+    change_type: str
+    message: str
+    created_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class PaginatedGigaInventoryAlerts(BaseModel):
+    items: list[GigaInventoryAlertResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class GigaPriceAlertResponse(BaseModel):
+    id: int
+    batch_id: str
+    site: str
+    data_source_id: int | None = None
+    sku_code: str
+    item_code: str | None = None
+    product_name: str | None = None
+    previous_batch_id: str | None = None
+    previous_effective_price: float | None = None
+    current_effective_price: float | None = None
+    previous_price: float | None = None
+    current_price: float | None = None
+    previous_exclusive_price: float | None = None
+    current_exclusive_price: float | None = None
+    previous_discounted_price: float | None = None
+    current_discounted_price: float | None = None
+    previous_shipping_fee: float | None = None
+    current_shipping_fee: float | None = None
+    change_type: str
+    message: str
+    created_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class PaginatedGigaPriceAlerts(BaseModel):
+    items: list[GigaPriceAlertResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class GigaInventoryResponse(BaseModel):
+    id: int
+    site: str
+    data_source_id: int | None = None
+    fulfillment_mode: str | None = None
+    inventory_mode: str | None = None
+    sku_code: str
+    item_code: str | None = None
+    product_name: str | None = None
+    stock_qty: int | None = None
+    seller_available_inventory: int | None = None
+    total_buyer_available_inventory: int | None = None
+    seller_inventory_distribution: str | None = None
+    buyer_inventory_distribution: str | None = None
+    next_arrival_inventory: str | None = None
+    availability_status: str | None = None
+    pulled_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class PaginatedGigaInventory(BaseModel):
+    items: list[GigaInventoryResponse]
+    total: int
+    page: int
+    page_size: int
+    latest_batch_id: str | None = None
+    pulled_at: datetime | None = None
+
+
+class AmazonStyleSnapCandidateResponse(BaseModel):
+    id: int
+    batch_id: str
+    site: str
+    item_code: str
+    sku_code: str
+    product_name: str | None = None
+    source_image_url: str | None = None
+    source_image_path: str | None = None
+    rank: int
+    asin: str
+    url: str | None = None
+    brand: str | None = None
+    seller: str | None = None
+    delivery: str | None = None
+    price: str | None = None
+    rating: str | None = None
+    category_rank: str | None = None
+    color: str | None = None
+    size: str | None = None
+    style: str | None = None
+    amazon_image_url: str | None = None
+    raw_snippet: str | None = None
+    is_selected: int = 0
+    selected_at: datetime | None = None
+    listing_capture_id: int | None = None
+    listing_capture_status: str | None = None
+    listing_captured_at: datetime | None = None
+    captured_at: datetime | None = None
+    imported_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class AmazonStyleSnapCandidateGroupResponse(BaseModel):
+    batch_id: str
+    site: str
+    item_code: str
+    sku_code: str
+    product_name: str | None = None
+    source_image_url: str | None = None
+    source_image_path: str | None = None
+    selected_candidate_id: int | None = None
+    product_task_id: int | None = None
+    product_task_status: str | None = None
+    task_ready: bool = False
+    task_ready_reason: str | None = None
+    candidates: list[AmazonStyleSnapCandidateResponse]
 
 
 class UpcPoolImportResponse(BaseModel):
@@ -207,7 +725,9 @@ class ProductDataResponse(BaseModel):
     listing_search_terms: str | None = None
     listing_title_zh: str | None = None
     listing_bullets_zh: str | None = None
+    listing_description: str | None = None
     listing_search_terms_zh: str | None = None
+    listing_description_zh: str | None = None
     listing_check: str | None = None
     listing_primary_keyword: str | None = None
     listing_removed_keywords: str | None = None
@@ -315,6 +835,27 @@ class PaginatedCatalogProducts(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class CatalogExportCategorySummary(BaseModel):
+    category: str
+    count: int = 0
+    exportable_count: int = 0
+    blocked_count: int = 0
+    template_available: bool = False
+    template_name: str | None = None
+    template_path: str | None = None
+    template_error: str | None = None
+    sample_item_codes: list[str] = Field(default_factory=list)
+
+
+class CatalogExportCategoriesResponse(BaseModel):
+    pending: list[CatalogExportCategorySummary]
+    exported: list[CatalogExportCategorySummary]
+
+
+class CatalogExportByCategoryRequest(BaseModel):
+    category: str = Field(..., min_length=1)
 
 
 class InventorySyncCreateRequest(BaseModel):

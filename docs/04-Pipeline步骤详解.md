@@ -816,7 +816,7 @@ new aplus image/
 ## Step 10 — Amazon 导入表格
 
 ### 职责
-将 Listing、价格、库存、图片 URL、包装尺寸和类目模板固定值写入 Amazon 类目导入模板，并生成“上架前检查”。
+将 Listing、价格、库存、图片 URL、包装尺寸和类目模板固定值写入 Amazon 类目导入模板，并生成“上架前检查”。导出阶段的最终数量以最新 `giga_inventory.stock_qty` 为准；Step 1 采集库存只作为早期可售性判断和历史参考。
 
 ### 模板映射合并规则
 
@@ -841,7 +841,7 @@ Step 10 会把前面几个步骤的风险合并到最终结果：
 - 图片：主图 URL 是否写入、Listing 图数量、Step 6 图片健康提醒
 - Listing：主关键词位置、Search Terms 是否过短、Step 5 文案提醒
 - 价格：净利率、单件利润是否低于系统配置
-- 库存：库存为空、为 0 或过低
+- 库存：最新 GIGA 库存快照为空、为 0 或过低
 - A+：A+ 图片是否完成 5 张、状态是否为 done
 
 `amazon_template_fill_summary.risk_level` 取值为 `pass`、`warning`、`high_risk`，前端会在商品详情“各种文件”中展示，方便人工最后确认。

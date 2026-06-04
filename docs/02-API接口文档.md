@@ -21,12 +21,21 @@
 | UPC池子 | POST | `/api/products/upc-pool/import` | 批量追加UPC |
 | Pipeline | POST | `/api/products/{id}/start` | 启动 Pipeline |
 | Pipeline | POST | `/api/products/bulk-start` | 批量启动待处理任务 |
-| Pipeline | POST | `/api/products/{id}/pause` | 暂停 Pipeline |
+| Pipeline | POST | `/api/products/{id}/pause` | 挂起 Pipeline |
 | Pipeline | POST | `/api/products/{id}/retry` | 重试失败步骤 |
 | Pipeline | POST | `/api/products/{id}/step/{step}` | 单独执行某步 |
 | 配置 | GET | `/api/config` | 获取系统配置（脱敏） |
 | 配置 | PATCH | `/api/config` | 保存系统配置到 `.env`，重启后生效 |
 | 配置 | GET | `/api/config/status` | 系统健康检查 |
+| GIGA | POST | `/api/giga/sync` | 同步 GIGA 商品、详情、价格、库存 |
+| GIGA | GET | `/api/giga/batches` | GIGA 同步批次列表 |
+| GIGA | GET | `/api/giga/items` | GIGA item 维度商品池 |
+| GIGA | GET | `/api/giga/skus` | GIGA SKU 明细 |
+| GIGA库存 | POST | `/api/giga/inventory/sync` | 同步 GIGA 库存快照并生成告警 |
+| GIGA库存 | GET | `/api/giga/inventory` | 分页查看最新 GIGA SKU 库存 |
+| GIGA库存 | GET | `/api/giga/inventory/alerts` | 查看有货/无货切换告警 |
+| GIGA价格 | POST | `/api/giga/price/sync` | 同步 GIGA 价格快照 |
+| GIGA价格 | GET | `/api/giga/price/alerts` | 查看价格变化告警 |
 | 图片 | GET | `/api/images/{path}` | 本地图片代理 |
 | 健康 | GET | `/api/health` | 健康检查 |
 
@@ -183,7 +192,7 @@ POST /api/products/bulk-start
 
 ---
 
-### 2.3 暂停 Pipeline
+### 2.3 挂起 Pipeline
 
 ```
 POST /api/products/{product_id}/pause
@@ -192,7 +201,8 @@ POST /api/products/{product_id}/pause
 **逻辑**：
 1. 将状态设为 `paused`
 2. 向后台任务发送 `CancelledError`，Pipeline 在 `except` 中安全退出
-3. 下次可从暂停点继续
+3. 不再跑后续未完成自动流程
+4. 下次可从挂起点继续
 
 **响应** `200 OK` → [ProductResponse](#productresponse)
 
@@ -497,7 +507,130 @@ GET /api/images/~/Documents/F/亚马逊工作目录/亚马逊商品/大健云仓
 
 ---
 
-## 6. 错误响应格式
+## 6. GIGA 库存与价格
+
+### 6.1 同步库存快照
+
+```http
+POST /api/giga/inventory/sync
+```
+
+请求体：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| batch_id | string | 是 | 库存快照批次，例如 `20260602-us-inventory` |
+| site | string | 是 | 站点，只允许 `US` 或 `JP` |
+| task_id | string \| null | 否 | 任务标识，用于日志追踪 |
+| sku_codes | string[] \| null | 否 | 指定 SKU；不传时使用最新 GIGA 商品池里的 SKU |
+
+响应示例：
+
+```json
+{
+  "batch_id": "20260602-us-inventory",
+  "site": "US",
+  "task_id": "manual-giga-inventory",
+  "total_skus": 219,
+  "success_count": 219,
+  "failed_count": 0,
+  "alert_count": 1,
+  "out_of_stock_count": 1,
+  "restocked_count": 0,
+  "previous_batch_id": "20260602-us-b002",
+  "pulled_at": "2026-06-02T11:52:40.818253",
+  "failed_skus": []
+}
+```
+
+### 6.2 同步价格快照
+
+```http
+POST /api/giga/price/sync
+```
+
+请求体：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| batch_id | string | 是 | 价格快照批次，例如 `20260602-us-price` |
+| site | string | 是 | 站点，只允许 `US` 或 `JP` |
+| task_id | string \| null | 否 | 任务标识，用于日志追踪 |
+| sku_codes | string[] \| null | 否 | 指定 SKU；不传时使用最新 GIGA 商品池里的 SKU |
+
+响应示例：
+
+```json
+{
+  "batch_id": "20260602-us-price",
+  "site": "US",
+  "task_id": "manual-giga-price",
+  "total_skus": 219,
+  "success_count": 219,
+  "failed_count": 0,
+  "alert_count": 0,
+  "price_changed_count": 0,
+  "previous_batch_id": "20260602-us-b002",
+  "pulled_at": "2026-06-02T12:15:01.100000",
+  "failed_skus": []
+}
+```
+
+说明：
+
+- 价格事实写入 `giga_prices`，复合唯一键为 `batch_id + site + sku_code`。
+- 有效成交价 `effective_price` 按 `exclusivePrice -> discountedPrice -> price` 取值。
+- `current_category=price_snapshot` 表示价格日快照。
+- 同步后会与上一价格 batch 对比，价格变化写入 `giga_price_alerts`。
+- 商品池 SKU 展开接口 `/api/giga/skus` 会读取最新价格快照，不依赖商品详情批次里的旧价格。
+
+### 6.3 查看最新库存
+
+```http
+GET /api/giga/inventory?site=US&page=1&page_size=50
+```
+
+查询参数：
+
+| 参数 | 类型 | 必填 | 默认值 | 说明 |
+|------|------|------|--------|------|
+| site | string | 是 | - | `US` 或 `JP` |
+| page | int | 否 | 1 | 页码 |
+| page_size | int | 否 | 50 | 每页数量，最大 200 |
+| sku_code | string | 否 | null | SKU 模糊搜索 |
+| availability_status | string | 否 | null | `in_stock` 或 `out_of_stock` |
+
+说明：
+
+- 返回最新库存快照，不要求前端传 batch_id。
+- 页面 `/inventory-sync` 使用该接口按 SKU 分页展示库存。
+- Seller 库存、Buyer 库存和分仓字段均来自 GIGA Open API 原始返回。
+
+### 6.4 查看库存告警
+
+```http
+GET /api/giga/inventory/alerts?site=US&batch_id=20260602-us-inventory
+```
+
+说明：
+
+- `change_type=out_of_stock`: 有货变无货。
+- `change_type=restocked`: 无货变有货。
+- 告警由当前库存 batch 与上一库存 batch 对比产生。
+
+### 6.5 查看价格告警
+
+```http
+GET /api/giga/price/alerts?site=US&batch_id=20260602-us-price
+```
+
+说明：
+
+- `change_type=price_changed`: 有效成交价变化。
+- 告警由当前价格 batch 与上一价格 batch 对比产生。
+- 返回上一有效价、当前有效价、原价、专享价、活动价和运费，方便判断变化来源。
+
+## 7. 错误响应格式
 
 所有错误返回统一 JSON 格式：
 

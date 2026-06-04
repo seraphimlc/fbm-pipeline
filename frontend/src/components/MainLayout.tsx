@@ -7,9 +7,10 @@ import {
   SyncOutlined,
   DatabaseOutlined,
   PictureOutlined,
-  PlusCircleOutlined,
   SettingOutlined,
   UnorderedListOutlined,
+  ApiOutlined,
+  BarsOutlined,
 } from '@ant-design/icons';
 
 const { Sider, Content } = Layout;
@@ -20,21 +21,20 @@ const MainLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const location = useLocation();
 
   const menuItems = [
-    { key: '/products', icon: <UnorderedListOutlined />, label: '商品生成任务' },
-    { key: '/catalog', icon: <ShoppingOutlined />, label: '商品列表' },
+    { key: '/products', icon: <UnorderedListOutlined />, label: '商品工作台' },
+    { key: '/offline-tasks', icon: <BarsOutlined />, label: '任务中心' },
+    { key: '/catalog', icon: <ShoppingOutlined />, label: '导出中心' },
     { key: '/inventory-sync', icon: <CloudSyncOutlined />, label: '库存同步' },
     { key: '/asin-sync', icon: <SyncOutlined />, label: 'ASIN同步' },
     { key: '/aplus-upload', icon: <PictureOutlined />, label: 'A+上传' },
     { key: '/upc-pool', icon: <DatabaseOutlined />, label: 'UPC池子' },
-    { key: '/products/new', icon: <PlusCircleOutlined />, label: '创建任务' },
+    { key: '/data-sources', icon: <ApiOutlined />, label: '店铺维护' },
     { key: '/config', icon: <SettingOutlined />, label: '系统配置' },
   ];
 
   const selectedKey = location.pathname === '/'
     ? '/products'
-    : location.pathname.startsWith('/products/new')
-      ? '/products/new'
-      : location.pathname.startsWith('/products/')
+    : location.pathname.startsWith('/products/')
         ? '/products'
         : location.pathname;
 

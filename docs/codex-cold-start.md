@@ -10,7 +10,14 @@
 2. `README.md`
 3. `docs/configuration.md`
 4. `docs/runbook.md`
-5. 涉及 Amazon 导入模板、类目、字段名或上架检查时，再读：
+5. 涉及 GIGA 商品池、库存同步、价格同步、库存告警或库存模板导出时，再读：
+   - `docs/giga-buyer-openapi-reference.md`
+   - `docs/giga-inventory-sync.md`
+   - `backend/app/services/giga_openapi.py`
+   - `backend/app/services/giga_inventory_sync.py`
+   - `backend/app/services/giga_price_sync.py`
+   - `backend/app/api/giga.py`
+6. 涉及 Amazon 导入模板、类目、字段名或上架检查时，再读：
    - `docs/template-mapping-spec.md`
    - `docs/add-category-template-sop.md`
    - `docs/template-mapping-change-log.md`

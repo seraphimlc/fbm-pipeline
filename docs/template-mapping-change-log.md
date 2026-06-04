@@ -9,6 +9,39 @@
 - 每条记录至少包含：日期、改动文件、涉及类目/模板、变更原因、验证命令和结果、后续注意事项。
 - 不要覆盖历史记录；只追加新条目。
 
+## 2026-06-02
+
+### Amazon 商品描述改用 Step5 生成文案
+
+- 改动文件：
+  - `backend/app/models/models.py`
+  - `backend/app/database.py`
+  - `backend/app/pipeline/step5_listing.py`
+  - `backend/app/pipeline/step10_amazon_template.py`
+  - `backend/app/api/schemas.py`
+  - `backend/app/api/products.py`
+  - `frontend/src/api/index.ts`
+  - `frontend/src/pages/ProductDetail.tsx`
+  - `docs/template-mapping-change-log.md`
+- 涉及类目/模板：
+  - 所有映射到 `product_description[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value` 的 Amazon 导入模板。
+  - 当前包括 `vindhvisk_sofa.json`、`vindhvisk_bicycle.json`、`ride_on_toy.json`、`andy_storage_furniture.json`、`andy_shelf_table_cabinet_gate.json` 对应模板。
+- 变更原因：
+  - Amazon listing 在没有 A+ 前需要可用的商品文字描述，不能依赖大健原始商品描述。
+  - 大健描述作为供应商原始数据继续保留，但不再作为前台主要展示内容，也不再拼入 Amazon 导入模板的商品描述字段。
+- 主要行为：
+  - ProductData 新增 `listing_description`、`listing_description_zh`。
+  - Step 5 生成标题、五点、商品描述、Search Terms 及中文翻译。
+  - Step 10 的 `description` 字段优先写入 `listing_description`；若缺失，仅用 listing 标题和五点兜底，不再追加 `pd.description`。
+  - 商品详情页 Listing 文案 tab 展示并允许编辑商品描述；基本信息区不再展示“大健描述”。
+- 验证：
+  - `backend/.venv/bin/python -m py_compile backend/app/models/models.py backend/app/database.py backend/app/pipeline/step5_listing.py backend/app/pipeline/step10_amazon_template.py backend/app/api/schemas.py backend/app/api/products.py` 通过。
+  - `make validate-template-mappings` 通过：5 个 mapping file，96 个 category options，0 warning。
+  - `cd frontend && npm run build` 通过，只有 Vite 大 chunk 提示。
+- 后续注意：
+  - 旧任务需重跑 Step 5 才会生成新的 `listing_description`。
+  - 已经生成过 Amazon 导入表格的商品，如需使用新描述，需要重新运行 Step 10。
+
 ## 2026-05-24
 
 ### Handling Time 默认值填充
@@ -82,3 +115,64 @@
   - 重新生成涉及的 27 个模板，`amazon_template_fill_summary.missing_required_count = 0`。
 - 后续注意：
   - RIDE_ON_TOY 的 `ps_toys_dv_us` 属 Amazon 玩具合规文档要求，不是普通模板字段缺失，仍需真实资质资料。
+
+## 2026-06-02
+
+### Amazon 导出库存来源改为最新 GIGA 库存快照
+
+- 改动文件：
+  - `backend/app/api/products.py`
+  - `backend/app/api/giga.py`
+  - `backend/app/services/giga_inventory_sync.py`
+  - `backend/app/models/models.py`
+  - `backend/app/database.py`
+  - `frontend/src/pages/InventorySyncList.tsx`
+  - `docs/giga-inventory-sync.md`
+  - `docs/configuration.md`
+  - `docs/02-API接口文档.md`
+  - `docs/05-部署指南.md`
+- 涉及类目/模板：
+  - 所有通过 `/api/products/catalog/export` 导出的 Amazon 类目导入模板中的 Quantity 字段。
+  - 库存/价格更新模板：`PriceAndQuantity.xlsm`。
+- 变更原因：
+  - GIGA 库存已改为 Open API 每日快照，导出库存不能继续依赖旧的 `catalog_products.stock`。
+  - 库存同步页面需要直接展示最新 SKU 库存，而不是旧的网页登录态库存同步批次。
+- 主要行为：
+  - 新增 GIGA 库存快照同步，库存事实写入 `giga_inventory`，复合唯一键为 `batch_id + site + sku_code`。
+  - 当前复用 `giga_sync_batches` 作为库存同步日志，库存 batch 使用 `current_category=inventory_snapshot` 标识。
+  - 新增 `giga_inventory_alerts`，记录 `out_of_stock` 和 `restocked`。
+  - `/inventory-sync` 页面展示最新库存快照，按 SKU 分页，不再展示旧同步批次。
+  - `/api/products/catalog/inventory-template/export` 使用最新 `giga_inventory.stock_qty` 写入库存更新模板。
+  - `/api/products/catalog/export` 中如需覆盖 Amazon 导入表 Quantity，也使用最新 `giga_inventory.stock_qty`。
+  - 若最新库存快照缺少目标 SKU，则导出跳过/停止该商品并写入报告。
+- 验证：
+  - `cd backend && .venv/bin/python -m compileall -q app` 通过。
+  - `make test-project-rules` 通过。
+  - `cd frontend && npm run build` 通过，只有 Vite 大 chunk 提示。
+  - `backend/.venv/bin/python scripts/giga_inventory_sync.py --site US --task-id manual-giga-inventory-check` 成功：219 SKU、成功 219、失败 0、告警 1。
+  - `curl -s 'http://localhost:8190/api/giga/inventory?site=US&page=1&page_size=3'` 返回最新库存分页数据，总数 219。
+- 后续注意：
+  - 部署时应配置每日 cron 或 systemd timer 调用 `scripts/giga_inventory_sync.py --site US`。
+  - 当前库存同步日志复用 `giga_sync_batches`；如后续要彻底分离商品同步与库存同步，可新增 `giga_inventory_sync_logs`。
+  - Seller 分仓和 Buyer 分仓按 GIGA Open API 原样保存；当前 US 数据可能返回空数组。
+
+### Amazon 导入类目优先参考已选同款候选
+
+- 改动文件：
+  - `backend/app/pipeline/step10_amazon_template.py`
+  - `docs/template-mapping-change-log.md`
+- 涉及类目/模板：
+  - 所有由 Step 10 自动选择 Amazon 导入模板或细分类目的类目。
+  - 当前重点覆盖 `RIDE_ON_TOY.xlsm`、`BICYCLE_CYCLING.xlsm`、`CHAIR_SOFA.xlsm`、`DRESSER_STORAGE_DRAWER_STORAGE_BOX_CABINET_STEP_STOOL.xlsm`、`SHELF_TABLE_CABINET_ANIMAL_CAGE_TEMPORARY_GATE.xlsm`。
+- 变更原因：
+  - 同款抽卡页面由人工从 Amazon StyleSnap Top 5 候选中选出最匹配竞品；后续导出 Amazon Excel 时，类目应优先参考这个已选竞品上的类目/类目排名文本。
+- 主要行为：
+  - Step 10 生成模板前，会按当前商品 `item_code` 匹配 `amazon_stylesnap_candidates` 中已选候选。
+  - 已选候选的 `category_rank` 和 `raw_snippet` 会并入模板选择和细分类目匹配上下文，但不会覆盖 `product_data.leaf_category` 或真实 ASIN 字段。
+  - 导出 warning/fill summary 会记录“Amazon 导入类目参考已选同款候选: ASIN ... / 类目...”。
+  - 若没有已选候选，Step 10 保持原有类目选择逻辑。
+- 验证：
+  - `backend/.venv/bin/python -m py_compile backend/app/pipeline/step10_amazon_template.py` 通过。
+  - `make validate-template-mappings` 通过。
+- 后续注意：
+  - 当前 StyleSnap 候选阶段保存的是卖家精灵增强后的类目排名/摘要文本，不是完整 Amazon browse node；后续 listing 详情抓取若能拿到更完整 breadcrumbs，可继续补强匹配上下文。

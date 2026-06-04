@@ -1,23 +1,28 @@
 """
-模块6：主图分析 — 使用 VLM 分析商品图片，选择主图和副图
+图片分析 — 使用 VLM 分析已确认的商品图片，提取图片卖点和证据
 
 流程：
-1. 从素材目录读取所有商品图片
+1. 从已确认的主图/副图读取商品图片
 2. 生成 Contact Sheet（缩略图拼接）
 3. VLM 分析每张图片的卖点
-4. 根据主图规则选择合规主图和副图序列
+4. 输出图片卖点、证据缺口和 A+ 参考素材
 """
 
+import base64
+import hashlib
+import asyncio
 import json
 import logging
-import base64
+import mimetypes
 import math
 import re
 import shutil
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
+import httpx
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from app.config import settings
@@ -358,6 +363,145 @@ def _scan_images(material_dir: str) -> list[Path]:
     return result
 
 
+def _json_loads(value, fallback):
+    if not value:
+        return fallback
+    try:
+        return json.loads(value)
+    except Exception:
+        return fallback
+
+
+def _is_remote_url(value: str | None) -> bool:
+    return bool(value and re.match(r"^https?://", str(value).strip(), flags=re.I))
+
+
+def _image_ext_from_url(url: str, content_type: str | None = None) -> str:
+    suffix = Path(unquote(urlparse(url).path)).suffix.lower()
+    if suffix in IMAGE_EXTENSIONS:
+        return suffix
+    guessed = mimetypes.guess_extension((content_type or "").split(";")[0].strip())
+    if guessed and guessed.lower() in IMAGE_EXTENSIONS:
+        return guessed.lower()
+    return ".jpg"
+
+
+async def _download_remote_image(url: str, target_dir: Path) -> str:
+    digest = hashlib.sha256(url.encode("utf-8")).hexdigest()
+    for existing in sorted(target_dir.glob(f"source_image_{digest[:16]}.*")):
+        if existing.is_file():
+            return str(existing)
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(connect=10, read=30, write=20, pool=20),
+        follow_redirects=True,
+        headers={"User-Agent": "Mozilla/5.0"},
+    ) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        content_type = response.headers.get("content-type")
+        content = response.content
+    target = target_dir / f"source_image_{digest[:16]}{_image_ext_from_url(url, content_type)}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+    return str(target)
+
+
+def _source_filename(value: str, index: int) -> str:
+    if _is_remote_url(value):
+        name = Path(unquote(urlparse(value).path)).name
+    else:
+        name = Path(value).expanduser().name
+    return name or f"source_image_{index:02d}.jpg"
+
+
+def _selected_image_sources(pi: ProductImage) -> list[str]:
+    gallery_paths = _json_loads(pi.gallery_images, [])
+    if not isinstance(gallery_paths, list):
+        gallery_paths = []
+    selected_paths = [pi.main_image_path, *gallery_paths]
+    unique: list[str] = []
+    seen: set[str] = set()
+    for path in selected_paths:
+        text = str(path or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        unique.append(text)
+    return unique
+
+
+def _image_source_records(sources: list[str]) -> list[dict]:
+    return [
+        {
+            "image_id": f"#{idx:02d}",
+            "filename": _source_filename(source, idx),
+            "path": source,
+            "source_type": "url" if _is_remote_url(source) else "file",
+        }
+        for idx, source in enumerate(sources, 1)
+    ]
+
+
+def _image_source_fingerprint(records: list[dict]) -> list[dict]:
+    fingerprint: list[dict] = []
+    for record in records:
+        path = str(record.get("path") or "")
+        if _is_remote_url(path):
+            fingerprint.append({
+                "path": path,
+                "source_type": "url",
+            })
+            continue
+        local = Path(path).expanduser()
+        if not local.is_file():
+            fingerprint.append({
+                "path": path,
+                "source_type": "missing_file",
+            })
+            continue
+        stat = local.stat()
+        fingerprint.append({
+            "path": str(local),
+            "source_type": "file",
+            "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns,
+        })
+    return fingerprint
+
+
+async def _prepare_confirmed_image_sources(pd: ProductData, pi: ProductImage) -> tuple[Path, list[dict]]:
+    material_dir = Path(pd.material_dir or settings.PRODUCT_BASE_DIR / "PRODUCT" / str(pd.product_id)).expanduser()
+    material_dir.mkdir(parents=True, exist_ok=True)
+    pd.material_dir = str(material_dir)
+
+    sources = _selected_image_sources(pi)
+    if sources:
+        pi.main_image_path = sources[0]
+        pi.main_image_source = pi.main_image_source or "manual_selected"
+        pi.gallery_images = json.dumps(sources[1:], ensure_ascii=False)
+    return material_dir, _image_source_records(sources)
+
+
+async def _download_image_records(records: list[dict], target_dir: Path) -> list[dict]:
+    downloaded: list[dict] = []
+    for record in records:
+        source = str(record.get("path") or "").strip()
+        if not source:
+            continue
+        path = await _download_remote_image(source, target_dir) if _is_remote_url(source) else source
+        local = Path(path).expanduser()
+        if not local.is_file():
+            continue
+        downloaded.append({
+            **record,
+            "path": str(local),
+            "source_url": source if _is_remote_url(source) else record.get("source_url"),
+            "source_type": "file",
+            "filename": local.name,
+        })
+    return downloaded
+
+
 def _image_fingerprint(images: list[Path]) -> list[dict]:
     fingerprint = []
     for path in images:
@@ -370,7 +514,12 @@ def _image_fingerprint(images: list[Path]) -> list[dict]:
     return fingerprint
 
 
-def _load_cached_image_analysis(material_dir: Path, images: list[Path]) -> dict | None:
+def _load_cached_image_analysis(
+    material_dir: Path,
+    images: list[Path] | None = None,
+    *,
+    source_fingerprint: list[dict] | None = None,
+) -> dict | None:
     analysis_path = material_dir / "image analysis" / "image_selling_points.json"
     if not analysis_path.is_file():
         return None
@@ -387,7 +536,8 @@ def _load_cached_image_analysis(material_dir: Path, images: list[Path]) -> dict 
     if not isinstance(reviews, list) or not isinstance(gallery, list) or not reviews:
         return None
 
-    current_fingerprint = _image_fingerprint(images)
+    images = images or []
+    current_fingerprint = source_fingerprint or _image_fingerprint(images)
     cached_fingerprint = payload.get("source_images")
     if isinstance(cached_fingerprint, list):
         if cached_fingerprint == current_fingerprint:
@@ -395,6 +545,8 @@ def _load_cached_image_analysis(material_dir: Path, images: list[Path]) -> dict 
             return payload
         return None
 
+    if not images:
+        return None
     newest_source_mtime = max((path.stat().st_mtime for path in images), default=0)
     if analysis_path.stat().st_mtime >= newest_source_mtime:
         payload["source_images"] = current_fingerprint
@@ -473,6 +625,28 @@ def _build_contact_sheets(image_records: list[dict], output_dir: Path, product_k
         })
 
     return sheets
+
+
+def _build_image_url_batches(image_records: list[dict]) -> list[dict]:
+    batches: list[dict] = []
+    for offset in range(0, len(image_records), SHEET_MAX):
+        batch_records = image_records[offset:offset + SHEET_MAX]
+        page = offset // SHEET_MAX + 1
+        sheet_path = f"url_batch:{page:02d}"
+        for record in batch_records:
+            record["contact_sheet_evidence"] = {
+                "sheet_path": sheet_path,
+                "sheet_page": page,
+                "sheet_label": record["image_id"],
+                "source": "direct_image_url",
+            }
+        batches.append({
+            "sheet_page": page,
+            "sheet_path": sheet_path,
+            "image_ids": [record["image_id"] for record in batch_records],
+            "source": "direct_image_url",
+        })
+    return batches
 
 
 def _save_contact_sheet(sheet: Image.Image, sheet_path: Path) -> None:
@@ -583,6 +757,20 @@ def _is_data_inspection_error(exc: Exception) -> bool:
     )
 
 
+def _is_transient_vlm_error(exc: Exception) -> bool:
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    return (
+        "apiconnectionerror" in name
+        or "apitimeouterror" in name
+        or "timeout" in name
+        or "remoteprotocolerror" in name
+        or "connection error" in text
+        or "server disconnected" in text
+        or "temporarily unavailable" in text
+    )
+
+
 async def _analyze_contact_sheet(client, image_analysis_model: str, sheet: dict, batch_records: list[dict], prompt: str) -> tuple[dict, list[dict]]:
     sheet_path = Path(sheet["sheet_path"])
     image_url = _image_data_url(sheet_path)
@@ -593,21 +781,43 @@ async def _analyze_contact_sheet(client, image_analysis_model: str, sheet: dict,
         f"sheet={sheet_path.name}, page={sheet['sheet_page']}, "
         f"images={len(batch_records)}, bytes={sheet_path.stat().st_size}"
     )
-    response = await client.chat.completions.create(
-        model=image_analysis_model,
-        messages=[
-            {"role": "system", "content": VLM_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": prompt},
+    request_client = client.with_options(timeout=45, max_retries=0) if hasattr(client, "with_options") else client
+    max_attempts = 2 if len(batch_records) > 1 else 3
+    response = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = await request_client.chat.completions.create(
+                model=image_analysis_model,
+                messages=[
+                    {"role": "system", "content": VLM_SYSTEM_PROMPT},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": image_url}},
+                            {"type": "text", "text": prompt},
+                        ],
+                    },
                 ],
-            },
-        ],
-        max_tokens=4000,
-        temperature=0.2,
-    )
+                max_tokens=4000,
+                temperature=0.2,
+            )
+            break
+        except Exception as exc:
+            if _is_data_inspection_error(exc) or not _is_transient_vlm_error(exc) or attempt >= max_attempts:
+                raise
+            wait_seconds = attempt * 5
+            logger.warning(
+                "[Step6] VLM图片分析连接异常，准备重试: sheet=%s, attempt=%s/%s, wait=%ss, error=%s: %s",
+                sheet_path.name,
+                attempt,
+                max_attempts,
+                wait_seconds,
+                type(exc).__name__,
+                exc,
+            )
+            await asyncio.sleep(wait_seconds)
+    if response is None:
+        raise RuntimeError(f"VLM 未返回响应: contact_sheet={sheet_path.name}")
 
     content = response.choices[0].message.content
     if not content:
@@ -621,6 +831,86 @@ async def _analyze_contact_sheet(client, image_analysis_model: str, sheet: dict,
 
     reviews = _normalize_sheet_reviews(sheet_analysis, batch_records, sheet)
     return sheet_analysis, reviews
+
+
+def _image_url_batch_descriptor(batch_records: list[dict]) -> str:
+    lines = [
+        "The images are attached individually in the same order as this list.",
+        "Use the provided image_id values exactly in the JSON output:",
+    ]
+    for index, record in enumerate(batch_records, 1):
+        lines.append(
+            f"{index}. {record['image_id']} filename={record.get('filename') or ''} "
+            f"source={record.get('path') or ''}"
+        )
+    return "\n".join(lines)
+
+
+async def _analyze_image_url_batch(client, image_analysis_model: str, batch: dict, batch_records: list[dict], prompt: str) -> tuple[dict, list[dict]]:
+    logger.info(
+        f"[Step6] 调用VLM分析图片URL: model={image_analysis_model}, "
+        f"provider={'LLM_API' if settings.VLM_USE_LLM_API else 'VLM_API'}, "
+        f"batch={batch['sheet_page']}, images={len(batch_records)}"
+    )
+    content: list[dict] = []
+    for record in batch_records:
+        source = str(record.get("path") or "")
+        image_url = source if _is_remote_url(source) else _image_data_url(Path(source).expanduser())
+        content.append({"type": "image_url", "image_url": {"url": image_url}})
+    content.append({
+        "type": "text",
+        "text": (
+            prompt.replace("Analyze this contact sheet page", "Analyze these product images")
+            + "\n\n"
+            + _image_url_batch_descriptor(batch_records)
+            + "\n\nThere is no contact sheet. Each attached image corresponds to the list above."
+        ),
+    })
+
+    request_client = client.with_options(timeout=60, max_retries=0) if hasattr(client, "with_options") else client
+    max_attempts = 2 if len(batch_records) > 1 else 3
+    response = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = await request_client.chat.completions.create(
+                model=image_analysis_model,
+                messages=[
+                    {"role": "system", "content": VLM_SYSTEM_PROMPT},
+                    {"role": "user", "content": content},
+                ],
+                max_tokens=4000,
+                temperature=0.2,
+            )
+            break
+        except Exception as exc:
+            if _is_data_inspection_error(exc) or not _is_transient_vlm_error(exc) or attempt >= max_attempts:
+                raise
+            wait_seconds = attempt * 5
+            logger.warning(
+                "[Step6] VLM图片URL分析连接异常，准备重试: batch=%s, attempt=%s/%s, wait=%ss, error=%s: %s",
+                batch["sheet_page"],
+                attempt,
+                max_attempts,
+                wait_seconds,
+                type(exc).__name__,
+                exc,
+            )
+            await asyncio.sleep(wait_seconds)
+    if response is None:
+        raise RuntimeError(f"VLM 未返回响应: image_url_batch={batch['sheet_page']}")
+
+    response_content = response.choices[0].message.content
+    if not response_content:
+        raise RuntimeError(f"VLM 返回空结果: image_url_batch={batch['sheet_page']}")
+
+    try:
+        batch_analysis = json.loads(_clean_json_content(response_content))
+    except json.JSONDecodeError as exc:
+        logger.warning(f"VLM URL JSON解析失败，保存原始内容: {exc}")
+        batch_analysis = {"raw": response_content, "images": []}
+
+    reviews = _normalize_sheet_reviews(batch_analysis, batch_records, batch)
+    return batch_analysis, reviews
 
 
 def _score(value) -> float:
@@ -1532,12 +1822,17 @@ def _write_image_analysis_files(
 def _restore_cached_image_analysis(
     pi: ProductImage,
     cached: dict,
-    images: list[Path],
+    images: list[Path] | None,
     image_analysis_model: str,
     pd: ProductData,
     strategy: dict,
     material_dir: Path,
+    *,
+    source_fingerprint: list[dict] | None = None,
 ) -> dict:
+    images = images or []
+    source_images = cached.get("source_images") or source_fingerprint or _image_fingerprint(images)
+    source_count = len(source_images) or len(images)
     reviews = cached.get("image_reviews") or cached.get("images") or []
     previous_diagnostics = cached.get("selection_diagnostics") or {}
     contact_sheets = cached.get("contact_sheets") or []
@@ -1582,7 +1877,7 @@ def _restore_cached_image_analysis(
         reviews,
         gallery_selection,
         diagnostics,
-        source_images=cached.get("source_images") or _image_fingerprint(images),
+        source_images=source_images,
     )
 
     pi.contact_sheet_path = str(contact_sheets[0].get("sheet_path")) if contact_sheets else pi.contact_sheet_path
@@ -1595,17 +1890,13 @@ def _restore_cached_image_analysis(
         "gallery_strategy": strategy_name,
         "cache_source": "image_selling_points.json",
         "cache_reselected": True,
-        "source_images": cached.get("source_images") or _image_fingerprint(images),
+        "source_images": source_images,
     }, ensure_ascii=False)
     pi.image_selling_points = json.dumps(selling_points, ensure_ascii=False)
     pi.category_style = f"multi_sheet:{strategy_name}"
-    pi.main_image_path = main_image_path
-    pi.main_image_source = diagnostics.get("main_image_source") or "cache"
-    pi.gallery_images = json.dumps(gallery_paths, ensure_ascii=False)
-    pi.gallery_order = json.dumps(gallery_order, ensure_ascii=False)
     pi.main_image_summary = (
-        f"复用图片分析缓存，覆盖 {len(reviews)}/{len(images)} 张图片，"
-        f"按当前规则重新选择 {len(gallery_selection)} 张主/副图。"
+        f"复用图片分析缓存，覆盖 {len(reviews)}/{source_count} 张图片，"
+        f"生成 {len(gallery_selection)} 张图片分析建议，不覆盖人工确认的图片顺序。"
         + f" 图片健康等级: {diagnostics.get('image_health', {}).get('label', '未知')}。"
         + (
             " 主图使用替代素材: " + "；".join(diagnostics.get("main_image_warnings") or [])
@@ -1683,12 +1974,12 @@ async def reselect_image_gallery_from_cache(product_id: int) -> dict:
 
 async def run_image_analysis(product_id: int) -> dict:
     """
-    执行主图分析
+    执行图片分析
     
-    1. 扫描素材目录图片
+    1. 准备已确认的主图/副图
     2. 生成 Contact Sheet
     3. VLM 分析
-    4. 选择主图和副图
+    4. 输出图片卖点和证据缺口
     """
     async with async_session() as db:
         result = await db.execute(
@@ -1701,40 +1992,35 @@ async def run_image_analysis(product_id: int) -> dict:
             raise ValueError(f"Product {product_id} not found or no data")
 
         pd = product.data
-        if not pd.material_dir:
-            raise ValueError("未设置素材目录，请先执行商品采集")
-
-        # 扫描图片
-        images = _scan_images(pd.material_dir)
-        if not images:
-            raise ValueError(f"素材目录中未找到图片: {pd.material_dir}")
-
-        logger.info(f"[Step6] 找到 {len(images)} 张图片")
-
-        # 确保 ProductImage 记录存在
+        # 准备已确认图片；远程 URL 默认直接传给 VLM，只有兜底路径才按需下载。
         pi = product.images
-        if not pi:
-            pi = ProductImage(product_id=product.id)
-            db.add(pi)
+        if not pi or not pi.main_image_path:
+            raise ValueError("请先确认商品主图和 Listing 图片")
+        material_dir, image_records = await _prepare_confirmed_image_sources(pd, pi)
+        if not image_records:
+            raise ValueError("已确认图片为空，请重新确认商品图片")
+        source_fingerprint = _image_source_fingerprint(image_records)
 
-        material_dir = Path(pd.material_dir)
+        logger.info(f"[Step6] 找到 {len(image_records)} 张图片")
+
         image_analysis_model = settings.VLM_MODEL
         category = pd.leaf_category or "General"
         strategy = _image_strategy(category, pd)
-        cached_analysis = _load_cached_image_analysis(material_dir, images)
+        cached_analysis = _load_cached_image_analysis(material_dir, source_fingerprint=source_fingerprint)
         if cached_analysis:
             result_payload = _restore_cached_image_analysis(
                 pi,
                 cached_analysis,
-                images,
+                None,
                 image_analysis_model,
                 pd,
                 strategy,
                 material_dir,
+                source_fingerprint=source_fingerprint,
             )
             await db.commit()
             logger.info(
-                f"[Step6] 命中图片分析缓存: product={product_id}, images={len(images)}, "
+                f"[Step6] 命中图片分析缓存: product={product_id}, images={len(image_records)}, "
                 f"source=image_selling_points.json, reselected=True"
             )
             return result_payload
@@ -1743,12 +2029,7 @@ async def run_image_analysis(product_id: int) -> dict:
         contact_sheet_dir = analysis_dir / "contact_sheets"
         if contact_sheet_dir.exists():
             shutil.rmtree(contact_sheet_dir)
-        image_records = _image_records(images)
         product_key = pd.item_code or product.gigab2b_product_id or str(product.id)
-        contact_sheets = _build_contact_sheets(image_records, contact_sheet_dir, product_key)
-        if not contact_sheets:
-            raise RuntimeError("Contact Sheet 生成失败")
-        pi.contact_sheet_path = str(contact_sheets[0]["sheet_path"])
 
         # 调用 VLM 分析
         client = settings.get_image_analysis_client()
@@ -1757,85 +2038,147 @@ async def run_image_analysis(product_id: int) -> dict:
         gallery_strategy = _gallery_strategy_prompt(strategy)
         all_reviews: list[dict] = []
         sheet_payloads: list[dict] = []
-        analysis_contact_sheets = list(contact_sheets)
+        analysis_contact_sheets: list[dict] = []
         analysis_warnings: list[str] = []
-        for sheet in contact_sheets:
-            batch_records = [record for record in image_records if record["image_id"] in set(sheet["image_ids"])]
-            prompt = VLM_ANALYSIS_PROMPT.format(
-                title=pd.title or "Unknown",
-                brand=product.brand or settings.DEFAULT_BRAND,
-                category=category,
-                facts=facts,
-                gallery_strategy=gallery_strategy,
-            )
-            try:
-                sheet_analysis, reviews = await _analyze_contact_sheet(client, image_analysis_model, sheet, batch_records, prompt)
-            except Exception as exc:
-                if not _is_data_inspection_error(exc):
-                    raise
+        prompt = VLM_ANALYSIS_PROMPT.format(
+            title=pd.title or "Unknown",
+            brand=product.brand or settings.DEFAULT_BRAND,
+            category=category,
+            facts=facts,
+            gallery_strategy=gallery_strategy,
+        )
 
-                warning = (
-                    f"Contact Sheet {sheet['sheet_page']} 被VLM内容安全检查拦截，"
-                    "已改为逐张图片重试分析。"
-                )
-                logger.warning(f"[Step6] {warning} error={exc}")
-                analysis_warnings.append(warning)
+        direct_batches = _build_image_url_batches(image_records)
+        direct_error: Exception | None = None
+        try:
+            for sheet in direct_batches:
+                batch_records = [record for record in image_records if record["image_id"] in set(sheet["image_ids"])]
+                sheet_analysis, reviews = await _analyze_image_url_batch(client, image_analysis_model, sheet, batch_records, prompt)
+                all_reviews.extend(reviews)
                 sheet_payloads.append({
                     **sheet,
-                    "analysis": {"images": []},
-                    "reviews": [],
-                    "status": "data_inspection_failed",
-                    "error": str(exc),
+                    "analysis": sheet_analysis,
+                    "reviews": reviews,
+                    "mode": "direct_image_url",
                 })
+            analysis_contact_sheets = list(direct_batches)
+            pi.contact_sheet_path = str(direct_batches[0]["sheet_path"]) if direct_batches else pi.contact_sheet_path
+        except Exception as exc:
+            direct_error = exc
+            all_reviews = []
+            sheet_payloads = []
+            analysis_contact_sheets = []
+            warning = (
+                f"图片URL直传VLM失败，已按需下载图片并切换到Contact Sheet兜底: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            logger.warning(f"[Step6] {warning}")
+            analysis_warnings.append(warning)
 
-                for record in batch_records:
-                    fallback_dir = contact_sheet_dir / f"fallback_sheet_{sheet['sheet_page']:02d}"
-                    fallback_key = f"{product_key}_sheet_{sheet['sheet_page']:02d}_{record['image_id'].lstrip('#')}"
-                    fallback_sheets = _build_contact_sheets([record], fallback_dir, fallback_key)
-                    if not fallback_sheets:
-                        continue
-                    fallback_sheet = fallback_sheets[0]
-                    analysis_contact_sheets.append(fallback_sheet)
-                    try:
-                        single_analysis, single_reviews = await _analyze_contact_sheet(
-                            client,
-                            image_analysis_model,
-                            fallback_sheet,
-                            [record],
-                            prompt,
+        if direct_error is not None:
+            local_image_records = await _download_image_records(image_records, material_dir)
+            if not local_image_records:
+                raise RuntimeError("图片URL直传失败，且已确认图片未能下载到本地，无法继续图片分析") from direct_error
+            missing_downloads = len(image_records) - len(local_image_records)
+            if missing_downloads > 0:
+                analysis_warnings.append(f"{missing_downloads} 张图片下载失败，已用可下载图片继续分析。")
+            contact_sheets = _build_contact_sheets(local_image_records, contact_sheet_dir, product_key)
+            if not contact_sheets:
+                raise RuntimeError("Contact Sheet 生成失败")
+            pi.contact_sheet_path = str(contact_sheets[0]["sheet_path"])
+            analysis_contact_sheets = list(contact_sheets)
+
+            for sheet in contact_sheets:
+                batch_records = [record for record in local_image_records if record["image_id"] in set(sheet["image_ids"])]
+                try:
+                    sheet_analysis, reviews = await _analyze_contact_sheet(client, image_analysis_model, sheet, batch_records, prompt)
+                except Exception as exc:
+                    is_data_inspection = _is_data_inspection_error(exc)
+                    is_transient = _is_transient_vlm_error(exc)
+                    if not (is_data_inspection or is_transient):
+                        raise
+
+                    if is_data_inspection:
+                        warning = (
+                            f"Contact Sheet {sheet['sheet_page']} 被VLM内容安全检查拦截，"
+                            "已改为逐张图片重试分析。"
                         )
-                    except Exception as single_exc:
-                        if not _is_data_inspection_error(single_exc):
-                            raise
-                        image_warning = (
-                            f"图片 {record['image_id']} {record['filename']} 被VLM内容安全检查拦截，"
-                            "已跳过该图继续流程。"
+                        fallback_status = "data_inspection_failed"
+                    else:
+                        warning = (
+                            f"Contact Sheet {sheet['sheet_page']} 多图请求连接异常，"
+                            "已改为逐张图片重试分析。"
                         )
-                        logger.warning(f"[Step6] {image_warning} error={single_exc}")
-                        analysis_warnings.append(image_warning)
+                        fallback_status = "transient_connection_failed"
+                    logger.warning(f"[Step6] {warning} error={exc}")
+                    analysis_warnings.append(warning)
+                    sheet_payloads.append({
+                        **sheet,
+                        "analysis": {"images": []},
+                        "reviews": [],
+                        "status": fallback_status,
+                        "error": str(exc),
+                    })
+
+                    for record in batch_records:
+                        fallback_dir = contact_sheet_dir / f"fallback_sheet_{sheet['sheet_page']:02d}"
+                        fallback_key = f"{product_key}_sheet_{sheet['sheet_page']:02d}_{record['image_id'].lstrip('#')}"
+                        fallback_sheets = _build_contact_sheets([record], fallback_dir, fallback_key)
+                        if not fallback_sheets:
+                            continue
+                        fallback_sheet = fallback_sheets[0]
+                        analysis_contact_sheets.append(fallback_sheet)
+                        try:
+                            single_analysis, single_reviews = await _analyze_contact_sheet(
+                                client,
+                                image_analysis_model,
+                                fallback_sheet,
+                                [record],
+                                prompt,
+                            )
+                        except Exception as single_exc:
+                            single_data_inspection = _is_data_inspection_error(single_exc)
+                            single_transient = _is_transient_vlm_error(single_exc)
+                            if not (single_data_inspection or single_transient):
+                                raise
+                            if single_data_inspection:
+                                image_warning = (
+                                    f"图片 {record['image_id']} {record['filename']} 被VLM内容安全检查拦截，"
+                                    "已跳过该图继续流程。"
+                                )
+                                single_status = "data_inspection_failed"
+                            else:
+                                image_warning = (
+                                    f"图片 {record['image_id']} {record['filename']} VLM连接异常，"
+                                    "已跳过该图继续流程。"
+                                )
+                                single_status = "transient_connection_failed"
+                            logger.warning(f"[Step6] {image_warning} error={single_exc}")
+                            analysis_warnings.append(image_warning)
+                            sheet_payloads.append({
+                                **fallback_sheet,
+                                "analysis": {"images": []},
+                                "reviews": [],
+                                "status": single_status,
+                                "error": str(single_exc),
+                            })
+                            continue
+                        all_reviews.extend(single_reviews)
                         sheet_payloads.append({
                             **fallback_sheet,
-                            "analysis": {"images": []},
-                            "reviews": [],
-                            "status": "data_inspection_failed",
-                            "error": str(single_exc),
+                            "analysis": single_analysis,
+                            "reviews": single_reviews,
+                            "fallback_from_sheet_page": sheet["sheet_page"],
                         })
-                        continue
-                    all_reviews.extend(single_reviews)
-                    sheet_payloads.append({
-                        **fallback_sheet,
-                        "analysis": single_analysis,
-                        "reviews": single_reviews,
-                        "fallback_from_sheet_page": sheet["sheet_page"],
-                    })
-                continue
+                    continue
 
-            all_reviews.extend(reviews)
-            sheet_payloads.append({
-                **sheet,
-                "analysis": sheet_analysis,
-                "reviews": reviews,
-            })
+                all_reviews.extend(reviews)
+                sheet_payloads.append({
+                    **sheet,
+                    "analysis": sheet_analysis,
+                    "reviews": reviews,
+                    "mode": "contact_sheet_fallback",
+                })
 
         if not all_reviews:
             raise RuntimeError("VLM 未返回任何图片分析结果")
@@ -1876,7 +2219,7 @@ async def run_image_analysis(product_id: int) -> dict:
             all_reviews,
             gallery_selection,
             selection_diagnostics,
-            source_images=_image_fingerprint(images),
+            source_images=source_fingerprint,
         )
 
         # 保存到数据库
@@ -1887,16 +2230,14 @@ async def run_image_analysis(product_id: int) -> dict:
             "gallery_selection": gallery_selection,
             "selection_diagnostics": selection_diagnostics,
             "gallery_strategy": strategy.get("name"),
+            "source_images": source_fingerprint,
         }, ensure_ascii=False)
         pi.image_selling_points = json.dumps(selling_points, ensure_ascii=False)
         pi.category_style = f"multi_sheet:{strategy.get('name')}"
-        pi.main_image_path = main_image_path
-        pi.main_image_source = selection_diagnostics.get("main_image_source") or "vlm_selected"
-        pi.gallery_images = json.dumps(gallery_paths, ensure_ascii=False)
-        pi.gallery_order = json.dumps(gallery_order, ensure_ascii=False)
         pi.main_image_summary = (
-            f"分析 {len(all_reviews)}/{len(images)} 张图片，生成 {len(analysis_contact_sheets)} 张 contact sheet，"
-            f"选择 {len(gallery_selection)} 张主/副图。"
+            f"分析 {len(all_reviews)}/{len(image_records)} 张图片，"
+            f"{'URL直传' if direct_error is None else 'Contact Sheet兜底'} {len(analysis_contact_sheets)} 组，"
+            f"生成 {len(gallery_selection)} 张图片分析建议，不覆盖人工确认的图片顺序。"
             + f" 图片健康等级: {selection_diagnostics.get('image_health', {}).get('label', '未知')}。"
             + (
                 f" Listing图片证据缺口 {len(selection_diagnostics.get('listing_image_alignment', {}).get('missing_evidence') or [])} 个。"
@@ -1919,7 +2260,7 @@ async def run_image_analysis(product_id: int) -> dict:
         await db.commit()
 
         logger.info(
-            f"[Step6] 图片分析完成: {len(all_reviews)}/{len(images)} 张图, sheets={len(analysis_contact_sheets)}, "
+            f"[Step6] 图片分析完成: {len(all_reviews)}/{len(image_records)} 张图, groups={len(analysis_contact_sheets)}, "
             f"主图={main_image_path}, 副图={len(gallery_paths)} 张"
         )
         return {

@@ -5,6 +5,7 @@
 生成 A+ Content 的模块布局规划（普通 A+ 固定 5 个模块）
 """
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -16,6 +17,20 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 logger = logging.getLogger(__name__)
+
+
+def _is_transient_llm_error(exc: Exception) -> bool:
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    return (
+        "apiconnectionerror" in name
+        or "apitimeouterror" in name
+        or "timeout" in name
+        or "remoteprotocolerror" in name
+        or "connection error" in text
+        or "server disconnected" in text
+        or "temporarily unavailable" in text
+    )
 
 SYSTEM_PROMPT = """You are an Amazon A+ Content strategist. You design compelling A+ Content layouts that:
 1. Tell a brand story
@@ -321,18 +336,37 @@ async def run_aplus_plan(product_id: int) -> dict:
 
         # 调用 LLM
         client = settings.get_llm_client()
+        request_client = client.with_options(timeout=60, max_retries=0) if hasattr(client, "with_options") else client
 
         logger.info(f"[Step7] 调用LLM生成A+规划: {pd.title}")
-        response = await client.chat.completions.create(
-            model=settings.LLM_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.8,
-            max_tokens=3000,
-            response_format={"type": "json_object"},
-        )
+        response = None
+        for attempt in range(1, 4):
+            try:
+                response = await request_client.chat.completions.create(
+                    model=settings.LLM_MODEL,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=0.8,
+                    max_tokens=3000,
+                    response_format={"type": "json_object"},
+                )
+                break
+            except Exception as exc:
+                if not _is_transient_llm_error(exc) or attempt >= 3:
+                    raise
+                wait_seconds = attempt * 5
+                logger.warning(
+                    "[Step7] A+规划LLM连接异常，准备重试: attempt=%s/3, wait=%ss, error=%s: %s",
+                    attempt,
+                    wait_seconds,
+                    type(exc).__name__,
+                    exc,
+                )
+                await asyncio.sleep(wait_seconds)
+        if response is None:
+            raise RuntimeError("LLM 未返回 A+规划响应")
 
         content = response.choices[0].message.content
         if not content:

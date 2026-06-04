@@ -1,179 +1,252 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Modal, Popconfirm, Space, Table, Tag, Typography, message } from 'antd';
-import { CloudSyncOutlined, ReloadOutlined } from '@ant-design/icons';
-import { createInventorySyncBatch, getInventorySyncBatch, listInventorySyncBatches } from '../api';
-import type { InventorySyncBatch, InventorySyncItem } from '../api';
+import { Alert, Button, Input, Popconfirm, Select, Space, Table, Tag, Typography, message } from 'antd';
+import { CloudSyncOutlined, DollarOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
+import { listGigaInventory, listProductDataSources, syncGigaInventory, syncGigaPrice } from '../api';
+import type { GigaInventory, ProductDataSource } from '../api';
 
-const { Title, Text } = Typography;
-
-const statusTag = (status: string) => {
-  const map: Record<string, { color: string; text: string }> = {
-    pending: { color: 'default', text: '等待中' },
-    running: { color: 'processing', text: '同步中' },
-    completed: { color: 'success', text: '完成' },
-    partial: { color: 'warning', text: '部分完成' },
-    failed: { color: 'error', text: '失败' },
-    success: { color: 'success', text: '已同步' },
-    unavailable: { color: 'warning', text: '不可售' },
-    skipped: { color: 'default', text: '跳过' },
-  };
-  const item = map[status] || { color: 'default', text: status };
-  return <Tag color={item.color}>{item.text}</Tag>;
-};
+const { Text, Title } = Typography;
 
 const stockText = (value?: number | null) => value === null || value === undefined ? '-' : value;
 
+const statusTag = (status?: string | null) => {
+  if (status === 'in_stock' || status === 'available') return <Tag color="success">有货</Tag>;
+  if (status === 'out_of_stock' || status === 'unavailable') return <Tag color="error">无货</Tag>;
+  return <Tag>{status || '-'}</Tag>;
+};
+
+const formatDateTime = (value?: string | null) => value ? new Date(value).toLocaleString('zh-CN') : '-';
+
+const distributionText = (value?: string | null) => {
+  if (!value) return '-';
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed) || parsed.length === 0) return '-';
+    return `${parsed.length} 个仓`;
+  } catch {
+    return value;
+  }
+};
+
+const defaultDynamicBatchId = (site: string, kind: 'inventory' | 'price') => {
+  const now = new Date();
+  const yyyy = now.getFullYear();
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  return `${yyyy}${mm}${dd}-${site.toLowerCase()}-${kind}`;
+};
+
 const InventorySyncList: React.FC = () => {
-  const [items, setItems] = useState<InventorySyncBatch[]>([]);
-  const [details, setDetails] = useState<Record<number, InventorySyncItem[]>>({});
+  const [items, setItems] = useState<GigaInventory[]>([]);
   const [loading, setLoading] = useState(false);
-  const [creating, setCreating] = useState(false);
+  const [syncing, setSyncing] = useState(false);
+  const [priceSyncing, setPriceSyncing] = useState(false);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  const [pageSize, setPageSize] = useState(50);
+  const [dataSources, setDataSources] = useState<ProductDataSource[]>([]);
+  const [selectedDataSourceId, setSelectedDataSourceId] = useState<number | undefined>();
+  const [skuInput, setSkuInput] = useState('');
+  const [skuCode, setSkuCode] = useState('');
+  const [availabilityStatus, setAvailabilityStatus] = useState<string | undefined>();
+  const [pulledAt, setPulledAt] = useState<string | null>(null);
 
-  const hasRunningBatch = useMemo(
-    () => items.some((item) => item.status === 'pending' || item.status === 'running'),
-    [items],
+  const summary = useMemo(() => {
+    const inStock = items.filter((item) => (item.stock_qty || 0) > 0).length;
+    const outOfStock = items.filter((item) => (item.stock_qty || 0) <= 0).length;
+    return { inStock, outOfStock };
+  }, [items]);
+  const activeDataSource = useMemo(
+    () => dataSources.find((source) => source.id === selectedDataSourceId),
+    [dataSources, selectedDataSourceId],
   );
+  const activeSite = activeDataSource?.site || 'US';
 
-  const fetchBatches = async () => {
+  const fetchDataSources = async () => {
+    try {
+      const { data } = await listProductDataSources({ platform: 'giga', enabled: true, page: 1, page_size: 100 });
+      setDataSources(data.items);
+      setSelectedDataSourceId((current) => (
+        current && data.items.some((source) => source.id === current)
+          ? current
+          : data.items[0]?.id
+      ));
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '加载店铺失败');
+    }
+  };
+
+  const fetchInventory = async () => {
+    if (!selectedDataSourceId) {
+      setItems([]);
+      setTotal(0);
+      setPulledAt(null);
+      return;
+    }
     setLoading(true);
     try {
-      const { data } = await listInventorySyncBatches({ page, page_size: pageSize });
+      const { data } = await listGigaInventory({
+        site: activeSite,
+        data_source_id: selectedDataSourceId,
+        page,
+        page_size: pageSize,
+        sku_code: skuCode || undefined,
+        availability_status: availabilityStatus,
+      });
       setItems(data.items);
       setTotal(data.total);
-    } catch {
-      message.error('加载失败');
+      setPulledAt(data.pulled_at);
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '库存数据加载失败');
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => { fetchBatches(); }, [page, pageSize]);
-
+  useEffect(() => { fetchDataSources(); }, []);
   useEffect(() => {
-    if (!hasRunningBatch) return;
-    const timer = window.setInterval(fetchBatches, 5000);
-    return () => window.clearInterval(timer);
-  }, [hasRunningBatch, page, pageSize]);
+    if (selectedDataSourceId) fetchInventory();
+  }, [page, pageSize, selectedDataSourceId, activeSite, skuCode, availabilityStatus]);
 
-  const createBatch = async () => {
-    setCreating(true);
+  const handleSync = async () => {
+    if (!selectedDataSourceId) {
+      message.warning('请先维护并选择店铺');
+      return;
+    }
+    setSyncing(true);
     try {
-      const { data } = await createInventorySyncBatch();
-      message.success(`已创建库存同步批次 #${data.id}`);
+      const { data } = await syncGigaInventory({
+        site: activeSite,
+        data_source_id: selectedDataSourceId,
+        batch_id: defaultDynamicBatchId(activeSite, 'inventory'),
+        task_id: 'manual-giga-inventory',
+      });
+      message.success(`库存已同步：${data.success_count}/${data.total_skus}，告警 ${data.alert_count}`);
       setPage(1);
-      await fetchBatches();
+      await fetchInventory();
     } catch (error: any) {
-      const detail = error?.response?.data?.detail || '库存同步批次创建失败';
-      if (String(detail).includes('大建云仓未登录') || String(detail).includes('登录态')) {
-        Modal.error({
-          title: '库存同步批次未创建',
-          content: detail,
-        });
-      } else {
-        message.error(detail);
-      }
+      message.error(error?.response?.data?.detail || '库存同步失败');
     } finally {
-      setCreating(false);
+      setSyncing(false);
     }
   };
 
-  const loadDetail = async (batch: InventorySyncBatch) => {
-    if (details[batch.id]) return;
+  const handlePriceSync = async () => {
+    if (!selectedDataSourceId) {
+      message.warning('请先维护并选择店铺');
+      return;
+    }
+    setPriceSyncing(true);
     try {
-      const { data } = await getInventorySyncBatch(batch.id);
-      setDetails((prev) => ({ ...prev, [batch.id]: data.items }));
-    } catch {
-      message.error('同步明细加载失败');
+      const { data } = await syncGigaPrice({
+        site: activeSite,
+        data_source_id: selectedDataSourceId,
+        batch_id: defaultDynamicBatchId(activeSite, 'price'),
+        task_id: 'manual-giga-price',
+      });
+      message.success(`价格已同步：${data.success_count}/${data.total_skus}，变价告警 ${data.price_changed_count}`);
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '价格同步失败');
+    } finally {
+      setPriceSyncing(false);
     }
   };
-
-  const detailColumns = [
-    { title: '商品资料ID', dataIndex: 'catalog_product_id', width: 110 },
-    { title: '任务ID', dataIndex: 'product_id', width: 90 },
-    { title: '大建商品ID', dataIndex: 'gigab2b_product_id', width: 130, render: (value: string) => value || '-' },
-    { title: '商品Code', dataIndex: 'item_code', width: 140, render: (value: string) => value || '-' },
-    { title: '旧库存', dataIndex: 'old_stock', width: 90, render: stockText },
-    { title: '新库存', dataIndex: 'new_stock', width: 90, render: stockText },
-    { title: '状态', dataIndex: 'status', width: 100, render: statusTag },
-    { title: '错误信息', dataIndex: 'error_message', render: (value: string) => value || '-' },
-  ];
 
   const columns = [
-    { title: '批次ID', dataIndex: 'id', width: 90 },
-    { title: '状态', dataIndex: 'status', width: 110, render: statusTag },
-    { title: '总数', dataIndex: 'total_count', width: 80 },
-    { title: '成功', dataIndex: 'success_count', width: 80 },
-    { title: '不可售', dataIndex: 'unavailable_count', width: 80 },
-    { title: '失败', dataIndex: 'failed_count', width: 80 },
-    { title: '跳过', dataIndex: 'skipped_count', width: 80 },
     {
-      title: '创建时间',
-      dataIndex: 'created_at',
-      width: 170,
-      render: (value: string) => value ? new Date(value).toLocaleString('zh-CN') : '-',
+      title: 'SKU',
+      dataIndex: 'sku_code',
+      width: 150,
+      fixed: 'left' as const,
+      render: (value: string) => <Text strong>{value}</Text>,
     },
+    { title: 'Item', dataIndex: 'item_code', width: 150, render: (value: string | null) => value || '-' },
     {
-      title: '完成时间',
-      dataIndex: 'finished_at',
-      width: 170,
-      render: (value: string) => value ? new Date(value).toLocaleString('zh-CN') : '-',
+      title: '标题',
+      dataIndex: 'product_name',
+      width: 320,
+      ellipsis: true,
+      render: (value: string | null) => value || '-',
     },
-    {
-      title: '错误信息',
-      dataIndex: 'error_message',
-      render: (value: string) => value ? <Text type="danger">{value}</Text> : '-',
-    },
+    { title: '库存', dataIndex: 'stock_qty', width: 90, render: stockText },
+    { title: 'Seller库存', dataIndex: 'seller_available_inventory', width: 110, render: stockText },
+    { title: 'Buyer库存', dataIndex: 'total_buyer_available_inventory', width: 110, render: stockText },
+    { title: 'Seller分仓', dataIndex: 'seller_inventory_distribution', width: 110, render: distributionText },
+    { title: 'Buyer分仓', dataIndex: 'buyer_inventory_distribution', width: 110, render: distributionText },
+    { title: '状态', dataIndex: 'availability_status', width: 90, render: statusTag },
+    { title: '同步时间', dataIndex: 'pulled_at', width: 170, render: formatDateTime },
   ];
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
-        <Title level={4} style={{ margin: 0 }}>库存同步</Title>
+      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 16, marginBottom: 16, alignItems: 'center' }}>
+        <div>
+          <Title level={4} style={{ margin: 0 }}>库存同步</Title>
+          <Text type="secondary">最新同步：{formatDateTime(pulledAt)}，当前页有货 {summary.inStock} / 无货 {summary.outOfStock}</Text>
+        </div>
         <Space>
-          <Button icon={<ReloadOutlined />} onClick={fetchBatches}>刷新</Button>
-          <Popconfirm
-            title="同步全部已确认商品的库存？"
-            okText="开始同步"
-            cancelText="取消"
-            onConfirm={createBatch}
-          >
-            <Button type="primary" icon={<CloudSyncOutlined />} loading={creating}>
-              同步全部库存
-            </Button>
+          <Select
+            placeholder="选择店铺"
+            value={selectedDataSourceId}
+            style={{ width: 240 }}
+            options={dataSources.map((source) => ({
+              value: source.id,
+              label: `${source.name} · ${source.site}`,
+            }))}
+            onChange={(value) => { setSelectedDataSourceId(value); setPage(1); }}
+          />
+          <Button icon={<ReloadOutlined />} onClick={fetchInventory}>刷新</Button>
+          <Popconfirm title="同步最新 GIGA 价格？" okText="开始同步" cancelText="取消" onConfirm={handlePriceSync}>
+            <Button icon={<DollarOutlined />} loading={priceSyncing}>同步价格</Button>
+          </Popconfirm>
+          <Popconfirm title="同步最新 GIGA 库存？" okText="开始同步" cancelText="取消" onConfirm={handleSync}>
+            <Button type="primary" icon={<CloudSyncOutlined />} loading={syncing}>同步库存</Button>
           </Popconfirm>
         </Space>
       </div>
+
       <Alert
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message="创建同步批次前会先检查大建云仓登录态；如果 Chrome 登录已失效，系统不会创建批次。"
+        message="库存按 SKU 展示，数据来自最新 GIGA Open API 库存快照；Amazon 库存模板导出也会使用这里的最新库存。"
       />
+
+      <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+        <Input
+          allowClear
+          style={{ width: 260 }}
+          prefix={<SearchOutlined />}
+          placeholder="搜索 SKU"
+          value={skuInput}
+          onChange={(event) => setSkuInput(event.target.value)}
+          onPressEnter={() => { setSkuCode(skuInput.trim()); setPage(1); }}
+        />
+        <Button onClick={() => { setSkuCode(skuInput.trim()); setPage(1); }}>搜索</Button>
+        <Select
+          allowClear
+          style={{ width: 140 }}
+          placeholder="库存状态"
+          value={availabilityStatus}
+          options={[
+            { value: 'in_stock', label: '有货' },
+            { value: 'out_of_stock', label: '无货' },
+          ]}
+          onChange={(value) => { setAvailabilityStatus(value); setPage(1); }}
+        />
+      </div>
+
       <Table
-        rowKey="id"
+        rowKey="sku_code"
         dataSource={items}
         columns={columns}
         loading={loading}
-        expandable={{
-          onExpand: (expanded, record) => { if (expanded) loadDetail(record); },
-          expandedRowRender: (record) => (
-            <Table
-              rowKey="id"
-              size="small"
-              pagination={false}
-              columns={detailColumns}
-              dataSource={details[record.id] || []}
-            />
-          ),
-        }}
+        scroll={{ x: 1320 }}
         pagination={{
           current: page,
           pageSize,
           total,
           showSizeChanger: true,
+          showTotal: (value) => `共 ${value} 个 SKU`,
           onChange: (nextPage, nextPageSize) => {
             setPage(nextPage);
             setPageSize(nextPageSize);

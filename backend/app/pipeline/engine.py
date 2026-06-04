@@ -1,11 +1,12 @@
 """
-Pipeline 引擎 — 编排10步Pipeline的执行
+Pipeline 引擎 — 编排商品优化 Pipeline 的执行
 
 状态流转：
-  Step1(采集) → Step2(定价) → Step3(关键词) → Step4(类目) → Step5(Listing) → Step6(主图) → Step7(A+规划) → Step8(A+脚本) → Step9(A+出图) → Step10(导入表格)
+  Step1(采集) → Step2(定价) → Step3(关键词) → Step4(类目) → Step5(图片分析) → Step6(Listing) → Step7(A+规划) → Step8(A+脚本) → Step9(A+出图)
 """
 
 import asyncio
+import json
 import logging
 import time
 import traceback
@@ -13,9 +14,11 @@ from datetime import datetime
 
 from app.config import settings
 from app.database import async_session
-from app.models import Product
+from app.models import AmazonListingCapture, Product
 from app.models.status import *
-from app.pipeline.step1_collect import Step1DuplicateSkipped, Step1NeedsReview, Step1ProductUnavailable, collect_product
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
+from app.pipeline.step1_collect import Step1DuplicateSkipped, Step1NeedsReview, Step1ProductUnavailable
 from app.pipeline.step2_pricing import run_pricing
 from app.pipeline.step3_keywords import Step3NeedsLogin, run_keywords
 from app.pipeline.step4_category import Step4NeedsReview, run_category
@@ -24,13 +27,95 @@ from app.pipeline.step6_image import run_image_analysis
 from app.pipeline.step7_aplus_plan import run_aplus_plan
 from app.pipeline.step8_aplus_script import run_aplus_script
 from app.pipeline.step9_aplus_image import run_aplus_image
-from app.pipeline.step10_amazon_template import run_amazon_template
 
 logger = logging.getLogger(__name__)
 
 # 正在运行的Pipeline任务
 _running_tasks: dict[int, asyncio.Task] = {}
 _pipeline_semaphore = asyncio.Semaphore(max(1, settings.PIPELINE_MAX_CONCURRENCY))
+
+
+def _json_loads(value: str | None, fallback):
+    if not value:
+        return fallback
+    try:
+        return json.loads(value)
+    except Exception:
+        return fallback
+
+
+ACTIVE_LISTING_CAPTURE_STATUSES = {"queued", "running"}
+
+
+async def _has_captured_competitor(db, product: Product) -> bool:
+    if not product.data:
+        return False
+    snapshot = _json_loads(product.data.gigab2b_raw_snapshot, {})
+    if not isinstance(snapshot, dict):
+        return False
+    selected = snapshot.get("selected_stylesnap")
+    capture = snapshot.get("amazon_listing_capture")
+    if _is_competitor_listing_capture_state(product):
+        raise RuntimeError("前置节点未完成：竞品详情仍在抓取中，请等待完成后再进入图片分析")
+    if isinstance(capture, dict) and capture.get("status") in ACTIVE_LISTING_CAPTURE_STATUSES:
+        raise RuntimeError("前置节点未完成：竞品详情仍在抓取中，请等待完成后再进入图片分析")
+    candidate_id = selected.get("candidate_id") if isinstance(selected, dict) else None
+    if candidate_id:
+        result = await db.execute(
+            select(AmazonListingCapture).where(AmazonListingCapture.selected_candidate_id == int(candidate_id))
+        )
+        current_capture = result.scalar_one_or_none()
+        if current_capture and current_capture.capture_status in ACTIVE_LISTING_CAPTURE_STATUSES:
+            raise RuntimeError("前置节点未完成：竞品详情仍在抓取中，请等待完成后再进入图片分析")
+        if (
+            current_capture
+            and current_capture.capture_status == "captured"
+            and current_capture.asin == product.competitor_asin
+        ):
+            return True
+    return bool(
+        product.competitor_asin
+        and isinstance(selected, dict)
+        and isinstance(capture, dict)
+        and capture.get("status") == "captured"
+        and capture.get("asin") == product.competitor_asin
+    )
+
+
+def _is_competitor_listing_capture_state(product: Product) -> bool:
+    return (
+        product.status == STEP5_LISTING
+        and bool(product.error_message)
+        and "竞品" in (product.error_message or "")
+        and "抓取中" in (product.error_message or "")
+    )
+
+
+async def _assert_step_prerequisites(product_id: int, step: int) -> None:
+    async with async_session() as db:
+        result = await db.execute(
+            select(Product)
+            .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
+            .where(Product.id == product_id)
+        )
+        product = result.scalar_one_or_none()
+        if not product:
+            raise RuntimeError(f"Product {product_id} not found")
+        if step >= 5:
+            if not product.images or not product.images.main_image_path:
+                raise RuntimeError("前置节点未完成：请先确认商品主图和 Listing 图片")
+            if not product.competitor_asin:
+                raise RuntimeError("前置节点未完成：请先从候选中选择参考竞品")
+            if not await _has_captured_competitor(db, product):
+                raise RuntimeError("前置节点未完成：请先抓取选中竞品的 Amazon Listing 详情")
+        if step >= 6 and (not product.images or not product.images.image_analysis):
+            raise RuntimeError("前置节点未完成：图片分析节点未完成，不能进入 Listing 文案")
+        if step >= 7 and (not product.data or not product.data.listing_title or not product.data.listing_bullets):
+            raise RuntimeError("前置节点未完成：Listing 文案节点未完成，不能进入 A+ 规划")
+        if step >= 8 and (not product.aplus or not product.aplus.aplus_plan):
+            raise RuntimeError("前置节点未完成：A+ 规划节点未完成，不能进入 A+ 脚本")
+        if step >= 9 and (not product.aplus or not product.aplus.aplus_scripts):
+            raise RuntimeError("前置节点未完成：A+ 脚本节点未完成，不能进入 A+ 出图")
 
 
 def get_step_status(step: int, phase: str = "running") -> str:
@@ -42,8 +127,8 @@ def get_step_status(step: int, phase: str = "running") -> str:
             2: STEP2_DONE,
             3: None,
             4: None,
-            5: STEP5_DONE,
-            6: STEP6_DONE,
+            5: STEP6_DONE,
+            6: STEP5_DONE,
             7: STEP7_DONE,
             8: STEP8_DONE,
             9: STEP9_DONE,
@@ -59,13 +144,9 @@ async def _run_pipeline(product_id: int, start_step: int = 1):
     """
     try:
         if start_step <= 1:
-            # === Step 1: 商品采集 ===
-            logger.info(f"[Pipeline] Product {product_id} Step1 商品采集开始")
-            step_started = time.monotonic()
-            await _update_status(product_id, STEP1_COLLECTING, 1)
-            await collect_product(product_id)
-            await _update_status(product_id, STEP1_DONE, 1)
-            logger.info(f"[Pipeline] Product {product_id} Step1 商品采集完成，耗时={time.monotonic() - step_started:.1f}s")
+            raise RuntimeError(
+                "Step1 浏览器采集已停用：商品中心应使用商品数据源/OpenAPI拉品，不能再自动访问大健商品页"
+            )
 
         if start_step <= 2:
             # === Step 2: 利润计算 ===
@@ -94,25 +175,28 @@ async def _run_pipeline(product_id: int, start_step: int = 1):
             logger.info(f"[Pipeline] Product {product_id} Step4 类目完成，耗时={time.monotonic() - step_started:.1f}s")
 
         if start_step <= 5:
-            # === Step 5: Listing 文案 ===
-            logger.info(f"[Pipeline] Product {product_id} Step5 Listing 开始")
+            # === Step 5: 图片分析 ===
+            await _assert_step_prerequisites(product_id, 5)
+            logger.info(f"[Pipeline] Product {product_id} Step5 图片分析开始")
             step_started = time.monotonic()
-            await _update_status(product_id, STEP5_LISTING, 5)
-            await run_listing(product_id)
-            await _update_status(product_id, STEP5_DONE, 5)
-            logger.info(f"[Pipeline] Product {product_id} Step5 Listing 完成，耗时={time.monotonic() - step_started:.1f}s")
+            await _update_status(product_id, STEP6_CURATING, 5)
+            await run_image_analysis(product_id)
+            await _update_status(product_id, STEP6_DONE, 5)
+            logger.info(f"[Pipeline] Product {product_id} Step5 图片分析完成，耗时={time.monotonic() - step_started:.1f}s")
 
         if start_step <= 6:
-            # === Step 6: 主图分析 ===
-            logger.info(f"[Pipeline] Product {product_id} Step6 主图分析开始")
+            # === Step 6: Listing 文案 ===
+            await _assert_step_prerequisites(product_id, 6)
+            logger.info(f"[Pipeline] Product {product_id} Step6 Listing 开始")
             step_started = time.monotonic()
-            await _update_status(product_id, STEP6_CURATING, 6)
-            await run_image_analysis(product_id)
-            await _update_status(product_id, STEP6_DONE, 6)
-            logger.info(f"[Pipeline] Product {product_id} Step6 主图分析完成，耗时={time.monotonic() - step_started:.1f}s")
+            await _update_status(product_id, STEP5_LISTING, 6)
+            await run_listing(product_id)
+            await _update_status(product_id, STEP5_DONE, 6)
+            logger.info(f"[Pipeline] Product {product_id} Step6 Listing 完成，耗时={time.monotonic() - step_started:.1f}s")
 
         if start_step <= 7:
             # === Step 7: A+ 规划 ===
+            await _assert_step_prerequisites(product_id, 7)
             logger.info(f"[Pipeline] Product {product_id} Step7 A+规划开始")
             step_started = time.monotonic()
             await _update_status(product_id, STEP7_APLUS_PLAN, 7)
@@ -122,6 +206,7 @@ async def _run_pipeline(product_id: int, start_step: int = 1):
 
         if start_step <= 8:
             # === Step 8: A+ 脚本 ===
+            await _assert_step_prerequisites(product_id, 8)
             logger.info(f"[Pipeline] Product {product_id} Step8 A+脚本开始")
             step_started = time.monotonic()
             await _update_status(product_id, STEP8_APLUS_SCRIPT, 8)
@@ -131,6 +216,7 @@ async def _run_pipeline(product_id: int, start_step: int = 1):
 
         if start_step <= 9:
             # === Step 9: A+ 出图 ===
+            await _assert_step_prerequisites(product_id, 9)
             logger.info(f"[Pipeline] Product {product_id} Step9 A+出图开始")
             step_started = time.monotonic()
             await _update_status(product_id, STEP9_APLUS_IMAGE, 9)
@@ -138,22 +224,13 @@ async def _run_pipeline(product_id: int, start_step: int = 1):
             await _update_status(product_id, STEP9_DONE, 9)
             logger.info(f"[Pipeline] Product {product_id} Step9 A+出图完成，耗时={time.monotonic() - step_started:.1f}s")
 
-        if start_step <= 10:
-            # === Step 10: Amazon导入表格 ===
-            logger.info(f"[Pipeline] Product {product_id} Step10 Amazon导入表格开始")
-            step_started = time.monotonic()
-            await _update_status(product_id, STEP10_AMAZON_TEMPLATE, 10)
-            await run_amazon_template(product_id)
-            await _update_status(product_id, STEP10_DONE, 10)
-            logger.info(f"[Pipeline] Product {product_id} Step10 Amazon导入表格完成，耗时={time.monotonic() - step_started:.1f}s")
-
         # === 等待人工确认 ===
-        await _update_status(product_id, PENDING_REVIEW, 10)
-        logger.info(f"[Pipeline] Product {product_id} 已生成完成，等待人工确认")
+        await _update_status(product_id, PENDING_REVIEW, 9)
+        logger.info(f"[Pipeline] Product {product_id} A+出图完成，等待人工复核并加入待导出")
 
     except asyncio.CancelledError:
         await _update_status(product_id, PAUSED, None)
-        logger.info(f"[Pipeline] Product {product_id} 已暂停")
+        logger.info(f"[Pipeline] Product {product_id} 已挂起")
     except Step1NeedsReview as e:
         await _update_status(product_id, PENDING_REVIEW, 1, error=f"Step1待人工处理: {e}")
         logger.warning(f"[Pipeline] Product {product_id} Step1 需要人工处理: {e}")
@@ -192,13 +269,24 @@ async def _run_pipeline_with_limit(product_id: int, start_step: int = 1):
                 f"[Pipeline] Product {product_id} 获取Pipeline并发名额，"
                 f"max={settings.PIPELINE_MAX_CONCURRENCY}"
             )
+            if await _is_paused(product_id):
+                logger.info(f"[Pipeline] Product {product_id} 已挂起，跳过自动执行")
+                return
             await _run_pipeline(product_id, start_step=start_step)
     except asyncio.CancelledError:
         if not entered:
             await _update_status(product_id, PAUSED, None)
-            _running_tasks.pop(product_id, None)
-            logger.info(f"[Pipeline] Product {product_id} 在等待Pipeline并发名额时已暂停")
+            logger.info(f"[Pipeline] Product {product_id} 在等待Pipeline并发名额时已挂起")
         raise
+    finally:
+        _running_tasks.pop(product_id, None)
+
+
+async def _is_paused(product_id: int) -> bool:
+    async with async_session() as db:
+        from sqlalchemy import select
+        result = await db.execute(select(Product.status).where(Product.id == product_id))
+        return result.scalar_one_or_none() == PAUSED
 
 
 async def _update_status(product_id: int, status: str, step: int | None, error: str | None = None):
@@ -235,7 +323,7 @@ def start_pipeline(product_id: int, start_step: int = 1) -> bool:
 
 
 def cancel_pipeline(product_id: int) -> bool:
-    """取消/暂停Pipeline"""
+    """取消/挂起Pipeline"""
     task = _running_tasks.get(product_id)
     if task and not task.done():
         task.cancel()
@@ -265,25 +353,55 @@ async def recover_interrupted_pipelines() -> None:
         STEP2_PRICING,
         STEP3_KEYWORDS,
         STEP4_CATEGORY,
+        "competitor_searching",
         STEP5_LISTING,
         STEP6_CURATING,
         STEP7_APLUS_PLAN,
         STEP8_APLUS_SCRIPT,
         STEP9_APLUS_IMAGE,
-        STEP10_AMAZON_TEMPLATE,
     }
     async with async_session() as db:
         from sqlalchemy import select
-        result = await db.execute(select(Product).where(Product.status.in_(running_statuses)))
+        result = await db.execute(
+            select(Product)
+            .options(selectinload(Product.data))
+            .where(Product.status.in_(running_statuses))
+        )
         products = result.scalars().all()
         now = datetime.now()
         resume_items: list[tuple[int, int]] = []
         for product in products:
+            if product.status == "competitor_searching":
+                product.status = FAILED
+                product.current_step = 2
+                product.error_message = "Amazon 同款搜索被中断，请重新搜索候选"
+                product.updated_at = now
+                if product.data:
+                    snapshot = _json_loads(product.data.gigab2b_raw_snapshot, {})
+                    if isinstance(snapshot, dict):
+                        snapshot["stylesnap_search"] = {
+                            "status": "failed",
+                            "error": product.error_message,
+                            "searched_at": now.isoformat(),
+                        }
+                        product.data.gigab2b_raw_snapshot = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+                continue
+            if _is_competitor_listing_capture_state(product):
+                # STEP5_LISTING is also used while the selected competitor detail
+                # capture is in progress. Do not resume it as Listing generation.
+                product.updated_at = now
+                continue
             step = product.current_step or 1
             if step < 1:
                 step = 1
-            if step > 10:
-                step = 10
+            if step <= 1:
+                product.status = FAILED
+                product.current_step = 1
+                product.error_message = "Step1 浏览器采集已停用：请通过商品数据源/OpenAPI拉品生成商品草稿"
+                product.updated_at = now
+                continue
+            if step > 9:
+                step = 9
             product.status = get_step_status(step)
             product.error_message = None
             product.updated_at = now

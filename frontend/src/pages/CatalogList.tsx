@@ -1,13 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, DatePicker, Input, message, Modal, Popconfirm, Select, Space, Table, Tag, Typography } from 'antd';
-import { CloudSyncOutlined, CopyOutlined, DeleteOutlined, DownloadOutlined, FileExcelOutlined, HistoryOutlined, PictureOutlined, ReloadOutlined, SearchOutlined, SyncOutlined } from '@ant-design/icons';
+import { Button, Card, Empty, Input, message, Modal, Popconfirm, Segmented, Select, Space, Table, Tag, Typography } from 'antd';
+import { CloudSyncOutlined, CopyOutlined, DeleteOutlined, DownloadOutlined, FileExcelOutlined, HistoryOutlined, PictureOutlined, ReloadOutlined, SyncOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { clearCatalogAsin, createAplusUploadBatch, createAsinSyncBatch, createInventorySyncBatch, deleteProduct, exportCatalogProducts, exportInventoryUpdateTemplate, getWorkbenchOverview, listCatalogProducts, updateCatalogAsin } from '../api';
-import type { CatalogProduct, WorkbenchOverview } from '../api';
+import { clearCatalogAsin, createAplusUploadBatch, createAsinSyncBatch, createInventorySyncBatch, deleteProduct, exportCatalogProductsByCategory, exportInventoryUpdateTemplate, getWorkbenchOverview, listCatalogExportCategories, listCatalogProducts, updateCatalogAsin } from '../api';
+import type { CatalogExportCategorySummary, CatalogProduct, WorkbenchOverview } from '../api';
 
 const { Title, Text } = Typography;
-const { RangePicker } = DatePicker;
 
 const CatalogList: React.FC = () => {
   const navigate = useNavigate();
@@ -27,34 +26,10 @@ const CatalogList: React.FC = () => {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
-  const [itemIdInput, setItemIdInput] = useState('');
-  const [asinInput, setAsinInput] = useState('');
-  const [amazonAsinInput, setAmazonAsinInput] = useState('');
-  const [asinSyncStatusInput, setAsinSyncStatusInput] = useState<string | undefined>();
-  const [amazonProductStatusInput, setAmazonProductStatusInput] = useState<string | undefined>();
-  const [aplusUploadStatusInput, setAplusUploadStatusInput] = useState<string | undefined>();
-  const [stockSyncStatusInput, setStockSyncStatusInput] = useState<string | undefined>();
-  const [templateRiskInput, setTemplateRiskInput] = useState<string | undefined>();
-  const [upcInput, setUpcInput] = useState('');
-  const [categoryInput, setCategoryInput] = useState('');
-  const [dateRangeInput, setDateRangeInput] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
-  const [stockSyncedRangeInput, setStockSyncedRangeInput] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(null);
-  const [filters, setFilters] = useState<{
-    item_id?: string;
-    competitor_asin?: string;
-    amazon_asin?: string;
-    asin_sync_status?: string;
-    amazon_product_status?: string;
-    aplus_upload_status?: string;
-    stock_sync_status?: string;
-    template_risk_level?: string;
-    upc?: string;
-    category?: string;
-    imported_from?: string;
-    imported_to?: string;
-    stock_synced_from?: string;
-    stock_synced_to?: string;
-  }>({});
+  const [exportStatus, setExportStatus] = useState<'pending' | 'exported'>('pending');
+  const [selectedCategory, setSelectedCategory] = useState<string | undefined>();
+  const [exportCategories, setExportCategories] = useState<{ pending: CatalogExportCategorySummary[]; exported: CatalogExportCategorySummary[] }>({ pending: [], exported: [] });
+  const [categoriesLoading, setCategoriesLoading] = useState(false);
   const [overview, setOverview] = useState<WorkbenchOverview | null>(null);
 
   const fetchItems = async () => {
@@ -63,7 +38,8 @@ const CatalogList: React.FC = () => {
       const { data } = await listCatalogProducts({
         page,
         page_size: pageSize,
-        ...filters,
+        export_status: exportStatus,
+        category: selectedCategory,
       });
       setItems(data.items);
       setTotal(data.total);
@@ -79,12 +55,31 @@ const CatalogList: React.FC = () => {
       const { data } = await getWorkbenchOverview();
       setOverview(data);
     } catch {
-      // 概览失败不影响商品列表。
+      // 概览失败不影响导出中心使用。
     }
   };
 
-  useEffect(() => { fetchItems(); }, [page, pageSize, filters]);
+  const fetchExportCategories = async () => {
+    setCategoriesLoading(true);
+    try {
+      const { data } = await listCatalogExportCategories();
+      setExportCategories(data);
+    } catch {
+      message.error('导出类目加载失败');
+    } finally {
+      setCategoriesLoading(false);
+    }
+  };
+
+  useEffect(() => { fetchItems(); }, [page, pageSize, exportStatus, selectedCategory]);
   useEffect(() => { fetchOverview(); }, []);
+  useEffect(() => { fetchExportCategories(); }, []);
+  useEffect(() => {
+    const categories = exportStatus === 'pending' ? exportCategories.pending : exportCategories.exported;
+    if (selectedCategory && categories.some((item) => item.category === selectedCategory)) return;
+    setSelectedCategory(categories[0]?.category);
+    setPage(1);
+  }, [exportCategories, exportStatus]);
   useEffect(() => {
     if (!selectedIds.length) return;
     const selectedSet = new Set(selectedIds.map(Number));
@@ -99,40 +94,9 @@ const CatalogList: React.FC = () => {
     });
   }, [items, selectedIds]);
 
-  const search = () => {
-    setFilters({
-      item_id: itemIdInput.trim() || undefined,
-      competitor_asin: asinInput.trim() || undefined,
-      amazon_asin: amazonAsinInput.trim() || undefined,
-      asin_sync_status: asinSyncStatusInput,
-      amazon_product_status: amazonProductStatusInput,
-      aplus_upload_status: aplusUploadStatusInput,
-      stock_sync_status: stockSyncStatusInput,
-      template_risk_level: templateRiskInput,
-      upc: upcInput.trim() || undefined,
-      category: categoryInput.trim() || undefined,
-      imported_from: dateRangeInput?.[0].startOf('day').toISOString(),
-      imported_to: dateRangeInput?.[1].endOf('day').toISOString(),
-      stock_synced_from: stockSyncedRangeInput?.[0].startOf('day').toISOString(),
-      stock_synced_to: stockSyncedRangeInput?.[1].endOf('day').toISOString(),
-    });
-    setPage(1);
-  };
-
-  const reset = () => {
-    setItemIdInput('');
-    setAsinInput('');
-    setAmazonAsinInput('');
-    setAsinSyncStatusInput(undefined);
-    setAmazonProductStatusInput(undefined);
-    setAplusUploadStatusInput(undefined);
-    setStockSyncStatusInput(undefined);
-    setTemplateRiskInput(undefined);
-    setUpcInput('');
-    setCategoryInput('');
-    setDateRangeInput(null);
-    setStockSyncedRangeInput(null);
-    setFilters({});
+  const selectExportStatus = (status: 'pending' | 'exported') => {
+    setExportStatus(status);
+    setSelectedCategory(undefined);
     setPage(1);
   };
 
@@ -165,23 +129,48 @@ const CatalogList: React.FC = () => {
     return payload?.detail || error?.message || fallback;
   };
 
+  const currentCategoryOptions = exportStatus === 'pending' ? exportCategories.pending : exportCategories.exported;
+  const selectedCategorySummary = currentCategoryOptions.find((item) => item.category === selectedCategory);
+
+  const categoryOptionLabel = (item: CatalogExportCategorySummary) => (
+    <Space direction="vertical" size={2} style={{ width: '100%' }}>
+      <Space wrap>
+        <Text strong>{item.category}</Text>
+        <Tag color={item.template_available ? 'success' : 'warning'}>
+          {item.template_available ? '有模板' : '缺模板'}
+        </Tag>
+        <Tag color={exportStatus === 'pending' ? 'blue' : 'default'}>
+          {exportStatus === 'pending' ? `${item.exportable_count} 个待导出` : `${item.count} 个已导出`}
+        </Tag>
+      </Space>
+      <Text type="secondary" ellipsis>
+        {item.template_available ? item.template_name : item.template_error || '未匹配到模板'}
+      </Text>
+    </Space>
+  );
+
   const exportSelected = async () => {
-    if (!selectedIds.length) {
-      message.warning('请先选择商品');
+    const category = currentCategoryOptions.find((item) => item.category === selectedCategory);
+    if (!category) {
+      message.warning('请先选择待导出类目');
       return;
     }
-    const selectedSet = new Set(selectedIds.map(Number));
-    const blocked = items.filter((item) => selectedSet.has(item.id) && item.amazon_asin);
-    if (blocked.length) {
-      message.warning(`已有关联真实 ASIN 的商品不能导出：${blocked.map((item) => item.item_code || item.id).slice(0, 5).join('、')}`);
+    if (exportStatus !== 'pending') {
+      message.warning('已导出类目只用于查看，不会再次生成 Amazon 导入表格');
+      return;
+    }
+    if (!category.template_available) {
+      message.warning(category.template_error || '当前类目没有可用模板');
       return;
     }
     setExporting(true);
-    const hideLoading = message.loading('正在导出 Amazon 表格，生成完成后会自动下载...', 0);
+    const hideLoading = message.loading(`正在导出「${category.category}」Amazon 表格，生成完成后会自动下载...`, 0);
     try {
-      const { data } = await exportCatalogProducts(selectedIds.map(Number));
-      saveBlob(data, `amazon_import_templates_${dayjs().format('YYYYMMDD_HHmmss')}.zip`);
+      const { data } = await exportCatalogProductsByCategory(category.category);
+      saveBlob(data, `amazon_import_${category.category}_${dayjs().format('YYYYMMDD_HHmmss')}.zip`);
       message.success('已导出 Amazon 导入表格压缩包');
+      fetchItems();
+      fetchExportCategories();
     } catch (error: any) {
       message.error(await extractDownloadError(error, '导出失败'));
     } finally {
@@ -372,11 +361,6 @@ const CatalogList: React.FC = () => {
     if (record.aplus_upload_status === 'failed') return <Tag color="error">查看 A+ 失败</Tag>;
     if (record.aplus_upload_status === 'pending' || record.aplus_upload_status === 'running') return <Tag color="processing">等待 A+ 上传</Tag>;
     return <Tag color="success">可持续运营</Tag>;
-  };
-
-  const applyQuickFilter = (nextFilters: typeof filters) => {
-    setFilters(nextFilters);
-    setPage(1);
   };
 
   const uploadSelectedAplus = async () => {
@@ -611,10 +595,10 @@ const CatalogList: React.FC = () => {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
-        <Title level={4} style={{ margin: 0 }}>商品列表</Title>
+        <Title level={4} style={{ margin: 0 }}>导出中心</Title>
         <Space>
           <Text type="secondary">最多显示 1000 个商品</Text>
-          <Button icon={<ReloadOutlined />} onClick={fetchItems}>刷新</Button>
+          <Button icon={<ReloadOutlined />} onClick={() => { fetchItems(); fetchExportCategories(); }}>刷新</Button>
           <Button icon={<CloudSyncOutlined />} loading={syncingInventory} onClick={syncSelectedInventory}>
             库存同步{selectedIds.length ? `(${selectedIds.length})` : ''}
           </Button>
@@ -631,158 +615,66 @@ const CatalogList: React.FC = () => {
           <Button icon={<FileExcelOutlined />} loading={inventoryExporting} disabled={!selectedIds.length} onClick={exportInventorySelected}>
             导出库存模板{selectedIds.length ? `(${selectedIds.length})` : ''}
           </Button>
-          <Button type="primary" icon={<DownloadOutlined />} loading={exporting} disabled={!selectedIds.length} onClick={exportSelected}>
-            导出Amazon表格{selectedIds.length ? `(${selectedIds.length})` : ''}
+          <Button
+            type="primary"
+            icon={<DownloadOutlined />}
+            loading={exporting}
+            disabled={exportStatus !== 'pending' || !selectedCategorySummary?.template_available || !selectedCategorySummary.exportable_count}
+            onClick={exportSelected}
+          >
+            导出Amazon表格{selectedCategorySummary?.exportable_count ? `(${selectedCategorySummary.exportable_count})` : ''}
           </Button>
         </Space>
       </div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 12, flexWrap: 'wrap' }}>
-        <Button size="small" onClick={() => applyQuickFilter({})}>全部商品</Button>
-        <Button size="small" onClick={() => applyQuickFilter({ asin_sync_status: 'not_synced' })}>
-          可同步ASIN{overview ? `(${overview.asin_not_synced})` : ''}
-        </Button>
-        <Button size="small" onClick={() => applyQuickFilter({ asin_sync_status: 'not_found' })}>ASIN未查到</Button>
-        <Button size="small" onClick={() => applyQuickFilter({ asin_sync_status: 'multiple_found' })}>ASIN多匹配</Button>
-        <Button size="small" onClick={() => applyQuickFilter({ amazon_product_status: 'sellable' })}>亚马逊售卖</Button>
-        <Button size="small" onClick={() => applyQuickFilter({ amazon_product_status: 'not_synced' })}>状态未同步</Button>
-        <Button size="small" onClick={() => applyQuickFilter({ aplus_upload_status: 'not_uploaded' })}>可上传A+</Button>
-        <Button size="small" onClick={() => applyQuickFilter({ aplus_upload_status: 'failed' })}>
-          A+失败{overview ? `(${overview.aplus_failed})` : ''}
-        </Button>
-        <Button size="small" onClick={() => applyQuickFilter({ stock_sync_status: 'not_synced' })}>库存未同步</Button>
-        <Button size="small" onClick={() => applyQuickFilter({ stock_sync_status: 'failed' })}>库存同步失败</Button>
-        <Button size="small" onClick={() => applyQuickFilter({ template_risk_level: 'high_risk' })}>
-          上架高风险{overview ? `(${overview.listing_high_risk})` : ''}
-        </Button>
-      </div>
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
-        <Input
-          allowClear
-          placeholder="搜索商品ID / Code"
-          value={itemIdInput}
-          onChange={(event) => setItemIdInput(event.target.value)}
-          onPressEnter={search}
-          style={{ width: 220 }}
-        />
-        <Input
-          allowClear
-          placeholder="搜索竞品 ASIN"
-          value={asinInput}
-          onChange={(event) => setAsinInput(event.target.value)}
-          onPressEnter={search}
-          style={{ width: 180 }}
-        />
-        <Input
-          allowClear
-          placeholder="搜索真实 ASIN"
-          value={amazonAsinInput}
-          onChange={(event) => setAmazonAsinInput(event.target.value)}
-          onPressEnter={search}
-          style={{ width: 180 }}
-        />
-        <Select
-          allowClear
-          placeholder="是否同步 ASIN"
-          value={asinSyncStatusInput}
-          onChange={setAsinSyncStatusInput}
-          style={{ width: 170 }}
-          options={[
-            { value: 'synced', label: '已同步' },
-            { value: 'not_synced', label: '未同步' },
-            { value: 'manual_linked', label: '手动关联' },
-            { value: 'not_found', label: '未查到' },
-            { value: 'multiple_found', label: '多匹配' },
-            { value: 'failed', label: '失败' },
-          ]}
-        />
-        <Select
-          allowClear
-          placeholder="亚马逊商品状态"
-          value={amazonProductStatusInput}
-          onChange={setAmazonProductStatusInput}
-          style={{ width: 180 }}
-          options={[
-            { value: 'sellable', label: '售卖' },
-            { value: 'not_synced', label: '未同步' },
-            { value: '不可售', label: '不可售' },
-            { value: '已删除', label: '已删除' },
-          ]}
-        />
-        <Select
-          allowClear
-          placeholder="A+上传状态"
-          value={aplusUploadStatusInput}
-          onChange={setAplusUploadStatusInput}
-          style={{ width: 170 }}
-          options={[
-            { value: 'not_uploaded', label: '未上传' },
-            { value: 'pending', label: '等待上传' },
-            { value: 'running', label: '上传中' },
-            { value: 'submitted', label: '已提交' },
-            { value: 'draft_saved', label: '已保存草稿' },
-            { value: 'failed', label: '失败' },
-            { value: 'skipped', label: '跳过' },
-          ]}
-        />
-        <Select
-          allowClear
-          placeholder="库存同步状态"
-          value={stockSyncStatusInput}
-          onChange={setStockSyncStatusInput}
-          style={{ width: 170 }}
-          options={[
-            { value: 'synced', label: '已同步' },
-            { value: 'not_synced', label: '未同步' },
-            { value: 'pending', label: '等待同步' },
-            { value: 'running', label: '同步中' },
-            { value: 'unavailable', label: '不可售' },
-            { value: 'failed', label: '失败' },
-            { value: 'skipped', label: '跳过' },
-          ]}
-        />
-        <Select
-          allowClear
-          placeholder="上架检查"
-          value={templateRiskInput}
-          onChange={setTemplateRiskInput}
-          style={{ width: 150 }}
-          options={[
-            { value: 'pass', label: '可复核' },
-            { value: 'warning', label: '需复核' },
-            { value: 'high_risk', label: '高风险' },
-          ]}
-        />
-        <Input
-          allowClear
-          placeholder="搜索 UPC"
-          value={upcInput}
-          onChange={(event) => setUpcInput(event.target.value)}
-          onPressEnter={search}
-          style={{ width: 180 }}
-        />
-        <Input
-          allowClear
-          placeholder="搜索类目"
-          value={categoryInput}
-          onChange={(event) => setCategoryInput(event.target.value)}
-          onPressEnter={search}
-          style={{ width: 180 }}
-        />
-        <RangePicker
-          placeholder={['导入开始', '导入结束']}
-          value={dateRangeInput}
-          onChange={(value) => setDateRangeInput(value as [dayjs.Dayjs, dayjs.Dayjs] | null)}
-          style={{ width: 260 }}
-        />
-        <RangePicker
-          placeholder={['库存同步开始', '库存同步结束']}
-          value={stockSyncedRangeInput}
-          onChange={(value) => setStockSyncedRangeInput(value as [dayjs.Dayjs, dayjs.Dayjs] | null)}
-          style={{ width: 300 }}
-        />
-        <Button icon={<SearchOutlined />} type="primary" onClick={search}>搜索</Button>
-        <Button onClick={reset}>重置</Button>
-      </div>
+      <Card size="small" style={{ marginBottom: 16 }}>
+        <Space direction="vertical" size={14} style={{ width: '100%' }}>
+          <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+            <Segmented
+              value={exportStatus}
+              onChange={(value) => selectExportStatus(value as 'pending' | 'exported')}
+              options={[
+                { label: `待导出类目 ${exportCategories.pending.length}`, value: 'pending' },
+                { label: `已导出类目 ${exportCategories.exported.length}`, value: 'exported' },
+              ]}
+            />
+            <Button size="small" icon={<ReloadOutlined />} loading={categoriesLoading} onClick={fetchExportCategories}>刷新类目</Button>
+          </Space>
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, 420px) minmax(0, 1fr)', gap: 16, alignItems: 'start' }}>
+            <Select
+              loading={categoriesLoading}
+              value={selectedCategory}
+              placeholder={exportStatus === 'pending' ? '选择待导出商品所在类目' : '选择已导出商品所在类目'}
+              onChange={(value) => { setSelectedCategory(value); setPage(1); }}
+              style={{ width: '100%' }}
+              options={currentCategoryOptions.map((item) => ({
+                value: item.category,
+                label: `${item.category} · ${exportStatus === 'pending' ? item.exportable_count : item.count}个 · ${item.template_available ? '有模板' : '缺模板'}`,
+              }))}
+            />
+            {selectedCategorySummary ? (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(110px, 1fr))', gap: 8 }}>
+                <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 12 }}>{categoryOptionLabel(selectedCategorySummary)}</div>
+                <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 12 }}>
+                  <Text type="secondary">商品数</Text>
+                  <div style={{ fontSize: 18, fontWeight: 600 }}>{selectedCategorySummary.count}</div>
+                </div>
+                <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 12 }}>
+                  <Text type="secondary">可导出</Text>
+                  <div style={{ fontSize: 18, fontWeight: 600 }}>{selectedCategorySummary.exportable_count}</div>
+                </div>
+                <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 12 }}>
+                  <Text type="secondary">样例</Text>
+                  <Typography.Paragraph ellipsis={{ rows: 2 }} style={{ marginBottom: 0 }}>
+                    {selectedCategorySummary.sample_item_codes.join('、') || '-'}
+                  </Typography.Paragraph>
+                </div>
+              </div>
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={exportStatus === 'pending' ? '暂无待导出类目' : '暂无已导出类目'} />
+            )}
+          </div>
+        </Space>
+      </Card>
       <Table
         dataSource={items}
         columns={columns}
