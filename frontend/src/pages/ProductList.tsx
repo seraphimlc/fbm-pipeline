@@ -664,6 +664,7 @@ const ProductList: React.FC = () => {
       render: (_: unknown, row: ProductRow) => {
         const product = row.product;
         const aplusRegenerating = APLUS_REGEN_ACTIVE_STATUSES.includes(product.aplus_status || '');
+        const canRestartProduct = !RUNNING_STATUSES.includes(product.status) && row.workStatus !== 'select_images';
         return (
           <Space size="small">
             <Button size="small" onClick={() => openProductDetail(product.id)}>详情</Button>
@@ -718,15 +719,15 @@ const ProductList: React.FC = () => {
                 <Button size="small" icon={<PauseOutlined />}>挂起</Button>
               </Popconfirm>
             )}
-            {!RUNNING_STATUSES.includes(product.status) && (
+            {canRestartProduct && (
               <Popconfirm
-                title="确定重新开始？"
-                description="会保留商品源数据和图片选择，清理后续生成结果，并回到详情页流程起点。"
+                title="确定重新开始流程？"
+                description="会保留已使用图片，清空旧候选竞品、已选竞品和后续生成结果；有主图时会重新搜索候选竞品。"
                 okText="重新开始"
                 cancelText="取消"
                 onConfirm={async () => { await restartPipeline(product.id); await refreshWorkbenchRows(); }}
               >
-                <Button size="small" icon={<RedoOutlined />}>重新开始</Button>
+                <Button size="small" icon={<RedoOutlined />}>重新开始流程</Button>
               </Popconfirm>
             )}
             <Popconfirm title="确定删除？" okText="删除" cancelText="取消" onConfirm={() => handleDeleteProduct(product)}>

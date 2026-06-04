@@ -6,7 +6,7 @@ from copy import copy
 from io import BytesIO
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from openpyxl import Workbook, load_workbook
 from sqlalchemy import delete, select, func
@@ -2836,8 +2836,12 @@ async def start_pipeline(product_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{product_id}/restart", response_model=ProductResponse)
-async def restart_pipeline(product_id: int, db: AsyncSession = Depends(get_db)):
-    """清理下游生成结果，保留商品源数据和图片选择，回到商品图片确认节点。"""
+async def restart_pipeline(
+    product_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """重新开始商品流程：保留已选图片，清空竞品和生成结果；有主图时重新搜索候选竞品。"""
     result = await db.execute(
         select(Product)
         .options(
@@ -2880,14 +2884,48 @@ async def restart_pipeline(product_id: int, db: AsyncSession = Depends(get_db)):
 
     await _delete_product_competitor_records(db, product)
 
+    snapshot = _json_loads(product.data.gigab2b_raw_snapshot, {}) if product.data else {}
+    if not isinstance(snapshot, dict):
+        snapshot = {}
+    batch_id = snapshot.get("batch_id")
+    site = str(snapshot.get("site") or "US").strip().upper()
+    item_code = product.data.item_code if product.data else None
+    representative_sku = snapshot.get("representative_sku") or item_code
+    has_confirmed_main_image = bool(product.images and product.images.main_image_path)
+    can_search_competitors = bool(has_confirmed_main_image and batch_id and item_code)
+    now = datetime.now()
+
     product.competitor_asin = None
     product.aplus_upload_status = "not_uploaded"
     product.aplus_uploaded_at = None
     product.aplus_upload_error = None
-    product.status = "created"
-    product.current_step = 0
-    product.error_message = None
-    product.updated_at = datetime.now()
+    product.updated_at = now
+    if can_search_competitors:
+        product.status = "competitor_searching"
+        product.current_step = 2
+        product.error_message = "重新开始流程：正在用已确认主图重新搜索 Amazon 候选竞品"
+        if product.data:
+            product.data.gigab2b_raw_snapshot = json.dumps(
+                {
+                    **snapshot,
+                    "batch_id": batch_id,
+                    "site": site,
+                    "representative_sku": representative_sku or item_code,
+                    "stylesnap_search": {
+                        "status": "running",
+                        "started_at": now.isoformat(),
+                        "source_image_path": product.images.main_image_path,
+                        "append": False,
+                        "previous_count": 0,
+                        "restart": True,
+                    },
+                },
+                ensure_ascii=False,
+            )
+    else:
+        product.status = "created"
+        product.current_step = 1 if has_confirmed_main_image else 0
+        product.error_message = None if has_confirmed_main_image else "待确认商品图片"
     if product.catalog_item:
         product.catalog_item.confirmed_at = None
         product.catalog_item.upc = product.upc
@@ -2896,9 +2934,14 @@ async def restart_pipeline(product_id: int, db: AsyncSession = Depends(get_db)):
         product.catalog_item.aplus_uploaded_at = None
         product.catalog_item.aplus_upload_error = None
         product.catalog_item.status = product.status
-        product.catalog_item.updated_at = datetime.now()
+        product.catalog_item.updated_at = now
     await db.commit()
     await db.refresh(product)
+
+    if can_search_competitors:
+        from app.api.amazon_stylesnap import _run_product_competitor_search_background
+
+        background_tasks.add_task(_run_product_competitor_search_background, product.id)
 
     return product
 

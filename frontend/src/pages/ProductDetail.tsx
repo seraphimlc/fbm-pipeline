@@ -75,6 +75,58 @@ const captureStatusTag = (status: string | null | undefined) => {
   return <Tag color="processing">{status}</Tag>;
 };
 
+const defaultProductDetailTab = (detail: ProductDetail | null | undefined) => {
+  if (!detail) return 'basic';
+
+  const snapshot = parseJson(detail.data?.gigab2b_raw_snapshot, {});
+  const searchStatus = snapshot?.stylesnap_search?.status || '';
+  const captureStatus = snapshot?.amazon_listing_capture?.status || '';
+  const selectedAsin = snapshot?.selected_stylesnap?.asin || detail.competitor_asin;
+  const step = Number(detail.current_step || 0);
+  const hasMainImage = Boolean(detail.images?.main_image_path || snapshot?.selected_stylesnap?.source_image_path);
+  const hasListingCapture = Boolean(
+    captureStatus === 'captured'
+    || (snapshot?.amazon_listing_capture?.title && captureStatus !== 'failed')
+  );
+  const hasListingContent = Boolean(
+    detail.data?.listing_title
+    || detail.data?.listing_bullets
+    || detail.data?.listing_description
+    || detail.data?.listing_search_terms
+  );
+  const hasAplusOutput = Boolean(
+    detail.aplus?.aplus_plan
+    || detail.aplus?.aplus_scripts
+    || detail.aplus?.aplus_images
+    || detail.aplus?.aplus_status
+  );
+  const competitorCaptureMessage = /竞品.*抓取中|Listing.*抓取中|竞品详情|竞品 Listing|Amazon Listing 详情|Amazon Listing 抓取|抓取选中竞品|选中竞品.*抓取|Amazon.*详情抓取/i;
+  const imageAnalysisMessage = /图片分析节点未完成|不能进入 Listing 文案|图片分析/i;
+
+  if (!hasMainImage || (detail.status === 'created' && step <= 0)) return 'images';
+  if (
+    detail.status === 'competitor_searching'
+    || searchStatus === 'running'
+    || searchStatus === 'failed'
+    || (!selectedAsin && hasMainImage)
+    || ['queued', 'running', 'failed'].includes(captureStatus)
+    || (detail.status === 'failed' && competitorCaptureMessage.test(detail.error_message || ''))
+  ) {
+    return 'competitor';
+  }
+  if (
+    step === 5
+    || detail.status === 'step6_curating'
+    || (detail.status === 'failed' && imageAnalysisMessage.test(detail.error_message || ''))
+    || (hasListingCapture && !detail.images?.image_analysis && !hasListingContent)
+  ) {
+    return 'images';
+  }
+  if (step >= 7 || hasAplusOutput) return 'aplus';
+  if (step >= 6 || hasListingContent) return 'listing';
+  return 'basic';
+};
+
 const ProductDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -116,6 +168,8 @@ const ProductDetail: React.FC = () => {
   const [listingImageDirty, setListingImageDirty] = useState(false);
   const [listingImageDraftProductId, setListingImageDraftProductId] = useState<number | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const autoTabProductIdRef = useRef<number | null>(null);
+  const userTouchedTabRef = useRef(false);
 
   const refreshCompetitorGroupFromProduct = async (detail: ProductDetail) => {
     const snapshot = parseJson(detail.data?.gigab2b_raw_snapshot, {});
@@ -145,6 +199,15 @@ const ProductDetail: React.FC = () => {
     try {
       const { data } = await getProduct(Number(id));
       setProduct(data);
+      const nextDefaultTab = defaultProductDetailTab(data);
+      const isNewProduct = autoTabProductIdRef.current !== data.id;
+      if (isNewProduct) {
+        autoTabProductIdRef.current = data.id;
+        userTouchedTabRef.current = false;
+        setActiveTabKey(nextDefaultTab);
+      } else if (!userTouchedTabRef.current) {
+        setActiveTabKey(nextDefaultTab);
+      }
       await refreshCompetitorGroupFromProduct(data);
     } catch {
       message.error('加载失败');
@@ -1219,6 +1282,19 @@ const ProductDetail: React.FC = () => {
   const canSuspendProduct = product.status !== 'paused'
     && !['completed', 'unavailable', 'source_unavailable'].includes(product.status)
     && !(product.status === 'pending_review' && product.current_step >= 9);
+  const hasRestartableDownstreamState = Boolean(
+    product.current_step > 0
+    || hasReferenceCompetitor
+    || hasCompetitorCandidates
+    || hasListingCapture
+    || hasImageAnalysis
+    || hasListingContent
+    || hasAplusOutput
+    || visibleGeneratedFiles.length
+  );
+  const canRestartProduct = !isPipelineRunning
+    && !['unavailable', 'source_unavailable'].includes(product.status)
+    && hasRestartableDownstreamState;
   const canOperateCompetitor = product.status !== 'completed'
     && !isListingCaptureRunning
     && (!isPipelineRunning || isListingCaptureFailed);
@@ -2649,15 +2725,15 @@ const ProductDetail: React.FC = () => {
               <Button icon={<PauseOutlined />}>挂起</Button>
             </Popconfirm>
           )}
-          {!isPipelineRunning && (
+          {canRestartProduct && (
             <Popconfirm
-              title="确定重新开始？"
-              description="会保留商品源数据和图片选择，清理后续生成结果，并回到详情页流程起点。"
+              title="确定重新开始流程？"
+              description="会保留已使用图片，清空旧候选竞品、已选竞品、Listing、图片分析、A+ 和生成文件；有主图时会重新搜索候选竞品。"
               okText="重新开始"
               cancelText="取消"
               onConfirm={() => doRestart()}
             >
-              <Button icon={<RedoOutlined />}>重新开始</Button>
+              <Button icon={<RedoOutlined />}>重新开始流程</Button>
             </Popconfirm>
           )}
           <Popconfirm
@@ -2705,6 +2781,7 @@ const ProductDetail: React.FC = () => {
         activeKey={activeTabKey}
         items={tabItems}
         onChange={(key) => {
+          userTouchedTabRef.current = true;
           setActiveTabKey(key);
           if (key === 'competitor' && !competitorGroup && !competitorLoading) {
             loadCompetitorCandidates();
