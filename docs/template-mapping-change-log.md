@@ -11,6 +11,48 @@
 
 ## 2026-06-05
 
+### Amazon 导出规则层重构
+
+- 改动文件：
+  - `backend/app/pipeline/step10_amazon_template.py`
+  - `backend/app/pipeline/amazon_export/context.py`
+  - `backend/app/pipeline/amazon_export/common_fill.py`
+  - `backend/app/pipeline/amazon_export/listing_fill.py`
+  - `backend/app/pipeline/amazon_export/offer_fill.py`
+  - `backend/app/pipeline/amazon_export/image_fill.py`
+  - `backend/app/pipeline/amazon_export/package_fill.py`
+  - `backend/app/pipeline/amazon_export/validators.py`
+  - `backend/app/pipeline/amazon_export/writer.py`
+  - `backend/app/pipeline/amazon_export/registry.py`
+  - `backend/app/pipeline/amazon_export/strategies/*.py`
+- 涉及类目/模板：
+  - `CHAIR_SOFA.xlsm`
+  - `BICYCLE_CYCLING.xlsm`
+  - `RIDE_ON_TOY.xlsm`
+  - `DRESSER_STORAGE_DRAWER_STORAGE_BOX_CABINET_STEP_STOOL.xlsm`
+  - `SHELF_TABLE_CABINET_ANIMAL_CAGE_TEMPORARY_GATE.xlsm`
+- 变更原因：
+  - Step 10 原先把通用字段、模板族差异、图片/包裹/Listing 填充、校验和写表逻辑揉在同一个大函数里，后续新增模板时难以复用和沉淀规则。
+  - 导出逻辑需要稳定沉淀为“模板规则引擎”，正式导出不依赖模型临时推理。
+- 主要行为：
+  - 新增 `amazon_export` 规则层，按上下文、Listing/Offer、图片、包裹、校验、写表和模板族策略拆分。
+  - `mapping JSON` 继续只负责“逻辑字段 -> Amazon 模板列名”和模板基础配置。
+  - 具体取值和差异规则由策略注册表分发到 `sofa_chair`、`bicycle`、`ride_on_toy`、`storage_furniture`、`shelf_table_cabinet_gate`。
+  - `step10_amazon_template._build_amazon_template_file` 改为薄适配层，调用 `amazon_export.writer.build_amazon_template_file`。
+  - 现有底层解析规则保持复用，避免 5 个已接入模板的导出结果大幅漂移。
+- 验证：
+  - `cd backend && .venv/bin/python -m py_compile app/pipeline/step10_amazon_template.py app/pipeline/amazon_export/*.py app/pipeline/amazon_export/strategies/*.py` 通过。
+  - 策略注册校验通过：5 个 mapping 文件分别命中 `sofa_chair`、`bicycle`、`ride_on_toy`、`home_storage_furniture`、`shelf_table_cabinet_gate`。
+  - 样例生成通过，输出到 `backend/tmp/amazon_export_rule_test` 临时目录：
+    - `CHAIR_SOFA.xlsm`：生成 `N726P248345Y_amazon_chair_sofa_import.xlsm`。
+    - `BICYCLE_CYCLING.xlsm`：生成 `N726P248345Y_amazon_bicycle_import.xlsm`。
+    - `RIDE_ON_TOY.xlsm`：生成 `N726P248345Y_amazon_ride_on_toy_import.xlsm`。
+    - `DRESSER_STORAGE_DRAWER_STORAGE_BOX_CABINET_STEP_STOOL.xlsm`：生成 `W808P410990_amazon_storage_furniture_import.xlsm`。
+    - `SHELF_TABLE_CABINET_ANIMAL_CAGE_TEMPORARY_GATE.xlsm`：生成 `W808P350170_amazon_shelf_table_cabinet_gate_import.xlsm`。
+- 后续注意：
+  - 这次优先完成规则层编排重构；后续新增模板时，应优先复用现有策略族，再考虑新增策略。
+  - 下一步可继续把 Step 10 中被策略层复用的 legacy helper 迁到对应模块，进一步削薄旧文件。
+
 ### 导出中心上传模板接入规则收敛
 
 - 改动文件：
