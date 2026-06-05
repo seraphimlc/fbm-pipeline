@@ -597,6 +597,7 @@ async def create_product_draft_from_giga_item(
     pi.gallery_order = _json_dumps(image_paths)
     pi.vlm_model = settings.VLM_MODEL
     product.images = pi
+    await ensure_product_upc(db, product)
 
     if not had_data:
         db.add(pd)

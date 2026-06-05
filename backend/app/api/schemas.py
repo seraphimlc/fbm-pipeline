@@ -190,9 +190,18 @@ class OfflineTaskGigaDynamicSyncRequest(BaseModel):
     sku_codes: list[str] | None = Field(default=None, max_length=5000)
 
 
+class OfflineTaskCatalogExportRequest(BaseModel):
+    catalog_product_ids: list[int] = Field(..., min_length=1, max_length=1000)
+
+
 class OfflineTaskQueuedResponse(BaseModel):
     task: OfflineTaskResponse
     steps: list[OfflineTaskStepResponse] = Field(default_factory=list)
+
+
+class OfflineTaskBatchQueuedResponse(BaseModel):
+    tasks: list[OfflineTaskResponse] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
 
 
 class GigaSyncRequest(BaseModel):
@@ -812,6 +821,8 @@ class CatalogProductResponse(BaseModel):
     aplus_upload_status: str | None = None
     aplus_uploaded_at: datetime | None = None
     aplus_upload_error: str | None = None
+    aplus_status: str | None = None
+    aplus_image_count: int | None = None
     upc: str | None = None
     brand: str = "Vindhvisk"
     item_code: str | None = None
@@ -823,6 +834,9 @@ class CatalogProductResponse(BaseModel):
     stock_sync_error: str | None = None
     status: str
     confirmed_at: datetime | None = None
+    exported_at: datetime | None = None
+    export_task_id: int | None = None
+    export_file_path: str | None = None
     imported_at: datetime | None = None
     updated_at: datetime | None = None
     template_risk_level: str | None = None
@@ -875,6 +889,22 @@ class CatalogTemplateUploadResponse(BaseModel):
     object_key: str | None = None
     oss_url: str | None = None
     uploaded_at: datetime
+
+
+class CatalogTemplateFileSummary(BaseModel):
+    file_id: str
+    file_no: str
+    file_name: str
+    file_status: str
+    enabled: bool = True
+    source: str
+    template_path: str | None = None
+    oss_object_key: str | None = None
+    oss_url: str | None = None
+    support_categories: list[str] = Field(default_factory=list)
+    template_errors: list[str] = Field(default_factory=list)
+    can_download: bool = True
+    can_delete: bool = False
 
 
 class InventorySyncCreateRequest(BaseModel):
@@ -981,6 +1011,11 @@ class AplusUploadCreateRequest(BaseModel):
     catalog_product_ids: list[int] = Field(..., min_length=1, max_length=1000)
     store: str = Field(default="Andy店-US", max_length=100)
     submit_for_approval: bool = True
+
+
+class AplusGenerateRequest(BaseModel):
+    catalog_product_ids: list[int] = Field(..., min_length=1, max_length=1000)
+    force: bool = False
 
 
 class AplusUploadBatchResponse(BaseModel):

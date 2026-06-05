@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { Button, Progress, Space, Table, Tag, Typography, message } from 'antd';
-import { PauseOutlined, PlayCircleOutlined, ReloadOutlined, RedoOutlined } from '@ant-design/icons';
+import { DownloadOutlined, PauseOutlined, PlayCircleOutlined, ReloadOutlined, RedoOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { getOfflineTask, listOfflineTasks, pauseOfflineTask, rerunOfflineTask, resumeOfflineTask } from '../api';
+import { downloadOfflineTaskResult, getOfflineTask, listOfflineTasks, pauseOfflineTask, rerunOfflineTask, resumeOfflineTask } from '../api';
 import type { OfflineTask, OfflineTaskDetail, OfflineTaskStep } from '../api';
 
 const { Title, Text } = Typography;
@@ -25,6 +25,8 @@ const taskTypeLabel = (type: string) => {
   if (type === 'giga_pull') return '同步店铺商品';
   if (type === 'giga_inventory_sync') return '同步大健库存';
   if (type === 'giga_price_sync') return '同步大健价格';
+  if (type === 'aplus_generate') return 'A+生成';
+  if (type === 'catalog_export') return 'Amazon表格导出';
   return type;
 };
 
@@ -33,6 +35,8 @@ const stepTypeLabel = (type: string) => {
   if (type === 'giga_image_download') return '下载图片';
   if (type === 'giga_inventory_sync') return '库存同步';
   if (type === 'giga_price_sync') return '价格同步';
+  if (type === 'aplus_generate_product') return 'A+生成';
+  if (type === 'catalog_export_template') return '模板导出';
   return type;
 };
 
@@ -48,7 +52,29 @@ const progressText = (record: OfflineTaskStep) => {
   if (['giga_inventory_sync', 'giga_price_sync'].includes(record.step_type) && record.progress_total > 0) {
     return `SKU ${record.progress_current}/${record.progress_total}`;
   }
+  if (record.step_type === 'aplus_generate_product' && record.progress_total > 0) {
+    const stageMap: Record<number, string> = {
+      0: '等待规划',
+      1: '规划完成',
+      2: '脚本完成',
+      3: '出图完成',
+    };
+    return `${stageMap[record.progress_current] || '生成中'} ${record.progress_current}/${record.progress_total}`;
+  }
+  if (record.step_type === 'catalog_export_template' && record.progress_total > 0) {
+    return `商品 ${record.progress_current}/${record.progress_total}`;
+  }
   return record.status === 'running' ? '执行中，正在统计...' : '-';
+};
+
+const parseResult = (value: string | null) => {
+  if (!value) return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
 };
 
 const OfflineTaskCenter: React.FC = () => {
@@ -58,6 +84,7 @@ const OfflineTaskCenter: React.FC = () => {
   const [rerunningId, setRerunningId] = useState<number | null>(null);
   const [pausingId, setPausingId] = useState<number | null>(null);
   const [resumingId, setResumingId] = useState<number | null>(null);
+  const [downloadingId, setDownloadingId] = useState<number | null>(null);
 
   const fetchTasks = async () => {
     setLoading(true);
@@ -122,6 +149,34 @@ const OfflineTaskCenter: React.FC = () => {
     }
   };
 
+  const saveBlob = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    setTimeout(() => {
+      URL.revokeObjectURL(url);
+      link.remove();
+    }, 1000);
+  };
+
+  const downloadTask = async (task: OfflineTask) => {
+    setDownloadingId(task.id);
+    try {
+      const result = parseResult(task.result_json);
+      const filename = String((result as any).filename || `catalog_export_${task.id}.zip`);
+      const { data } = await downloadOfflineTaskResult(task.id);
+      saveBlob(data, filename);
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '下载导出文件失败');
+    } finally {
+      setDownloadingId(null);
+    }
+  };
+
   useEffect(() => { fetchTasks(); }, []);
 
   const stepColumns = [
@@ -145,7 +200,7 @@ const OfflineTaskCenter: React.FC = () => {
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <div>
           <Title level={4} style={{ margin: 0 }}>任务中心</Title>
-          <Text type="secondary">承载店铺商品同步、库存同步、价格同步、图片下载、导出等离线操作；商品工作台只负责提交和查看商品状态。</Text>
+          <Text type="secondary">承载店铺商品同步、库存同步、价格同步、A+生成、图片下载、导出等离线操作；商品工作台只负责提交和查看商品状态。</Text>
         </div>
         <Button icon={<ReloadOutlined />} onClick={fetchTasks}>刷新</Button>
       </div>
@@ -186,6 +241,7 @@ const OfflineTaskCenter: React.FC = () => {
               const canPause = ['pending', 'running'].includes(record.status);
               const canResume = record.status === 'paused';
               const canRerun = ['failed', 'partial_failed', 'interrupted'].includes(record.status);
+              const canDownload = record.task_type === 'catalog_export' && record.status === 'done';
               return (
                 <Space size="small">
                   {canPause && (
@@ -218,6 +274,17 @@ const OfflineTaskCenter: React.FC = () => {
                   >
                     重跑
                   </Button>
+                  {canDownload && (
+                    <Button
+                      size="small"
+                      type="primary"
+                      icon={<DownloadOutlined />}
+                      loading={downloadingId === record.id}
+                      onClick={() => downloadTask(record)}
+                    >
+                      下载
+                    </Button>
+                  )}
                 </Space>
               );
             },

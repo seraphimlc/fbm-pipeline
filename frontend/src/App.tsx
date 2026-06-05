@@ -9,7 +9,7 @@ import CreateProduct from './pages/CreateProduct';
 import CatalogList from './pages/CatalogList';
 import InventorySyncList from './pages/InventorySyncList';
 import AsinSyncList from './pages/AsinSyncList';
-import AplusUploadList from './pages/AplusUploadList';
+import AplusManagement from './pages/AplusManagement';
 import ConfigPage from './pages/ConfigPage';
 import ProductDataSourceList from './pages/ProductDataSourceList';
 import OfflineTaskCenter from './pages/OfflineTaskCenter';
@@ -26,10 +26,11 @@ const App: React.FC = () => (
             <Route path="/amazon-stylesnap" element={<Navigate to="/products" replace />} />
             <Route path="/products" element={<ProductList />} />
             <Route path="/offline-tasks" element={<OfflineTaskCenter />} />
-            <Route path="/catalog" element={<CatalogList />} />
+            <Route path="/export-center" element={<CatalogList />} />
             <Route path="/inventory-sync" element={<InventorySyncList />} />
             <Route path="/asin-sync" element={<AsinSyncList />} />
-            <Route path="/aplus-upload" element={<AplusUploadList />} />
+            <Route path="/aplus" element={<AplusManagement />} />
+            <Route path="/aplus-upload" element={<Navigate to="/aplus" replace />} />
             <Route path="/upc-pool" element={<UpcPoolPage />} />
             <Route path="/data-sources" element={<ProductDataSourceList />} />
             <Route path="/config" element={<ConfigPage />} />

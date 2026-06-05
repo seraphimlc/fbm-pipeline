@@ -1,13 +1,14 @@
 import subprocess
 import zipfile
+import hashlib
 import json
 import re
 from copy import copy
 from io import BytesIO
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse, StreamingResponse
 from openpyxl import Workbook, load_workbook
 from sqlalchemy import delete, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,10 +46,11 @@ from app.api.schemas import (
     ProductCreate, ProductUpdate, ProductListingImagesUpdate, ProductGigaRefreshRequest, ProductResponse, ProductDetail, ProductImageResponse,
     PaginatedResponse, ProductFileEntry, AplusRegenerateRequest,
     AsinSyncBatchDetail, AsinSyncBatchResponse, AsinSyncCreateRequest,
-    AplusUploadBatchDetail, AplusUploadBatchResponse, AplusUploadCreateRequest,
+    AplusUploadBatchDetail, AplusUploadBatchResponse, AplusUploadCreateRequest, AplusGenerateRequest,
     BulkImportResponse, BulkStartRequest, BulkStartResponse,
     PaginatedAsinSyncBatches, PaginatedCatalogProducts, CatalogProductResponse,
-    CatalogExportByCategoryRequest, CatalogExportCategoriesResponse, CatalogExportCategorySummary, CatalogTemplateUploadResponse,
+    CatalogExportByCategoryRequest, CatalogExportCategoriesResponse, CatalogExportCategorySummary,
+    CatalogTemplateFileSummary, CatalogTemplateUploadResponse,
     PaginatedAplusUploadBatches, WorkbenchOverview, CatalogAsinUpdateRequest,
     InventorySyncBatchDetail, InventorySyncBatchResponse, InventorySyncCreateRequest,
     PaginatedInventorySyncBatches, PaginatedUpcPoolItems, UpcPoolImportRequest,
@@ -60,9 +62,6 @@ from app.pipeline.step3_keywords import run_keywords
 from app.pipeline.step4_category import run_category
 from app.pipeline.step5_listing import run_listing
 from app.pipeline.step6_image import run_image_analysis
-from app.pipeline.step7_aplus_plan import run_aplus_plan
-from app.pipeline.step8_aplus_script import run_aplus_script
-from app.pipeline.step9_aplus_image import run_aplus_image
 from app.pipeline.ride_on_category import RIDE_ON_CATEGORY_OPTIONS
 from app.pipeline.step10_amazon_template import (
     AMAZON_TEMPLATE_LOGIC_VERSION,
@@ -81,7 +80,8 @@ from app.services.material_assets import (
     folder_summary,
     organize_video_files,
 )
-from app.services.oss_uploader import upload_private_file
+from app.services.oss_uploader import download_private_file, sign_private_url, upload_private_file
+from app.services.offline_tasks import create_aplus_generate_task
 from app.services.asin_sync import build_sync_item, start_asin_sync_batch
 from app.services.inventory_sync import (
     InventorySyncLoginRequired,
@@ -113,9 +113,6 @@ STEP_RUNNERS = {
     4: run_category,
     5: run_image_analysis,
     6: run_listing,
-    7: run_aplus_plan,
-    8: run_aplus_script,
-    9: run_aplus_image,
     10: run_amazon_template,
 }
 
@@ -131,9 +128,6 @@ RUNNING_STATUSES = {
     "step4_category",
     "step5_listing",
     "step6_curating",
-    "step7_aplus_plan",
-    "step8_aplus_script",
-    "step9_aplus_image",
 }
 
 APLUS_REGEN_ACTIVE_STATUSES = {"regen_queued", "regen_script_running", "regen_image_running"}
@@ -253,14 +247,7 @@ async def _require_generation_prerequisites(db: AsyncSession, product: Product, 
         if not product.images or not product.images.image_analysis:
             raise HTTPException(400, "不能进入 Listing 文案：图片分析节点未完成")
     if start_step >= 7:
-        if not product.data or not product.data.listing_title or not product.data.listing_bullets:
-            raise HTTPException(400, "不能进入 A+ 规划：Listing 文案节点未完成")
-    if start_step >= 8:
-        if not product.aplus or not product.aplus.aplus_plan:
-            raise HTTPException(400, "不能进入 A+ 脚本：A+ 规划节点未完成")
-    if start_step >= 9:
-        if not product.aplus or not product.aplus.aplus_scripts:
-            raise HTTPException(400, "不能进入 A+ 出图：A+ 脚本节点未完成")
+        raise HTTPException(400, "A+ 已从商品主流程拆出，请在 A+管理中单独生成")
 
 
 def _current_task_status(product: Product) -> str:
@@ -297,8 +284,8 @@ def _current_task_status(product: Product) -> str:
     if product.status == "paused":
         return f"已挂起：{step_label}，不会继续执行后续自动流程"
     if product.status == "pending_review":
-        if product.current_step >= 9:
-            return "待复核A+，确认后加入待导出"
+        if product.current_step >= 6:
+            return "Listing已生成，点击继续后自动进入待导出"
         detail = _compact_error_message(product.error_message)
         return f"待人工处理：{detail or step_label}"
     if product.status == "failed":
@@ -663,6 +650,79 @@ def _sync_catalog_item(product: Product, db: AsyncSession, confirm: bool = False
     return item
 
 
+def _safe_oss_key_part(value: str | None, fallback: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value or "").strip("-._")
+    return cleaned or fallback
+
+
+async def _ensure_contact_sheet_oss_urls(product: Product, db: AsyncSession) -> None:
+    images = product.images
+    if not images or not images.image_analysis:
+        return
+    try:
+        payload = json.loads(images.image_analysis)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(payload, dict):
+        return
+
+    sheets = payload.get("contact_sheets")
+    if not isinstance(sheets, list) or not sheets:
+        return
+
+    changed = False
+    product_key = _safe_oss_key_part(product.gigab2b_product_id or product.source_item_id, f"product-{product.id}")
+    for index, sheet in enumerate(sheets):
+        if not isinstance(sheet, dict):
+            continue
+        sheet_path = str(sheet.get("sheet_path") or "").strip()
+        if not sheet_path or sheet_path.startswith("url_batch:"):
+            continue
+        if sheet_path.startswith(("http://", "https://")):
+            if not sheet.get("display_url"):
+                sheet["display_url"] = sheet_path
+                changed = True
+            continue
+
+        object_key = str(sheet.get("oss_object_key") or "").strip()
+        if object_key:
+            try:
+                signed_url = sign_private_url(object_key)
+            except Exception:
+                signed_url = str(sheet.get("oss_url") or sheet.get("display_url") or "")
+            if signed_url:
+                if sheet.get("oss_url") != signed_url or sheet.get("display_url") != signed_url:
+                    sheet["oss_url"] = signed_url
+                    sheet["display_url"] = signed_url
+                    changed = True
+            continue
+
+        path = Path(sheet_path).expanduser()
+        if not path.is_file():
+            continue
+        filename = _safe_oss_key_part(path.name, f"contact_sheet_{index + 1:02d}{path.suffix or '.jpg'}")
+        object_key = f"image_analysis/{product_key}/contact_sheets/{filename}"
+        try:
+            uploaded = upload_private_file(path, object_key)
+        except Exception:
+            continue
+        sheet["oss_object_key"] = uploaded.get("object_key")
+        sheet["oss_url"] = uploaded.get("url")
+        sheet["display_url"] = uploaded.get("url")
+        sheet["oss_uploaded_at"] = datetime.now().isoformat()
+        changed = True
+
+    if changed:
+        images.image_analysis = json.dumps(payload, ensure_ascii=False)
+        first_sheet = next((item for item in sheets if isinstance(item, dict)), None)
+        if first_sheet:
+            images.contact_sheet_path = first_sheet.get("display_url") or first_sheet.get("oss_url") or first_sheet.get("sheet_path")
+        images.analyzed_at = images.analyzed_at or datetime.now()
+        product.updated_at = datetime.now()
+        await db.commit()
+        await db.refresh(product)
+
+
 def _mark_pipeline_starting(product: Product) -> None:
     product.status = STEP_STATUS_MAP.get(max(product.current_step or 5, 5), STEP5_LISTING)
     product.current_step = max(product.current_step or 5, 5)
@@ -751,6 +811,10 @@ def _category_template_manifest_path() -> Path:
     return _category_template_cache_dir() / "manifest.json"
 
 
+def _template_file_state_path() -> Path:
+    return _category_template_cache_dir() / "template_files.json"
+
+
 def _load_category_template_manifest() -> dict[str, dict]:
     path = _category_template_manifest_path()
     if not path.is_file():
@@ -767,9 +831,98 @@ def _save_category_template_manifest(manifest: dict[str, dict]) -> None:
     path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def _load_template_file_state() -> dict[str, dict]:
+    path = _template_file_state_path()
+    if not path.is_file():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _save_template_file_state(state: dict[str, dict]) -> None:
+    path = _template_file_state_path()
+    path.write_text(json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _template_file_id(path: Path | str) -> str:
+    raw = str(Path(path).expanduser().resolve())
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _template_file_no(file_id: str) -> str:
+    return f"TPL-{file_id[:8].upper()}"
+
+
+def _template_file_enabled(path: Path | str) -> bool:
+    file_id = _template_file_id(path)
+    state = _load_template_file_state().get(file_id)
+    if not isinstance(state, dict):
+        return True
+    return bool(state.get("enabled", True))
+
+
+def _template_file_object_key(path: Path | str, file_id: str | None = None) -> str:
+    resolved = Path(path).expanduser().resolve()
+    template_id = file_id or _template_file_id(resolved)
+    prefix = settings.OSS_TEMPLATE_UPLOAD_PREFIX.strip().strip("/")
+    safe_name = _safe_export_name(resolved.stem, "amazon_template") + (resolved.suffix.lower() or ".xlsm")
+    key = f"template_files/{template_id}/{safe_name}"
+    return f"{prefix}/{key}" if prefix else key
+
+
+def _ensure_template_file_oss_metadata(path: Path | str, *, preferred_object_key: str | None = None) -> dict:
+    resolved = Path(path).expanduser().resolve()
+    file_id = _template_file_id(resolved)
+    state = _load_template_file_state()
+    current = state.get(file_id) if isinstance(state.get(file_id), dict) else {}
+    object_key = str(preferred_object_key or current.get("object_key") or "").strip().lstrip("/")
+    if object_key:
+        try:
+            oss_url = sign_private_url(object_key)
+        except Exception:
+            oss_url = str(current.get("oss_url") or "")
+    else:
+        object_key = _template_file_object_key(resolved, file_id)
+        uploaded = upload_private_file(resolved, object_key)
+        object_key = str(uploaded.get("object_key") or object_key)
+        oss_url = str(uploaded.get("url") or "")
+
+    current.update({
+        "file_name": resolved.name,
+        "template_path": str(resolved),
+        "object_key": object_key,
+        "oss_url": oss_url,
+        "oss_synced_at": datetime.now().isoformat(),
+    })
+    state[file_id] = current
+    _save_template_file_state(state)
+    return current
+
+
 def _category_template_upload_for(category: str) -> dict | None:
     upload = _load_category_template_manifest().get(category)
     return upload if isinstance(upload, dict) else None
+
+
+def _uploaded_category_template_path(category: str) -> Path | None:
+    upload = _category_template_upload_for(category)
+    if not upload:
+        return None
+    cache_path = str(upload.get("cache_path") or "").strip()
+    if not cache_path:
+        return None
+    path = Path(cache_path).expanduser()
+    if not path.is_file():
+        object_key = str(upload.get("object_key") or "").strip()
+        if object_key:
+            try:
+                download_private_file(object_key, path)
+            except Exception:
+                return None
+    return path if path.is_file() and _template_file_enabled(path) else None
 
 
 def _catalog_category(product: Product | None, item: CatalogProduct | None) -> str:
@@ -781,17 +934,30 @@ def _catalog_existing_asin(product: Product | None, item: CatalogProduct | None)
     return ((product.amazon_asin if product else None) or (item.amazon_asin if item else None) or "").strip()
 
 
+def _catalog_has_export_file(product: Product | None, item: CatalogProduct | None) -> bool:
+    return bool((item.exported_at if item else None) or _catalog_existing_asin(product, item))
+
+
 def _template_status_for_catalog(product: Product | None, item: CatalogProduct | None) -> tuple[bool, str | None, str | None, str | None]:
     pd = product.data if product else None
+    category = _catalog_category(product, item)
     if not product or not pd:
         return False, None, None, "商品资料不存在"
     try:
         mapping = _load_template_mapping(product, pd)
+        uploaded_path = _uploaded_category_template_path(category)
+        if uploaded_path:
+            return True, uploaded_path.name, str(uploaded_path), None
         template_path = Path(mapping["template_path"]).expanduser()
         if not template_path.is_file():
             return False, template_path.name, str(template_path), f"模板文件不存在: {template_path}"
+        if not _template_file_enabled(template_path):
+            return False, template_path.name, str(template_path), "模板文件已停用"
         return True, template_path.name, str(template_path), None
     except Exception as exc:
+        upload = _category_template_upload_for(category)
+        if upload:
+            return False, upload.get("filename"), upload.get("cache_path"), f"模板已上传，但类目映射未接入导出: {type(exc).__name__}: {exc}"
         return False, None, None, f"{type(exc).__name__}: {exc}"
 
 
@@ -867,6 +1033,148 @@ def _export_category_summaries(groups: dict[str, dict]) -> list[CatalogExportCat
             item.category,
         ),
     )
+
+
+async def _catalog_template_category_samples(db: AsyncSession) -> list[tuple[str, int, CatalogProduct | None]]:
+    category_expr = func.coalesce(ProductData.leaf_category, CatalogProduct.leaf_category, "未分类")
+    category_result = await db.execute(
+        select(category_expr.label("category"), func.count(CatalogProduct.id))
+        .select_from(CatalogProduct)
+        .join(Product, CatalogProduct.source_product_id == Product.id, isouter=True)
+        .outerjoin(ProductData, ProductData.product_id == Product.id)
+        .where(category_expr != "未分类")
+        .group_by(category_expr)
+        .order_by(category_expr)
+    )
+    rows: list[tuple[str, int, CatalogProduct | None]] = []
+    for category, count in category_result.all():
+        normalized_category = str(category or "未分类")
+        result = await db.execute(
+            select(CatalogProduct)
+            .join(Product, CatalogProduct.source_product_id == Product.id, isouter=True)
+            .outerjoin(ProductData, ProductData.product_id == Product.id)
+            .where(category_expr == normalized_category)
+            .options(selectinload(CatalogProduct.source_product).selectinload(Product.data))
+            .limit(1)
+        )
+        rows.append((normalized_category, int(count or 0), result.scalar_one_or_none()))
+    return rows
+
+
+def _template_file_source(path: Path) -> str:
+    cache_root = _category_template_cache_dir().resolve()
+    template_root = (Path(__file__).resolve().parents[1] / "pipeline" / "templates").resolve()
+    resolved = path.expanduser().resolve()
+    if resolved == cache_root or cache_root in resolved.parents:
+        return "uploaded"
+    if resolved == template_root or template_root in resolved.parents:
+        return "builtin"
+    return "external"
+
+
+def _template_file_status(enabled: bool, errors: list[str]) -> str:
+    if not enabled:
+        return "disabled"
+    return "enabled" if not errors else "unmapped"
+
+
+async def _catalog_template_file_summaries(db: AsyncSession) -> list[CatalogTemplateFileSummary]:
+    files: dict[str, dict] = {}
+
+    def add_file(path: Path, category: str, *, error: str | None = None, preferred_object_key: str | None = None) -> None:
+        if not path.is_file():
+            return
+        resolved = path.expanduser().resolve()
+        file_id = _template_file_id(resolved)
+        state = _load_template_file_state().get(file_id)
+        enabled = bool(state.get("enabled", True)) if isinstance(state, dict) else True
+        source = _template_file_source(resolved)
+        oss_error = None
+        object_key = None
+        oss_url = None
+        try:
+            oss_state = _ensure_template_file_oss_metadata(resolved, preferred_object_key=preferred_object_key)
+            object_key = oss_state.get("object_key")
+            oss_url = oss_state.get("oss_url")
+        except Exception as exc:
+            oss_error = f"OSS同步失败: {type(exc).__name__}: {exc}"
+        row = files.setdefault(
+            file_id,
+            {
+                "file_id": file_id,
+                "file_no": _template_file_no(file_id),
+                "file_name": resolved.name,
+                "enabled": enabled,
+                "source": source,
+                "template_path": str(resolved),
+                "oss_object_key": object_key,
+                "oss_url": oss_url,
+                "support_categories": [],
+                "template_errors": [],
+                "can_download": True,
+                "can_delete": True,
+            },
+        )
+        if object_key:
+            row["oss_object_key"] = object_key
+        if oss_url:
+            row["oss_url"] = oss_url
+        if category not in row["support_categories"]:
+            row["support_categories"].append(category)
+        if error and error not in row["template_errors"]:
+            row["template_errors"].append(error)
+        if oss_error and oss_error not in row["template_errors"]:
+            row["template_errors"].append(oss_error)
+
+    for category, _count, item in await _catalog_template_category_samples(db):
+        upload = _category_template_upload_for(category)
+        upload_path = None
+        if upload:
+            cache_path = str(upload.get("cache_path") or "").strip()
+            if cache_path:
+                upload_path = Path(cache_path).expanduser()
+
+        mapping_error: str | None = None
+        mapping_path: Path | None = None
+        product = item.source_product if item else None
+        pd = product.data if product else None
+        if product and pd:
+            try:
+                mapping = _load_template_mapping(product, pd)
+                mapping_path = Path(mapping["template_path"]).expanduser()
+                if not mapping_path.is_file():
+                    mapping_error = f"模板文件不存在: {mapping_path}"
+            except Exception as exc:
+                mapping_error = f"{type(exc).__name__}: {exc}"
+        else:
+            mapping_error = "没有可用于检测模板的代表商品"
+
+        if upload_path and upload_path.is_file():
+            add_file(upload_path, category, error=mapping_error, preferred_object_key=upload.get("object_key") if upload else None)
+        if mapping_path and mapping_path.is_file():
+            add_file(mapping_path, category, error=None)
+
+    summaries: list[CatalogTemplateFileSummary] = []
+    for row in files.values():
+        row["support_categories"] = sorted(row["support_categories"])
+        row["file_status"] = _template_file_status(row["enabled"], row["template_errors"])
+        summaries.append(CatalogTemplateFileSummary(**row))
+    return sorted(
+        summaries,
+        key=lambda item: (
+            item.file_status != "enabled",
+            item.source != "uploaded",
+            item.file_name,
+            item.file_no,
+        ),
+    )
+
+
+async def _find_catalog_template_file(db: AsyncSession, file_id: str) -> CatalogTemplateFileSummary:
+    for item in await _catalog_template_file_summaries(db):
+        if item.file_id == file_id:
+            return item
+    raise HTTPException(404, "模板文件不存在")
 
 
 def _copy_row_format(ws, source_row: int, target_row: int) -> None:
@@ -1354,17 +1662,8 @@ async def create_product(body: ProductCreate, db: AsyncSession = Depends(get_db)
 async def get_workbench_overview(db: AsyncSession = Depends(get_db)):
     """工作台概览：用于顶部快速发现需要处理的任务和商品。"""
     running_result = await db.execute(select(func.count(Product.id)).where(Product.status.in_(RUNNING_STATUSES)))
-    manual_result = await db.execute(select(func.count(Product.id)).where(Product.status == PENDING_REVIEW, Product.current_step < 9))
+    manual_result = await db.execute(select(func.count(Product.id)).where(Product.status == PENDING_REVIEW))
     failed_result = await db.execute(select(func.count(Product.id)).where(Product.status == "failed"))
-    confirmable_result = await db.execute(
-        select(func.count(Product.id))
-        .join(ProductAplus, ProductAplus.product_id == Product.id, isouter=True)
-        .where(
-            Product.status == PENDING_REVIEW,
-            Product.current_step >= 9,
-            (ProductAplus.aplus_status.is_(None) | ProductAplus.aplus_status.notin_(APLUS_REGEN_ACTIVE_STATUSES)),
-        )
-    )
     asin_not_synced_result = await db.execute(
         select(func.count(CatalogProduct.id)).where(
             CatalogProduct.confirmed_at.is_not(None),
@@ -1396,7 +1695,7 @@ async def get_workbench_overview(db: AsyncSession = Depends(get_db)):
         running_tasks=running_result.scalar() or 0,
         manual_review_tasks=manual_result.scalar() or 0,
         failed_tasks=failed_result.scalar() or 0,
-        confirmable_tasks=confirmable_result.scalar() or 0,
+        confirmable_tasks=0,
         asin_not_synced=asin_not_synced_result.scalar() or 0,
         asin_attention=asin_attention_result.scalar() or 0,
         aplus_failed=aplus_failed_result.scalar() or 0,
@@ -1789,7 +2088,8 @@ async def list_catalog_products(
     ).outerjoin(
         ProductData, ProductData.product_id == Product.id
     ).options(
-        selectinload(CatalogProduct.source_product).selectinload(Product.data)
+        selectinload(CatalogProduct.source_product).selectinload(Product.data),
+        selectinload(CatalogProduct.source_product).selectinload(Product.aplus),
     ).order_by(
         func.coalesce(Product.updated_at, CatalogProduct.updated_at, CatalogProduct.imported_at).desc(),
         CatalogProduct.imported_at.desc(),
@@ -1860,19 +2160,21 @@ async def list_catalog_products(
         query = query.where((ProductData.leaf_category.ilike(pattern)) | (CatalogProduct.leaf_category.ilike(pattern)))
         count_query = count_query.where((ProductData.leaf_category.ilike(pattern)) | (CatalogProduct.leaf_category.ilike(pattern)))
     if export_status == "pending":
+        no_export_file = CatalogProduct.exported_at.is_(None)
         no_asin = (
             ((Product.amazon_asin.is_(None)) | (Product.amazon_asin == ""))
             & ((CatalogProduct.amazon_asin.is_(None)) | (CatalogProduct.amazon_asin == ""))
         )
-        query = query.where(no_asin)
-        count_query = count_query.where(no_asin)
+        query = query.where(no_export_file & no_asin)
+        count_query = count_query.where(no_export_file & no_asin)
     elif export_status == "exported":
+        has_export_file = CatalogProduct.exported_at.is_not(None)
         has_asin = (
             ((Product.amazon_asin.is_not(None)) & (Product.amazon_asin != ""))
             | ((CatalogProduct.amazon_asin.is_not(None)) & (CatalogProduct.amazon_asin != ""))
         )
-        query = query.where(has_asin)
-        count_query = count_query.where(has_asin)
+        query = query.where(has_export_file | has_asin)
+        count_query = count_query.where(has_export_file | has_asin)
     imported_from = _naive_datetime(imported_from)
     imported_to = _naive_datetime(imported_to)
     if imported_from:
@@ -1911,6 +2213,8 @@ async def list_catalog_products(
             item.aplus_upload_status = product.aplus_upload_status
             item.aplus_uploaded_at = product.aplus_uploaded_at
             item.aplus_upload_error = product.aplus_upload_error
+            item.aplus_status = product.aplus.aplus_status if product.aplus else None
+            item.aplus_image_count = product.aplus.aplus_image_count if product.aplus else None
             item.upc = product.upc
             item.brand = product.brand
             item.item_code = pd.item_code if pd else None
@@ -1938,7 +2242,7 @@ async def list_catalog_export_categories(db: AsyncSession = Depends(get_db)):
     exported_groups: dict[str, dict] = {}
     for item in result.scalars().all():
         product = item.source_product
-        exported = bool(_catalog_existing_asin(product, item))
+        exported = _catalog_has_export_file(product, item)
         _collect_export_category(
             exported_groups if exported else pending_groups,
             product,
@@ -1949,6 +2253,124 @@ async def list_catalog_export_categories(db: AsyncSession = Depends(get_db)):
         pending=_export_category_summaries(pending_groups),
         exported=_export_category_summaries(exported_groups),
     )
+
+
+@router.get("/catalog/template-categories", response_model=list[CatalogExportCategorySummary])
+async def list_catalog_template_categories(db: AsyncSession = Depends(get_db)):
+    """列出库里所有商品类目，用于类目模板管理。"""
+    groups: dict[str, dict] = {}
+    for category, count, item in await _catalog_template_category_samples(db):
+        if item:
+            _collect_export_category(groups, item.source_product, item, exported=False)
+            groups[category]["count"] = count
+        else:
+            groups[category] = {
+                "category": category,
+                "count": count,
+                "exportable_count": 0,
+                "blocked_count": count,
+                "template_available": False,
+                "template_name": None,
+                "template_path": None,
+                "template_error": "没有可用于检测模板的代表商品",
+                "uploaded_template_name": None,
+                "uploaded_template_cache_path": None,
+                "uploaded_template_oss_url": None,
+                "uploaded_template_object_key": None,
+                "uploaded_template_uploaded_at": None,
+                "sample_item_codes": [],
+            }
+    return _export_category_summaries(groups)
+
+
+@router.get("/catalog/template-files", response_model=list[CatalogTemplateFileSummary])
+async def list_catalog_template_files(db: AsyncSession = Depends(get_db)):
+    """按模板文件维度列出当前可管理的 Amazon 导入模板。"""
+    return await _catalog_template_file_summaries(db)
+
+
+@router.get("/catalog/template-files/{file_id}/download")
+async def download_catalog_template_file(file_id: str, db: AsyncSession = Depends(get_db)):
+    item = await _find_catalog_template_file(db, file_id)
+    if not item.template_path:
+        raise HTTPException(400, "模板文件路径不存在")
+    path = Path(item.template_path).expanduser().resolve()
+    allowed_roots = [
+        (_category_template_cache_dir()).resolve(),
+        (Path(__file__).resolve().parents[1] / "pipeline" / "templates").resolve(),
+    ]
+    if not any(path == root or root in path.parents for root in allowed_roots):
+        raise HTTPException(400, "模板路径非法")
+    if not path.is_file():
+        state = _load_template_file_state().get(file_id)
+        object_key = str((state or {}).get("object_key") or item.oss_object_key or "").strip()
+        if object_key:
+            try:
+                download_private_file(object_key, path)
+            except Exception as exc:
+                raise HTTPException(404, f"模板文件本地缓存不存在，且从 OSS 下载失败: {type(exc).__name__}: {exc}")
+        else:
+            raise HTTPException(404, "模板文件不存在")
+    return FileResponse(
+        path,
+        media_type="application/vnd.ms-excel.sheet.macroEnabled.12",
+        filename=path.name,
+    )
+
+
+@router.patch("/catalog/template-files/{file_id}/status", response_model=CatalogTemplateFileSummary)
+async def update_catalog_template_file_status(
+    file_id: str,
+    enabled: bool = Body(..., embed=True),
+    db: AsyncSession = Depends(get_db),
+):
+    item = await _find_catalog_template_file(db, file_id)
+    state = _load_template_file_state()
+    current = state.get(file_id) if isinstance(state.get(file_id), dict) else {}
+    current["enabled"] = bool(enabled)
+    current["updated_at"] = datetime.now().isoformat()
+    current["file_name"] = item.file_name
+    current["template_path"] = item.template_path
+    state[file_id] = current
+    _save_template_file_state(state)
+    return await _find_catalog_template_file(db, file_id)
+
+
+@router.delete("/catalog/template-files/{file_id}", response_model=list[CatalogTemplateFileSummary])
+async def delete_catalog_template_file(file_id: str, db: AsyncSession = Depends(get_db)):
+    item = await _find_catalog_template_file(db, file_id)
+    if not item.template_path:
+        raise HTTPException(400, "模板文件路径不存在")
+
+    target_path = Path(item.template_path).expanduser().resolve()
+    cache_root = _category_template_cache_dir().resolve()
+    template_root = (Path(__file__).resolve().parents[1] / "pipeline" / "templates").resolve()
+    allowed_roots = [cache_root, template_root]
+    if not any(target_path == root or root in target_path.parents for root in allowed_roots):
+        raise HTTPException(400, "模板路径非法")
+
+    manifest = _load_category_template_manifest()
+    changed = False
+    for category, upload in list(manifest.items()):
+        if not isinstance(upload, dict):
+            continue
+        cache_path = str(upload.get("cache_path") or "").strip()
+        if cache_path and _template_file_id(cache_path) == file_id:
+            manifest.pop(category, None)
+            changed = True
+    if changed:
+        _save_category_template_manifest(manifest)
+
+    try:
+        if target_path.is_file():
+            target_path.unlink()
+    except OSError as exc:
+        raise HTTPException(400, f"删除模板文件失败: {exc}")
+
+    state = _load_template_file_state()
+    state.pop(file_id, None)
+    _save_template_file_state(state)
+    return await _catalog_template_file_summaries(db)
 
 
 @router.post("/catalog/category-template-upload", response_model=CatalogTemplateUploadResponse)
@@ -2007,7 +2429,67 @@ async def upload_catalog_category_template(
     )
 
 
-async def _export_catalog_items(catalog_items: list[CatalogProduct], db: AsyncSession) -> StreamingResponse:
+@router.get("/catalog/category-template-download")
+async def download_catalog_category_template(
+    category: str = Query(..., min_length=1),
+    db: AsyncSession = Depends(get_db),
+):
+    """下载某个类目当前命中的模板文件，优先下载用户上传并缓存的模板。"""
+    normalized_category = category.strip()
+    if not normalized_category:
+        raise HTTPException(400, "类目不能为空")
+
+    upload_path = _uploaded_category_template_path(normalized_category)
+    if upload_path:
+        path = upload_path.resolve()
+    else:
+        result = await db.execute(
+            select(CatalogProduct)
+            .join(Product, CatalogProduct.source_product_id == Product.id, isouter=True)
+            .outerjoin(ProductData, ProductData.product_id == Product.id)
+            .where(func.coalesce(ProductData.leaf_category, CatalogProduct.leaf_category, "未分类") == normalized_category)
+            .options(selectinload(CatalogProduct.source_product).selectinload(Product.data))
+            .limit(1)
+        )
+        item = result.scalar_one_or_none()
+        if not item:
+            raise HTTPException(404, f"类目不存在: {normalized_category}")
+        available, _template_name, template_path, template_error = _template_status_for_catalog(item.source_product, item)
+        if not available or not template_path:
+            raise HTTPException(400, template_error or "当前类目没有可下载模板")
+        path = Path(template_path).expanduser().resolve()
+
+    allowed_roots = [
+        (_category_template_cache_dir()).resolve(),
+        (Path(__file__).resolve().parents[1] / "pipeline" / "templates").resolve(),
+    ]
+    if not any(path == root or root in path.parents for root in allowed_roots):
+        raise HTTPException(400, "模板路径非法")
+    if not path.is_file():
+        upload = _category_template_upload_for(normalized_category)
+        object_key = str((upload or {}).get("object_key") or "").strip()
+        if object_key:
+            try:
+                download_private_file(object_key, path)
+            except Exception as exc:
+                raise HTTPException(404, f"模板文件本地缓存不存在，且从 OSS 下载失败: {type(exc).__name__}: {exc}")
+        else:
+            raise HTTPException(404, "模板文件不存在")
+    try:
+        _ensure_template_file_oss_metadata(
+            path,
+            preferred_object_key=(_category_template_upload_for(normalized_category) or {}).get("object_key"),
+        )
+    except Exception:
+        pass
+    return FileResponse(
+        path,
+        media_type="application/vnd.ms-excel.sheet.macroEnabled.12",
+        filename=path.name,
+    )
+
+
+async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: AsyncSession) -> tuple[bytes, str, list[dict]]:
     if not catalog_items:
         raise HTTPException(400, "没有可导出的 Amazon 导入表格数据")
     source_ids = [item.source_product_id for item in catalog_items]
@@ -2020,7 +2502,7 @@ async def _export_catalog_items(catalog_items: list[CatalogProduct], db: AsyncSe
     catalog_by_source_id = {item.source_product_id: item for item in catalog_items}
     latest_inventory_by_catalog_id = await _latest_giga_inventory_by_catalog_id(db, catalog_items)
 
-    grouped: dict[tuple[str, str], dict] = {}
+    grouped: dict[str, dict] = {}
     report_rows: list[dict] = []
     for item in catalog_items:
         product = products_by_id.get(item.source_product_id)
@@ -2045,18 +2527,25 @@ async def _export_catalog_items(catalog_items: list[CatalogProduct], db: AsyncSe
             continue
         try:
             mapping = _load_template_mapping(product, pd)
-            template_path = Path(mapping["template_path"]).expanduser()
+            category = pd.leaf_category or mapping.get("category_type") or item.leaf_category or "未分类"
+            template_path = _uploaded_category_template_path(str(category)) or Path(mapping["template_path"]).expanduser()
             if not template_path.is_file():
                 raise FileNotFoundError(f"模板文件不存在: {template_path}")
-            category = pd.leaf_category or mapping.get("category_type") or item.leaf_category or "未分类"
-            key = (str(template_path), str(category))
+            if not _template_file_enabled(template_path):
+                raise ValueError(f"模板文件已停用: {template_path.name}")
+            key = str(template_path.expanduser().resolve())
             group = grouped.setdefault(key, {
                 "template_path": template_path,
+                "categories": [],
+                "entries": [],
+            })
+            if str(category) not in group["categories"]:
+                group["categories"].append(str(category))
+            group["entries"].append({
+                "product": product,
                 "category": str(category),
                 "mapping": mapping,
-                "products": [],
             })
-            group["products"].append(product)
         except Exception as exc:
             report_rows.append({
                 **base_report,
@@ -2073,24 +2562,27 @@ async def _export_catalog_items(catalog_items: list[CatalogProduct], db: AsyncSe
 
     zip_stream = BytesIO()
     with zipfile.ZipFile(zip_stream, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for (_, category), group in grouped.items():
-            products = group["products"]
+        for group in grouped.values():
+            entries = group["entries"]
             template_path: Path = group["template_path"]
-            mapping = group["mapping"]
-            safe_category = _safe_export_name(category)
+            categories = sorted(group.get("categories") or [])
+            safe_scope = _safe_export_name("_".join(categories[:3]) if len(categories) <= 3 else f"{categories[0]}_and_{len(categories) - 1}_more")
             template_stem = _safe_export_name(template_path.stem, "amazon_template")
-            for chunk_index in range(0, len(products), 500):
-                chunk = products[chunk_index:chunk_index + 500]
+            for chunk_index in range(0, len(entries), 500):
+                chunk = entries[chunk_index:chunk_index + 500]
                 wb = load_workbook(template_path, keep_vba=True, data_only=False)
                 if "Template" not in wb.sheetnames:
                     raise HTTPException(400, f"模板缺少 Template 工作表: {template_path}")
                 ws = wb["Template"]
                 _clear_template_data_rows(ws, len(chunk))
                 part = chunk_index // 500 + 1
-                export_name = f"{safe_category}_{template_stem}_{part}.xlsm"
+                export_name = f"{template_stem}_{safe_scope}_{part}.xlsm"
                 exported_in_workbook = 0
 
-                for offset, product in enumerate(chunk):
+                for offset, entry in enumerate(chunk):
+                    product = entry["product"]
+                    category = entry["category"]
+                    mapping = entry["mapping"]
                     pd = product.data
                     row_number = DATA_ROW + offset
                     report_base = {
@@ -2147,8 +2639,13 @@ async def _export_catalog_items(catalog_items: list[CatalogProduct], db: AsyncSe
     if not any(row.get("状态") == "已导出" for row in report_rows):
         raise HTTPException(400, "选中的商品没有成功生成 Amazon 导入表格，请查看商品详情中的导入表格检查。")
 
-    zip_stream.seek(0)
     filename = f"amazon_import_templates_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
+    return zip_stream.getvalue(), filename, report_rows
+
+
+async def _export_catalog_items(catalog_items: list[CatalogProduct], db: AsyncSession) -> StreamingResponse:
+    zip_bytes, filename, _report_rows = await build_catalog_export_zip(catalog_items, db)
+    zip_stream = BytesIO(zip_bytes)
     return StreamingResponse(
         zip_stream,
         media_type="application/zip",
@@ -2161,8 +2658,8 @@ async def export_catalog_products(ids: list[int], db: AsyncSession = Depends(get
     """按 Amazon 类目模板拆分导出可导入 Amazon 的 xlsm，同一类目多个商品写多行。"""
     if not ids:
         raise HTTPException(400, "请选择要导出的商品")
-    if len(ids) > 300:
-        raise HTTPException(400, "单次最多导出 300 个商品")
+    if len(ids) > 1000:
+        raise HTTPException(400, "单次最多导出 1000 个商品")
 
     catalog_result = await db.execute(select(CatalogProduct).where(CatalogProduct.id.in_(ids)))
     return await _export_catalog_items(catalog_result.scalars().all(), db)
@@ -2548,6 +3045,62 @@ async def get_asin_sync_batch(batch_id: int, db: AsyncSession = Depends(get_db))
     return batch
 
 
+@router.post("/catalog/aplus-generate", response_model=BulkStartResponse)
+async def create_aplus_generate_batch(body: AplusGenerateRequest, db: AsyncSession = Depends(get_db)):
+    """批量生成 A+。A+ 独立于商品主流程，只允许对待导出/已导出的商品执行。"""
+    try:
+        task, errors, started_product_ids = await create_aplus_generate_task(
+            db,
+            body.catalog_product_ids,
+            force=body.force,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+    return BulkStartResponse(
+        requested=len(list(dict.fromkeys(body.catalog_product_ids))),
+        started=len(started_product_ids),
+        skipped=len(list(dict.fromkeys(body.catalog_product_ids))) - len(started_product_ids),
+        errors=errors,
+        started_ids=started_product_ids,
+    )
+
+
+@router.post("/{product_id}/aplus/generate")
+async def generate_product_aplus(
+    product_id: int,
+    force: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+):
+    """为单个已加入导出中心的商品后台生成 A+。"""
+    result = await db.execute(
+        select(Product)
+        .options(
+            selectinload(Product.data),
+            selectinload(Product.images),
+            selectinload(Product.aplus),
+            selectinload(Product.catalog_item),
+        )
+        .where(Product.id == product_id)
+    )
+    product = result.scalar_one_or_none()
+    if not product:
+        raise HTTPException(404, "Product not found")
+    if not product.catalog_item:
+        raise HTTPException(400, "只有待导出/已导出的商品可以生成 A+")
+    try:
+        task, errors, started_product_ids = await create_aplus_generate_task(
+            db,
+            [product.catalog_item.id],
+            force=force,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if not started_product_ids:
+        raise HTTPException(400, "；".join(errors) or "A+ 生成任务未创建")
+    return {"status": "queued", "product_id": product.id, "task_id": task.id if task else None}
+
+
 @router.post("/catalog/aplus-upload", response_model=AplusUploadBatchResponse)
 async def create_aplus_upload_batch(body: AplusUploadCreateRequest, db: AsyncSession = Depends(get_db)):
     """为选中的商品资料创建领星 A+ 上传批次。默认自动提交审批。"""
@@ -2640,15 +3193,13 @@ async def confirm_product(product_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "Product not found")
     if is_running(product.id):
         raise HTTPException(400, "任务还在运行中，完成后再确认")
-    if _aplus_regeneration_running(product):
-        raise HTTPException(400, "A+重新生成还在进行中，完成后再确认加入待导出")
-    if product.status not in {PENDING_REVIEW, COMPLETED}:
-        raise HTTPException(400, "只有生成完成、待人工确认的商品可以加入待导出")
-    if product.current_step < 9:
-        raise HTTPException(400, "A+内容还没有生成完成")
+    if product.current_step < 6:
+        raise HTTPException(400, "Listing 内容还没有生成完成")
+    if not product.data or not product.data.listing_title or not product.data.listing_bullets:
+        raise HTTPException(400, "Listing 标题和五点还没有生成完成")
 
     product.status = COMPLETED
-    product.current_step = 9
+    product.current_step = 6
     product.error_message = None
     product.updated_at = datetime.now()
     _sync_catalog_item(product, db, confirm=True)
@@ -2669,6 +3220,7 @@ async def get_product(product_id: int, db: AsyncSession = Depends(get_db)):
     if not product:
         raise HTTPException(404, "Product not found")
 
+    await _ensure_contact_sheet_oss_urls(product, db)
     detail = ProductDetail.model_validate(product)
     fallback_image_paths = []
     if not (detail.images and detail.images.gallery_order):
@@ -2989,7 +3541,12 @@ async def start_pipeline(product_id: int, db: AsyncSession = Depends(get_db)):
     """旧入口已禁用：商品中心不再触发浏览器 Step1 采集。"""
     result = await db.execute(
         select(Product)
-        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
+        .options(
+            selectinload(Product.data),
+            selectinload(Product.images),
+            selectinload(Product.aplus),
+            selectinload(Product.catalog_item),
+        )
         .where(Product.id == product_id)
     )
     product = result.scalar_one_or_none()
@@ -3236,7 +3793,7 @@ async def retry_step(product_id: int, db: AsyncSession = Depends(get_db)):
 @router.post("/{product_id}/run-from-step", response_model=ProductResponse)
 async def run_product_from_step(
     product_id: int,
-    start_step: int = Query(5, ge=5, le=9),
+    start_step: int = Query(5, ge=5, le=6),
     db: AsyncSession = Depends(get_db),
 ):
     """从指定商品节点启动后续生成流程。用于商品工作台，不依赖旧 StyleSnap 任务入口。"""
@@ -3250,12 +3807,17 @@ async def run_product_from_step(
         raise HTTPException(404, "Product not found")
     if is_running(product.id):
         raise HTTPException(400, "商品流程正在运行中")
-    if product.status in {"completed", "source_unavailable", "unavailable"}:
+    if product.status in {"source_unavailable", "unavailable"}:
         raise HTTPException(400, f"当前状态不能启动生成: {product.status}")
+    if product.status == "completed" and start_step != 6:
+        raise HTTPException(400, f"当前状态不能从该节点启动生成: {product.status}")
     if product.status == "paused":
         raise HTTPException(400, "商品已挂起，请先点击继续")
     await _require_generation_prerequisites(db, product, start_step)
 
+    if start_step == 6 and product.catalog_item:
+        product.catalog_item.confirmed_at = None
+        product.catalog_item.updated_at = datetime.now()
     product.status = STEP_STATUS_MAP.get(start_step, "step5_listing")
     product.current_step = start_step
     product.error_message = None
@@ -3289,10 +3851,17 @@ async def resume_pipeline(product_id: int, db: AsyncSession = Depends(get_db)):
         step = 1
     if step <= 1:
         _raise_step1_browser_collect_removed()
-    if step > 10:
+    if step > 6:
         raise HTTPException(400, f"当前步骤无效，无法继续: {step}")
-    if product.status == PENDING_REVIEW and step >= 9:
-        raise HTTPException(400, "当前任务已生成完成，请确认加入待导出或重新开始")
+    if product.status == PENDING_REVIEW and step >= 6:
+        product.status = COMPLETED
+        product.current_step = 6
+        product.error_message = None
+        product.updated_at = datetime.now()
+        _sync_catalog_item(product, db, confirm=True)
+        await db.commit()
+        await db.refresh(product)
+        return product
     if step >= 5:
         await _require_generation_prerequisites(db, product, step)
 
@@ -3312,7 +3881,7 @@ async def run_single_step(product_id: int, step: int, db: AsyncSession = Depends
     if step == 1:
         _raise_step1_browser_collect_removed()
     if step not in STEP_RUNNERS:
-        raise HTTPException(400, f"Invalid step: {step}. Must be 1-10.")
+        raise HTTPException(400, f"Invalid step: {step}. 主流程只支持 Step2-6；A+ 请在 A+管理中生成。")
 
     result = await db.execute(
         select(Product)
@@ -3338,11 +3907,11 @@ async def run_single_step(product_id: int, step: int, db: AsyncSession = Depends
         runner = STEP_RUNNERS[step]
         data = await runner(product_id)
         await db.refresh(product)
-        product.status = PENDING_REVIEW if step == 9 else get_step_status(step, "done")
+        product.status = COMPLETED if step == 6 else get_step_status(step, "done")
         product.current_step = step
         product.error_message = None
         product.updated_at = datetime.now()
-        _sync_catalog_item(product, db)
+        _sync_catalog_item(product, db, confirm=(step == 6))
         await db.commit()
         return {"status": "ok", "step": step, "data": data}
     except Exception as e:

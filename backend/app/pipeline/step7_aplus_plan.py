@@ -446,13 +446,9 @@ async def run_aplus_plan(product_id: int) -> dict:
                     raise
                 last_transient_error = exc
                 if attempt >= max_attempts:
-                    logger.warning(
-                        "[Step7] A+规划LLM连接连续失败，使用保底规划: error=%s: %s",
-                        type(exc).__name__,
-                        exc,
-                    )
-                    response = None
-                    break
+                    raise RuntimeError(
+                        f"A+规划LLM连接连续失败，未生成真实规划，请稍后重跑: {type(exc).__name__}: {exc}"
+                    ) from exc
                 wait_seconds = attempt * 5
                 logger.warning(
                     "[Step7] A+规划LLM连接异常，准备重试: attempt=%s/%s, wait=%ss, error=%s: %s",
@@ -464,9 +460,11 @@ async def run_aplus_plan(product_id: int) -> dict:
                 )
                 await asyncio.sleep(wait_seconds)
         if response is None:
-            plan = _fallback_aplus_plan(product, pd, pi, selling_points)
             if last_transient_error:
-                plan["fallback_error"] = f"{type(last_transient_error).__name__}: {last_transient_error}"
+                raise RuntimeError(
+                    f"A+规划未生成真实结果，请重跑: {type(last_transient_error).__name__}: {last_transient_error}"
+                ) from last_transient_error
+            raise RuntimeError("A+规划未生成真实结果，请重跑")
         else:
             content = response.choices[0].message.content
             if not content:

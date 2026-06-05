@@ -666,26 +666,7 @@ async def _generate_single_image(
                 f"reference_files={_reference_image_names(ref_sources)}..."
             )
             if script.get("fallback_script"):
-                fallback_info = _create_fallback_aplus_image(output_path, script, ref_sources, width, height)
-                oss_info = _upload_generated_image_to_oss(output_path, product_key, position)
-                display_url = oss_info.get("oss_url")
-                if not display_url:
-                    raise RuntimeError("A+兜底图已上传OSS，但未返回可用URL")
-                logger.warning(f"[Step9] 模块 {position} 使用A+脚本保底图: {output_path.name}")
-                return {
-                    "position": position,
-                    "status": "done",
-                    "path": str(output_path),
-                    "url": display_url,
-                    "display_url": display_url,
-                    "size": output_path.stat().st_size,
-                    "model": settings.GPT_IMAGE_MODEL,
-                    "generation_quality": _generation_quality(),
-                    "reference_paths": ref_sources,
-                    "original_error": "Skipped remote image generation because A+ script is fallback.",
-                    **fallback_info,
-                    **oss_info,
-                }
+                raise RuntimeError("A+脚本是降级兜底结果，不能生成或上传占位 A+ 图片，请先重跑 A+脚本。")
             image_payload = await _submit_reference_generation(prompt, ref_sources, width, height)
             img_bytes = image_payload["bytes"]
             raw_path = output_path.with_name(f"{output_path.stem}_raw{_image_extension(img_bytes)}")
@@ -720,31 +701,7 @@ async def _generate_single_image(
         except Exception as e:
             error_msg = f"{type(e).__name__}: {str(e)}"
             logger.error(f"[Step9] 模块 {position} 生成失败: {error_msg}, 耗时={time.monotonic() - image_started:.1f}s")
-            try:
-                fallback_info = _create_fallback_aplus_image(output_path, script, ref_sources, width, height)
-                oss_info = _upload_generated_image_to_oss(output_path, product_key, position)
-                display_url = oss_info.get("oss_url")
-                if not display_url:
-                    raise RuntimeError("A+兜底图已上传OSS，但未返回可用URL")
-                logger.warning(f"[Step9] 模块 {position} 已生成兜底A+占位图: {output_path.name}")
-                return {
-                    "position": position,
-                    "status": "done",
-                    "path": str(output_path),
-                    "url": display_url,
-                    "display_url": display_url,
-                    "size": output_path.stat().st_size,
-                    "model": settings.GPT_IMAGE_MODEL,
-                    "generation_quality": _generation_quality(),
-                    "reference_paths": ref_sources,
-                    "original_error": error_msg,
-                    **fallback_info,
-                    **oss_info,
-                }
-            except Exception as fallback_exc:
-                fallback_error = f"{type(fallback_exc).__name__}: {fallback_exc}"
-                logger.error(f"[Step9] 模块 {position} 兜底图生成/上传失败: {fallback_error}")
-                return {"position": position, "status": "failed", "error": error_msg, "fallback_error": fallback_error}
+            return {"position": position, "status": "failed", "error": error_msg}
 
 
 def _sanitize_generation_prompt(prompt: str, brand: str | None, negative_prompt: str | None = None) -> str:
@@ -833,7 +790,7 @@ async def run_aplus_image(product_id: int) -> dict:
         skipped_count = 0
         for script in scripts[:5]:
             if scripts_data.get("fallback"):
-                script["fallback_script"] = True
+                raise RuntimeError("A+脚本是降级兜底结果，不能进入 A+出图，请先重跑 A+脚本。")
             position = script.get("module_position", 0)
             output_path = _module_output_path(output_dir, position)
             if not overwrite_existing:

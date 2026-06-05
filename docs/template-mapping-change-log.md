@@ -9,6 +9,33 @@
 - 每条记录至少包含：日期、改动文件、涉及类目/模板、变更原因、验证命令和结果、后续注意事项。
 - 不要覆盖历史记录；只追加新条目。
 
+## 2026-06-05
+
+### 导出中心上传模板接入规则收敛
+
+- 改动文件：
+  - `backend/app/api/products.py`
+  - `frontend/src/pages/CatalogList.tsx`
+  - `docs/template-mapping-change-log.md`
+- 涉及类目/模板：
+  - 所有导出中心按类目导出的 Amazon 导入模板。
+  - 已有内置模板：`BICYCLE_CYCLING.xlsm`、`CHAIR_SOFA.xlsm`、`DRESSER_STORAGE_DRAWER_STORAGE_BOX_CABINET_STEP_STOOL.xlsm`、`RIDE_ON_TOY.xlsm`、`SHELF_TABLE_CABINET_ANIMAL_CAGE_TEMPORARY_GATE.xlsm`。
+- 变更原因：
+  - 导出中心页面混入 ASIN 同步、库存同步、A+ 上传等非导出操作，干扰按类目导出流程。
+  - 类目模板上传此前只写 OSS 和本地缓存，但没有接入实际导出，容易误判为“有模板即可导出”。
+- 主要行为：
+  - 导出中心仅保留刷新、上传类目模板、按当前类目导出 Amazon 表格。
+  - 上传模板只有在该类目已能通过 `template_mappings/*.json` 找到字段映射时，才会作为实际导出模板文件使用。
+  - 若类目没有映射，即使已上传模板，也显示“已上传但未接入映射”，不会标记为可导出。
+  - 未上传模板的类目继续使用既有 mapping 中的内置 `template_path`。
+- 验证：
+  - `cd backend && .venv/bin/python -m compileall -q app` 通过。
+  - `cd frontend && npm run build` 通过，只有 Vite 大 chunk 提示。
+  - `curl -s 'http://127.0.0.1:8190/api/products/catalog/export-categories'` 返回导出类目分组。
+- 后续注意：
+  - 新类目如果只上传 XLSM 仍不能导出；必须先按 `docs/add-category-template-sop.md` 补 mapping JSON 和字段映射。
+  - 后续若要用模型自动学习上传模板字段，需要单独设计模板解析/映射生成流程，不能直接把上传文件当作可导出模板。
+
 ## 2026-06-02
 
 ### Amazon 商品描述改用 Step5 生成文案

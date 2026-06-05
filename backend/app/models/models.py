@@ -164,6 +164,9 @@ class CatalogProduct(Base):
     stock_sync_error: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(30), default="created")
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime)
+    exported_at: Mapped[datetime | None] = mapped_column(DateTime)
+    export_task_id: Mapped[int | None] = mapped_column(Integer)
+    export_file_path: Mapped[str | None] = mapped_column(Text)
     imported_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 

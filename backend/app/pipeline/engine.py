@@ -2,7 +2,7 @@
 Pipeline 引擎 — 编排商品优化 Pipeline 的执行
 
 状态流转：
-  Step1(采集) → Step2(定价) → Step3(关键词) → Step4(类目) → Step5(图片分析) → Step6(Listing) → Step7(A+规划) → Step8(A+脚本) → Step9(A+出图)
+  Step1(采集) → Step2(定价) → Step3(关键词) → Step4(类目) → Step5(图片分析) → Step6(Listing) → 待导出
 """
 
 import asyncio
@@ -14,7 +14,7 @@ from datetime import datetime
 
 from app.config import settings
 from app.database import async_session
-from app.models import AmazonListingCapture, Product
+from app.models import AmazonListingCapture, CatalogProduct, Product
 from app.models.status import *
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -24,9 +24,6 @@ from app.pipeline.step3_keywords import Step3NeedsLogin, run_keywords
 from app.pipeline.step4_category import Step4NeedsReview, run_category
 from app.pipeline.step5_listing import run_listing
 from app.pipeline.step6_image import run_image_analysis
-from app.pipeline.step7_aplus_plan import run_aplus_plan
-from app.pipeline.step8_aplus_script import run_aplus_script
-from app.pipeline.step9_aplus_image import run_aplus_image
 
 logger = logging.getLogger(__name__)
 
@@ -110,12 +107,8 @@ async def _assert_step_prerequisites(product_id: int, step: int) -> None:
                 raise RuntimeError("前置节点未完成：请先抓取选中竞品的 Amazon Listing 详情")
         if step >= 6 and (not product.images or not product.images.image_analysis):
             raise RuntimeError("前置节点未完成：图片分析节点未完成，不能进入 Listing 文案")
-        if step >= 7 and (not product.data or not product.data.listing_title or not product.data.listing_bullets):
-            raise RuntimeError("前置节点未完成：Listing 文案节点未完成，不能进入 A+ 规划")
-        if step >= 8 and (not product.aplus or not product.aplus.aplus_plan):
-            raise RuntimeError("前置节点未完成：A+ 规划节点未完成，不能进入 A+ 脚本")
-        if step >= 9 and (not product.aplus or not product.aplus.aplus_scripts):
-            raise RuntimeError("前置节点未完成：A+ 脚本节点未完成，不能进入 A+ 出图")
+        if step >= 7:
+            raise RuntimeError("A+ 已从主流程拆出，请在 A+管理中单独生成")
 
 
 def get_step_status(step: int, phase: str = "running") -> str:
@@ -129,9 +122,6 @@ def get_step_status(step: int, phase: str = "running") -> str:
             4: None,
             5: STEP6_DONE,
             6: STEP5_DONE,
-            7: STEP7_DONE,
-            8: STEP8_DONE,
-            9: STEP9_DONE,
             10: STEP10_DONE,
         }
         return done_map.get(step, COMPLETED)
@@ -194,39 +184,8 @@ async def _run_pipeline(product_id: int, start_step: int = 1):
             await _update_status(product_id, STEP5_DONE, 6)
             logger.info(f"[Pipeline] Product {product_id} Step6 Listing 完成，耗时={time.monotonic() - step_started:.1f}s")
 
-        if start_step <= 7:
-            # === Step 7: A+ 规划 ===
-            await _assert_step_prerequisites(product_id, 7)
-            logger.info(f"[Pipeline] Product {product_id} Step7 A+规划开始")
-            step_started = time.monotonic()
-            await _update_status(product_id, STEP7_APLUS_PLAN, 7)
-            await run_aplus_plan(product_id)
-            await _update_status(product_id, STEP7_DONE, 7)
-            logger.info(f"[Pipeline] Product {product_id} Step7 A+规划完成，耗时={time.monotonic() - step_started:.1f}s")
-
-        if start_step <= 8:
-            # === Step 8: A+ 脚本 ===
-            await _assert_step_prerequisites(product_id, 8)
-            logger.info(f"[Pipeline] Product {product_id} Step8 A+脚本开始")
-            step_started = time.monotonic()
-            await _update_status(product_id, STEP8_APLUS_SCRIPT, 8)
-            await run_aplus_script(product_id)
-            await _update_status(product_id, STEP8_DONE, 8)
-            logger.info(f"[Pipeline] Product {product_id} Step8 A+脚本完成，耗时={time.monotonic() - step_started:.1f}s")
-
-        if start_step <= 9:
-            # === Step 9: A+ 出图 ===
-            await _assert_step_prerequisites(product_id, 9)
-            logger.info(f"[Pipeline] Product {product_id} Step9 A+出图开始")
-            step_started = time.monotonic()
-            await _update_status(product_id, STEP9_APLUS_IMAGE, 9)
-            await run_aplus_image(product_id)
-            await _update_status(product_id, STEP9_DONE, 9)
-            logger.info(f"[Pipeline] Product {product_id} Step9 A+出图完成，耗时={time.monotonic() - step_started:.1f}s")
-
-        # === 等待人工确认 ===
-        await _update_status(product_id, PENDING_REVIEW, 9)
-        logger.info(f"[Pipeline] Product {product_id} A+出图完成，等待人工复核并加入待导出")
+        await _mark_completed_for_export(product_id)
+        logger.info(f"[Pipeline] Product {product_id} Listing 完成，已自动加入待导出")
 
     except asyncio.CancelledError:
         await _update_status(product_id, PAUSED, None)
@@ -307,6 +266,53 @@ async def _update_status(product_id: int, status: str, step: int | None, error: 
             await db.commit()
 
 
+async def _mark_completed_for_export(product_id: int) -> None:
+    """Listing generated successfully; sync the product into the export catalog."""
+    async with async_session() as db:
+        result = await db.execute(
+            select(Product)
+            .options(selectinload(Product.data), selectinload(Product.catalog_item))
+            .where(Product.id == product_id)
+        )
+        product = result.scalar_one_or_none()
+        if not product:
+            return
+
+        product.status = COMPLETED
+        product.current_step = 6
+        product.error_message = None
+        product.updated_at = datetime.now()
+
+        pd = product.data
+        item = product.catalog_item
+        if not item:
+            item = CatalogProduct(source_product_id=product.id, gigab2b_url=product.gigab2b_url)
+            db.add(item)
+
+        item.gigab2b_url = product.gigab2b_url
+        item.gigab2b_product_id = product.gigab2b_product_id
+        item.competitor_asin = product.competitor_asin
+        item.amazon_asin = product.amazon_asin
+        item.asin_sync_status = product.asin_sync_status
+        item.asin_synced_at = product.asin_synced_at
+        item.asin_sync_error = product.asin_sync_error
+        item.amazon_product_status = product.amazon_product_status
+        item.amazon_product_status_synced_at = product.amazon_product_status_synced_at
+        item.amazon_product_status_error = product.amazon_product_status_error
+        item.aplus_upload_status = product.aplus_upload_status
+        item.aplus_uploaded_at = product.aplus_uploaded_at
+        item.aplus_upload_error = product.aplus_upload_error
+        item.upc = product.upc
+        item.brand = product.brand
+        item.item_code = pd.item_code if pd else None
+        item.title = pd.title if pd else None
+        item.leaf_category = pd.leaf_category if pd else None
+        item.status = product.status
+        item.confirmed_at = item.confirmed_at or datetime.now()
+        item.updated_at = datetime.now()
+        await db.commit()
+
+
 def start_pipeline(product_id: int, start_step: int = 1) -> bool:
     """
     启动Pipeline（非阻塞）
@@ -356,9 +362,6 @@ async def recover_interrupted_pipelines() -> None:
         "competitor_searching",
         STEP5_LISTING,
         STEP6_CURATING,
-        STEP7_APLUS_PLAN,
-        STEP8_APLUS_SCRIPT,
-        STEP9_APLUS_IMAGE,
     }
     async with async_session() as db:
         from sqlalchemy import select
@@ -400,8 +403,8 @@ async def recover_interrupted_pipelines() -> None:
                 product.error_message = "Step1 浏览器采集已停用：请通过商品数据源/OpenAPI拉品生成商品草稿"
                 product.updated_at = now
                 continue
-            if step > 9:
-                step = 9
+            if step > 6:
+                step = 6
             product.status = get_step_status(step)
             product.error_message = None
             product.updated_at = now

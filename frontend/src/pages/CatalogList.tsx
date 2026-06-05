@@ -1,62 +1,84 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, Card, Empty, Input, message, Modal, Popconfirm, Segmented, Select, Space, Table, Tag, Typography, Upload } from 'antd';
-import { CloudSyncOutlined, CopyOutlined, DeleteOutlined, DownloadOutlined, FileExcelOutlined, HistoryOutlined, PictureOutlined, ReloadOutlined, SyncOutlined, UploadOutlined } from '@ant-design/icons';
-import dayjs from 'dayjs';
-import { clearCatalogAsin, createAplusUploadBatch, createAsinSyncBatch, createInventorySyncBatch, deleteProduct, exportCatalogProductsByCategory, exportInventoryUpdateTemplate, getWorkbenchOverview, listCatalogExportCategories, listCatalogProducts, updateCatalogAsin, uploadCatalogCategoryTemplate } from '../api';
-import type { CatalogExportCategorySummary, CatalogProduct, WorkbenchOverview } from '../api';
+import { Button, Empty, message, Popconfirm, Segmented, Select, Space, Table, Tabs, Tag, Typography, Upload } from 'antd';
+import { DeleteOutlined, DownloadOutlined, PauseCircleOutlined, PlayCircleOutlined, ReloadOutlined, UploadOutlined } from '@ant-design/icons';
+import {
+  createCatalogExportOfflineTasks,
+  deleteCatalogTemplateFile,
+  downloadCatalogTemplateFile,
+  listCatalogExportCategories,
+  listCatalogProducts,
+  listCatalogTemplateCategories,
+  listCatalogTemplateFiles,
+  updateCatalogTemplateFileStatus,
+  uploadCatalogCategoryTemplate,
+} from '../api';
+import type { CatalogExportCategorySummary, CatalogProduct, CatalogTemplateFileSummary } from '../api';
 
 const { Title, Text } = Typography;
+const ALL_CATEGORIES = '__all__';
 
 const CatalogList: React.FC = () => {
   const navigate = useNavigate();
   const [items, setItems] = useState<CatalogProduct[]>([]);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
-  const [inventoryExporting, setInventoryExporting] = useState(false);
-  const [syncingInventory, setSyncingInventory] = useState(false);
-  const [syncingAsin, setSyncingAsin] = useState(false);
-  const [uploadingAplus, setUploadingAplus] = useState(false);
-  const [asinModalOpen, setAsinModalOpen] = useState(false);
-  const [asinSaving, setAsinSaving] = useState(false);
-  const [asinTarget, setAsinTarget] = useState<CatalogProduct | null>(null);
-  const [manualAsin, setManualAsin] = useState('');
-  const [selectedIds, setSelectedIds] = useState<React.Key[]>([]);
-  const [selectedItemMap, setSelectedItemMap] = useState<Record<number, CatalogProduct>>({});
-  const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
+  const [total, setTotal] = useState(0);
   const [exportStatus, setExportStatus] = useState<'pending' | 'exported'>('pending');
-  const [selectedCategory, setSelectedCategory] = useState<string | undefined>();
+  const [selectedCategory, setSelectedCategory] = useState<string>(ALL_CATEGORIES);
   const [exportCategories, setExportCategories] = useState<{ pending: CatalogExportCategorySummary[]; exported: CatalogExportCategorySummary[] }>({ pending: [], exported: [] });
+  const [templateCategories, setTemplateCategories] = useState<CatalogExportCategorySummary[]>([]);
+  const [templateFiles, setTemplateFiles] = useState<CatalogTemplateFileSummary[]>([]);
   const [categoriesLoading, setCategoriesLoading] = useState(false);
   const [templateUploading, setTemplateUploading] = useState(false);
-  const [overview, setOverview] = useState<WorkbenchOverview | null>(null);
+  const [templateDownloadingFileId, setTemplateDownloadingFileId] = useState<string | null>(null);
+  const [templateFileMutatingId, setTemplateFileMutatingId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<React.Key[]>([]);
+  const [selectedItemMap, setSelectedItemMap] = useState<Record<number, CatalogProduct>>({});
+  const [activeTab, setActiveTab] = useState('export');
+  const itemRequestId = useRef(0);
+
+  const currentCategoryOptions = exportStatus === 'pending' ? exportCategories.pending : exportCategories.exported;
+  const isAllCategories = selectedCategory === ALL_CATEGORIES;
+  const selectedCategorySummary = isAllCategories ? undefined : currentCategoryOptions.find((item) => item.category === selectedCategory);
+  const aggregateSummary = currentCategoryOptions.reduce(
+    (acc, item) => ({
+      count: acc.count + item.count,
+      exportableCount: acc.exportableCount + item.exportable_count,
+      categoryCount: acc.categoryCount + 1,
+      templateReadyCount: acc.templateReadyCount + (item.template_available ? 1 : 0),
+      blockedCount: acc.blockedCount + item.blocked_count,
+    }),
+    { count: 0, exportableCount: 0, categoryCount: 0, templateReadyCount: 0, blockedCount: 0 },
+  );
+  const uncoveredTemplateCategoryRows = templateCategories
+    .filter((summary) => !summary.template_available)
+    .map((summary) => ({
+      key: summary.category,
+      category: summary.category,
+      summary,
+    }));
 
   const fetchItems = async () => {
+    const requestId = itemRequestId.current + 1;
+    itemRequestId.current = requestId;
     setLoading(true);
     try {
       const { data } = await listCatalogProducts({
         page,
         page_size: pageSize,
         export_status: exportStatus,
-        category: selectedCategory,
+        category: isAllCategories ? undefined : selectedCategory,
       });
+      if (requestId !== itemRequestId.current) return;
       setItems(data.items);
       setTotal(data.total);
-    } catch {
-      message.error('加载失败');
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '加载导出商品失败');
     } finally {
       setLoading(false);
-    }
-  };
-
-  const fetchOverview = async () => {
-    try {
-      const { data } = await getWorkbenchOverview();
-      setOverview(data);
-    } catch {
-      // 概览失败不影响导出中心使用。
     }
   };
 
@@ -65,20 +87,47 @@ const CatalogList: React.FC = () => {
     try {
       const { data } = await listCatalogExportCategories();
       setExportCategories(data);
-    } catch {
-      message.error('导出类目加载失败');
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '导出类目加载失败');
     } finally {
       setCategoriesLoading(false);
     }
   };
 
+  const fetchTemplateCategories = async () => {
+    setCategoriesLoading(true);
+    try {
+      const { data } = await listCatalogTemplateCategories();
+      setTemplateCategories(data);
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '模板类目加载失败');
+    } finally {
+      setCategoriesLoading(false);
+    }
+  };
+
+  const fetchTemplateFiles = async () => {
+    setCategoriesLoading(true);
+    try {
+      const { data } = await listCatalogTemplateFiles();
+      setTemplateFiles(data);
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '模板文件加载失败');
+    } finally {
+      setCategoriesLoading(false);
+    }
+  };
+
+  const refreshExportCenterData = async () => {
+    await Promise.all([fetchExportCategories(), fetchTemplateCategories(), fetchTemplateFiles()]);
+  };
+
+  useEffect(() => { refreshExportCenterData(); }, []);
   useEffect(() => { fetchItems(); }, [page, pageSize, exportStatus, selectedCategory]);
-  useEffect(() => { fetchOverview(); }, []);
-  useEffect(() => { fetchExportCategories(); }, []);
   useEffect(() => {
     const categories = exportStatus === 'pending' ? exportCategories.pending : exportCategories.exported;
-    if (selectedCategory && categories.some((item) => item.category === selectedCategory)) return;
-    setSelectedCategory(categories[0]?.category);
+    if (selectedCategory === ALL_CATEGORIES || categories.some((item) => item.category === selectedCategory)) return;
+    setSelectedCategory(ALL_CATEGORIES);
     setPage(1);
   }, [exportCategories, exportStatus]);
   useEffect(() => {
@@ -97,7 +146,9 @@ const CatalogList: React.FC = () => {
 
   const selectExportStatus = (status: 'pending' | 'exported') => {
     setExportStatus(status);
-    setSelectedCategory(undefined);
+    setSelectedCategory(ALL_CATEGORIES);
+    setSelectedIds([]);
+    setSelectedItemMap({});
     setPage(1);
   };
 
@@ -115,74 +166,107 @@ const CatalogList: React.FC = () => {
     }, 1000);
   };
 
-  const extractDownloadError = async (error: any, fallback: string) => {
-    const payload = error?.response?.data;
-    if (payload instanceof Blob) {
-      const text = await payload.text();
-      if (!text) return fallback;
-      try {
-        const parsed = JSON.parse(text);
-        return parsed?.detail || text;
-      } catch {
-        return text;
-      }
+  const extractFilename = (disposition?: string | null, fallback = 'amazon_category_template.xlsm') => {
+    const matched = disposition?.match(/filename\\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i);
+    const raw = matched?.[1] || matched?.[2];
+    if (!raw) return fallback;
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
     }
-    return payload?.detail || error?.message || fallback;
   };
 
-  const currentCategoryOptions = exportStatus === 'pending' ? exportCategories.pending : exportCategories.exported;
-  const selectedCategorySummary = currentCategoryOptions.find((item) => item.category === selectedCategory);
+  const categoryTemplateTag = (summary?: CatalogExportCategorySummary) => {
+    if (!summary) return <Tag>未选择类目</Tag>;
+    if (summary.template_available) {
+      return <Tag color="success">有模板</Tag>;
+    }
+    if (summary.uploaded_template_name) {
+      return <Tag color="warning">已上传但未接入映射</Tag>;
+    }
+    return <Tag color="warning">缺模板</Tag>;
+  };
 
-  const categoryOptionLabel = (item: CatalogExportCategorySummary) => (
-    <Space direction="vertical" size={2} style={{ width: '100%' }}>
-      <Space wrap>
-        <Text strong>{item.category}</Text>
-        <Tag color={item.template_available ? 'success' : 'warning'}>
-          {item.template_available ? '有模板' : '缺模板'}
-        </Tag>
-        <Tag color={exportStatus === 'pending' ? 'blue' : 'default'}>
-          {exportStatus === 'pending' ? `${item.exportable_count} 个待导出` : `${item.count} 个已导出`}
-        </Tag>
-      </Space>
-      <Text type="secondary" ellipsis>
-        {item.template_available ? item.template_name : item.template_error || '未匹配到模板'}
-      </Text>
-    </Space>
-  );
+  const templateTag = (summary?: CatalogExportCategorySummary) => {
+    if (isAllCategories) {
+      if (!aggregateSummary.categoryCount) return <Tag>无类目</Tag>;
+      if (aggregateSummary.templateReadyCount === aggregateSummary.categoryCount) return <Tag color="success">全部类目有模板</Tag>;
+      return <Tag color="warning">{aggregateSummary.categoryCount - aggregateSummary.templateReadyCount} 个类目缺模板</Tag>;
+    }
+    return categoryTemplateTag(summary);
+  };
 
-  const exportSelected = async () => {
-    const category = currentCategoryOptions.find((item) => item.category === selectedCategory);
-    if (!category) {
-      message.warning('请先选择待导出类目');
+  const createExportTasksByIds = async (ids: number[], label: string) => {
+    if (!ids.length) {
+      message.warning('没有可导出的商品');
+      return;
+    }
+    if (ids.length > 1000) {
+      message.warning('单次最多导出 1000 个商品，请缩小筛选范围');
       return;
     }
     if (exportStatus !== 'pending') {
-      message.warning('已导出类目只用于查看，不会再次生成 Amazon 导入表格');
-      return;
-    }
-    if (!category.template_available) {
-      message.warning(category.template_error || '当前类目没有可用模板');
+      message.warning('已导出商品只用于查看，不能再次生成 Amazon 导入表格');
       return;
     }
     setExporting(true);
-    const hideLoading = message.loading(`正在导出「${category.category}」Amazon 表格，生成完成后会自动下载...`, 0);
+    const hideLoading = message.loading(`正在为${label}创建导出任务，系统会按模板拆分...`, 0);
     try {
-      const { data } = await exportCatalogProductsByCategory(category.category);
-      saveBlob(data, `amazon_import_${category.category}_${dayjs().format('YYYYMMDD_HHmmss')}.zip`);
-      message.success('已导出 Amazon 导入表格压缩包');
-      fetchItems();
-      fetchExportCategories();
+      const { data } = await createCatalogExportOfflineTasks(ids);
+      if (data.tasks.length) {
+        message.success(`已创建 ${data.tasks.length} 个导出任务，请到任务中心下载结果`);
+      } else {
+        message.warning('没有创建导出任务，请检查类目模板和商品状态');
+      }
+      if (data.errors?.length) {
+        message.warning(`有 ${data.errors.length} 个商品未进入导出任务，可在任务中心任务详情或接口返回中查看原因`);
+      }
+      await refreshExportCenterData();
+      await fetchItems();
     } catch (error: any) {
-      message.error(await extractDownloadError(error, '导出失败'));
+      message.error(error?.response?.data?.detail || '创建导出任务失败');
     } finally {
       hideLoading();
       setExporting(false);
     }
   };
 
-  const uploadTemplateForCategory = async (file: File) => {
-    if (!selectedCategorySummary?.category) {
-      message.warning('请先选择类目');
+  const exportCatalog = async () => {
+    if (selectedIds.length) {
+      await createExportTasksByIds(selectedIds.map(Number), `选中的 ${selectedIds.length} 个商品`);
+      return;
+    }
+    if (exportStatus !== 'pending') {
+      message.warning('已导出商品只用于查看，不能再次生成 Amazon 导入表格');
+      return;
+    }
+    if (!isAllCategories && selectedCategorySummary && !selectedCategorySummary.exportable_count) {
+      message.warning('当前类目没有可导出的商品');
+      return;
+    }
+    if (isAllCategories && !aggregateSummary.exportableCount) {
+      message.warning('当前没有待导出的商品');
+      return;
+    }
+    setExporting(true);
+    try {
+      const { data } = await listCatalogProducts({
+        page: 1,
+        page_size: 1000,
+        export_status: exportStatus,
+        category: isAllCategories ? undefined : selectedCategory,
+      });
+      await createExportTasksByIds(data.items.map((item) => item.id), isAllCategories ? '全部待导出商品' : `「${selectedCategory}」下的商品`);
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '加载待导出商品失败');
+      setExporting(false);
+    }
+  };
+
+  const uploadTemplateForCategory = async (category: string, file: File) => {
+    if (!category) {
+      message.warning('请先选择一个具体类目');
       return;
     }
     const suffix = file.name.split('.').pop()?.toLowerCase();
@@ -192,9 +276,10 @@ const CatalogList: React.FC = () => {
     }
     setTemplateUploading(true);
     try {
-      const { data } = await uploadCatalogCategoryTemplate(selectedCategorySummary.category, file);
+      const { data } = await uploadCatalogCategoryTemplate(category, file);
       message.success(`模板已上传 OSS，并缓存到本地：${data.filename}`);
-      await fetchExportCategories();
+      await refreshExportCenterData();
+      await fetchItems();
     } catch (error: any) {
       message.error(error?.response?.data?.detail || '模板上传失败');
     } finally {
@@ -202,595 +287,441 @@ const CatalogList: React.FC = () => {
     }
   };
 
-  const copyText = async (text: string) => {
-    if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(text);
-      return;
-    }
-    const textarea = document.createElement('textarea');
-    textarea.value = text;
-    textarea.style.position = 'fixed';
-    textarea.style.left = '-9999px';
-    document.body.appendChild(textarea);
-    textarea.focus();
-    textarea.select();
-    document.execCommand('copy');
-    textarea.remove();
-  };
-
-  const copySelectedAmazonAsins = async () => {
-    if (!selectedIds.length) {
-      message.warning('请先选择商品');
-      return;
-    }
-    const selectedRecords = selectedIds
-      .map((id) => selectedItemMap[Number(id)] || items.find((item) => item.id === Number(id)))
-      .filter(Boolean) as CatalogProduct[];
-    const asins = selectedRecords
-      .filter((item) => item.amazon_asin?.trim() && !isUnavailableAmazonStatus(item.amazon_product_status))
-      .map((item) => item.amazon_asin?.trim())
-      .filter((asin): asin is string => Boolean(asin));
-    if (!asins.length) {
-      message.info('没有可复制的真实 ASIN，空 ASIN 或不可售商品已跳过');
-      return;
-    }
+  const downloadTemplateFile = async (record: CatalogTemplateFileSummary) => {
+    setTemplateDownloadingFileId(record.file_id);
     try {
-      await copyText(asins.join('\n'));
-      const missingCount = selectedIds.length - asins.length;
-      message.success(`已复制 ${asins.length} 个真实 ASIN${missingCount ? `，跳过 ${missingCount} 个空 ASIN 或不可售商品` : ''}`);
-    } catch {
-      message.error('复制失败，请检查浏览器剪贴板权限');
-    }
-  };
-
-  const exportInventorySelected = async () => {
-    if (!selectedIds.length) {
-      message.warning('请先选择商品');
-      return;
-    }
-    const selectedSet = new Set(selectedIds.map(Number));
-    const missingAsinItems = items.filter((item) => selectedSet.has(item.id) && !item.amazon_asin);
-    if (missingAsinItems.length) {
-      message.info(`缺少真实 ASIN 的商品会自动跳过：${missingAsinItems.map((item) => item.item_code || item.id).slice(0, 5).join('、')}`);
-    }
-    setInventoryExporting(true);
-    const hideLoading = message.loading('正在导出库存模板，生成完成后会自动下载...', 0);
-    try {
-      const { data } = await exportInventoryUpdateTemplate(selectedIds.map(Number));
-      saveBlob(data, `inventory_update_templates_${dayjs().format('YYYYMMDD_HHmmss')}.zip`);
-      message.success('已导出库存同步模板');
+      const response = await downloadCatalogTemplateFile(record.file_id);
+      saveBlob(response.data, extractFilename(response.headers['content-disposition'], record.file_name || 'amazon_template.xlsm'));
     } catch (error: any) {
-      message.error(await extractDownloadError(error, '库存模板导出失败'));
+      message.error(error?.response?.data?.detail || '下载模板失败');
     } finally {
-      hideLoading();
-      setInventoryExporting(false);
+      setTemplateDownloadingFileId(null);
     }
   };
 
-  const syncSelectedInventory = async () => {
-    if (!selectedIds.length) {
-      navigate('/inventory-sync');
-      return;
-    }
-    setSyncingInventory(true);
+  const toggleTemplateFile = async (record: CatalogTemplateFileSummary) => {
+    setTemplateFileMutatingId(record.file_id);
     try {
-      const { data } = await createInventorySyncBatch(selectedIds.map(Number));
-      message.success(`已创建库存同步批次 #${data.id}`);
-      setSelectedIds([]);
-      setSelectedItemMap({});
-      fetchItems();
-      fetchOverview();
-      navigate('/inventory-sync');
+      await updateCatalogTemplateFileStatus(record.file_id, !record.enabled);
+      message.success(record.enabled ? '模板已停用' : '模板已启用');
+      await refreshExportCenterData();
+      await fetchItems();
     } catch (error: any) {
-      message.error(error?.response?.data?.detail || '库存同步批次创建失败');
+      message.error(error?.response?.data?.detail || '更新模板状态失败');
     } finally {
-      setSyncingInventory(false);
+      setTemplateFileMutatingId(null);
     }
   };
 
-  const syncSelectedAsins = async () => {
-    if (!selectedIds.length) {
-      message.warning('请先选择商品');
-      return;
-    }
+  const deleteTemplateFile = async (record: CatalogTemplateFileSummary) => {
+    setTemplateFileMutatingId(record.file_id);
     try {
-      setSyncingAsin(true);
-      const { data } = await createAsinSyncBatch(selectedIds.map(Number));
-      message.success(`已创建 ASIN/亚马逊商品状态同步批次 #${data.id}`);
-      setSelectedIds([]);
-      setSelectedItemMap({});
-      fetchItems();
-      fetchOverview();
+      await deleteCatalogTemplateFile(record.file_id);
+      message.success('模板文件已删除');
+      await refreshExportCenterData();
+      await fetchItems();
     } catch (error: any) {
-      message.error(error?.response?.data?.detail || 'ASIN/亚马逊商品状态同步批次创建失败');
+      message.error(error?.response?.data?.detail || '删除模板失败');
     } finally {
-      setSyncingAsin(false);
+      setTemplateFileMutatingId(null);
     }
-  };
-
-  const asinStatusTag = (status?: string | null, asin?: string | null) => {
-    if (asin && status === 'manual_linked') return <Tag color="success">手动关联</Tag>;
-    if (asin) return <Tag color="success">已同步</Tag>;
-    if (status === 'pending' || status === 'running') return <Tag color="processing">同步中</Tag>;
-    if (status === 'not_found') return <Tag color="warning">未查到</Tag>;
-    if (status === 'multiple_found') return <Tag color="warning">多匹配</Tag>;
-    if (status === 'failed') return <Tag color="error">失败</Tag>;
-    if (status === 'manual_linked') return <Tag color="success">手动关联</Tag>;
-    if (status === 'skipped') return <Tag>跳过</Tag>;
-    return <Tag>未同步</Tag>;
-  };
-
-  const aplusStatusTag = (status?: string | null) => {
-    if (status === 'pending' || status === 'running') return <Tag color="processing">上传中</Tag>;
-    if (status === 'submitted') return <Tag color="success">已提交</Tag>;
-    if (status === 'draft_saved') return <Tag color="success">已保存草稿</Tag>;
-    if (status === 'failed') return <Tag color="error">失败</Tag>;
-    if (status === 'skipped') return <Tag>跳过</Tag>;
-    return <Tag>未上传</Tag>;
-  };
-
-  const isUnavailableAmazonStatus = (status?: string | null) => {
-    const normalized = String(status || '').toLowerCase();
-    return ['不可售', '停售', '已删除', '下架', 'suppressed', 'inactive', 'deleted', 'not sellable', 'unavailable'].some((keyword) => normalized.includes(keyword));
-  };
-
-  const amazonProductStatusTag = (status?: string | null, error?: string | null, record?: CatalogProduct) => {
-    const text = status || (record?.amazon_asin || record?.asin_sync_status === 'synced' ? '状态未返回' : '未同步');
-    const normalized = String(status || '').toLowerCase();
-    const sellable = ['售卖', '在售', '可售', 'active', 'buyable', '正常'].some((keyword) => normalized.includes(keyword));
-    const unavailable = isUnavailableAmazonStatus(status);
-    return (
-      <Space direction="vertical" size={2}>
-        <Tag color={sellable ? 'success' : unavailable ? 'error' : status ? 'warning' : 'default'}>{text}</Tag>
-        {error && <Text type="secondary" ellipsis style={{ maxWidth: 150 }}>{error}</Text>}
-      </Space>
-    );
-  };
-
-  const stockStatusTag = (status?: string | null, error?: string | null) => {
-    const content = (() => {
-      if (status === 'pending' || status === 'running') return <Tag color="processing">同步中</Tag>;
-      if (status === 'synced') return <Tag color="success">已同步</Tag>;
-      if (status === 'unavailable') return <Tag color="warning">不可售</Tag>;
-      if (status === 'failed') return <Tag color="error">失败</Tag>;
-      if (status === 'skipped') return <Tag>跳过</Tag>;
-      return <Tag>未同步</Tag>;
-    })();
-    return (
-      <Space direction="vertical" size={2}>
-        {content}
-        {error && <Text type="secondary" ellipsis style={{ maxWidth: 150 }}>{error}</Text>}
-      </Space>
-    );
   };
 
   const riskTag = (risk?: string | null, count?: number | null) => {
     const suffix = count ? ` · ${count}条` : '';
-    if (risk === 'pass') return <Tag color="success">可复核{suffix}</Tag>;
+    if (risk === 'pass') return <Tag color="success">通过{suffix}</Tag>;
     if (risk === 'warning') return <Tag color="warning">需复核{suffix}</Tag>;
     if (risk === 'high_risk') return <Tag color="error">高风险{suffix}</Tag>;
     return <Tag>未检查</Tag>;
   };
 
-  const nextAction = (record: CatalogProduct) => {
-    if (!record.amazon_asin) {
-      if (record.asin_sync_status === 'not_found') return <Tag color="warning">人工确认 ASIN</Tag>;
-      if (record.asin_sync_status === 'multiple_found') return <Tag color="warning">人工处理多匹配</Tag>;
-      if (record.asin_sync_status === 'pending' || record.asin_sync_status === 'running') return <Tag color="processing">等待 ASIN 同步</Tag>;
-      return <Tag color="blue">同步 ASIN</Tag>;
-    }
-    if (record.template_risk_level === 'high_risk') return <Tag color="error">复核上架风险</Tag>;
-    if (!record.aplus_upload_status || record.aplus_upload_status === 'not_uploaded') return <Tag color="blue">上传 A+</Tag>;
-    if (record.aplus_upload_status === 'failed') return <Tag color="error">查看 A+ 失败</Tag>;
-    if (record.aplus_upload_status === 'pending' || record.aplus_upload_status === 'running') return <Tag color="processing">等待 A+ 上传</Tag>;
-    return <Tag color="success">可持续运营</Tag>;
+  const panelStyle: React.CSSProperties = {
+    background: '#fff',
+    border: '1px solid #eef0f4',
+    borderRadius: 8,
   };
 
-  const uploadSelectedAplus = async () => {
-    if (!selectedIds.length) {
-      message.warning('请先选择商品');
-      return;
-    }
-    setUploadingAplus(true);
-    try {
-      const { data } = await createAplusUploadBatch(selectedIds.map(Number));
-      message.success(`已创建 A+ 上传批次 #${data.id}`);
-      setSelectedIds([]);
-      setSelectedItemMap({});
-      fetchItems();
-      fetchOverview();
-      navigate('/aplus-upload');
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || 'A+ 上传批次创建失败');
-    } finally {
-      setUploadingAplus(false);
-    }
-  };
-
-  const openAsinModal = (record: CatalogProduct) => {
-    setAsinTarget(record);
-    setManualAsin(record.amazon_asin || '');
-    setAsinModalOpen(true);
-  };
-
-  const saveManualAsin = async () => {
-    if (!asinTarget) return;
-    const asin = manualAsin.trim().toUpperCase();
-    if (!/^B0[A-Z0-9]{8}$/.test(asin)) {
-      message.warning('ASIN 格式不正确，应为 B0 开头的 10 位编码');
-      return;
-    }
-    setAsinSaving(true);
-    try {
-      await updateCatalogAsin(asinTarget.id, asin);
-      message.success('真实 ASIN 已更新');
-      setAsinModalOpen(false);
-      setAsinTarget(null);
-      setManualAsin('');
-      fetchItems();
-      fetchOverview();
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '更新 ASIN 失败');
-    } finally {
-      setAsinSaving(false);
-    }
-  };
-
-  const deleteCatalogRecord = async (record: CatalogProduct) => {
-    try {
-      await deleteProduct(record.source_product_id);
-      message.success('商品已删除');
-      setSelectedIds((prev) => prev.filter((id) => Number(id) !== record.id));
-      setSelectedItemMap((prev) => {
-        const next = { ...prev };
-        delete next[record.id];
-        return next;
-      });
-      if (items.length === 1 && page > 1) {
-        setPage(page - 1);
-      } else {
-        fetchItems();
-      }
-      fetchOverview();
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '删除失败');
-    }
-  };
-
-  const clearAsin = async (record: CatalogProduct) => {
-    try {
-      await clearCatalogAsin(record.id);
-      message.success('真实 ASIN 已清除');
-      fetchItems();
-      fetchOverview();
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '清除 ASIN 失败');
-    }
-  };
+  const selectedItems = selectedIds.map((id) => selectedItemMap[Number(id)]).filter(Boolean) as CatalogProduct[];
+  const templateSplitKey = (summary?: CatalogExportCategorySummary) =>
+    summary?.template_path || summary?.template_name || summary?.uploaded_template_object_key || summary?.category || '';
+  const selectedCategories = new Set(selectedItems.map((item) => item.leaf_category || '未分类'));
+  const selectedTemplateCount = new Set(
+    currentCategoryOptions
+      .filter((summary) => selectedCategories.has(summary.category) && summary.template_available)
+      .map((summary) => templateSplitKey(summary))
+      .filter(Boolean),
+  ).size;
+  const currentSplitCount = isAllCategories
+    ? new Set(currentCategoryOptions.filter((summary) => summary.template_available && summary.exportable_count > 0).map((summary) => templateSplitKey(summary))).size
+    : selectedCategorySummary?.template_available ? 1 : 0;
+  const exportButtonText = selectedIds.length
+    ? `导出选中(${selectedIds.length})`
+    : `导出当前筛选${isAllCategories ? `(${aggregateSummary.exportableCount})` : selectedCategorySummary?.exportable_count ? `(${selectedCategorySummary.exportable_count})` : ''}`;
+  const exportDisabled = exportStatus !== 'pending'
+    || (!selectedIds.length && (isAllCategories
+      ? !aggregateSummary.exportableCount || aggregateSummary.templateReadyCount === 0
+      : !selectedCategorySummary?.exportable_count || !selectedCategorySummary?.template_available));
 
   const columns = [
     {
-      title: '商品资料ID',
-      dataIndex: 'id',
-      width: 110,
-    },
-    {
-      title: '任务ID',
-      dataIndex: 'source_product_id',
-      width: 90,
-      render: (id: number) => <a onClick={() => navigate(`/products/${id}`)}>{id}</a>,
-    },
-    {
-      title: '来源商品ID',
-      dataIndex: 'gigab2b_product_id',
-      width: 130,
-      render: (value: string, record: CatalogProduct) => (record.source_item_id || value) ? <a onClick={() => navigate(`/products/${record.source_product_id}`)}>{record.source_item_id || value}</a> : '-',
-    },
-    {
       title: '商品Code',
       dataIndex: 'item_code',
-      width: 140,
-      render: (value: string) => value || '-',
-    },
-    {
-      title: '运营库存',
-      dataIndex: 'stock',
-      width: 100,
-      render: (value: number | null) => value === null || value === undefined ? '-' : value,
+      width: 150,
+      render: (value: string | null, record: CatalogProduct) => (
+        <a onClick={() => navigate(`/products/${record.source_product_id}`)}>
+          {record.source_item_id || value || record.source_product_id}
+        </a>
+      ),
     },
     {
       title: '标题',
       dataIndex: 'title',
       ellipsis: true,
-      render: (value: string) => value || '-',
-    },
-    {
-      title: '类目',
-      dataIndex: 'leaf_category',
-      width: 180,
-      render: (value: string) => value ? <Tag>{value}</Tag> : '-',
-    },
-    {
-      title: '竞品ASIN',
-      dataIndex: 'competitor_asin',
-      width: 140,
-      render: (value: string) => value || '-',
-    },
-    {
-      title: '真实ASIN',
-      dataIndex: 'amazon_asin',
-      width: 140,
-      render: (value: string) => value || '-',
-    },
-    {
-      title: 'ASIN同步',
-      dataIndex: 'asin_sync_status',
-      width: 120,
-      render: (value: string, record: CatalogProduct) => asinStatusTag(value, record.amazon_asin),
-    },
-    {
-      title: '亚马逊商品状态',
-      dataIndex: 'amazon_product_status',
-      width: 150,
-      render: (value: string, record: CatalogProduct) => amazonProductStatusTag(value, record.amazon_product_status_error, record),
-    },
-    {
-      title: 'A+上传',
-      dataIndex: 'aplus_upload_status',
-      width: 120,
-      render: (value: string, record: CatalogProduct) => (
-        <Space direction="vertical" size={2}>
-          {aplusStatusTag(value)}
-          {record.aplus_upload_error && <Text type="secondary" ellipsis style={{ maxWidth: 150 }}>{record.aplus_upload_error}</Text>}
-        </Space>
+      render: (value: string | null) => (
+        <Typography.Text ellipsis style={{ maxWidth: 360 }}>
+          {value || '-'}
+        </Typography.Text>
       ),
     },
     {
-      title: '库存同步',
-      dataIndex: 'stock_sync_status',
-      width: 120,
-      render: (value: string, record: CatalogProduct) => stockStatusTag(value, record.stock_sync_error),
-    },
-    {
-      title: '库存同步时间',
-      dataIndex: 'stock_synced_at',
-      width: 170,
-      render: (value: string) => value ? new Date(value).toLocaleString('zh-CN') : '-',
-    },
-    {
-      title: '上架检查',
-      dataIndex: 'template_risk_level',
-      width: 130,
-      render: (value: string, record: CatalogProduct) => riskTag(value, record.template_warnings_count),
-    },
-    {
-      title: '下一步',
-      width: 150,
-      render: (_: unknown, record: CatalogProduct) => nextAction(record),
+      title: 'Amazon类目',
+      dataIndex: 'leaf_category',
+      width: 260,
+      render: (value: string | null) => value ? (
+        <Typography.Text ellipsis style={{ maxWidth: 240 }}>
+          {value}
+        </Typography.Text>
+      ) : '-',
     },
     {
       title: 'UPC',
       dataIndex: 'upc',
       width: 150,
-      render: (value: string) => value || '-',
+      render: (value: string | null) => value || '-',
     },
     {
-      title: '导入时间',
-      dataIndex: 'imported_at',
+      title: '模板检查',
+      dataIndex: 'template_risk_level',
+      width: 130,
+      render: (value: string | null, record: CatalogProduct) => riskTag(value, record.template_warnings_count),
+    },
+    {
+      title: '导出状态',
+      width: 120,
+      render: () => exportStatus === 'pending' ? <Tag color="blue">待导出</Tag> : <Tag color="success">已导出</Tag>,
+    },
+    {
+      title: '更新时间',
+      dataIndex: 'updated_at',
       width: 170,
-      render: (value: string) => value ? new Date(value).toLocaleString('zh-CN') : '-',
+      render: (value: string | null) => value ? new Date(value).toLocaleString('zh-CN') : '-',
     },
     {
       title: '操作',
-      width: 330,
+      width: 90,
       render: (_: unknown, record: CatalogProduct) => (
-        <Space size="small">
-          <Button size="small" onClick={() => navigate(`/products/${record.source_product_id}`)}>详情</Button>
-          <Button size="small" onClick={() => openAsinModal(record)}>
-            {record.amazon_asin ? '重新关联ASIN' : '关联ASIN'}
-          </Button>
-          {record.amazon_asin && (
-            <Popconfirm
-              title="确定清除真实 ASIN？"
-              description="清除后这个商品会回到可同步 ASIN 状态。"
-              okText="清除"
-              cancelText="取消"
-              onConfirm={() => clearAsin(record)}
-            >
-              <Button size="small">清除ASIN</Button>
-            </Popconfirm>
-          )}
-          <Popconfirm
-            title="确定删除这个商品？"
-            description="会删除对应任务和商品资料。"
-            okText="删除"
-            cancelText="取消"
-            okButtonProps={{ danger: true }}
-            onConfirm={() => deleteCatalogRecord(record)}
-          >
-            <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
-          </Popconfirm>
+        <Button size="small" onClick={() => navigate(`/products/${record.source_product_id}`)}>详情</Button>
+      ),
+    },
+  ];
+  const templateFileStatusTag = (record: CatalogTemplateFileSummary) => {
+    if (!record.enabled || record.file_status === 'disabled') return <Tag color="default">已停用</Tag>;
+    if (record.file_status === 'unmapped') return <Tag color="warning">未接入</Tag>;
+    return <Tag color="success">启用中</Tag>;
+  };
+
+  const templateFileColumns = [
+    {
+      title: '文件编号',
+      dataIndex: 'file_no',
+      width: 240,
+      render: (value: string, record: CatalogTemplateFileSummary) => (
+        <Space direction="vertical" size={2}>
+          <Typography.Text strong>{value}</Typography.Text>
+          <Typography.Text type="secondary" ellipsis style={{ maxWidth: 220 }}>
+            {record.file_name}
+          </Typography.Text>
         </Space>
+      ),
+    },
+    {
+      title: '文件状态',
+      dataIndex: 'file_status',
+      width: 120,
+      render: (_: string, record: CatalogTemplateFileSummary) => templateFileStatusTag(record),
+    },
+    {
+      title: '支持类目',
+      width: 620,
+      render: (_: unknown, record: CatalogTemplateFileSummary) => (
+        <Space size={[4, 4]} wrap>
+          {record.support_categories.map((category) => <Tag key={category}>{category}</Tag>)}
+        </Space>
+      ),
+    },
+    {
+      title: '模板下载',
+      width: 120,
+      render: (_: unknown, record: CatalogTemplateFileSummary) => (
+        <Button
+          size="small"
+          icon={<DownloadOutlined />}
+          disabled={!record.can_download}
+          loading={templateDownloadingFileId === record.file_id}
+          onClick={() => downloadTemplateFile(record)}
+        >
+          下载
+        </Button>
+      ),
+    },
+    {
+      title: '模板启用/停用',
+      width: 150,
+      render: (_: unknown, record: CatalogTemplateFileSummary) => (
+        <Button
+          size="small"
+          icon={record.enabled ? <PauseCircleOutlined /> : <PlayCircleOutlined />}
+          loading={templateFileMutatingId === record.file_id}
+          onClick={() => toggleTemplateFile(record)}
+        >
+          {record.enabled ? '停用' : '启用'}
+        </Button>
+      ),
+    },
+    {
+      title: '文件删除',
+      width: 120,
+      render: (_: unknown, record: CatalogTemplateFileSummary) => (
+        <Popconfirm
+          title="删除模板文件"
+          description="只删除上传模板记录和本地缓存，不会删除商品数据。"
+          okText="删除"
+          cancelText="取消"
+          disabled={!record.can_delete}
+          onConfirm={() => deleteTemplateFile(record)}
+        >
+          <Button
+            size="small"
+            danger
+            icon={<DeleteOutlined />}
+            disabled={!record.can_delete}
+            loading={templateFileMutatingId === record.file_id}
+          >
+            删除
+          </Button>
+        </Popconfirm>
+      ),
+    },
+  ];
+  const uncoveredCategoryColumns = [
+    {
+      title: '未覆盖类目',
+      dataIndex: 'category',
+      width: 260,
+      render: (value: string) => (
+        <Typography.Text ellipsis style={{ maxWidth: 240 }}>
+          {value}
+        </Typography.Text>
+      ),
+    },
+    {
+      title: '状态',
+      width: 180,
+      render: () => <Tag color="warning">未被现有模板覆盖</Tag>,
+    },
+    {
+      title: '处理建议',
+      render: () => <Text type="secondary">请到 Amazon 重新下载包含该类目的导入模板，上传后再配置/确认 mapping</Text>,
+    },
+    {
+      title: '上传模板',
+      width: 150,
+      render: (_: unknown, record: any) => (
+        <Upload
+          showUploadList={false}
+          accept=".xls,.xlsx,.xlsm"
+          customRequest={({ file, onSuccess, onError }) => {
+            uploadTemplateForCategory(record.category, file as File)
+              .then(() => onSuccess?.('ok'))
+              .catch((error) => onError?.(error));
+          }}
+        >
+          <Button size="small" icon={<UploadOutlined />} loading={templateUploading}>
+            上传模板
+          </Button>
+        </Upload>
       ),
     },
   ];
 
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
-        <Title level={4} style={{ margin: 0 }}>导出中心</Title>
-        <Space>
-          <Text type="secondary">最多显示 1000 个商品</Text>
-          <Button icon={<ReloadOutlined />} onClick={() => { fetchItems(); fetchExportCategories(); }}>刷新</Button>
-          <Button icon={<CloudSyncOutlined />} loading={syncingInventory} onClick={syncSelectedInventory}>
-            库存同步{selectedIds.length ? `(${selectedIds.length})` : ''}
-          </Button>
-          <Button icon={<HistoryOutlined />} onClick={() => navigate('/asin-sync')}>同步记录</Button>
-          <Button icon={<SyncOutlined />} loading={syncingAsin} disabled={!selectedIds.length} onClick={syncSelectedAsins}>
-            同步ASIN/状态{selectedIds.length ? `(${selectedIds.length})` : ''}
-          </Button>
-          <Button icon={<CopyOutlined />} disabled={!selectedIds.length} onClick={copySelectedAmazonAsins}>
-            提取真实ASIN{selectedIds.length ? `(${selectedIds.length})` : ''}
-          </Button>
-          <Button icon={<PictureOutlined />} loading={uploadingAplus} disabled={!selectedIds.length} onClick={uploadSelectedAplus}>
-            上传A+{selectedIds.length ? `(${selectedIds.length})` : ''}
-          </Button>
-          <Button icon={<FileExcelOutlined />} loading={inventoryExporting} disabled={!selectedIds.length} onClick={exportInventorySelected}>
-            导出库存模板{selectedIds.length ? `(${selectedIds.length})` : ''}
-          </Button>
-          <Button
-            type="primary"
-            icon={<DownloadOutlined />}
-            loading={exporting}
-            disabled={exportStatus !== 'pending' || !selectedCategorySummary?.template_available || !selectedCategorySummary.exportable_count}
-            onClick={exportSelected}
-          >
-            导出Amazon表格{selectedCategorySummary?.exportable_count ? `(${selectedCategorySummary.exportable_count})` : ''}
-          </Button>
-          <Upload
-            showUploadList={false}
-            accept=".xls,.xlsx,.xlsm"
-            customRequest={({ file, onSuccess, onError }) => {
-              uploadTemplateForCategory(file as File)
-                .then(() => onSuccess?.('ok'))
-                .catch((error) => onError?.(error));
-            }}
-          >
-            <Button icon={<UploadOutlined />} loading={templateUploading} disabled={!selectedCategorySummary}>
-              上传类目模板
-            </Button>
-          </Upload>
-        </Space>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 16, marginBottom: 16 }}>
+        <div style={{ minWidth: 0 }}>
+          <Title level={4} style={{ margin: 0 }}>导出中心</Title>
+        </div>
+        <Button icon={<ReloadOutlined />} onClick={() => { fetchItems(); refreshExportCenterData(); }}>查询</Button>
       </div>
-      <Card size="small" style={{ marginBottom: 16 }}>
-        <Space direction="vertical" size={14} style={{ width: '100%' }}>
-          <Space style={{ justifyContent: 'space-between', width: '100%' }}>
-            <Segmented
-              value={exportStatus}
-              onChange={(value) => selectExportStatus(value as 'pending' | 'exported')}
-              options={[
-                { label: `待导出类目 ${exportCategories.pending.length}`, value: 'pending' },
-                { label: `已导出类目 ${exportCategories.exported.length}`, value: 'exported' },
-              ]}
-            />
-            <Button size="small" icon={<ReloadOutlined />} loading={categoriesLoading} onClick={fetchExportCategories}>刷新类目</Button>
-          </Space>
-          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, 420px) minmax(0, 1fr)', gap: 16, alignItems: 'start' }}>
-            <Select
-              loading={categoriesLoading}
-              value={selectedCategory}
-              placeholder={exportStatus === 'pending' ? '选择待导出商品所在类目' : '选择已导出商品所在类目'}
-              onChange={(value) => { setSelectedCategory(value); setPage(1); }}
-              style={{ width: '100%' }}
-              options={currentCategoryOptions.map((item) => ({
-                value: item.category,
-                label: `${item.category} · ${exportStatus === 'pending' ? item.exportable_count : item.count}个 · ${item.template_available ? '有模板' : '缺模板'}`,
-              }))}
-            />
-            {selectedCategorySummary ? (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, minmax(110px, 1fr))', gap: 8 }}>
-                <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 12 }}>{categoryOptionLabel(selectedCategorySummary)}</div>
-                <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 12 }}>
-                  <Text type="secondary">商品数</Text>
-                  <div style={{ fontSize: 18, fontWeight: 600 }}>{selectedCategorySummary.count}</div>
-                </div>
-                <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 12 }}>
-                  <Text type="secondary">可导出</Text>
-                  <div style={{ fontSize: 18, fontWeight: 600 }}>{selectedCategorySummary.exportable_count}</div>
-                </div>
-                <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 12 }}>
-                  <Text type="secondary">样例</Text>
-                  <Typography.Paragraph ellipsis={{ rows: 2 }} style={{ marginBottom: 0 }}>
-                    {selectedCategorySummary.sample_item_codes.join('、') || '-'}
-                  </Typography.Paragraph>
-                </div>
-                <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 12 }}>
-                  <Text type="secondary">上传模板</Text>
-                  {selectedCategorySummary.uploaded_template_name ? (
-                    <Space direction="vertical" size={2} style={{ width: '100%' }}>
-                      <Space size={4} wrap>
-                        <Tag color="success">已缓存</Tag>
-                        {selectedCategorySummary.uploaded_template_oss_url && <Tag color="blue">OSS</Tag>}
+
+      <Tabs
+        activeKey={activeTab}
+        onChange={setActiveTab}
+        items={[
+          {
+            key: 'export',
+            label: '商品导出',
+            children: (
+              <>
+                <div style={{ ...panelStyle, padding: 16, marginBottom: 16 }}>
+                  <Space direction="vertical" size={14} style={{ width: '100%' }}>
+                    <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+                      <Segmented
+                        value={exportStatus}
+                        onChange={(value) => selectExportStatus(value as 'pending' | 'exported')}
+                        options={[
+                          { label: `待导出类目 ${exportCategories.pending.length}`, value: 'pending' },
+                          { label: `已导出类目 ${exportCategories.exported.length}`, value: 'exported' },
+                        ]}
+                      />
+                      <Space wrap>
+                        {selectedIds.length > 0 && (
+                          <Button onClick={() => { setSelectedIds([]); setSelectedItemMap({}); }}>
+                            清空选择
+                          </Button>
+                        )}
+                        <Button
+                          type="primary"
+                          icon={<DownloadOutlined />}
+                          loading={exporting}
+                          disabled={exportDisabled}
+                          onClick={exportCatalog}
+                        >
+                          {exportButtonText}
+                        </Button>
                       </Space>
-                      <Typography.Paragraph ellipsis={{ rows: 1 }} copyable={{ text: selectedCategorySummary.uploaded_template_cache_path || '' }} style={{ marginBottom: 0 }}>
-                        {selectedCategorySummary.uploaded_template_name}
-                      </Typography.Paragraph>
                     </Space>
-                  ) : (
-                    <Text type="secondary">未上传</Text>
-                  )}
+                    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(320px, 520px) minmax(0, 1fr)', gap: 20, alignItems: 'start' }}>
+                      <Select
+                        loading={categoriesLoading}
+                        value={selectedCategory}
+                        placeholder={exportStatus === 'pending' ? '选择待导出商品所在类目' : '选择已导出商品所在类目'}
+                        onChange={(value) => { setSelectedCategory(value); setPage(1); }}
+                        style={{ width: '100%' }}
+                        options={[
+                          {
+                            value: ALL_CATEGORIES,
+                            label: `${exportStatus === 'pending' ? '全部待导出商品' : '全部已导出商品'} · ${exportStatus === 'pending' ? aggregateSummary.exportableCount : aggregateSummary.count}个 · ${aggregateSummary.categoryCount}个类目`,
+                          },
+                          ...currentCategoryOptions.map((item) => ({
+                            value: item.category,
+                            label: `${item.category} · ${exportStatus === 'pending' ? item.exportable_count : item.count}个 · ${item.template_available ? '有模板' : item.uploaded_template_name ? '已上传未接入' : '缺模板'}`,
+                          })),
+                        ]}
+                      />
+                      {currentCategoryOptions.length ? (
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(110px, 1fr))', gap: 16 }}>
+                          <div>
+                            <Text type="secondary">模板状态</Text>
+                            <div style={{ marginTop: 6 }}>{templateTag(selectedCategorySummary)}</div>
+                          </div>
+                          <div>
+                            <Text type="secondary">{exportStatus === 'pending' ? '待导出商品' : '已导出商品'}</Text>
+                            <div style={{ fontSize: 20, fontWeight: 600 }}>
+                              {isAllCategories ? aggregateSummary.count : selectedCategorySummary?.count || 0}
+                            </div>
+                          </div>
+                          <div>
+                            <Text type="secondary">导出拆分</Text>
+                            <div style={{ fontSize: 20, fontWeight: 600 }}>{selectedIds.length ? selectedTemplateCount : currentSplitCount} 个模板</div>
+                          </div>
+                        </div>
+                      ) : (
+                        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={exportStatus === 'pending' ? '暂无待导出类目' : '暂无已导出类目'} />
+                      )}
+                    </div>
+                  </Space>
                 </div>
-              </div>
-            ) : (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={exportStatus === 'pending' ? '暂无待导出类目' : '暂无已导出类目'} />
-            )}
-          </div>
-        </Space>
-      </Card>
-      <Table
-        dataSource={items}
-        columns={columns}
-        rowKey="id"
-        loading={loading}
-        rowSelection={{
-          selectedRowKeys: selectedIds,
-          onChange: (keys, selectedRows) => {
-            setSelectedIds(keys);
-            setSelectedItemMap((prev) => {
-              const next: Record<number, CatalogProduct> = {};
-              keys.forEach((key) => {
-                const id = Number(key);
-                const latestRow = selectedRows.find((row) => row.id === id);
-                const currentPageRow = items.find((item) => item.id === id);
-                const cachedRow = prev[id];
-                if (latestRow || currentPageRow || cachedRow) {
-                  next[id] = latestRow || currentPageRow || cachedRow;
-                }
-              });
-              return next;
-            });
+
+                <div style={panelStyle}>
+                  <Table
+                    dataSource={items}
+                    columns={columns}
+                    rowKey="id"
+                    loading={loading}
+                    size="middle"
+                    scroll={{ x: 1120 }}
+                    rowSelection={exportStatus === 'pending' ? {
+                      selectedRowKeys: selectedIds,
+                      preserveSelectedRowKeys: true,
+                      onChange: (keys, selectedRows) => {
+                        setSelectedIds(keys);
+                        setSelectedItemMap((prev) => {
+                          const next: Record<number, CatalogProduct> = {};
+                          keys.forEach((key) => {
+                            const id = Number(key);
+                            const latestRow = selectedRows.find((row) => row.id === id);
+                            const currentPageRow = items.find((item) => item.id === id);
+                            const cachedRow = prev[id];
+                            if (latestRow || currentPageRow || cachedRow) {
+                              next[id] = latestRow || currentPageRow || cachedRow;
+                            }
+                          });
+                          return next;
+                        });
+                      },
+                    } : undefined}
+                    pagination={{
+                      current: page,
+                      pageSize,
+                      total,
+                      showSizeChanger: true,
+                      pageSizeOptions: [20, 50, 100, 500, 1000],
+                      onChange: (nextPage, nextPageSize) => {
+                        setPage(nextPage);
+                        setPageSize(Math.min(nextPageSize, 1000));
+                      },
+                    }}
+                  />
+                </div>
+              </>
+            ),
           },
-          preserveSelectedRowKeys: true,
-        }}
-        pagination={{
-          current: page,
-          pageSize,
-          total,
-          showSizeChanger: true,
-          pageSizeOptions: [20, 50, 100, 500, 1000],
-          onChange: (nextPage, nextPageSize) => {
-            setPage(nextPage);
-            setPageSize(Math.min(nextPageSize, 1000));
+          {
+            key: 'templates',
+            label: '类目模板管理',
+            children: (
+              <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                <div style={panelStyle}>
+                  <Table
+                    rowKey="file_id"
+                    dataSource={templateFiles}
+                    columns={templateFileColumns}
+                    loading={categoriesLoading}
+                    scroll={{ x: 1210 }}
+                    pagination={false}
+                    locale={{ emptyText: '暂无模板文件' }}
+                  />
+                </div>
+                <div style={panelStyle}>
+                  <div style={{ padding: '12px 16px', borderBottom: '1px solid #eef0f4', fontWeight: 600 }}>
+                    未覆盖类目
+                  </div>
+                  <Table
+                    rowKey="category"
+                    dataSource={uncoveredTemplateCategoryRows}
+                    columns={uncoveredCategoryColumns}
+                    loading={categoriesLoading}
+                    scroll={{ x: 980 }}
+                    pagination={false}
+                    locale={{ emptyText: '当前没有未覆盖类目' }}
+                  />
+                </div>
+              </Space>
+            ),
           },
-        }}
+        ]}
       />
-      <Modal
-        title={asinTarget?.amazon_asin ? '重新关联真实 ASIN' : '关联真实 ASIN'}
-        open={asinModalOpen}
-        okText="保存 ASIN"
-        cancelText="取消"
-        confirmLoading={asinSaving}
-        onOk={saveManualAsin}
-        onCancel={() => {
-          if (!asinSaving) {
-            setAsinModalOpen(false);
-            setAsinTarget(null);
-            setManualAsin('');
-          }
-        }}
-      >
-        <Space direction="vertical" style={{ width: '100%' }}>
-          <Text type="secondary">
-            这会直接替换真实 ASIN，不会创建同步任务。已有真实 ASIN 的商品不会再参与 Amazon 导入表格导出。
-          </Text>
-          <Input
-            value={manualAsin}
-            onChange={(event) => setManualAsin(event.target.value.toUpperCase())}
-            placeholder="B0XXXXXXXX"
-            maxLength={10}
-          />
-        </Space>
-      </Modal>
+
     </div>
   );
 };

@@ -21,6 +21,7 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
         if conn.dialect.name != "sqlite":
             if conn.dialect.name in {"mysql", "mariadb"}:
+                await _ensure_mysql_catalog_export_columns(conn)
                 await _ensure_mysql_longtext_columns(conn)
                 await _ensure_mysql_giga_relation_columns(conn)
                 await _ensure_mysql_giga_store_scoped_unique_indexes(conn)
@@ -185,6 +186,9 @@ async def init_db():
                 stock_sync_error TEXT,
                 status VARCHAR(30),
                 confirmed_at DATETIME,
+                exported_at DATETIME,
+                export_task_id INTEGER,
+                export_file_path TEXT,
                 imported_at DATETIME,
                 updated_at DATETIME,
                 FOREIGN KEY(source_product_id) REFERENCES products(id)
@@ -209,6 +213,9 @@ async def init_db():
             ("stock_sync_status", "VARCHAR(20) DEFAULT 'not_synced'"),
             ("stock_synced_at", "DATETIME"),
             ("stock_sync_error", "TEXT"),
+            ("exported_at", "DATETIME"),
+            ("export_task_id", "INTEGER"),
+            ("export_file_path", "TEXT"),
         ):
             if column_name not in existing_catalog_columns:
                 await conn.execute(text(f"ALTER TABLE catalog_products ADD COLUMN {column_name} {column_type}"))
@@ -957,6 +964,16 @@ async def _mysql_constraint_exists(conn, table_name: str, constraint_name: str) 
         LIMIT 1
     """), {"table_name": table_name, "constraint_name": constraint_name})
     return result.first() is not None
+
+
+async def _ensure_mysql_catalog_export_columns(conn) -> None:
+    for column_name, column_type in (
+        ("exported_at", "DATETIME NULL"),
+        ("export_task_id", "INTEGER NULL"),
+        ("export_file_path", "LONGTEXT NULL"),
+    ):
+        if not await _mysql_column_exists(conn, "catalog_products", column_name):
+            await conn.execute(text(f"ALTER TABLE `catalog_products` ADD COLUMN `{column_name}` {column_type}"))
 
 
 async def _ensure_mysql_giga_relation_columns(conn) -> None:

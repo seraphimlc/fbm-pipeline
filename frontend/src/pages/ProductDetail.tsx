@@ -7,18 +7,24 @@ import {
   PauseOutlined, ReloadOutlined, DeleteOutlined,
   FolderOpenOutlined, FileZipOutlined, InboxOutlined, FileExcelOutlined,
   CheckOutlined, DragOutlined, CopyOutlined, ExportOutlined,
+  PictureOutlined,
 } from '@ant-design/icons';
-import { getProduct, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, updateProduct, updateProductListingImages, confirmProduct, listCategoryOptions, listProductCompetitorCandidates, searchProductCompetitorCandidates, selectProductCompetitorCandidate } from '../api';
+import { getProduct, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, generateProductAplus, runProductFromStep, updateProduct, updateProductListingImages, listCategoryOptions, listProductCompetitorCandidates, searchProductCompetitorCandidates, selectProductCompetitorCandidate } from '../api';
 import type { AmazonStyleSnapCandidateGroup, CategoryOption, ProductDetail } from '../api';
 
 const { Title, Text } = Typography;
 const PRODUCT_LIST_RETURN_KEY = 'fbm.productList.returnPath';
 
-const APLUS_REGEN_ACTIVE_STATUSES = ['regen_queued', 'regen_script_running', 'regen_image_running'];
+const APLUS_REGEN_ACTIVE_STATUSES = ['queued', 'planning', 'scripting', 'imaging', 'regen_queued', 'regen_script_running', 'regen_image_running'];
 const APLUS_REGEN_RETRYABLE_STATUSES = ['regen_failed', 'regen_interrupted'];
 const APLUS_STATUS_LABELS: Record<string, { color: string; text: string }> = {
   done: { color: 'success', text: 'A+已完成' },
   partial: { color: 'warning', text: 'A+部分完成' },
+  queued: { color: 'processing', text: 'A+排队中' },
+  planning: { color: 'processing', text: 'A+规划中' },
+  scripting: { color: 'processing', text: 'A+脚本中' },
+  imaging: { color: 'processing', text: 'A+出图中' },
+  failed: { color: 'error', text: 'A+生成失败' },
   regen_queued: { color: 'processing', text: '重新生图排队中' },
   regen_script_running: { color: 'processing', text: '正在重写脚本' },
   regen_image_running: { color: 'processing', text: '正在重新生图' },
@@ -122,7 +128,7 @@ const defaultProductDetailTab = (detail: ProductDetail | null | undefined) => {
   ) {
     return 'images';
   }
-  if (step >= 7 || hasAplusOutput) return 'aplus';
+  if (hasAplusOutput) return 'aplus';
   if (step >= 6 || hasListingContent) return 'listing';
   return 'basic';
 };
@@ -138,6 +144,8 @@ const ProductDetail: React.FC = () => {
   const [regenReason, setRegenReason] = useState('');
   const [regenLoading, setRegenLoading] = useState(false);
   const [regenRetryLoading, setRegenRetryLoading] = useState(false);
+  const [aplusGenerateLoading, setAplusGenerateLoading] = useState(false);
+  const [listingRegenerateLoading, setListingRegenerateLoading] = useState(false);
   const [restartLoading, setRestartLoading] = useState(false);
   const [activeTabKey, setActiveTabKey] = useState('basic');
   const [categoryEditOpen, setCategoryEditOpen] = useState(false);
@@ -344,6 +352,12 @@ const ProductDetail: React.FC = () => {
   const contactSheets = imageAnalysisPayload?.contact_sheets || (
     images?.contact_sheet_path ? [{ sheet_page: 1, sheet_path: images.contact_sheet_path, image_ids: imageReviews.map((item) => item.image_id || `#${item.index}`) }] : []
   );
+  const contactSheetDisplayUrl = (sheet: any) => (
+    sheet?.display_url
+    || sheet?.oss_url
+    || sheet?.url
+    || imgUrl(sheet?.sheet_path)
+  );
   const reviewsBySheet = contactSheets.map((sheet) => ({
     ...sheet,
     reviews: imageReviews.filter((review) => review?.contact_sheet_evidence?.sheet_path === sheet.sheet_path || sheet.image_ids?.includes(review.image_id)),
@@ -522,10 +536,11 @@ const ProductDetail: React.FC = () => {
       kind: '分析图',
       label: `Contact Sheet ${sheet.sheet_page || index + 1}`,
       path: sheet.sheet_path,
-      url: imgUrl(sheet.sheet_path),
+      url: contactSheetDisplayUrl(sheet),
+      oss_url: sheet.oss_url,
       localPath: sheet.sheet_path,
       previewable: true,
-      meta: `${sheet.image_ids?.length || 0} 张图`,
+      meta: sheet.oss_url ? `OSS · ${sheet.image_ids?.length || 0} 张图` : `${sheet.image_ids?.length || 0} 张图`,
     }),
     ...(Array.isArray(aplusGeneratedImages) ? aplusGeneratedImages.map((item, index) => {
       const displayUrl = item?.display_url || item?.url || item?.oss_url || item?.provider_url || item?.path;
@@ -632,7 +647,7 @@ const ProductDetail: React.FC = () => {
     if (forceCapture && hasDownstreamOutput) {
       Modal.confirm({
         title: '确认重新抓取竞品详情？',
-        content: '重新抓取后会刷新选中竞品的标题、五点、描述、类目等参考数据；后续生成内容需要重新确认或重跑。',
+        content: '重新抓取后会刷新选中竞品的标题、五点、描述、类目等参考数据；后续生成内容需要重跑。',
         okText: '重新抓详情',
         cancelText: '取消',
         onOk: doSelect,
@@ -712,6 +727,32 @@ const ProductDetail: React.FC = () => {
       message.error(e?.response?.data?.detail || 'A+重新生图重试失败');
     } finally {
       setRegenRetryLoading(false);
+    }
+  };
+
+  const generateAplus = async (force = false) => {
+    setAplusGenerateLoading(true);
+    try {
+      await generateProductAplus(product.id, force);
+      message.success(force ? '已创建任务中心任务：重新生成 A+' : '已创建任务中心任务：生成 A+');
+      await fetchDetail();
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || 'A+生成任务创建失败');
+    } finally {
+      setAplusGenerateLoading(false);
+    }
+  };
+
+  const regenerateListing = async () => {
+    setListingRegenerateLoading(true);
+    try {
+      await runProductFromStep(product.id, 6);
+      message.success('已开始重新生成 Listing 文案，完成后会自动回到待导出');
+      await fetchDetail();
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || 'Listing 文案重新生成失败');
+    } finally {
+      setListingRegenerateLoading(false);
     }
   };
 
@@ -1069,7 +1110,7 @@ const ProductDetail: React.FC = () => {
   const stepStatus = stoppedStatuses.includes(product.status) ? 'error' : ['completed', 'pending_review'].includes(product.status) ? 'finish' : 'process';
   const isStopped = stoppedStatuses.includes(product.status);
   const isPaused = product.status === 'paused';
-  const isReadyToExport = ['completed', 'pending_review'].includes(product.status) && product.current_step >= 9;
+  const isReadyToExport = product.status === 'completed' && product.current_step >= 6;
   const stylesnapSearch = rawSnapshot?.stylesnap_search || {};
   const stylesnapSearchStatus = stylesnapSearch?.status || '';
   const competitorCandidateCount = competitorGroup?.candidates?.length || Number(stylesnapSearch?.count || 0);
@@ -1150,7 +1191,6 @@ const ProductDetail: React.FC = () => {
   const hasAplusOutput = Boolean(
     aplus?.aplus_status === 'done'
     || aplus?.aplus_status === 'regen_done'
-    || product.current_step >= 9
     || (Array.isArray(aplusGeneratedImages) && aplusGeneratedImages.length)
   );
   const aplusProgressText = [
@@ -1158,6 +1198,14 @@ const ProductDetail: React.FC = () => {
     aplusScriptReady ? '脚本已完成' : '待脚本',
     aplusImageDoneCount ? `出图 ${aplusImageDoneCount}/5` : '待出图',
   ].join('，');
+  const canGenerateAplus = isReadyToExport && hasListingContent && hasImageAnalysis;
+  const aplusGenerateDisabledReason = (() => {
+    if (isAplusRegenerating) return 'A+生成中，请等待后台任务完成';
+    if (!isReadyToExport) return '只有待导出或已导出的商品可以生成 A+';
+    if (!hasListingContent) return 'Listing文案未完成';
+    if (!hasImageAnalysis) return '图片分析未完成';
+    return '';
+  })();
   const statusSuffix = isPaused ? '，已挂起' : '';
   const nodeErrorAt = (node: string) => {
     if (isCompetitorSearchFailed) return node === 'find-competitors';
@@ -1170,7 +1218,6 @@ const ProductDetail: React.FC = () => {
     if (node === 'capture-competitor-detail') return step <= 4;
     if (node === 'image-analysis') return step === 5;
     if (node === 'listing') return step === 6;
-    if (node === 'aplus') return step >= 7;
     return false;
   };
   const nodeActiveAt = (node: string) => {
@@ -1182,8 +1229,7 @@ const ProductDetail: React.FC = () => {
     if (node === 'capture-competitor-detail') return isListingCaptureRunning || (hasReferenceCompetitor && !hasListingCapture);
     if (node === 'image-analysis') return !isListingCaptureRunning && hasListingCapture && hasListingImages && !hasImageAnalysis;
     if (node === 'listing') return !isListingCaptureRunning && hasReferenceCompetitor && hasListingCapture && hasImageAnalysis && !hasListingContent;
-    if (node === 'aplus') return step >= 7 && step <= 9 && !hasAplusOutput;
-    if (node === 'export') return ['completed', 'pending_review'].includes(product.status);
+    if (node === 'export') return isReadyToExport;
     return false;
   };
   const toWorkflowItem = (item: any) => ({
@@ -1261,20 +1307,15 @@ const ProductDetail: React.FC = () => {
         : hasListingCapture
           ? `竞品详情已抓取，等待结合图片分析生成文案${statusSuffix}`
           : `等待竞品详情抓取完成${statusSuffix}`,
-      done: hasListingContent || product.current_step > 6 || isReadyToExport,
+      done: hasListingContent || product.current_step >= 6 || isReadyToExport,
       active: nodeActiveAt('listing'),
       error: nodeErrorAt('listing'),
     },
     {
-      title: 'A+规划/脚本/出图',
-      description: `${aplusProgressText}${isAplusRegenerating && aplusStatus ? `，${aplusStatus.text}` : statusSuffix}`,
-      done: hasAplusOutput || isReadyToExport,
-      active: nodeActiveAt('aplus') || isAplusRegenerating,
-      error: nodeErrorAt('aplus') || canRetryAplusRegeneration,
-    },
-    {
       title: '待导出',
-      description: isReadyToExport ? '已具备导出条件' : '等待生成结果通过复核',
+      description: isReadyToExport
+        ? '已加入待导出'
+        : '等待Listing生成完成',
       done: isReadyToExport,
       active: nodeActiveAt('export'),
     },
@@ -1289,9 +1330,10 @@ const ProductDetail: React.FC = () => {
   })();
 
   const isPipelineRunning = !['completed', 'pending_review', 'failed', 'unavailable', 'source_unavailable', 'created', 'paused'].includes(product.status);
+  const canRegenerateListing = Boolean(hasListingCapture && hasImageAnalysis && !isPipelineRunning && !isPaused && !isHardStopped);
   const canSuspendProduct = product.status !== 'paused'
     && !['completed', 'unavailable', 'source_unavailable'].includes(product.status)
-    && !(product.status === 'pending_review' && product.current_step >= 9);
+    && !(product.status === 'pending_review' && product.current_step >= 6);
   const hasRestartableDownstreamState = Boolean(
     product.current_step > 0
     || hasReferenceCompetitor
@@ -1872,7 +1914,28 @@ const ProductDetail: React.FC = () => {
             title="标题"
             size="small"
             style={{ marginBottom: 12 }}
-            extra={<Button size="small" onClick={openListingEditor}>编辑 Listing</Button>}
+            extra={(
+              <Space size="small">
+                <Popconfirm
+                  title="确定重新生成 Listing 文案？"
+                  description="会基于当前商品图片、图片分析和已选竞品重新生成标题、五点、描述和 Search Terms；完成后会自动回到待导出。"
+                  okText="重新生成"
+                  cancelText="取消"
+                  onConfirm={regenerateListing}
+                  disabled={!canRegenerateListing || listingRegenerateLoading}
+                >
+                  <Button
+                    size="small"
+                    icon={<RedoOutlined />}
+                    loading={listingRegenerateLoading}
+                    disabled={!canRegenerateListing}
+                  >
+                    重新生成
+                  </Button>
+                </Popconfirm>
+                <Button size="small" onClick={openListingEditor}>编辑 Listing</Button>
+              </Space>
+            )}
           >
             <Space direction="vertical" style={{ width: '100%' }}>
               <Text>{data?.listing_title || '（未生成）'}</Text>
@@ -2314,7 +2377,7 @@ const ProductDetail: React.FC = () => {
                     title={`Contact Sheet ${sheet.sheet_page || ''}`}
                     extra={<Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(sheet.sheet_path)}>打开</Button>}
                   >
-                    <Image src={imgUrl(sheet.sheet_path)} width={360} alt={`Contact Sheet ${sheet.sheet_page || ''}`} style={{ marginBottom: 12 }} />
+                    <Image src={contactSheetDisplayUrl(sheet)} width={360} alt={`Contact Sheet ${sheet.sheet_page || ''}`} style={{ marginBottom: 12 }} />
                     <Table
                       size="small"
                       rowKey={(record) => record.image_id || record.filename}
@@ -2343,6 +2406,47 @@ const ProductDetail: React.FC = () => {
       label: '🎨 A+内容',
       children: (
         <div>
+          <Card
+            title="A+生成"
+            size="small"
+            style={{ marginBottom: 12 }}
+            extra={aplusStatus ? <Tag color={aplusStatus.color}>{aplusStatus.text}</Tag> : <Tag>未生成</Tag>}
+          >
+            <Space direction="vertical" style={{ width: '100%' }} size={12}>
+              <Text type="secondary">
+                A+已从商品主流程拆出；商品进入待导出后，可以在这里单个生成，也可以到 A+管理批量生成。
+              </Text>
+              <Space wrap>
+                <Button
+                  type="primary"
+                  icon={<PictureOutlined />}
+                  loading={aplusGenerateLoading && !hasAplusOutput}
+                  disabled={!canGenerateAplus || isAplusRegenerating || (hasAplusOutput && aplus?.aplus_status === 'done')}
+                  onClick={() => generateAplus(false)}
+                >
+                  生成A+
+                </Button>
+                <Popconfirm
+                  title="确定强制重跑 A+？"
+                  description="会清空已有 A+ 规划、脚本和出图结果，并重新走后台生成任务。"
+                  okText="强制重跑"
+                  cancelText="取消"
+                  onConfirm={() => generateAplus(true)}
+                  disabled={!canGenerateAplus || isAplusRegenerating || aplusGenerateLoading}
+                >
+                  <Button
+                    icon={<RedoOutlined />}
+                    loading={aplusGenerateLoading && hasAplusOutput}
+                    disabled={!canGenerateAplus || isAplusRegenerating || aplusGenerateLoading}
+                  >
+                    强制重跑
+                  </Button>
+                </Popconfirm>
+                {isAplusRegenerating && <Tag color="processing">后台生成中</Tag>}
+                {aplusGenerateDisabledReason && <Text type="secondary">{aplusGenerateDisabledReason}</Text>}
+              </Space>
+            </Space>
+          </Card>
           <Card
             title="A+规划"
             size="small"
@@ -2678,6 +2782,10 @@ const ProductDetail: React.FC = () => {
       ),
     },
   ];
+  const tabOrder = ['basic', 'competitor', 'images', 'listing', 'aplus', 'files'];
+  const orderedTabItems = tabOrder
+    .map((key) => tabItems.find((item) => item.key === key))
+    .filter(Boolean);
 
   return (
     <>
@@ -2701,22 +2809,10 @@ const ProductDetail: React.FC = () => {
               继续
             </Button>
           )}
-          {product.status === 'pending_review' && product.current_step < 9 && (
+          {product.status === 'pending_review' && (
             <Button type="primary" icon={<PlayCircleOutlined />} onClick={async () => { await resumePipeline(product.id); fetchDetail(); }}>
               继续
             </Button>
-          )}
-          {product.status === 'pending_review' && product.current_step >= 9 && (
-            <Popconfirm
-              title="确认加入待导出？"
-              description={isAplusRegenerating ? 'A+重新生成还在进行中，完成后才能确认。' : '确认后，这个 Item 会进入待导出，后续在导出中心批量生成 Excel。'}
-              okText="加入待导出"
-              cancelText="再看看"
-              disabled={isAplusRegenerating}
-              onConfirm={async () => { await confirmProduct(product.id); message.success('已加入待导出'); fetchDetail(); }}
-            >
-              <Button type="primary" icon={<CheckOutlined />} disabled={isAplusRegenerating}>加入待导出</Button>
-            </Popconfirm>
           )}
           {canRetryAplusRegeneration && (
             <Button icon={<RedoOutlined />} loading={regenRetryLoading} onClick={retryInterruptedAplus}>
@@ -2793,7 +2889,7 @@ const ProductDetail: React.FC = () => {
       {/* 内容 Tabs */}
       <Tabs
         activeKey={activeTabKey}
-        items={tabItems}
+        items={orderedTabItems}
         onChange={(key) => {
           userTouchedTabRef.current = true;
           setActiveTabKey(key);

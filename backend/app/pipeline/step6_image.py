@@ -2107,7 +2107,7 @@ async def run_image_analysis(product_id: int) -> dict:
                     else:
                         warning = (
                             f"Contact Sheet {sheet['sheet_page']} 多图请求连接异常，"
-                            "已跳过逐张重试并使用保守图片分析保底。"
+                            "已跳过逐张重试；本轮如无其它真实分析结果将停在图片分析节点等待重跑。"
                         )
                         fallback_status = "transient_connection_failed"
                     logger.warning(f"[Step6] {warning} error={exc}")
@@ -2183,43 +2183,11 @@ async def run_image_analysis(product_id: int) -> dict:
                 })
 
         if not all_reviews:
-            warning = "VLM 未返回任何图片分析结果，已使用保守图片分析保底继续流程。"
+            warning = "VLM 未返回任何真实图片分析结果，不能使用保守兜底继续流程，请重跑图片分析。"
             logger.warning(f"[Step6] {warning}")
-            analysis_warnings.append(warning)
-            all_reviews = []
-            for index, record in enumerate(image_records):
-                role = "main" if index == 0 else "alternate_angle"
-                score = 8 if index == 0 else 6
-                filename = record.get("filename") or f"image_{index + 1}"
-                fallback_review = {
-                    "image_id": record.get("image_id") or f"#{index + 1}",
-                    "slot": record.get("slot") or f"{index + 1:02d}",
-                    "filename": filename,
-                    "path": record.get("path") or record.get("url"),
-                    "source_url": record.get("source_url") or record.get("url") or record.get("path"),
-                    "image_type": role,
-                    "selection_role": role,
-                    "slot01_score": score,
-                    "gallery_score": score,
-                    "visible_selling_point": "Use this image as a conservative product reference; avoid unsupported claims.",
-                    "aplus_reference_value": "Product identity reference only; preserve visible shape, color, material, and construction.",
-                    "risk_notes": ["Fallback analysis: VLM unavailable or timed out."],
-                    "analysis_source": "fallback_no_vlm",
-                    "multimodal_result": {
-                        "aplus_reference_value": "Product identity reference only; preserve visible shape, color, material, and construction.",
-                        "visual_risks": ["VLM analysis unavailable; keep downstream claims conservative."],
-                    },
-                }
-                all_reviews.append(fallback_review)
-            sheet_payloads.append({
-                "sheet_page": 0,
-                "sheet_path": pi.contact_sheet_path,
-                "image_ids": [item.get("image_id") for item in all_reviews],
-                "analysis": {"images": all_reviews, "fallback": True},
-                "reviews": all_reviews,
-                "mode": "fallback_no_vlm",
-                "status": "fallback_no_vlm",
-            })
+            if analysis_warnings:
+                warning = warning + " " + " ".join(analysis_warnings[-3:])
+            raise RuntimeError(warning)
 
         main_review, gallery_selection, selection_diagnostics = _select_gallery(all_reviews, strategy)
         if analysis_warnings:

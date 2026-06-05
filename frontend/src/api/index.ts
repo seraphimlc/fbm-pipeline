@@ -25,6 +25,7 @@ export interface Product {
   aplus_uploaded_at: string | null;
   aplus_upload_error: string | null;
   aplus_status?: string | null;
+  aplus_image_count?: number | null;
   upc: string | null;
   item_code?: string | null;
   title?: string | null;
@@ -56,6 +57,8 @@ export interface CatalogProduct {
   aplus_upload_status: string | null;
   aplus_uploaded_at: string | null;
   aplus_upload_error: string | null;
+  aplus_status?: string | null;
+  aplus_image_count?: number | null;
   upc: string | null;
   brand: string;
   item_code: string | null;
@@ -67,6 +70,9 @@ export interface CatalogProduct {
   stock_sync_error: string | null;
   status: string;
   confirmed_at: string | null;
+  exported_at: string | null;
+  export_task_id: number | null;
+  export_file_path: string | null;
   imported_at: string;
   updated_at: string;
   template_risk_level: string | null;
@@ -238,6 +244,22 @@ export interface CatalogTemplateUploadResult {
   object_key: string | null;
   oss_url: string | null;
   uploaded_at: string;
+}
+
+export interface CatalogTemplateFileSummary {
+  file_id: string;
+  file_no: string;
+  file_name: string;
+  file_status: 'enabled' | 'disabled' | 'unmapped' | string;
+  enabled: boolean;
+  source: string;
+  template_path: string | null;
+  oss_object_key: string | null;
+  oss_url: string | null;
+  support_categories: string[];
+  template_errors: string[];
+  can_download: boolean;
+  can_delete: boolean;
 }
 
 export interface InventorySyncBatch {
@@ -491,6 +513,11 @@ export interface PaginatedOfflineTasks {
 export interface OfflineTaskQueuedResult {
   task: OfflineTask;
   steps: OfflineTaskStep[];
+}
+
+export interface OfflineTaskBatchQueuedResult {
+  tasks: OfflineTask[];
+  errors: string[];
 }
 
 export interface AmazonStyleSnapCandidate {
@@ -978,6 +1005,27 @@ export const listCatalogProducts = (params?: {
 export const listCatalogExportCategories = () =>
   api.get<CatalogExportCategories>('/products/catalog/export-categories');
 
+export const listCatalogTemplateCategories = () =>
+  api.get<CatalogExportCategorySummary[]>('/products/catalog/template-categories');
+
+export const listCatalogTemplateFiles = () =>
+  api.get<CatalogTemplateFileSummary[]>('/products/catalog/template-files');
+
+export const downloadCatalogTemplateFile = (fileId: string) =>
+  api.get<Blob>(`/products/catalog/template-files/${fileId}/download`, { responseType: 'blob', timeout: 300000 });
+
+export const updateCatalogTemplateFileStatus = (fileId: string, enabled: boolean) =>
+  api.patch<CatalogTemplateFileSummary>(`/products/catalog/template-files/${fileId}/status`, { enabled });
+
+export const deleteCatalogTemplateFile = (fileId: string) =>
+  api.delete<CatalogTemplateFileSummary[]>(`/products/catalog/template-files/${fileId}`);
+
+export const downloadCatalogCategoryTemplate = (category: string) =>
+  api.get<Blob>('/products/catalog/category-template-download', { params: { category }, responseType: 'blob', timeout: 300000 });
+
+export const createCatalogExportOfflineTasks = (ids: number[]) =>
+  api.post<OfflineTaskBatchQueuedResult>('/offline-tasks/catalog-export', { catalog_product_ids: ids }, { timeout: 30000 });
+
 export const exportCatalogProducts = (ids: number[]) =>
   api.post<Blob>('/products/catalog/export', ids, { responseType: 'blob', timeout: 300000 });
 
@@ -1041,6 +1089,9 @@ export const pauseOfflineTask = (id: number) =>
 
 export const resumeOfflineTask = (id: number) =>
   api.post<OfflineTaskDetail>(`/offline-tasks/${id}/resume`);
+
+export const downloadOfflineTaskResult = (id: number) =>
+  api.get<Blob>(`/offline-tasks/${id}/download`, { responseType: 'blob', timeout: 300000 });
 
 export const listGigaItems = (params: { batch_id?: string; site?: string; data_source_id?: number; page?: number; page_size?: number; sku_code?: string }) =>
   api.get<PaginatedGigaItems>('/giga/items', { params });
@@ -1106,6 +1157,9 @@ export const getAsinSyncBatch = (id: number) =>
 
 export const createAplusUploadBatch = (catalogProductIds: number[], store = 'Andy店-US', submitForApproval = true) =>
   api.post<AplusUploadBatch>('/products/catalog/aplus-upload', { catalog_product_ids: catalogProductIds, store, submit_for_approval: submitForApproval }, { timeout: 120000 });
+
+export const createAplusGenerateBatch = (catalogProductIds: number[], force = false) =>
+  api.post<BulkStartResult>('/products/catalog/aplus-generate', { catalog_product_ids: catalogProductIds, force }, { timeout: 120000 });
 
 export const listAplusUploadBatches = (params?: { page?: number; page_size?: number }) =>
   api.get<PaginatedAplusUploadBatches>('/products/aplus-upload-batches', { params });
@@ -1177,6 +1231,9 @@ export const regenerateAplusModule = (id: number, data: { module_position: numbe
 
 export const retryAplusRegeneration = (id: number) =>
   api.post<{ status: string; message: string; task_ids: number[]; module_positions: number[] }>(`/products/${id}/aplus/regenerate/retry`);
+
+export const generateProductAplus = (id: number, force = false) =>
+  api.post<{ status: string; product_id: number; task_id?: number | null }>(`/products/${id}/aplus/generate`, null, { params: { force }, timeout: 120000 });
 
 export const getConfig = () =>
   api.get<SystemConfig>('/config');

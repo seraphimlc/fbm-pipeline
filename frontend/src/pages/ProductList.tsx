@@ -1,10 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Table, Button, Tag, Space, Typography, message, Popconfirm, Input, Modal, DatePicker, Image, Select } from 'antd';
-import { ReloadOutlined, PlayCircleOutlined, RedoOutlined, DeleteOutlined, CheckOutlined, CloudDownloadOutlined, PauseOutlined } from '@ant-design/icons';
+import { ReloadOutlined, PlayCircleOutlined, RedoOutlined, DeleteOutlined, CloudDownloadOutlined, PauseOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import {
-  confirmProduct,
   createGigaPullOfflineTask,
   deleteProduct,
   getOfflineTask,
@@ -29,7 +28,6 @@ const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
 const PRODUCT_LIST_RETURN_KEY = 'fbm.productList.returnPath';
 const PRODUCT_DATA_SOURCE_KEY = 'fbm.productList.dataSourceId';
-const APLUS_REGEN_ACTIVE_STATUSES = ['regen_queued', 'regen_script_running', 'regen_image_running'];
 const RUNNING_STATUSES = [
   'step1_collecting',
   'step2_pricing',
@@ -37,9 +35,6 @@ const RUNNING_STATUSES = [
   'step4_category',
   'step5_listing',
   'step6_curating',
-  'step7_aplus_plan',
-  'step8_aplus_script',
-  'step9_aplus_image',
 ];
 
 type WorkStatus =
@@ -50,7 +45,7 @@ type WorkStatus =
   | 'ready_to_generate'
   | 'running'
   | 'suspended'
-  | 'review'
+  | 'manual_review'
   | 'export_ready'
   | 'failed';
 
@@ -207,7 +202,7 @@ const ProductList: React.FC = () => {
     if (product.status === 'step5_listing' && /竞品.*抓取中|Listing.*抓取中/i.test(product.error_message || '')) return 'capture_detail';
     if (RUNNING_STATUSES.includes(product.status)) return 'running';
     if (product.status === 'completed') return 'export_ready';
-    if (product.status === 'pending_review') return 'review';
+    if (product.status === 'pending_review') return 'manual_review';
     if (product.status === 'created' && (product.current_step || 0) <= 0) return 'select_images';
     if (product.status === 'created' && !product.competitor_asin) return 'select_competitor';
     if (product.status === 'created') return 'ready_to_generate';
@@ -525,7 +520,7 @@ const ProductList: React.FC = () => {
     if (status === 'ready_to_generate') return <Tag color="success">待生成</Tag>;
     if (status === 'running') return <Tag color="processing">生成中</Tag>;
     if (status === 'suspended') return <Tag color="default">已挂起</Tag>;
-    if (status === 'review') return <Tag color="warning">待复核</Tag>;
+    if (status === 'manual_review') return <Tag color="warning">待人工处理</Tag>;
     if (status === 'export_ready') return <Tag color="success">待导出</Tag>;
     return <Tag color="error">失败</Tag>;
   };
@@ -537,7 +532,7 @@ const ProductList: React.FC = () => {
     if (status === 'capture_detail') return <Tag color="processing">等待详情抓取完成</Tag>;
     if (status === 'ready_to_generate') return <Tag color="green">可启动生成</Tag>;
     if (status === 'suspended') return <Tag color="warning">继续任务</Tag>;
-    if (status === 'review') return product.current_step >= 9 ? <Tag color="green">确认加入待导出</Tag> : <Tag color="warning">人工确认后继续</Tag>;
+    if (status === 'manual_review') return <Tag color="warning">人工处理后继续</Tag>;
     if (status === 'export_ready') return <Tag color="success">等待批量导出</Tag>;
     if (status === 'failed') return <Tag color="error">查看错误并重试</Tag>;
     return <Tag color="processing">等待运行完成</Tag>;
@@ -663,7 +658,6 @@ const ProductList: React.FC = () => {
       fixed: 'right' as const,
       render: (_: unknown, row: ProductRow) => {
         const product = row.product;
-        const aplusRegenerating = APLUS_REGEN_ACTIVE_STATUSES.includes(product.aplus_status || '');
         const canRestartProduct = !RUNNING_STATUSES.includes(product.status) && row.workStatus !== 'select_images';
         return (
           <Space size="small">
@@ -689,26 +683,12 @@ const ProductList: React.FC = () => {
                 继续
               </Button>
             )}
-            {product.status === 'pending_review' && product.current_step < 9 && (
+            {product.status === 'pending_review' && (
               <Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={() => resumeProductTask(product.id)}>
                 继续
               </Button>
             )}
-            {product.status === 'pending_review' && product.current_step >= 9 && (
-              <Popconfirm
-                title="确认加入待导出？"
-                description={aplusRegenerating ? 'A+重新生成还在进行中，完成后才能确认。' : '确认后，这个 Item 会进入待导出，后续在导出中心批量生成 Excel。'}
-                okText="加入待导出"
-                cancelText="再看看"
-                disabled={aplusRegenerating}
-                onConfirm={async () => { await confirmProduct(product.id); message.success('已加入待导出'); await refreshWorkbenchRows(); }}
-              >
-                <Button size="small" type="primary" icon={<CheckOutlined />} disabled={aplusRegenerating}>
-                  加入待导出
-                </Button>
-              </Popconfirm>
-            )}
-            {['ready_to_generate', 'review', 'failed'].includes(row.workStatus) && (
+            {['ready_to_generate', 'manual_review', 'failed'].includes(row.workStatus) && (
               <Popconfirm
                 title="挂起这个商品？"
                 description="挂起后不会继续执行后续自动流程，之后可以点继续恢复。"
@@ -754,7 +734,7 @@ const ProductList: React.FC = () => {
             {' '}· 待生成 {statusCounts('ready_to_generate')}
             {' '}· 生成中 {statusCounts('running')}
             {' '}· 已挂起 {statusCounts('suspended')}
-            {' '}· 待复核 {statusCounts('review')}
+            {' '}· 待人工处理 {statusCounts('manual_review')}
             {' '}· 待导出 {statusCounts('export_ready')}
             {' '}· 失败 {statusCounts('failed')}
           </Text>
@@ -861,7 +841,7 @@ const ProductList: React.FC = () => {
                 ['ready_to_generate', '待生成'],
                 ['running', '生成中'],
                 ['suspended', '已挂起'],
-                ['review', '待复核'],
+                ['manual_review', '待人工处理'],
                 ['export_ready', '待导出'],
                 ['failed', '失败'],
               ].map(([value, label]) => (

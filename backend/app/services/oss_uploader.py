@@ -79,3 +79,33 @@ def upload_private_file(path: Path, object_key: str) -> dict:
         "status": result.status,
         "expires_seconds": settings.OSS_SIGNED_URL_EXPIRES_SECONDS,
     }
+
+
+def download_private_file(object_key: str, target_path: Path) -> dict:
+    if not oss_configured():
+        raise RuntimeError("OSS 未配置，无法下载文件。")
+    cleaned_key = object_key.strip().lstrip("/")
+    if not cleaned_key:
+        raise ValueError("OSS object_key 不能为空")
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    bucket = _bucket()
+    result = bucket.get_object_to_file(cleaned_key, str(target_path))
+    signed_url = bucket.sign_url("GET", cleaned_key, settings.OSS_SIGNED_URL_EXPIRES_SECONDS, slash_safe=True)
+    return {
+        "path": str(target_path),
+        "object_key": cleaned_key,
+        "url": signed_url,
+        "status": result.status,
+        "expires_seconds": settings.OSS_SIGNED_URL_EXPIRES_SECONDS,
+    }
+
+
+def sign_private_url(object_key: str) -> str:
+    if not oss_configured():
+        raise RuntimeError("OSS 未配置，无法生成文件访问链接。")
+    cleaned_key = object_key.strip().lstrip("/")
+    if not cleaned_key:
+        raise ValueError("OSS object_key 不能为空")
+    bucket = _bucket()
+    return bucket.sign_url("GET", cleaned_key, settings.OSS_SIGNED_URL_EXPIRES_SECONDS, slash_safe=True)

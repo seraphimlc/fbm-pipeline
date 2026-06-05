@@ -2,10 +2,10 @@ import React from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { Layout, Menu, Typography } from 'antd';
 import {
-  ShoppingOutlined,
   CloudSyncOutlined,
   SyncOutlined,
   DatabaseOutlined,
+  ExportOutlined,
   PictureOutlined,
   SettingOutlined,
   UnorderedListOutlined,
@@ -23,10 +23,10 @@ const MainLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const menuItems = [
     { key: '/products', icon: <UnorderedListOutlined />, label: '商品工作台' },
     { key: '/offline-tasks', icon: <BarsOutlined />, label: '任务中心' },
-    { key: '/catalog', icon: <ShoppingOutlined />, label: '导出中心' },
+    { key: '/export-center', icon: <ExportOutlined />, label: '导出中心' },
     { key: '/inventory-sync', icon: <CloudSyncOutlined />, label: '库存同步' },
     { key: '/asin-sync', icon: <SyncOutlined />, label: 'ASIN同步' },
-    { key: '/aplus-upload', icon: <PictureOutlined />, label: 'A+上传' },
+    { key: '/aplus', icon: <PictureOutlined />, label: 'A+管理' },
     { key: '/upc-pool', icon: <DatabaseOutlined />, label: 'UPC池子' },
     { key: '/data-sources', icon: <ApiOutlined />, label: '店铺维护' },
     { key: '/config', icon: <SettingOutlined />, label: '系统配置' },

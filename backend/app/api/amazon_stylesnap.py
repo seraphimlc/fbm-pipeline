@@ -35,9 +35,6 @@ COMPETITOR_SWITCH_BLOCKING_STATUSES = {
     COMPETITOR_SEARCHING,
     STEP5_LISTING,
     "step6_curating",
-    "step7_aplus_plan",
-    "step8_aplus_script",
-    "step9_aplus_image",
 }
 LISTING_CAPTURE_ACTIVE_TTL = timedelta(minutes=5)
 LISTING_CAPTURE_QUEUED_TTL = timedelta(seconds=30)

@@ -1161,13 +1161,9 @@ async def run_aplus_script(product_id: int) -> dict:
                     raise
                 last_transient_error = exc
                 if attempt >= max_attempts:
-                    logger.warning(
-                        "[Step8] A+脚本LLM连接连续失败，使用保底脚本: error=%s: %s",
-                        type(exc).__name__,
-                        exc,
-                    )
-                    response = None
-                    break
+                    raise RuntimeError(
+                        f"A+脚本LLM连接连续失败，未生成真实脚本，请稍后重跑: {type(exc).__name__}: {exc}"
+                    ) from exc
                 wait_seconds = attempt * 5
                 logger.warning(
                     "[Step8] A+脚本LLM连接异常，准备重试: attempt=%s/%s, wait=%ss, error=%s: %s",
@@ -1179,9 +1175,11 @@ async def run_aplus_script(product_id: int) -> dict:
                 )
                 await asyncio.sleep(wait_seconds)
         if response is None:
-            scripts_data = _fallback_aplus_scripts(plan, product, pd)
             if last_transient_error:
-                scripts_data["fallback_error"] = f"{type(last_transient_error).__name__}: {last_transient_error}"
+                raise RuntimeError(
+                    f"A+脚本未生成真实结果，请重跑: {type(last_transient_error).__name__}: {last_transient_error}"
+                ) from last_transient_error
+            raise RuntimeError("A+脚本未生成真实结果，请重跑")
         else:
             content = response.choices[0].message.content
             if not content:
