@@ -5,6 +5,7 @@ import { DeleteOutlined, DownloadOutlined, PauseCircleOutlined, PlayCircleOutlin
 import {
   createCatalogExportOfflineTasks,
   deleteCatalogTemplateFile,
+  downloadOfflineTaskResult,
   downloadCatalogTemplateFile,
   listCatalogExportCategories,
   listCatalogProducts,
@@ -35,6 +36,7 @@ const CatalogList: React.FC = () => {
   const [templateUploading, setTemplateUploading] = useState(false);
   const [templateDownloadingFileId, setTemplateDownloadingFileId] = useState<string | null>(null);
   const [templateFileMutatingId, setTemplateFileMutatingId] = useState<string | null>(null);
+  const [exportDownloadingTaskId, setExportDownloadingTaskId] = useState<number | null>(null);
   const [selectedIds, setSelectedIds] = useState<React.Key[]>([]);
   const [selectedItemMap, setSelectedItemMap] = useState<Record<number, CatalogProduct>>({});
   const [activeTab, setActiveTab] = useState('export');
@@ -73,6 +75,10 @@ const CatalogList: React.FC = () => {
         category: isAllCategories ? undefined : selectedCategory,
       });
       if (requestId !== itemRequestId.current) return;
+      if (!data.items.length && data.total > 0 && page > 1) {
+        setPage(1);
+        return;
+      }
       setItems(data.items);
       setTotal(data.total);
     } catch (error: any) {
@@ -206,10 +212,6 @@ const CatalogList: React.FC = () => {
       message.warning('单次最多导出 1000 个商品，请缩小筛选范围');
       return;
     }
-    if (exportStatus !== 'pending') {
-      message.warning('已导出商品只用于查看，不能再次生成 Amazon 导入表格');
-      return;
-    }
     setExporting(true);
     const hideLoading = message.loading(`正在为${label}创建导出任务，系统会按模板拆分...`, 0);
     try {
@@ -237,16 +239,15 @@ const CatalogList: React.FC = () => {
       await createExportTasksByIds(selectedIds.map(Number), `选中的 ${selectedIds.length} 个商品`);
       return;
     }
-    if (exportStatus !== 'pending') {
-      message.warning('已导出商品只用于查看，不能再次生成 Amazon 导入表格');
+    const currentActionCount = exportStatus === 'pending'
+      ? (isAllCategories ? aggregateSummary.exportableCount : selectedCategorySummary?.exportable_count || 0)
+      : (isAllCategories ? aggregateSummary.count : selectedCategorySummary?.count || 0);
+    if (!isAllCategories && selectedCategorySummary && !currentActionCount) {
+      message.warning(exportStatus === 'pending' ? '当前类目没有可导出的商品' : '当前类目没有历史导出商品');
       return;
     }
-    if (!isAllCategories && selectedCategorySummary && !selectedCategorySummary.exportable_count) {
-      message.warning('当前类目没有可导出的商品');
-      return;
-    }
-    if (isAllCategories && !aggregateSummary.exportableCount) {
-      message.warning('当前没有待导出的商品');
+    if (isAllCategories && !currentActionCount) {
+      message.warning(exportStatus === 'pending' ? '当前没有待导出的商品' : '当前没有已导出商品');
       return;
     }
     setExporting(true);
@@ -257,7 +258,12 @@ const CatalogList: React.FC = () => {
         export_status: exportStatus,
         category: isAllCategories ? undefined : selectedCategory,
       });
-      await createExportTasksByIds(data.items.map((item) => item.id), isAllCategories ? '全部待导出商品' : `「${selectedCategory}」下的商品`);
+      await createExportTasksByIds(
+        data.items.map((item) => item.id),
+        isAllCategories
+          ? (exportStatus === 'pending' ? '全部待导出商品' : '全部已导出商品的新导出尝试')
+          : `「${selectedCategory}」下的${exportStatus === 'pending' ? '商品' : '已导出商品新导出尝试'}`,
+      );
     } catch (error: any) {
       message.error(error?.response?.data?.detail || '加载待导出商品失败');
       setExporting(false);
@@ -296,6 +302,23 @@ const CatalogList: React.FC = () => {
       message.error(error?.response?.data?.detail || '下载模板失败');
     } finally {
       setTemplateDownloadingFileId(null);
+    }
+  };
+
+  const downloadExportTaskResult = async (record: CatalogProduct) => {
+    if (!record.export_task_id) {
+      message.warning('当前商品没有关联导出任务');
+      return;
+    }
+    setExportDownloadingTaskId(record.export_task_id);
+    try {
+      const response = await downloadOfflineTaskResult(record.export_task_id);
+      const fallback = record.export_file_path?.split('/').pop() || `catalog_export_${record.export_task_id}.zip`;
+      saveBlob(response.data, extractFilename(response.headers['content-disposition'], fallback));
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '下载导出文件失败');
+    } finally {
+      setExportDownloadingTaskId(null);
     }
   };
 
@@ -356,11 +379,14 @@ const CatalogList: React.FC = () => {
     : selectedCategorySummary?.template_available ? 1 : 0;
   const exportButtonText = selectedIds.length
     ? `导出选中(${selectedIds.length})`
-    : `导出当前筛选${isAllCategories ? `(${aggregateSummary.exportableCount})` : selectedCategorySummary?.exportable_count ? `(${selectedCategorySummary.exportable_count})` : ''}`;
-  const exportDisabled = exportStatus !== 'pending'
-    || (!selectedIds.length && (isAllCategories
-      ? !aggregateSummary.exportableCount || aggregateSummary.templateReadyCount === 0
-      : !selectedCategorySummary?.exportable_count || !selectedCategorySummary?.template_available));
+    : `${exportStatus === 'pending' ? '导出当前筛选' : '新建导出任务'}${isAllCategories
+      ? `(${exportStatus === 'pending' ? aggregateSummary.exportableCount : aggregateSummary.count})`
+      : selectedCategorySummary
+        ? `(${exportStatus === 'pending' ? selectedCategorySummary.exportable_count : selectedCategorySummary.count})`
+        : ''}`;
+  const exportDisabled = !selectedIds.length && (isAllCategories
+    ? (exportStatus === 'pending' ? !aggregateSummary.exportableCount : !aggregateSummary.count) || aggregateSummary.templateReadyCount === 0
+    : (exportStatus === 'pending' ? !selectedCategorySummary?.exportable_count : !selectedCategorySummary?.count) || !selectedCategorySummary?.template_available);
 
   const columns = [
     {
@@ -400,7 +426,7 @@ const CatalogList: React.FC = () => {
       render: (value: string | null) => value || '-',
     },
     {
-      title: '模板检查',
+      title: '风险检查',
       dataIndex: 'template_risk_level',
       width: 130,
       render: (value: string | null, record: CatalogProduct) => riskTag(value, record.template_warnings_count),
@@ -408,7 +434,12 @@ const CatalogList: React.FC = () => {
     {
       title: '导出状态',
       width: 120,
-      render: () => exportStatus === 'pending' ? <Tag color="blue">待导出</Tag> : <Tag color="success">已导出</Tag>,
+      render: (_: unknown, record: CatalogProduct) => (
+        <Space size={4} wrap>
+          {exportStatus === 'pending' ? <Tag color="blue">待导出</Tag> : <Tag color="success">历史文件</Tag>}
+          {record.amazon_asin ? <Tag color="purple">真实 ASIN</Tag> : null}
+        </Space>
+      ),
     },
     {
       title: '更新时间',
@@ -418,9 +449,21 @@ const CatalogList: React.FC = () => {
     },
     {
       title: '操作',
-      width: 90,
+      width: 150,
       render: (_: unknown, record: CatalogProduct) => (
-        <Button size="small" onClick={() => navigate(`/products/${record.source_product_id}`)}>详情</Button>
+        <Space size="small">
+          <Button size="small" onClick={() => navigate(`/products/${record.source_product_id}`)}>商品详情</Button>
+          {exportStatus === 'exported' && record.export_task_id ? (
+            <Button
+              size="small"
+              icon={<DownloadOutlined />}
+              loading={exportDownloadingTaskId === record.export_task_id}
+              onClick={() => downloadExportTaskResult(record)}
+            >
+              下载
+            </Button>
+          ) : null}
+        </Space>
       ),
     },
   ];
@@ -621,7 +664,7 @@ const CatalogList: React.FC = () => {
                       {currentCategoryOptions.length ? (
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(110px, 1fr))', gap: 16 }}>
                           <div>
-                            <Text type="secondary">模板状态</Text>
+                            <Text type="secondary">模板覆盖</Text>
                             <div style={{ marginTop: 6 }}>{templateTag(selectedCategorySummary)}</div>
                           </div>
                           <div>
@@ -650,7 +693,7 @@ const CatalogList: React.FC = () => {
                     loading={loading}
                     size="middle"
                     scroll={{ x: 1120 }}
-                    rowSelection={exportStatus === 'pending' ? {
+                    rowSelection={{
                       selectedRowKeys: selectedIds,
                       preserveSelectedRowKeys: true,
                       onChange: (keys, selectedRows) => {
@@ -669,7 +712,7 @@ const CatalogList: React.FC = () => {
                           return next;
                         });
                       },
-                    } : undefined}
+                    }}
                     pagination={{
                       current: page,
                       pageSize,

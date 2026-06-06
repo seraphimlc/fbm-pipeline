@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -31,6 +31,7 @@ TASK_STATUS_ACTIVE = {"pending", "running"}
 STEP_STATUS_SUCCESS = "done"
 STEP_STATUS_FAILURES = {"failed", "interrupted"}
 STEP_STATUS_RESUMABLE = {"pending", "running", "paused", "interrupted"}
+STEP_STATUS_CLAIMABLE = {"pending", "interrupted"}
 SUPPORTED_TASK_TYPES = {"giga_pull", "giga_inventory_sync", "giga_price_sync", "aplus_generate", "catalog_export"}
 APLUS_GENERATE_ACTIVE_STATUSES = {"queued", "planning", "scripting", "imaging"}
 
@@ -60,6 +61,89 @@ def _catalog_export_object_key(task_id: int, filename: str) -> str:
     safe_filename = _safe_filename_part(raw.stem, "catalog_export") + (raw.suffix.lower() or ".zip")
     key = f"task_{task_id}/{safe_filename}"
     return f"{prefix}/{key}" if prefix else key
+
+
+def _catalog_export_result_ready(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    file_path = str(payload.get("file_path") or "").strip()
+    object_key = str(payload.get("oss_object_key") or "").strip()
+    if file_path and Path(file_path).expanduser().is_file():
+        return True
+    return bool(object_key and payload.get("filename"))
+
+
+def _catalog_export_row_status(row: dict) -> str:
+    status = str(row.get("状态") or "").strip()
+    if status == "已导出":
+        return "exported"
+    if status == "失败":
+        return "failed"
+    return "skipped"
+
+
+def _catalog_export_result_rows(report_rows: list[dict]) -> list[dict]:
+    rows: list[dict] = []
+    for row in report_rows:
+        rows.append({
+            "catalog_id": row.get("商品资料ID"),
+            "product_id": row.get("商品ID"),
+            "item_code": row.get("商品Code"),
+            "category": row.get("类目"),
+            "status": _catalog_export_row_status(row),
+            "reason": row.get("原因"),
+            "template_file": row.get("模板文件"),
+            "output_file": row.get("导出文件"),
+        })
+    return rows
+
+
+def _catalog_export_result_payload(
+    *,
+    category: str,
+    categories: list[str],
+    template_name: str | None,
+    template_path: object,
+    catalog_ids: list[int],
+    report_rows: list[dict],
+    created_at: datetime,
+    filename: str | None = None,
+    file_path: str | None = None,
+    oss_object_key: str | None = None,
+    oss_url: str | None = None,
+    file_size: int | None = None,
+) -> dict:
+    rows = _catalog_export_result_rows(report_rows)
+    success_count = sum(1 for row in rows if row["status"] == "exported")
+    skipped_count = sum(1 for row in rows if row["status"] == "skipped")
+    failed_count = sum(1 for row in rows if row["status"] == "failed")
+    status = "failed"
+    if success_count and (skipped_count or failed_count):
+        status = "partial_failed"
+    elif success_count:
+        status = "done"
+    return {
+        "status": status,
+        "category": category,
+        "categories": categories or [category],
+        "template_name": template_name or None,
+        "template_path": template_path,
+        "catalog_product_ids": catalog_ids,
+        "requested_count": len(catalog_ids),
+        "success_count": success_count,
+        "exported_count": success_count,
+        "skipped_count": skipped_count,
+        "failed_count": failed_count,
+        "report_count": len(report_rows),
+        "filename": filename,
+        "file_path": file_path,
+        "oss_object_key": oss_object_key,
+        "oss_url": oss_url,
+        "file_size": file_size,
+        "report_filename": "导出报告.xlsx" if report_rows else None,
+        "created_at": created_at.isoformat(),
+        "rows": rows,
+    }
 
 
 async def _refresh_task_stats(db: AsyncSession, task_id: int) -> OfflineTask | None:
@@ -102,6 +186,16 @@ async def _refresh_task_stats(db: AsyncSession, task_id: int) -> OfflineTask | N
     else:
         task.status = "pending"
         task.finished_at = None
+    if task.task_type == "catalog_export" and task.status == "done":
+        payload = _json_loads(task.result_json, {})
+        if not isinstance(payload, dict) or not payload:
+            for step in steps:
+                if step.step_type == "catalog_export_template" and step.status == STEP_STATUS_SUCCESS:
+                    payload = _json_loads(step.result_json, {})
+                    if isinstance(payload, dict) and payload:
+                        break
+        if isinstance(payload, dict) and payload.get("status") == "partial_failed":
+            task.status = "partial_failed"
     return task
 
 
@@ -134,6 +228,33 @@ async def _set_step_status(
         step.progress_total = progress_total
     await _refresh_task_stats(db, step.task_id)
     await db.commit()
+
+
+async def _claim_offline_step(db: AsyncSession, step_id: int) -> OfflineTaskStep | None:
+    now = datetime.now()
+    result = await db.execute(
+        update(OfflineTaskStep)
+        .where(
+            OfflineTaskStep.id == step_id,
+            OfflineTaskStep.status.in_(tuple(STEP_STATUS_CLAIMABLE)),
+        )
+        .values(
+            status="running",
+            started_at=now,
+            finished_at=None,
+            error_message=None,
+            updated_at=now,
+        )
+    )
+    if (result.rowcount or 0) != 1:
+        await db.rollback()
+        return None
+    await db.commit()
+    claimed = await db.get(OfflineTaskStep, step_id)
+    if claimed:
+        await _refresh_task_stats(db, claimed.task_id)
+        await db.commit()
+    return claimed
 
 
 async def _ensure_image_step(db: AsyncSession, sync_step: OfflineTaskStep) -> OfflineTaskStep:
@@ -421,6 +542,36 @@ async def _run_aplus_generate_step(db: AsyncSession, step: OfflineTaskStep) -> N
 
 
 async def _run_catalog_export_step(db: AsyncSession, step: OfflineTaskStep) -> None:
+    step_id = step.id
+    task_id = step.task_id
+    existing_result = _json_loads(step.result_json, {})
+    if step.status == STEP_STATUS_SUCCESS and _catalog_export_result_ready(existing_result):
+        task = await db.get(OfflineTask, step.task_id)
+        if task and isinstance(existing_result, dict):
+            if not task.result_json:
+                task.result_json = _json_dumps(existing_result)
+            if existing_result.get("status") == "partial_failed":
+                task.status = "partial_failed"
+            task.updated_at = datetime.now()
+            await db.commit()
+        return
+    if _catalog_export_result_ready(existing_result):
+        progress_total = step.progress_total or len((existing_result if isinstance(existing_result, dict) else {}).get("catalog_product_ids") or [])
+        await _set_step_status(
+            db,
+            step,
+            "done",
+            result=existing_result if isinstance(existing_result, dict) else None,
+            progress_current=progress_total,
+            progress_total=progress_total,
+        )
+        task = await db.get(OfflineTask, step.task_id)
+        if task and not task.result_json:
+            task.result_json = _json_dumps(existing_result)
+            task.updated_at = datetime.now()
+            await db.commit()
+        return
+
     payload = _json_loads(step.payload_json, {})
     if not isinstance(payload, dict):
         await _set_step_status(db, step, "failed", error="导出步骤参数格式错误")
@@ -433,6 +584,8 @@ async def _run_catalog_export_step(db: AsyncSession, step: OfflineTaskStep) -> N
         await _set_step_status(db, step, "failed", error="导出步骤缺少商品")
         return
 
+    from app.api.products import CatalogExportBuildError, build_catalog_export_zip
+
     try:
         await _set_step_status(db, step, "running", progress_current=0, progress_total=len(catalog_ids))
         result = await db.execute(select(CatalogProduct).where(CatalogProduct.id.in_(catalog_ids)))
@@ -442,8 +595,6 @@ async def _run_catalog_export_step(db: AsyncSession, step: OfflineTaskStep) -> N
 
         # Reuse the exact same export builder as the direct download endpoint,
         # so task export and manual export cannot drift apart.
-        from app.api.products import build_catalog_export_zip
-
         zip_bytes, filename, report_rows = await build_catalog_export_zip(catalog_items, db)
         export_dir = settings.DATA_DIR / "exports" / f"task_{step.task_id}"
         export_dir.mkdir(parents=True, exist_ok=True)
@@ -451,8 +602,6 @@ async def _run_catalog_export_step(db: AsyncSession, step: OfflineTaskStep) -> N
         target_path = export_dir / f"{safe_scope}_{filename}"
         target_path.write_bytes(zip_bytes)
         uploaded = upload_private_file(target_path, _catalog_export_object_key(step.task_id, target_path.name))
-        exported_count = sum(1 for row in report_rows if row.get("状态") == "已导出")
-        skipped_count = sum(1 for row in report_rows if row.get("状态") != "已导出")
         exported_source_ids = {
             int(row.get("商品ID"))
             for row in report_rows
@@ -465,22 +614,20 @@ async def _run_catalog_export_step(db: AsyncSession, step: OfflineTaskStep) -> N
                 item.export_task_id = step.task_id
                 item.export_file_path = str(uploaded.get("url") or target_path)
                 item.updated_at = exported_at
-        result_payload = {
-            "category": category,
-            "categories": categories or [category],
-            "template_name": template_name or None,
-            "template_path": payload.get("template_path"),
-            "catalog_product_ids": catalog_ids,
-            "filename": target_path.name,
-            "file_path": str(target_path),
-            "oss_object_key": uploaded.get("object_key"),
-            "oss_url": uploaded.get("url"),
-            "file_size": target_path.stat().st_size,
-            "exported_count": exported_count,
-            "skipped_count": skipped_count,
-            "report_count": len(report_rows),
-            "created_at": exported_at.isoformat(),
-        }
+        result_payload = _catalog_export_result_payload(
+            category=category,
+            categories=categories,
+            template_name=template_name or None,
+            template_path=payload.get("template_path"),
+            catalog_ids=catalog_ids,
+            report_rows=report_rows,
+            created_at=exported_at,
+            filename=target_path.name,
+            file_path=str(target_path),
+            oss_object_key=uploaded.get("object_key"),
+            oss_url=uploaded.get("url"),
+            file_size=target_path.stat().st_size,
+        )
         await _set_step_status(
             db,
             step,
@@ -492,11 +639,46 @@ async def _run_catalog_export_step(db: AsyncSession, step: OfflineTaskStep) -> N
         task = await db.get(OfflineTask, step.task_id)
         if task:
             task.result_json = _json_dumps(result_payload)
+            task.status = result_payload["status"]
+            task.updated_at = datetime.now()
+            await db.commit()
+    except CatalogExportBuildError as exc:
+        await db.rollback()
+        step = await db.get(OfflineTaskStep, step_id)
+        if not step:
+            return
+        failed_at = datetime.now()
+        result_payload = _catalog_export_result_payload(
+            category=category,
+            categories=categories,
+            template_name=template_name or None,
+            template_path=payload.get("template_path"),
+            catalog_ids=catalog_ids,
+            report_rows=exc.report_rows,
+            created_at=failed_at,
+        )
+        await _set_step_status(
+            db,
+            step,
+            "failed",
+            result=result_payload,
+            error=exc.message,
+            progress_current=0,
+            progress_total=len(catalog_ids),
+        )
+        task = await db.get(OfflineTask, task_id)
+        if task:
+            task.result_json = _json_dumps(result_payload)
+            task.status = "failed"
+            task.error_message = exc.message
             task.updated_at = datetime.now()
             await db.commit()
     except Exception as exc:
         await db.rollback()
-        logger.exception("[OfflineTask] catalog export step failed: task=%s step=%s", step.task_id, step.id)
+        step = await db.get(OfflineTaskStep, step_id)
+        if not step:
+            return
+        logger.exception("[OfflineTask] catalog export step failed: task=%s step=%s", task_id, step_id)
         await _set_step_status(db, step, "failed", error=f"{type(exc).__name__}: {exc}")
 
 
@@ -507,7 +689,7 @@ async def _execute_offline_task(task_id: int, step_ids: list[int] | None = None)
             if step_ids:
                 query = query.where(OfflineTaskStep.id.in_(step_ids))
             else:
-                query = query.where(OfflineTaskStep.status == "pending")
+                query = query.where(OfflineTaskStep.status.in_(tuple(STEP_STATUS_CLAIMABLE)))
             result = await db.execute(query.order_by(OfflineTaskStep.id.asc()))
             steps = result.scalars().all()
             task = await db.get(OfflineTask, task_id)
@@ -519,7 +701,10 @@ async def _execute_offline_task(task_id: int, step_ids: list[int] | None = None)
                 task.updated_at = datetime.now()
                 await db.commit()
             for step in steps:
-                await db.refresh(step)
+                claimed_step = await _claim_offline_step(db, step.id)
+                if not claimed_step:
+                    continue
+                step = claimed_step
                 task = await db.get(OfflineTask, task_id)
                 if task and task.status == "paused":
                     break
@@ -651,7 +836,12 @@ async def _load_enabled_sources(db: AsyncSession, data_source_ids: list[int]) ->
     return deduped_ids, sources
 
 
-async def create_giga_pull_task(db: AsyncSession, body: OfflineTaskGigaPullRequest) -> OfflineTask:
+async def create_giga_pull_task(
+    db: AsyncSession,
+    body: OfflineTaskGigaPullRequest,
+    *,
+    auto_start: bool = True,
+) -> OfflineTask:
     data_source_ids, sources = await _load_enabled_sources(db, body.data_source_ids)
 
     task = OfflineTask(
@@ -703,7 +893,8 @@ async def create_giga_pull_task(db: AsyncSession, body: OfflineTaskGigaPullReque
         )
     await db.commit()
     await db.refresh(task)
-    _schedule_offline_task(task.id)
+    if auto_start:
+        _schedule_offline_task(task.id)
     return task
 
 
@@ -712,6 +903,7 @@ async def create_giga_dynamic_sync_task(
     body: OfflineTaskGigaDynamicSyncRequest,
     *,
     kind: str,
+    auto_start: bool = True,
 ) -> OfflineTask:
     if kind not in {"inventory", "price"}:
         raise ValueError(f"不支持的同步类型: {kind}")
@@ -769,7 +961,8 @@ async def create_giga_dynamic_sync_task(
         )
     await db.commit()
     await db.refresh(task)
-    _schedule_offline_task(task.id)
+    if auto_start:
+        _schedule_offline_task(task.id)
     return task
 
 
@@ -798,6 +991,8 @@ async def _active_export_catalog_ids(db: AsyncSession) -> set[int]:
 async def create_catalog_export_tasks(
     db: AsyncSession,
     body: OfflineTaskCatalogExportRequest,
+    *,
+    auto_start: bool = True,
 ) -> tuple[list[OfflineTask], list[str]]:
     requested_ids = list(dict.fromkeys(int(item_id) for item_id in body.catalog_product_ids))
     if not requested_ids:
@@ -827,9 +1022,6 @@ async def create_catalog_export_tasks(
         item_code = (product.data.item_code if product and product.data else None) or catalog.item_code or str(catalog_id)
         if catalog.confirmed_at is None:
             errors.append(f"{item_code}: 还不是待导出商品")
-            continue
-        if catalog.exported_at is not None:
-            errors.append(f"{item_code}: 已生成过导出文件，不能重复导出")
             continue
         existing_asin = _catalog_existing_asin(product, catalog)
         if existing_asin:
@@ -919,7 +1111,8 @@ async def create_catalog_export_tasks(
     await db.commit()
     for task in created_tasks:
         await db.refresh(task)
-        _schedule_offline_task(task.id)
+        if auto_start:
+            _schedule_offline_task(task.id)
     return created_tasks, errors
 
 
@@ -963,6 +1156,7 @@ async def create_aplus_generate_task(
     catalog_product_ids: list[int],
     *,
     force: bool = False,
+    auto_start: bool = True,
 ) -> tuple[OfflineTask | None, list[str], list[int]]:
     requested_ids = list(dict.fromkeys(int(item_id) for item_id in catalog_product_ids))
     if not requested_ids:
@@ -1061,7 +1255,8 @@ async def create_aplus_generate_task(
 
     await db.commit()
     await db.refresh(task)
-    _schedule_offline_task(task.id)
+    if auto_start:
+        _schedule_offline_task(task.id)
     return task, errors, [product.id for _, product in eligible]
 
 
@@ -1096,32 +1291,26 @@ async def rerun_offline_task(db: AsyncSession, task_id: int) -> OfflineTask:
 
 
 async def recover_offline_tasks() -> None:
+    affected_task_ids: set[int] = set()
     async with async_session() as db:
-        result = await db.execute(select(OfflineTask).where(OfflineTask.status == "running"))
+        result = await db.execute(select(OfflineTask).where(OfflineTask.status.in_(("running", "interrupted"))))
         tasks = result.scalars().all()
-        affected_task_ids = {task.id for task in tasks}
         for task in tasks:
-            task.status = "interrupted"
-            task.error_message = "服务重启导致任务中断，可重跑。"
-            task.finished_at = datetime.now()
+            affected_task_ids.add(task.id)
+            if task.status == "running":
+                task.status = "interrupted"
+                task.error_message = "服务重启导致任务中断，系统正在恢复执行。"
+                task.finished_at = None
             task.updated_at = datetime.now()
-        step_result = await db.execute(select(OfflineTaskStep).where(OfflineTaskStep.status == "running"))
+        step_result = await db.execute(select(OfflineTaskStep).where(OfflineTaskStep.status.in_(("running", "interrupted"))))
         steps = step_result.scalars().all()
         for step in steps:
             affected_task_ids.add(step.task_id)
-            step.status = "interrupted"
-            step.error_message = "服务重启导致步骤中断，可重跑。"
-            step.finished_at = datetime.now()
+            if step.status == "running":
+                step.status = "interrupted"
+                step.error_message = "服务重启导致步骤中断，系统正在恢复执行。"
+                step.finished_at = None
             step.updated_at = datetime.now()
-            if step.step_type == "aplus_generate_product":
-                payload = _json_loads(step.payload_json, {})
-                if isinstance(payload, dict):
-                    try:
-                        product_id = int(payload.get("product_id") or 0)
-                    except (TypeError, ValueError):
-                        product_id = 0
-                    if product_id > 0:
-                        await _set_aplus_status(product_id, "failed", error="A+生成失败: 服务重启导致任务中断，可在任务中心重跑。")
         for task_id in affected_task_ids:
             await _refresh_task_stats(db, task_id)
 
@@ -1143,6 +1332,8 @@ async def recover_offline_tasks() -> None:
             if product.catalog_item:
                 product.catalog_item.updated_at = now
         await db.commit()
+    for task_id in affected_task_ids:
+        _schedule_offline_task(task_id)
 
 
 async def cancel_active_offline_tasks() -> None:

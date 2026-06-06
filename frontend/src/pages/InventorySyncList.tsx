@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Alert, Button, Input, Popconfirm, Select, Space, Table, Tag, Typography, message } from 'antd';
+import { Alert, Button, Empty, Input, Popconfirm, Select, Space, Table, Tag, Typography, message } from 'antd';
 import { CloudSyncOutlined, DollarOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -59,6 +59,41 @@ const InventorySyncList: React.FC = () => {
     [dataSources, selectedDataSourceId],
   );
   const activeSite = activeDataSource?.site || 'US';
+  const hasInventoryFilter = Boolean(skuCode || availabilityStatus);
+  const inventoryEmptyText = () => {
+    if (!selectedDataSourceId) {
+      return (
+        <Empty description="还没有选择可用店铺">
+          <Button onClick={() => navigate('/data-sources')}>去维护店铺</Button>
+        </Empty>
+      );
+    }
+    if (!pulledAt && !hasInventoryFilter) {
+      return (
+        <Empty description="当前店铺还没有库存同步快照">
+          <Space>
+            <Button type="primary" icon={<CloudSyncOutlined />} loading={syncing} onClick={handleSync}>同步库存</Button>
+            <Button onClick={() => navigate('/offline-tasks')}>查看任务中心</Button>
+          </Space>
+        </Empty>
+      );
+    }
+    if (hasInventoryFilter) {
+      return (
+        <Empty description="当前筛选没有库存记录">
+          <Space>
+            <Button onClick={() => { setSkuInput(''); setSkuCode(''); setAvailabilityStatus(undefined); setPage(1); }}>清空筛选</Button>
+            <Button onClick={() => navigate('/offline-tasks')}>查看最近同步任务</Button>
+          </Space>
+        </Empty>
+      );
+    }
+    return (
+      <Empty description="当前店铺暂无库存记录">
+        <Button onClick={() => navigate('/offline-tasks')}>查看最近同步任务</Button>
+      </Empty>
+    );
+  };
 
   const fetchDataSources = async () => {
     try {
@@ -245,6 +280,7 @@ const InventorySyncList: React.FC = () => {
             setPageSize(nextPageSize);
           },
         }}
+        locale={{ emptyText: inventoryEmptyText() }}
       />
     </div>
   );

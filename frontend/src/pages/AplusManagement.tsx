@@ -46,6 +46,13 @@ const statusTag = (status?: string | null, imageCount?: number | null) => {
   );
 };
 
+const exportStatusTag = (row: CatalogProduct) => {
+  if (row.exported_at || row.export_task_id || row.export_file_path) {
+    return <Tag color="success">有历史导出</Tag>;
+  }
+  return <Tag color="blue">待导出</Tag>;
+};
+
 const AplusManagement: React.FC = () => {
   const navigate = useNavigate();
   const [items, setItems] = useState<CatalogProduct[]>([]);
@@ -147,7 +154,13 @@ const AplusManagement: React.FC = () => {
     {
       title: '导出状态',
       width: 110,
-      render: (_: unknown, row: CatalogProduct) => row.amazon_asin ? <Tag color="success">已导出</Tag> : <Tag color="blue">待导出</Tag>,
+      render: (_: unknown, row: CatalogProduct) => exportStatusTag(row),
+    },
+    {
+      title: '真实 ASIN',
+      dataIndex: 'amazon_asin',
+      width: 130,
+      render: (value: string | null) => value ? <Tag color="purple">{value}</Tag> : <Tag>未同步</Tag>,
     },
     {
       title: 'A+状态',
@@ -255,7 +268,7 @@ const AplusManagement: React.FC = () => {
             setPageSize(nextPageSize);
           },
         }}
-        scroll={{ x: 1100 }}
+        scroll={{ x: 1230 }}
       />
       <Drawer
         title={previewProduct ? `A+内容 · ${previewProduct.gigab2b_product_id || previewProduct.id}` : 'A+内容'}

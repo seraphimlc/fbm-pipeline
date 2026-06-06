@@ -194,18 +194,21 @@ const ProductDetail: React.FC = () => {
     if (!shouldLoadCandidates) {
       return;
     }
+    setCompetitorLoading(true);
     try {
       const { data: group } = await listProductCompetitorCandidates(detail.id);
       setCompetitorGroup(group);
     } catch {
       setCompetitorGroup(null);
+    } finally {
+      setCompetitorLoading(false);
     }
   };
 
   const fetchDetail = async () => {
     if (!id) return;
     try {
-      const { data } = await getProduct(Number(id));
+      const { data } = await getProduct(Number(id), { compact: true });
       setProduct(data);
       const nextDefaultTab = defaultProductDetailTab(data);
       const isNewProduct = autoTabProductIdRef.current !== data.id;
@@ -216,11 +219,12 @@ const ProductDetail: React.FC = () => {
       } else if (!userTouchedTabRef.current) {
         setActiveTabKey(nextDefaultTab);
       }
-      await refreshCompetitorGroupFromProduct(data);
+      setLoading(false);
+      void refreshCompetitorGroupFromProduct(data);
     } catch {
       message.error('加载失败');
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   useEffect(() => {

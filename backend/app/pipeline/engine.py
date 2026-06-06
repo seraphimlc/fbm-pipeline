@@ -88,6 +88,21 @@ def _is_competitor_listing_capture_state(product: Product) -> bool:
     )
 
 
+def _selected_stylesnap_candidate_id(product: Product) -> int | None:
+    if not product.data:
+        return None
+    snapshot = _json_loads(product.data.gigab2b_raw_snapshot, {})
+    if not isinstance(snapshot, dict):
+        return None
+    selected = snapshot.get("selected_stylesnap")
+    if not isinstance(selected, dict) or not selected.get("candidate_id"):
+        return None
+    try:
+        return int(selected["candidate_id"])
+    except (TypeError, ValueError):
+        return None
+
+
 async def _assert_step_prerequisites(product_id: int, step: int) -> None:
     async with async_session() as db:
         result = await db.execute(
@@ -391,8 +406,32 @@ async def recover_interrupted_pipelines() -> None:
                 continue
             if _is_competitor_listing_capture_state(product):
                 # STEP5_LISTING is also used while the selected competitor detail
-                # capture is in progress. Do not resume it as Listing generation.
+                # capture is in progress. After a process restart the background
+                # capture task is gone, so expose it as a retryable failure.
+                product.status = FAILED
+                product.current_step = 4
+                product.error_message = "竞品详情抓取被中断，请重新抓详情"
                 product.updated_at = now
+                if product.data:
+                    snapshot = _json_loads(product.data.gigab2b_raw_snapshot, {})
+                    if isinstance(snapshot, dict):
+                        capture_snapshot = snapshot.get("amazon_listing_capture")
+                        if isinstance(capture_snapshot, dict):
+                            capture_snapshot["status"] = "failed"
+                            capture_snapshot["capture_status"] = "failed"
+                            capture_snapshot["capture_error"] = product.error_message
+                            capture_snapshot["updated_at"] = now.isoformat()
+                        product.data.gigab2b_raw_snapshot = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+                candidate_id = _selected_stylesnap_candidate_id(product)
+                if candidate_id:
+                    capture_result = await db.execute(
+                        select(AmazonListingCapture).where(AmazonListingCapture.selected_candidate_id == candidate_id)
+                    )
+                    capture = capture_result.scalar_one_or_none()
+                    if capture and capture.capture_status in ACTIVE_LISTING_CAPTURE_STATUSES:
+                        capture.capture_status = "failed"
+                        capture.capture_error = product.error_message
+                        capture.updated_at = now
                 continue
             step = product.current_step or 1
             if step < 1:

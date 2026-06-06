@@ -729,8 +729,8 @@ def _offer_quantity(pd: ProductData) -> int:
     stock = _stock_value(pd)
     if stock is None:
         raise ValueError("未解析到可售库存，已停止生成 Amazon 导入模板；请先采集/补充库存后再上传。")
-    if stock <= 0:
-        raise ValueError(f"采集库存为 {stock}，无可售库存，已停止生成 Amazon 导入模板。")
+    if stock < 0:
+        raise ValueError(f"采集库存为 {stock}，不能导出负数库存。")
     return stock
 
 

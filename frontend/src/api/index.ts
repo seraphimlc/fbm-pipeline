@@ -1167,8 +1167,8 @@ export const listAplusUploadBatches = (params?: { page?: number; page_size?: num
 export const getAplusUploadBatch = (id: number) =>
   api.get<AplusUploadBatchDetail>(`/products/aplus-upload-batches/${id}`);
 
-export const getProduct = (id: number) =>
-  api.get<ProductDetail>(`/products/${id}`);
+export const getProduct = (id: number, params?: { compact?: boolean }) =>
+  api.get<ProductDetail>(`/products/${id}`, { params });
 
 export const updateProduct = (id: number, data: Partial<Product> & {
   categories?: string | string[];

@@ -190,9 +190,13 @@ const ProductList: React.FC = () => {
     () => gigaSyncBatches.find((batch) => ['pending', 'running'].includes(batch.status)),
     [gigaSyncBatches],
   );
+  const latestGigaPullTaskMatchesSelectedSource = useMemo(() => {
+    if (!latestGigaPullTask || !selectedDataSourceId) return Boolean(latestGigaPullTask);
+    return latestGigaPullTask.steps?.some((step) => step.data_source_id === selectedDataSourceId);
+  }, [latestGigaPullTask, selectedDataSourceId]);
   const latestGigaPullSummary = useMemo(
-    () => offlineTaskStatusSummary(latestGigaPullTask),
-    [latestGigaPullTask],
+    () => offlineTaskStatusSummary(latestGigaPullTaskMatchesSelectedSource ? latestGigaPullTask : null),
+    [latestGigaPullTask, latestGigaPullTaskMatchesSelectedSource],
   );
 
   const productWorkStatus = (product: Product): WorkStatus => {
@@ -910,6 +914,7 @@ const ProductList: React.FC = () => {
       >
         <Space direction="vertical" style={{ width: '100%' }} size={12}>
           <Text type="secondary">请选择要同步的大健店铺。多选时系统会在任务中心创建一个同步任务，并按店铺分别执行。</Text>
+          <Text type="secondary">商品草稿创建时 UPC 会自动从 UPC池子领取。</Text>
           <Select
             mode="multiple"
             placeholder="选择一个或多个店铺"

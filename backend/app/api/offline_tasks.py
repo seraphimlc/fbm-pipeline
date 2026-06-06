@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -43,6 +44,29 @@ async def _load_task_with_steps(db: AsyncSession, task_id: int) -> OfflineTask:
         raise HTTPException(404, "任务不存在")
     task.steps.sort(key=lambda step: step.id)
     return task
+
+
+def _json_loads(value: str | None) -> dict:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _catalog_export_payload(task: OfflineTask) -> dict:
+    payload = _json_loads(task.result_json)
+    if payload.get("filename") or payload.get("file_path") or payload.get("oss_object_key"):
+        return payload
+    for step in sorted(task.steps, key=lambda item: item.id, reverse=True):
+        if step.step_type != "catalog_export_template" or step.status != "done":
+            continue
+        step_payload = _json_loads(step.result_json)
+        if step_payload.get("filename") or step_payload.get("file_path") or step_payload.get("oss_object_key"):
+            return step_payload
+    return payload
 
 
 @router.get("", response_model=PaginatedOfflineTasks)
@@ -132,15 +156,12 @@ async def download_offline_task_result(task_id: int, db: AsyncSession = Depends(
     task = await _load_task_with_steps(db, task_id)
     if task.task_type != "catalog_export":
         raise HTTPException(400, "当前任务没有可下载的导出文件")
-    payload = {}
-    try:
-        import json
-        payload = json.loads(task.result_json or "{}")
-    except Exception:
-        payload = {}
+    payload = _catalog_export_payload(task)
     file_path = str(payload.get("file_path") or "").strip()
     filename = str(payload.get("filename") or Path(file_path).name or f"catalog_export_{task_id}.zip")
     object_key = str(payload.get("oss_object_key") or "").strip()
+    if file_path.lower().startswith(("http://", "https://")):
+        file_path = ""
     if not file_path:
         if not object_key:
             raise HTTPException(400, "导出文件尚未生成")
@@ -152,6 +173,7 @@ async def download_offline_task_result(task_id: int, db: AsyncSession = Depends(
     if not path.is_file():
         if object_key:
             try:
+                path.parent.mkdir(parents=True, exist_ok=True)
                 download_private_file(object_key, path)
             except Exception as exc:
                 raise HTTPException(404, f"导出文件本地缓存不存在，且从 OSS 下载失败: {type(exc).__name__}: {exc}")

@@ -9,6 +9,37 @@
 - 每条记录至少包含：日期、改动文件、涉及类目/模板、变更原因、验证命令和结果、后续注意事项。
 - 不要覆盖历史记录；只追加新条目。
 
+## 2026-06-06
+
+### Amazon 首次导入表库存 0 继续导出
+
+- 改动文件：
+  - `backend/app/api/products.py`
+  - `backend/app/pipeline/step10_amazon_template.py`
+  - `docs/runbook.md`
+  - `docs/giga-inventory-sync.md`
+  - `docs/template-mapping-spec.md`
+  - `docs/add-category-template-sop.md`
+  - `docs/main-flow-user-path.md`
+  - `docs/item-workbench-redesign-plan.md`
+  - `docs/template-mapping-change-log.md`
+  - `scripts/test_project_rules.py`
+- 涉及类目/模板：
+  - 所有通过 `/api/products/catalog/export` 或离线 `catalog_export` 生成的 Amazon 首次导入表。
+  - 本次真实验证样例命中 `BICYCLE_CYCLING.xlsm` / `Cruiser Bikes`。
+- 变更原因：
+  - 业务确认库存为 0 不应阻止首次导入表生成；库存 0 是库存事实，不是跳过导出的理由。
+- 主要行为：
+  - `ProductData.stock` 或最新 GIGA 库存为 `0` 时，首次导入表继续导出，Quantity 写入 `0`。
+  - 最新库存快照缺少目标 SKU 时仍跳过该商品并写入任务 `result_json.rows` / 导出报告。
+  - 负库存视为异常，不导出负数 Quantity。
+- 验证：
+  - `make check` 通过。
+  - 真实导出 CatalogProduct `3` / `W101984862` 生成 Task `15`：`success_count=1`、`skipped_count=0`、`failed_count=0`。
+  - 读取 `data/exports/task_15/BICYCLE_CYCLING_amazon_import_templates_20260606_171427.zip` 内导入 xlsm：`contribution_sku#1.value = W101984862`，`fulfillment_availability#1.quantity = 0`。
+- 后续注意：
+  - Amazon 平台是否接受 Quantity `0` 的首次导入表仍需运营导入后观察 processing summary；如平台要求改为空值或延后上架，再按实际报错调整。
+
 ## 2026-06-05
 
 ### Amazon 导出规则层重构

@@ -67,6 +67,16 @@ make validate-template-mappings
 make test-project-rules
 ```
 
+## 导出运营边界
+
+Amazon 首次导入表用于新建 listing。已有真实 Amazon ASIN 的商品不应再次生成首次导入表；库存变化应走 PriceAndQuantity 库存更新模板，价格变化暂只作为运营复核和告警输入，未确认定价策略前不自动写入 Amazon。
+
+导出中心是任务工作台，不是商品资格审查页。真实 ASIN、库存缺失、负库存、模板异常、字段异常等应尽量进入导出任务 `result_json.rows` 和导出报告，形成 `exported / skipped / failed` 的逐商品原因，而不是在商品列表上组合成前置资格总 gate。库存为 0 时仍导出首次导入表，Quantity 写入 `0`。
+
+类目来源优先归属商品处理链路：用户选择竞品后，系统从已选竞品详情、类目排名或候选信息同步 `ProductData.categories/leaf_category` 和 `CatalogProduct.leaf_category`。导出中心不做常规临时猜类目；若类目与 mapping marker 或人工记录冲突，应先回到商品详情/竞品类目链路复核，再决定是否需要改 mapping 或人工确认。
+
+如果后续改动首次导入表的价格、类目选择、字段填充或模板匹配逻辑，必须同步追加 `docs/template-mapping-change-log.md` 并跑 `make validate-template-mappings`。
+
 ## 常见风险
 
 - `template_path` 指向不存在的 `.xlsm` 文件。

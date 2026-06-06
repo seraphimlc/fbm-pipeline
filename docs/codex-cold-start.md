@@ -4,25 +4,37 @@
 
 ## 1. 先读这些文件
 
-按顺序读：
+冷启动分两档。普通日常对话、heartbeat、短任务或已知身份会话，不要默认读取完整长文档。
 
-1. `AGENTS.md`
-2. `README.md`
-3. `docs/configuration.md`
-4. `docs/runbook.md`
-5. 涉及 GIGA 商品池、库存同步、价格同步、库存告警或库存模板导出时，再读：
+最小启动：
+
+1. 当前用户消息
+2. `AGENTS.md`
+3. `git status --short`
+4. `docs/collaboration/inbox.md` 中给当前身份或全体的 OPEN/ACKED/待处理消息
+
+以下文件按条件补读：
+
+5. 多会话协作首次进入、身份/协作规约不确定或规则变化时，读 `docs/codex-collaboration-roles.md`
+6. 环境不熟、长时间缺席、复杂 handoff 或需要完整项目冷启动时，读 `README.md`、`docs/configuration.md`、`docs/runbook.md`
+7. 做商品拉取到导出主链路 QA 或发布前复核时，再读：
+   - `docs/main-flow-qa-checklist.md`
+   - `docs/main-flow-user-path.md`
+8. 涉及 GIGA 商品池、库存同步、价格同步、库存告警或库存模板导出时，再读：
    - `docs/giga-buyer-openapi-reference.md`
    - `docs/giga-inventory-sync.md`
    - `backend/app/services/giga_openapi.py`
    - `backend/app/services/giga_inventory_sync.py`
    - `backend/app/services/giga_price_sync.py`
    - `backend/app/api/giga.py`
-6. 涉及 Amazon 导入模板、类目、字段名或上架检查时，再读：
+9. 涉及 Amazon 导入模板、类目、字段名或上架检查时，再读：
    - `docs/template-mapping-spec.md`
    - `docs/add-category-template-sop.md`
    - `docs/template-mapping-change-log.md`
    - `backend/app/pipeline/template_mappings/*.json`
    - `backend/app/pipeline/step10_amazon_template.py`
+
+读取 `docs/collaboration/inbox.md` 等长文件时，先用 `rg` 搜索当前 `agentKey`、消息编号、topic 或文件路径，只读取相关段落和引用链。日常对话只带当前问题所需事实，不要把完整 inbox、旧聊天记录、完整日志或大段真实商品数据装入上下文。
 
 ## 2. 项目定位
 
@@ -34,6 +46,20 @@
   - API 文档：`http://localhost:8190/docs`
   - 前端：`http://localhost:3190`
 - Pipeline 流程：Step 1 商品采集到 Step 10 Amazon 导入表格，最后进入人工复核/确认。
+
+## 2.1 多会话身份协作
+
+当用户在不同 Codex 会话中指定身份时，按 `docs/codex-collaboration-roles.md` 工作：
+
+- 若命（agentKey: `ruoming`）：产品方向、架构边界、review、handoff 和多 agent 协作控制。
+- 听云（agentKey: `tingyun`）：工程实现、测试、本地验证和收口。
+- 清秋（agentKey: `qingqiu`）：页面体验、信息架构和用户路径。
+- 观止（agentKey: `guanzhi`）：QA gate、验收路径和风险复核。
+- 霜弦（agentKey: `shuangxian`）：Amazon/GIGA/库存/价格/类目映射运营口径复核。
+
+每个身份都必须从磁盘事实和 `git status --short` 开始，不依赖另一个会话的口头结论。
+
+跨会话正式消息写入 `docs/collaboration/inbox.md`；复杂交接写入 `docs/codex-handoff-YYYY-MM-DD-*.md`，再在 inbox 留链接。
 
 ## 3. 本地环境准备
 

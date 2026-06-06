@@ -316,10 +316,16 @@ GET /api/giga/price/alerts?site=US&batch_id=20260602-us-price
 
 不再依赖 `catalog_products.stock` 作为导出库存来源。
 
+库存口径只在导出执行时影响 Quantity，不阻断商品拉取、商品处理、选竞品、生成 Listing 或进入待导出。若最新库存为 0，Amazon 首次导入表继续导出并写入 Quantity `0`；若最新库存快照缺少目标 SKU 或出现负库存，任务 `result_json.rows` 和导出报告应记录跳过/失败原因。这不是永久运营结论，后续补货后可由用户人工新建导出任务。
+
 如果选中商品的 SKU 不在最新 GIGA 库存快照中：
 
 - 库存更新模板导出：跳过该 SKU，并写入导出报告。
 - 普通 Amazon 导入表格导出：停止该商品导出，并写入导出报告。
+
+价格事实当前用于运营复核、价格变化告警和后续定价策略输入，不自动写入 Amazon 首次导入表或 PriceAndQuantity 模板。是否把 `effective_price`、人工售价、利润公式价或其它价格写入 Amazon，需要单独确认价格策略；未确认前，系统只把价格变化作为告警和复核信息。
+
+PriceAndQuantity 当前按“库存更新模板”使用：只对已有真实 ASIN 的商品按 SKU 写入 Quantity，价格列留空，不更新 Amazon 价格。已有真实 ASIN 的商品补货或库存变化应优先走该库存更新模板；没有真实 ASIN 的商品仍走首次导入表导出。
 
 ## 当前已验证数据
 

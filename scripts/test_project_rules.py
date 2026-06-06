@@ -102,6 +102,12 @@ def test_inventory_update_template_exports_stock_only_by_sku() -> None:
     assert_true("缺少真实 ASIN" in text, "库存同步模板导出必须只允许已有真实 ASIN 的商品")
     assert_true("按 SKU 写入库存；价格列留空，不更新价格" in text, "库存同步模板只能写 SKU 和库存，不能更新价格")
     assert_true(
+        "stock_value < 0" in text
+        and "stock_value <= 0" not in text
+        and "数量按最新 GIGA 库存" in text,
+        "Amazon 首次导入表必须允许库存 0 写入 Quantity=0，只禁止负库存",
+    )
+    assert_true(
         "assert_gigab2b_logged_in_for_inventory" in text,
         "创建库存同步批次前必须先检查大建云仓登录态，未登录不能创建同步批次",
     )
@@ -141,6 +147,8 @@ def test_asin_sync_uses_lingxing_product_code_for_upc() -> None:
 def test_step10_keeps_sofa_dimensions_and_avoids_inventory_conflict() -> None:
     step10_py = ROOT / "backend" / "app" / "pipeline" / "step10_amazon_template.py"
     text = step10_py.read_text(encoding="utf-8")
+    sofa_strategy_py = ROOT / "backend" / "app" / "pipeline" / "amazon_export" / "strategies" / "sofa_chair.py"
+    sofa_strategy_text = sofa_strategy_py.read_text(encoding="utf-8")
     assert_true(
         "SOFA_ITEM_DIMENSION_MAX_WIDTH_INCHES" not in text,
         "SOFA 不能再因为宽度阈值清空 Item Dimensions D x W x H",
@@ -157,7 +165,7 @@ def test_step10_keeps_sofa_dimensions_and_avoids_inventory_conflict() -> None:
         "_existing_template_image_urls" in text and '"status": "reused"' in text,
         "重复生成 Amazon 模板时应复用既有图片 URL，避免每次导出都重新上传 OSS",
     )
-    chair_block = text.split('if product_type == "CHAIR":', 1)[1].split("if pd.weight:", 1)[0]
+    chair_block = sofa_strategy_text.split('if product_type == "CHAIR":', 1)[1].split("if pd.weight:", 1)[0]
     assert_true(
         "maximum_weight_recommendation" not in chair_block,
         "CHAIR 模板必须保留 Maximum Weight Recommendation，Amazon processing summary 会把它当必填字段",
@@ -171,12 +179,18 @@ def test_step10_keeps_sofa_dimensions_and_avoids_inventory_conflict() -> None:
         "承重默认规则必须覆盖单人 250 lbs、标准座位 250 lbs/座、模块化/sectional 300 lbs/座",
     )
     assert_true(
-        'fields["maximum_weight_recommendation"]: _weight_capacity_maximum(seating, pd)' in text,
+        'fields["maximum_weight_recommendation"]: legacy._weight_capacity_maximum(seating, pd)' in sofa_strategy_text,
         "Maximum Weight Recommendation 必须由商品文本和座位数共同推断，不能只按旧座位数兜底",
     )
     assert_true(
         "_shipping_template_for_product" in text and "shipping_template_by_brand" in text,
         "Amazon 导入表格必须支持按品牌指定配送模板，不能只取模板第一个下拉值",
+    )
+    assert_true(
+        "stock < 0" in text
+        and "stock <= 0" not in text
+        and "不能导出负数库存" in text,
+        "Step10 单品模板生成必须允许库存 0 写入 Quantity=0，只禁止负库存",
     )
 
 
@@ -286,6 +300,114 @@ def test_upc_pool_is_source_of_new_task_upcs() -> None:
     assert_true('name="upc"' not in create_page_text, "创建任务页面不应再显示 UPC 输入框")
 
 
+def test_offline_tasks_are_claimed_and_idempotent() -> None:
+    offline_text = (ROOT / "backend" / "app" / "services" / "offline_tasks.py").read_text(encoding="utf-8")
+    offline_api_text = (ROOT / "backend" / "app" / "api" / "offline_tasks.py").read_text(encoding="utf-8")
+    products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    catalog_page_text = (ROOT / "frontend" / "src" / "pages" / "CatalogList.tsx").read_text(encoding="utf-8")
+    task_center_text = (ROOT / "frontend" / "src" / "pages" / "OfflineTaskCenter.tsx").read_text(encoding="utf-8")
+    main_text = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+
+    assert_true("def _claim_offline_step" in offline_text, "离线任务步骤必须先原子 claim，避免重复调度执行同一步")
+    assert_true(
+        "OfflineTaskStep.status.in_(tuple(STEP_STATUS_CLAIMABLE))" in offline_text
+        and ".values(" in offline_text
+        and 'status="running"' in offline_text,
+        "离线任务步骤 claim 必须用数据库条件更新从 pending/interrupted 切到 running",
+    )
+    assert_true(
+        "claimed_step = await _claim_offline_step(db, step.id)" in offline_text
+        and "if not claimed_step:" in offline_text,
+        "_execute_offline_task 只能执行成功 claim 的步骤",
+    )
+    assert_true(
+        "def _catalog_export_result_ready" in offline_text
+        and "_catalog_export_result_ready(existing_result)" in offline_text,
+        "导出任务必须有结果幂等保护，避免重复生成第二个 zip",
+    )
+    assert_true(
+        "auto_start: bool = True" in offline_text
+        and "if auto_start:" in offline_text,
+        "任务创建函数必须支持 auto_start=False，避免脚本/测试创建后又手动执行导致重叠",
+    )
+    assert_true(
+        "recover_offline_tasks" in main_text
+        and 'OfflineTaskStep.status.in_(("running", "interrupted"))' in offline_text
+        and "_schedule_offline_task(task_id)" in offline_text,
+        "服务启动必须恢复遗留 running/interrupted 离线任务，而不是只依赖内存态",
+    )
+    assert_true(
+        "def _catalog_export_payload" in offline_api_text
+        and "step.result_json" in offline_api_text
+        and "path.parent.mkdir(parents=True, exist_ok=True)" in offline_api_text,
+        "导出下载必须能从任务或步骤结果恢复，并在本地缓存缺失时创建目录后从 OSS 恢复",
+    )
+    assert_true(
+        "downloadOfflineTaskResult" in catalog_page_text
+        and "record.export_task_id" in catalog_page_text,
+        "导出中心已导出商品必须能通过关联导出任务下载结果",
+    )
+    assert_true(
+        "resultSummary" in task_center_text
+        and "exported_count" in task_center_text
+        and "skipped_count" in task_center_text,
+        "任务中心必须展示导出成功和跳过数量，不能只显示 done",
+    )
+    assert_true(
+        "class CatalogExportBuildError" in products_api_text
+        and '"商品资料ID"' in products_api_text,
+        "导出构建失败时必须保留逐商品报告证据，并在报告里包含 CatalogProduct ID",
+    )
+    assert_true(
+        "def _catalog_export_result_payload" in offline_text
+        and '"rows": rows' in offline_text
+        and '"success_count": success_count' in offline_text
+        and '"failed_count": failed_count' in offline_text
+        and '"status": status' in offline_text,
+        "导出任务 result_json 必须包含结构化 rows、稳定状态和成功/跳过/失败计数",
+    )
+    assert_true(
+        '"partial_failed"' in offline_text
+        and 'payload.get("status") == "partial_failed"' in offline_text,
+        "导出任务有成功产物但存在跳过/失败行时必须能表达 partial_failed",
+    )
+    assert_true(
+        "catalog.exported_at is not None" not in offline_text
+        and "已生成过导出文件，不能重复导出" not in offline_text,
+        "导出任务创建不能用历史导出文件硬拦截；已导出但无真实 ASIN 的商品允许人工新建导出任务",
+    )
+    assert_true(
+        "已有真实 ASIN" in offline_text
+        and "不能再次导出" in offline_text,
+        "导出任务创建仍必须保留真实 ASIN 防重复首次导入表保护",
+    )
+
+
+def test_product_pipeline_recovers_interrupted_competitor_capture() -> None:
+    engine_text = (ROOT / "backend" / "app" / "pipeline" / "engine.py").read_text(encoding="utf-8")
+
+    assert_true(
+        "recover_interrupted_pipelines" in engine_text
+        and "_is_competitor_listing_capture_state(product)" in engine_text,
+        "商品 pipeline 启动恢复必须识别竞品详情抓取中的特殊状态，不能当作 Listing 生成续跑",
+    )
+    assert_true(
+        'product.error_message = "竞品详情抓取被中断，请重新抓详情"' in engine_text
+        and "product.status = FAILED" in engine_text
+        and "product.current_step = 4" in engine_text,
+        "竞品详情抓取中断后必须落到可重试失败态，不能重启后继续显示后台抓取中",
+    )
+    assert_true(
+        'capture.capture_status = "failed"' in engine_text
+        and "capture.capture_error = product.error_message" in engine_text,
+        "竞品详情抓取中断恢复必须同步 AmazonListingCapture 记录，前端才能显示重新抓详情入口",
+    )
+    assert_true(
+        "start_pipeline(product_id, start_step=step)" in engine_text,
+        "真正的商品生成节点重启后仍应按原步骤重新排队续跑",
+    )
+
+
 def main() -> int:
     tests = [
         test_category_conflict_only_overrides_conflict,
@@ -301,6 +423,8 @@ def main() -> int:
         test_search_terms_are_twenty_comma_separated_keywords,
         test_gigab2b_alphanumeric_product_id_url_is_supported,
         test_upc_pool_is_source_of_new_task_upcs,
+        test_offline_tasks_are_claimed_and_idempotent,
+        test_product_pipeline_recovers_interrupted_competitor_capture,
     ]
     for test in tests:
         test()

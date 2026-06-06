@@ -77,6 +77,26 @@ const parseResult = (value: string | null) => {
   }
 };
 
+const resultSummary = (record: OfflineTask) => {
+  const result = parseResult(record.result_json);
+  if (record.task_type === 'catalog_export' && Object.keys(result).length) {
+    const exported = Number((result as any).exported_count || 0);
+    const skipped = Number((result as any).skipped_count || 0);
+    const report = Number((result as any).report_count || 0);
+    return (
+      <Space size={4} wrap>
+        <Tag color="success">导出 {exported}</Tag>
+        {skipped ? <Tag color="warning">跳过 {skipped}</Tag> : null}
+        {report ? <Tag>报告 {report}</Tag> : null}
+      </Space>
+    );
+  }
+  if (record.error_message) {
+    return <Typography.Text type="danger" ellipsis style={{ maxWidth: 220 }}>{record.error_message}</Typography.Text>;
+  }
+  return <Text type="secondary">-</Text>;
+};
+
 const OfflineTaskCenter: React.FC = () => {
   const [items, setItems] = useState<OfflineTask[]>([]);
   const [details, setDetails] = useState<Record<number, OfflineTaskDetail>>({});
@@ -232,6 +252,11 @@ const OfflineTaskCenter: React.FC = () => {
               </Text>
             ),
           },
+          {
+            title: '结果',
+            width: 220,
+            render: (_: unknown, record: OfflineTask) => resultSummary(record),
+          },
           { title: '创建时间', dataIndex: 'created_at', width: 170, render: formatTime },
           { title: '更新时间', dataIndex: 'updated_at', width: 170, render: formatTime },
           {
@@ -241,7 +266,7 @@ const OfflineTaskCenter: React.FC = () => {
               const canPause = ['pending', 'running'].includes(record.status);
               const canResume = record.status === 'paused';
               const canRerun = ['failed', 'partial_failed', 'interrupted'].includes(record.status);
-              const canDownload = record.task_type === 'catalog_export' && record.status === 'done';
+              const canDownload = record.task_type === 'catalog_export' && ['done', 'partial_failed'].includes(record.status);
               return (
                 <Space size="small">
                   {canPause && (
@@ -265,15 +290,16 @@ const OfflineTaskCenter: React.FC = () => {
                       恢复
                     </Button>
                   )}
-                  <Button
-                    size="small"
-                    icon={<RedoOutlined />}
-                    loading={rerunningId === record.id}
-                    disabled={!canRerun}
-                    onClick={() => rerunTask(record.id)}
-                  >
-                    重跑
-                  </Button>
+                  {canRerun && (
+                    <Button
+                      size="small"
+                      icon={<RedoOutlined />}
+                      loading={rerunningId === record.id}
+                      onClick={() => rerunTask(record.id)}
+                    >
+                      重跑
+                    </Button>
+                  )}
                   {canDownload && (
                     <Button
                       size="small"

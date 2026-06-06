@@ -133,6 +133,28 @@ RUNNING_STATUSES = {
 APLUS_REGEN_ACTIVE_STATUSES = {"regen_queued", "regen_script_running", "regen_image_running"}
 
 
+class CatalogExportBuildError(Exception):
+    """Raised when a catalog export cannot produce a workbook but has row-level evidence."""
+
+    def __init__(self, message: str, report_rows: list[dict] | None = None):
+        super().__init__(message)
+        self.message = message
+        self.report_rows = report_rows or []
+
+
+def _catalog_export_exception_status(exc: Exception) -> str:
+    message = str(exc)
+    business_skip_markers = (
+        "已有真实 ASIN",
+        "最新 GIGA 库存快照未找到",
+        "无可售库存",
+        "商品资料不存在",
+    )
+    if isinstance(exc, ValueError) and any(marker in message for marker in business_skip_markers):
+        return "跳过"
+    return "失败"
+
+
 def _aplus_regeneration_running(product: Product) -> bool:
     return bool(product.aplus and product.aplus.aplus_status in APLUS_REGEN_ACTIVE_STATUSES)
 
@@ -1229,8 +1251,8 @@ def _catalog_stock_export_override(ws, mapping: dict, catalog: CatalogProduct | 
     stock_value = stock if stock is not None else (catalog.stock if catalog else None)
     if stock_value is None:
         return None
-    if stock_value <= 0:
-        raise ValueError(f"最新 GIGA 库存为 {stock_value}，无可售库存，已停止导出 Amazon 导入表格。")
+    if stock_value < 0:
+        raise ValueError(f"最新 GIGA 库存为 {stock_value}，不能导出负数库存。")
     quantity_attr = (mapping.get("dynamic_fields") or {}).get("quantity")
     if not quantity_attr:
         return None
@@ -1244,7 +1266,7 @@ def _summary_workbook(rows: list[dict]) -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "导出报告"
-    headers = ["状态", "商品ID", "商品Code", "类目", "模板文件", "导出文件", "原因"]
+    headers = ["状态", "商品资料ID", "商品ID", "商品Code", "类目", "模板文件", "导出文件", "原因"]
     ws.append(headers)
     for row in rows:
         ws.append([row.get(header) for header in headers])
@@ -2491,7 +2513,7 @@ async def download_catalog_category_template(
 
 async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: AsyncSession) -> tuple[bytes, str, list[dict]]:
     if not catalog_items:
-        raise HTTPException(400, "没有可导出的 Amazon 导入表格数据")
+        raise CatalogExportBuildError("没有可导出的 Amazon 导入表格数据")
     source_ids = [item.source_product_id for item in catalog_items]
     product_result = await db.execute(
         select(Product)
@@ -2508,6 +2530,7 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
         product = products_by_id.get(item.source_product_id)
         pd = product.data if product else None
         base_report = {
+            "商品资料ID": item.id,
             "商品ID": product.id if product else item.source_product_id,
             "商品Code": pd.item_code if pd else item.item_code,
             "类目": (pd.leaf_category if pd else None) or item.leaf_category or "未分类",
@@ -2549,7 +2572,7 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
         except Exception as exc:
             report_rows.append({
                 **base_report,
-                "状态": "跳过",
+                "状态": _catalog_export_exception_status(exc),
                 "模板文件": None,
                 "导出文件": None,
                 "原因": f"{type(exc).__name__}: {exc}",
@@ -2557,8 +2580,8 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
 
     if not grouped:
         if report_rows and all("已有真实 ASIN" in str(row.get("原因") or "") for row in report_rows):
-            raise HTTPException(400, "选中的商品都已有真实 ASIN，不能再次导出 Amazon 导入表格")
-        raise HTTPException(400, "没有可导出的 Amazon 导入表格数据")
+            raise CatalogExportBuildError("选中的商品都已有真实 ASIN，不能再次导出 Amazon 导入表格", report_rows)
+        raise CatalogExportBuildError("没有可导出的 Amazon 导入表格数据", report_rows)
 
     zip_stream = BytesIO()
     with zipfile.ZipFile(zip_stream, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -2584,8 +2607,10 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                     category = entry["category"]
                     mapping = entry["mapping"]
                     pd = product.data
+                    catalog = catalog_by_source_id.get(product.id)
                     row_number = DATA_ROW + offset
                     report_base = {
+                        "商品资料ID": catalog.id if catalog else None,
                         "商品ID": product.id,
                         "商品Code": pd.item_code if pd else None,
                         "类目": category,
@@ -2595,7 +2620,6 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                     try:
                         if not pd:
                             raise ValueError("商品资料不存在")
-                        catalog = catalog_by_source_id.get(product.id)
                         sku = _catalog_price_quantity_sku(catalog) if catalog else ""
                         latest_inventory = latest_inventory_by_catalog_id.get(catalog.id) if catalog else None
                         if sku and not latest_inventory:
@@ -2625,7 +2649,7 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                     except Exception as exc:
                         report_rows.append({
                             **report_base,
-                            "状态": "跳过",
+                            "状态": _catalog_export_exception_status(exc),
                             "原因": f"{type(exc).__name__}: {exc}",
                         })
 
@@ -2637,14 +2661,17 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
         archive.writestr("导出报告.xlsx", _summary_workbook(report_rows))
 
     if not any(row.get("状态") == "已导出" for row in report_rows):
-        raise HTTPException(400, "选中的商品没有成功生成 Amazon 导入表格，请查看商品详情中的导入表格检查。")
+        raise CatalogExportBuildError("选中的商品没有成功生成 Amazon 导入表格，请查看商品详情中的导入表格检查。", report_rows)
 
     filename = f"amazon_import_templates_{datetime.now().strftime('%Y%m%d_%H%M%S')}.zip"
     return zip_stream.getvalue(), filename, report_rows
 
 
 async def _export_catalog_items(catalog_items: list[CatalogProduct], db: AsyncSession) -> StreamingResponse:
-    zip_bytes, filename, _report_rows = await build_catalog_export_zip(catalog_items, db)
+    try:
+        zip_bytes, filename, _report_rows = await build_catalog_export_zip(catalog_items, db)
+    except CatalogExportBuildError as exc:
+        raise HTTPException(400, exc.message)
     zip_stream = BytesIO(zip_bytes)
     return StreamingResponse(
         zip_stream,
@@ -3208,8 +3235,68 @@ async def confirm_product(product_id: int, db: AsyncSession = Depends(get_db)):
     return product
 
 
+def _compact_gigab2b_snapshot(value: str | None) -> str | None:
+    snapshot = _json_loads(value, None)
+    if not isinstance(snapshot, dict):
+        return value
+    capture = snapshot.get("amazon_listing_capture")
+    compact_capture = None
+    if isinstance(capture, dict):
+        compact_capture = {
+            key: capture.get(key)
+            for key in (
+                "asin",
+                "status",
+                "capture_status",
+                "capture_error",
+                "title",
+                "brand",
+                "categories",
+                "leaf_category",
+                "category_rank",
+                "url",
+            )
+            if capture.get(key) is not None
+        }
+    keep_keys = (
+        "batch_id",
+        "site",
+        "data_source_id",
+        "data_source_name",
+        "representative_sku",
+        "selected_stylesnap",
+        "stylesnap_search",
+        "item",
+    )
+    compact = {key: snapshot.get(key) for key in keep_keys if snapshot.get(key) is not None}
+    if compact_capture:
+        compact["amazon_listing_capture"] = compact_capture
+    return json.dumps(compact, ensure_ascii=False)
+
+
+def _compact_product_detail(detail: ProductDetail) -> ProductDetail:
+    if detail.data:
+        detail.data.gigab2b_raw_snapshot = _compact_gigab2b_snapshot(detail.data.gigab2b_raw_snapshot)
+    if detail.images:
+        detail.images.image_analysis = None
+    if detail.aplus:
+        detail.aplus.aplus_plan = None
+        detail.aplus.aplus_scripts = None
+        detail.aplus.aplus_images = None
+    detail.zip_files = []
+    detail.generated_files = []
+    detail.video_folder = None
+    detail.aplus_folder = None
+    detail.amazon_export_preview = None
+    return detail
+
+
 @router.get("/{product_id}", response_model=ProductDetail)
-async def get_product(product_id: int, db: AsyncSession = Depends(get_db)):
+async def get_product(
+    product_id: int,
+    compact: bool = Query(False, description="返回首屏轻量详情，跳过大字段和本地文件扫描"),
+    db: AsyncSession = Depends(get_db),
+):
     """商品详情（含子表数据）"""
     result = await db.execute(
         select(Product)
@@ -3220,8 +3307,12 @@ async def get_product(product_id: int, db: AsyncSession = Depends(get_db)):
     if not product:
         raise HTTPException(404, "Product not found")
 
-    await _ensure_contact_sheet_oss_urls(product, db)
     detail = ProductDetail.model_validate(product)
+    if compact:
+        detail.current_task_status = _current_task_status(product)
+        return _compact_product_detail(detail)
+
+    await _ensure_contact_sheet_oss_urls(product, db)
     fallback_image_paths = []
     if not (detail.images and detail.images.gallery_order):
         fallback_image_paths = await _giga_image_paths_for_product(db, product)
