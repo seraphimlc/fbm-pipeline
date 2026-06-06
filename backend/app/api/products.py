@@ -2538,6 +2538,15 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
         if not product or not pd:
             report_rows.append({**base_report, "状态": "跳过", "原因": "商品资料不存在"})
             continue
+        if item.confirmed_at is None:
+            report_rows.append({
+                **base_report,
+                "状态": "跳过",
+                "模板文件": None,
+                "导出文件": None,
+                "原因": "商品还未加入待导出",
+            })
+            continue
         existing_asin = (product.amazon_asin or item.amazon_asin or "").strip()
         if existing_asin:
             report_rows.append({
@@ -2701,7 +2710,6 @@ async def export_catalog_products_by_category(body: CatalogExportByCategoryReque
         .join(Product, CatalogProduct.source_product_id == Product.id)
         .outerjoin(ProductData, ProductData.product_id == Product.id)
         .where(CatalogProduct.confirmed_at.is_not(None))
-        .where(((Product.amazon_asin.is_(None)) | (Product.amazon_asin == "")) & ((CatalogProduct.amazon_asin.is_(None)) | (CatalogProduct.amazon_asin == "")))
         .where(func.coalesce(ProductData.leaf_category, CatalogProduct.leaf_category, "未分类") == category)
         .order_by(func.coalesce(Product.updated_at, CatalogProduct.updated_at, CatalogProduct.imported_at).desc())
     )

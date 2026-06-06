@@ -215,13 +215,13 @@ make validate-template-mappings
 |---:|---:|---|---|---|
 | 1 | 1 | `N726P248345Y` | `Kids' Tricycles` | 已导出 |
 | 2 | 2 | `W1019138605` | `Kids' Bikes` | 已导出 |
-| 3 | 3 | `W101984862` | `Cruiser Bikes` | 因最新 GIGA 库存 0 跳过 |
+| 3 | 3 | `W101984862` | `Cruiser Bikes` | 当时按旧口径因最新 GIGA 库存 0 跳过；已被 2026-06-06 新口径废弃 |
 | 4 | 4 | `W1019P165868` | `Cruiser Bikes` | 已导出 |
 | 297 | 1071 | `W808P350170` | `Bookcases, Cabinets & Shelves` | 已导出 |
 
 生成过的任务：
 
-- Task 9：`BICYCLE_CYCLING` 模板，3 个成功，1 个因库存 0 跳过。
+- Task 9：`BICYCLE_CYCLING` 模板，3 个成功，1 个当时按旧口径因库存 0 跳过；当前规则应继续导出并写入 Quantity `0`。
 - Task 10：`SHELF_TABLE_CABINET_ANIMAL_CAGE_TEMPORARY_GATE` 模板，1 个成功。
 
 注意：当时手工调用和后台自动执行重叠，产生过未引用的本地重复 zip。数据库最终已修正到干净结果，但这暴露了任务执行可靠性问题。

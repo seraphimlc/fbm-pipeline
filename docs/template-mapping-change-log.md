@@ -11,6 +11,35 @@
 
 ## 2026-06-06
 
+### Amazon 导出任务清理旧前置规则
+
+- 改动文件：
+  - `backend/app/api/products.py`
+  - `backend/app/services/offline_tasks.py`
+  - `backend/app/pipeline/step1_collect.py`
+  - `README.md`
+  - `docs/collaboration/topic-tree.md`
+  - `docs/codex-handoff-2026-06-05-export-rule-layer-and-workflow.md`
+  - `docs/collaboration/inbox.md`
+  - `docs/template-mapping-change-log.md`
+  - `scripts/test_project_rules.py`
+- 涉及类目/模板：
+  - 所有通过 `/api/products/catalog/export`、`/api/products/catalog/export-by-category` 或离线 `catalog_export` 生成的 Amazon 首次导入表。
+- 变更原因：
+  - 清理旧的库存 0 跳过和创建任务前置业务 gate，避免真实 ASIN、模板缺失/停用、未确认、字段异常等原因在任务 `result_json.rows` / 导出报告外丢失。
+- 主要行为：
+  - Step1 浏览器采集层不再把 `stock == 0` 当成不可售、下架或跳过原因。
+  - 离线导出任务创建层不再用真实 ASIN 或模板状态把商品排除在任务外；活跃导出任务防重复仍保留。
+  - 直接按类目导出不再在查询层过滤真实 ASIN；导出构建器统一写逐商品报告。
+  - 未加入待导出的商品即使被宽松入口选入，也只进入报告，不生成首次导入表明细行。
+- 验证：
+  - `make check` 通过。
+  - `cd frontend && npm run build` 通过，仅保留 Vite chunk size warning。
+  - 真实重跑旧失败同组导出 CatalogProduct `[4, 3, 2, 1]` 生成 Task `20`：`success_count=4`、`skipped_count=0`、`failed_count=0`。
+  - 读取 `data/exports/task_20/BICYCLE_CYCLING_amazon_import_templates_20260606_172758.zip` 内导入 xlsm：`W101984862` 对应 `fulfillment_availability#1.quantity = 0`。
+- 后续注意：
+  - 真实 ASIN 仍不能生成 Amazon 首次导入表明细行；区别是原因必须进入任务报告，而不是在创建任务时静默丢弃。
+
 ### Amazon 首次导入表库存 0 继续导出
 
 - 改动文件：

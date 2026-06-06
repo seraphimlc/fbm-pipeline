@@ -552,6 +552,8 @@ async def _run_catalog_export_step(db: AsyncSession, step: OfflineTaskStep) -> N
                 task.result_json = _json_dumps(existing_result)
             if existing_result.get("status") == "partial_failed":
                 task.status = "partial_failed"
+            if existing_result.get("status") in {"done", "partial_failed"}:
+                task.error_message = None
             task.updated_at = datetime.now()
             await db.commit()
         return
@@ -640,6 +642,7 @@ async def _run_catalog_export_step(db: AsyncSession, step: OfflineTaskStep) -> N
         if task:
             task.result_json = _json_dumps(result_payload)
             task.status = result_payload["status"]
+            task.error_message = None if result_payload["status"] in {"done", "partial_failed"} else task.error_message
             task.updated_at = datetime.now()
             await db.commit()
     except CatalogExportBuildError as exc:
@@ -1009,7 +1012,7 @@ async def create_catalog_export_tasks(
     catalog_by_id = {item.id: item for item in catalog_items}
     active_catalog_ids = await _active_export_catalog_ids(db)
 
-    from app.api.products import _catalog_category, _catalog_existing_asin, _template_status_for_catalog
+    from app.api.products import _catalog_category, _template_status_for_catalog
 
     errors: list[str] = []
     grouped: dict[str, dict[str, object]] = {}
@@ -1020,28 +1023,22 @@ async def create_catalog_export_tasks(
             continue
         product = catalog.source_product
         item_code = (product.data.item_code if product and product.data else None) or catalog.item_code or str(catalog_id)
-        if catalog.confirmed_at is None:
-            errors.append(f"{item_code}: 还不是待导出商品")
-            continue
-        existing_asin = _catalog_existing_asin(product, catalog)
-        if existing_asin:
-            errors.append(f"{item_code}: 已有真实 ASIN {existing_asin}，不能再次导出")
-            continue
         if catalog.id in active_catalog_ids:
             errors.append(f"{item_code}: 已在导出任务中")
             continue
         available, template_name, template_path, template_error = _template_status_for_catalog(product, catalog)
-        if not available:
-            errors.append(f"{item_code}: 类目模板未就绪：{template_error or '缺模板'}")
-            continue
         category = _catalog_category(product, catalog)
-        template_key = str(Path(str(template_path or template_name or "unknown_template")).expanduser().resolve())
+        if available and template_path:
+            template_key = str(Path(str(template_path)).expanduser().resolve())
+        else:
+            template_key = f"__report_only__:{category}"
         group = grouped.setdefault(
             template_key,
             {
                 "items": [],
-                "template_name": template_name,
+                "template_name": template_name or ("待报告商品" if not available else None),
                 "template_path": template_path,
+                "template_error": template_error,
                 "categories": [],
                 "item_codes": [],
             },

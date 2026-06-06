@@ -117,6 +117,26 @@ def test_inventory_update_template_exports_stock_only_by_sku() -> None:
     )
 
 
+def test_catalog_export_creation_keeps_business_reasons_in_task_report() -> None:
+    offline_tasks_py = ROOT / "backend" / "app" / "services" / "offline_tasks.py"
+    products_py = ROOT / "backend" / "app" / "api" / "products.py"
+    offline_text = offline_tasks_py.read_text(encoding="utf-8")
+    products_text = products_py.read_text(encoding="utf-8")
+    create_section = offline_text.split("async def create_catalog_export_tasks", 1)[1].split("async def _active_aplus_product_ids", 1)[0]
+    export_by_category_section = products_text.split('async def export_catalog_products_by_category', 1)[1].split('@router.post("/catalog/inventory-template/export")', 1)[0]
+    assert_true(
+        "_catalog_existing_asin" not in create_section
+        and "已有真实 ASIN" not in create_section
+        and "类目模板未就绪" not in create_section,
+        "导出任务创建层不能用真实 ASIN 或模板状态前置过滤；这些原因必须进入任务 result_json.rows/导出报告",
+    )
+    assert_true(
+        "Product.amazon_asin" not in export_by_category_section
+        and "CatalogProduct.amazon_asin" not in export_by_category_section,
+        "按类目导出不能在查询层过滤真实 ASIN；应由导出构建器写入逐商品报告",
+    )
+
+
 def test_asin_sync_uses_lingxing_product_code_for_upc() -> None:
     asin_sync_py = ROOT / "backend" / "app" / "services" / "asin_sync.py"
     text = asin_sync_py.read_text(encoding="utf-8")
@@ -210,6 +230,12 @@ def test_step1_collects_product_dimensions_and_numeric_packages() -> None:
     assert_true(
         "_max_package_dimensions" not in text and "_judge_product_dimensions_with_llm" not in text,
         "产品尺寸不能再用包装尺寸最大值或大模型兜底覆盖",
+    )
+    assert_true(
+        "stock == 0" not in text
+        and "库存为 0" not in text
+        and "库存为0" not in text,
+        "Step1 采集层不能再把库存 0 当成不可售或跳过原因；库存 0 是导出 Quantity 事实",
     )
 
 
@@ -377,9 +403,8 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
         "导出任务创建不能用历史导出文件硬拦截；已导出但无真实 ASIN 的商品允许人工新建导出任务",
     )
     assert_true(
-        "已有真实 ASIN" in offline_text
-        and "不能再次导出" in offline_text,
-        "导出任务创建仍必须保留真实 ASIN 防重复首次导入表保护",
+        "已有真实 ASIN" not in offline_text.split("async def create_catalog_export_tasks", 1)[1].split("async def _active_aplus_product_ids", 1)[0],
+        "导出任务创建层不能用真实 ASIN 前置过滤；防重复首次导入表保护必须由导出构建器写入逐商品报告",
     )
 
 
@@ -414,6 +439,7 @@ def main() -> int:
         test_template_mapping_changes_must_be_logged,
         test_real_asin_export_guard_is_present,
         test_inventory_update_template_exports_stock_only_by_sku,
+        test_catalog_export_creation_keeps_business_reasons_in_task_report,
         test_asin_sync_uses_lingxing_product_code_for_upc,
         test_step10_keeps_sofa_dimensions_and_avoids_inventory_conflict,
         test_step1_collects_product_dimensions_and_numeric_packages,

@@ -1,7 +1,7 @@
 # FBM Pipeline Topic Tree
 
 状态：协作主题树，持续维护
-更新：2026-06-06 17:12 CST
+更新：2026-06-06 17:27 CST
 Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
 
 本文件用于记录项目讨论的大纲、目录、进展和未完话题，避免因为深入某个子话题而丢失其它待讨论事项。轻量跨会话消息写 `docs/collaboration/inbox.md`；复杂交接写 `docs/codex-handoff-YYYY-MM-DD-*.md` 并在 inbox 留链接。
@@ -226,7 +226,7 @@ Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
 
 ### TT-120 - 全库商品 Excel 导出
 
-- Status: IN_PROGRESS
+- Status: NEEDS_FIX
 - Owner: 若命（agentKey: `ruoming`）主控
 - Execution owner: 清秋（agentKey: `qingqiu`）页面主操
 - Support owner: 听云（agentKey: `tingyun`）技术待命
@@ -239,6 +239,11 @@ Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
 - Related inbox:
   - `MSG-20260606-002 - REQUEST` 若命：全库商品 Excel 导出
   - `MSG-20260606-003 - REQUEST` 若命：改为必须通过页面操作完成，禁止直接接口创建任务
+  - `MSG-20260606-004 - REVIEW` 观止：P0 首屏和任务错误残留 NEEDS_FIX，TT-120 等页面证据后继续验收
+  - `MSG-20260606-005 - DONE_CLAIMED` 清秋：已通过页面创建任务 #16-#19
+  - `MSG-20260606-006 - REQUEST` 若命：派听云修复首屏、旧错误残留和导出报告覆盖
+  - `MSG-20260606-007 - REVIEW` 观止：任务 #16-#19 下载可用，但 #17 库存 0 仍旧口径跳过，项目规则测试失败
+  - `MSG-20260606-008 - STATUS` 若命：要求听云把观止新发现并入修复范围
 - User request:
   - 2026-06-06 17:10 CST：用户表示可以进入下一步，把库里所有商品导出到 Excel，并要求若命安排协作身份执行。
   - 2026-06-06 17:12 CST：用户明确该任务必须通过操作页面完成，不能直接调用接口。
@@ -253,13 +258,19 @@ Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
   - 如果页面没有“全库所有商品”可操作入口，应先 `BLOCKED`，由若命决定是补 UI 还是调整需求。
 - Boundaries:
   - 已有真实 Amazon ASIN 的商品不能生成首次导入表；应在任务结果中跳过并说明原因。
-  - 库存 0、模板缺失/停用、字段异常、类目无覆盖等进入 `result_json.rows` 和导出报告。
+  - 库存 0 应生成首次导入表并写入 Quantity `0`；模板缺失/停用、字段异常、类目无覆盖等进入 `result_json.rows` 和导出报告。
   - 不修改 Step 10、template mappings 或模板文件；若导出失败落在映射/模板，先 `BLOCKED` 并确认 change log 和校验要求。
   - 不打印密钥，不粘贴批量真实商品敏感数据或真实 ASIN。
 - Verification target:
   - 清秋给出页面操作截图、筛选/选择范围、任务 id、请求商品数、成功/跳过/失败数量、文件/报告路径或下载入口。
   - 观止基于任务记录、接口/数据库事实、下载入口和报告验收；如遇页面证据不足、任务状态不一致、下载入口不可用、报告无法解释原因或环境阻塞，必须及时反馈若命调度，不能自行绕过页面或默认接受。
   - 霜弦复核运营口径是否符合真实 ASIN、库存、模板、字段和类目边界。
+- Current blockers:
+  - 观止实测 `/products/1071` 首屏仍被 spinner 卡住，TT-090/TT-110 不能 PASS。
+  - Task 15 顶层 `error_message` 残留旧中断文案，任务中心可能混淆完成和旧错误。
+  - 真实 ASIN、模板未就绪、类目无覆盖等拦截原因需进入 task `result_json.rows` 或导出报告，不能只在创建阶段 `errors` 后丢失。
+  - 全库页面导出任务 #17 仍用旧口径把库存 0 商品跳过，需改为当前新口径：库存 0 继续导出，Quantity 写 0。
+  - `make test-project-rules` 失败，真实 ASIN 防重复首次导入表保护必须恢复。
 - Blocker watch:
   - 若当前大型 GIGA 图片下载任务占用后端 worker，需先确认是否会干扰全量导出；无法安全执行则标 `BLOCKED`。
 
@@ -276,7 +287,7 @@ Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
   - `docs/codex-handoff-2026-06-05-export-rule-layer-and-workflow.md`
 - Current fact:
   - 之前已经用 5 个商品跑过从商品工作台到导出中心的完整流程。
-  - 生成过 Task 9 和 Task 10；其中 4 个商品已导出，1 个因最新 GIGA 库存 0 跳过。
+  - 生成过 Task 9 和 Task 10；其中 4 个商品已导出，1 个当时按旧口径因最新 GIGA 库存 0 跳过；该口径已被 2026-06-06 “库存 0 继续导出 Quantity 0”废弃。
   - 当时手工调用和后台自动执行重叠，产生过未引用的本地重复 zip；数据库最终已修正到干净结果，但暴露任务执行可靠性问题。
 - Scope:
   - 在测试环境中复核已跑完整流程的证据、状态、导出结果和风险。
@@ -286,7 +297,7 @@ Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
   - 不把“流程跑通”直接等同于“可运营 PASS”。
 - Verification target:
   - 观止复核：可通过测试环境操作验证任务记录、导出记录、失败/跳过原因、页面/接口状态是否能支撑验收结论。
-  - 霜弦复核：可通过测试环境操作验证库存 0 跳过、真实 ASIN 禁止重复导出、导出模板按类目/模板文件选择、A+ 不参与主流程等运营口径是否合理。
+  - 霜弦复核：可通过测试环境操作验证库存 0 写入 Quantity `0`、真实 ASIN 禁止重复导出、导出模板按类目/模板文件选择、A+ 不参与主流程等运营口径是否合理。
 - Output:
   - 在 inbox 写 `REVIEW`，结论为 `PASS / NEEDS_FIX / BLOCKED` 之一，并列证据。
 
@@ -349,7 +360,7 @@ Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
   - 如需重新尝试，用户新建一个导出任务，不在原任务上强制重生。
   - 当前调试阶段允许同一商品重复人工导出，每次都是新任务、新文件、旧文件留档。
   - 已有真实 ASIN 的商品仍禁止再次生成 Amazon 首次导入表格。
-  - 库存今天为 0 不阻断铺货主流程；导出执行时如遇最新库存 0，则在导出报告写跳过原因。
+  - 库存今天为 0 不阻断铺货主流程；导出执行时如遇最新库存 0，首次导入表仍生成并写入 Quantity `0`。
   - 商品 Amazon 类目归属选竞品/抓竞品详情链路；导出中心不承担常规类目确定。
   - 一个商品可能铺到多个 Amazon 店铺并产生多个 ASIN；多店铺 ASIN 关系后续可能需要店铺维度模型支持。
 - Code facts:

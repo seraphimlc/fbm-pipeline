@@ -998,7 +998,7 @@ def _has_commerce_values(data: dict) -> bool:
 def _looks_like_source_unavailable(data: dict, stock: int | None = None) -> bool:
     if _is_not_logged_in(data):
         return False
-    if _is_offline_product(data) or stock == 0:
+    if _is_offline_product(data):
         return True
     has_identity = bool(data.get("itemCode") or data.get("title"))
     if not has_identity:
@@ -1011,8 +1011,6 @@ def _looks_like_source_unavailable(data: dict, stock: int | None = None) -> bool
 def _unavailable_reason(data: dict, stock: int | None = None) -> str | None:
     if _is_offline_product(data):
         return data.get("availabilityReason") or "页面显示商品不可售"
-    if stock == 0:
-        return "商品库存为 0"
     if _looks_like_source_unavailable(data, stock):
         return "页面缺少价格、库存和购买/下载入口，疑似原商品已下架"
     return None
@@ -1025,8 +1023,6 @@ def _price_missing_unavailable_reason(data: dict, stock: int | None = None) -> s
     shipping_min = _parse_float(data.get("shippingCostMin"))
     shipping_max = _parse_float(data.get("shippingCostMax"))
 
-    if stock == 0:
-        return "商品价格/成本信息缺失且库存为 0"
     if value_total == 0 and any(value is not None and value > 0 for value in (estimated_total, shipping_cost, shipping_min, shipping_max)):
         return (
             "商品货值为 0 且仍返回物流/预估成本，通常表示无可售库存或已下架"

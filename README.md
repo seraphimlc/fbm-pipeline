@@ -78,7 +78,7 @@ GIGA OpenAPI 拉品/图片
 - `/products/{id}`：商品详情，处理选图、竞品、类目、图片分析和 Listing。
 - `/export-center`：导出中心，人工创建导出任务、查看历史任务和下载产物。
 - `/offline-tasks`：任务中心，查看 GIGA 拉品、库存/价格同步、A+生成、Amazon 导出等离线任务事实。
-- `/inventory-sync`：GIGA 库存事实页；库存 0 不阻断商品进入待导出，只在导出执行时作为跳过原因进入任务结果/报告。
+- `/inventory-sync`：GIGA 库存事实页；库存 0 不阻断商品进入待导出，导出首次导入表时写入 Quantity `0`。
 
 关键边界：
 
