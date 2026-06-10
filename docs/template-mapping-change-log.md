@@ -9,6 +9,57 @@
 - 每条记录至少包含：日期、改动文件、涉及类目/模板、变更原因、验证命令和结果、后续注意事项。
 - 不要覆盖历史记录；只追加新条目。
 
+## 2026-06-09
+
+### Amazon 首次导入表 UPC 与下拉值保护
+
+- 改动文件：
+  - `backend/app/api/products.py`
+  - `backend/app/pipeline/amazon_export/listing_fill.py`
+  - `backend/app/pipeline/amazon_export/strategies/sofa_chair.py`
+  - `backend/app/pipeline/step10_amazon_template.py`
+  - `backend/app/pipeline/amazon_export/validators.py`
+  - `docs/template-mapping-change-log.md`
+- 涉及类目/模板：
+  - 所有通过 Step 10 或导出中心 `catalog_export` 生成的 Amazon 首次导入表；用户现场问题样例为任务 `#25` 的 `SHELF_TABLE_CABINET_ANIMAL_CAGE_TEMPORARY_GATE.xlsm`。
+- 变更原因：
+  - 任务 `#25` 实际导出文件中 `Product Id Type` 被写成 `GTIN Exempt` 且 `Product Id` 为空；`Target Audience Keyword` 写入 `Adult` 等非模板下拉值；多个可解析下拉字段写入了不在下拉列表中的值。
+- 主要行为：
+  - Step 10 生成模板前确保商品绑定 UPC；导出中心合并既有缓存模板时也会覆盖 `Product Id Type=UPC` 和 `Product Id=<商品UPC>`。
+  - 普通家具/收纳、sofa/chair、bicycle、ride-on toy 的语义下拉字段不再用规则硬猜；Step 10 会解析当前模板/Product Type 的允许值，把商品事实、Listing、竞品摘要和允许值交给模型分析，只写模型返回且精确命中下拉项的值。
+  - 模型分析覆盖 `Target Audience`、组件、用途、房间、形状、安装方式、自行车年龄段/风格、ride-on 性别/主题等可解析语义下拉字段；没有结构化模型结果或模型失败时留空并记录原因，避免沿用旧缓存中的非法值。
+  - 明确下拉值改为模板值：`MDF` 归一到 `Engineered Wood`，装配说明使用 `Require Assembly`。
+  - 写模板时若能解析到下拉选项且填充值不在选项中，会留空并写入模板 warning；价格字段的 Amazon 特殊 `Delete Offer` 下拉不会误清数字价格。
+- 验证：
+  - `cd backend && .venv/bin/python -m compileall -q app` 通过。
+  - `make validate-template-mappings` 通过：5 个 mapping、96 个 category options、0 warning。
+  - `make test-project-rules` 通过：17 个项目规则测试。
+  - 只读解析模板定义名称确认 sofa、bicycle、ride-on toy、家具/收纳模板的语义下拉允许值可解析；内存填值验证 bicycle/ride-on/storage/sofa 只读取 `listing_check.amazon_template_fields` 的结构化值，不生成新的真实导出 zip/Excel。
+- 后续注意：
+  - 本次不重新生成任务 `#25` 的真实 zip/Excel。多 SKU 变体导出仍未在本条中实现，需要单独设计父子行、父 SKU、variation theme 与库存/价格聚合规则。
+
+### Amazon 首次导入表 UPC 绑定时机收敛
+
+- 改动文件：
+  - `backend/app/api/products.py`
+  - `backend/app/pipeline/step10_amazon_template.py`
+  - `scripts/test_project_rules.py`
+  - `docs/template-mapping-change-log.md`
+- 涉及类目/模板：
+  - 所有通过 Step 10 单商品生成或导出中心 `catalog_export` 合并行生成的 Amazon 首次导入表；未修改模板文件或 `template_mappings/*.json`。
+- 变更原因：
+  - 观止 `2026-06-09 17:35` 复验指出：导出合并行与 Step 10 单商品生成会在库存快照、Listing、模板语义字段等前置检查完成前先绑定并提交 UPC，失败路径可能消耗 UPC 并写入 `product/catalog.upc`。
+- 主要行为：
+  - Step 10 单商品生成先完成模板存在、商品 Code、Listing 文案、语义下拉字段分析等前置检查，再绑定 UPC；模板文件实际构建失败时 rollback 未提交的 UPC 绑定。
+  - 导出中心 catalog export 合并行先确认商品资料、最新 GIGA 库存快照和语义字段，再绑定 UPC；行复制、UPC/语义字段覆盖、库存覆盖成功后才 commit；单行失败会 rollback 未提交的 UPC 绑定。
+  - 项目规则测试新增 UPC 绑定顺序和 rollback 断言，避免后续回退成“前置失败也消耗 UPC”。
+- 验证：
+  - `cd backend && .venv/bin/python -m compileall -q app` 通过。
+  - `make validate-template-mappings` 通过：5 个 mapping、96 个 category options、0 warning。
+  - `make test-project-rules` 通过：18 个项目规则测试。
+- 后续注意：
+  - 本次没有创建新的真实导出任务或 zip/Excel；若后续页面产生新导出文件，仍需按 inbox 要求打开实际 xlsm 并结合模板参考 sheet 逐列核对。
+
 ## 2026-06-06
 
 ### Amazon 导出任务清理旧前置规则

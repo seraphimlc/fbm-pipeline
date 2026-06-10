@@ -1,5 +1,6 @@
 import json
 import re
+import asyncio
 from datetime import datetime
 from typing import Any
 
@@ -23,6 +24,22 @@ CAPTURE_JS = r"""(function() {
       if (value) return value;
     }
     return null;
+  }
+  function metaContent(selectors) {
+    for (var i = 0; i < selectors.length; i++) {
+      var el = document.querySelector(selectors[i]);
+      var value = el ? String(el.getAttribute('content') || '').replace(/\s+/g, ' ').trim() : null;
+      if (value) return value;
+    }
+    return null;
+  }
+  function amazonTitleFromPageTitle(value) {
+    var title = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!title || !/^Amazon\.com\s*:/i.test(title)) return null;
+    title = title.replace(/^Amazon\.com\s*:\s*/i, '');
+    title = title.replace(/\s*:\s*Amazon\.com\s*$/i, '');
+    title = title.replace(/\s*:\s*[^:]{2,80}\s*$/, '');
+    return title.trim() || null;
   }
   function cleanList(items) {
     var seen = {};
@@ -114,12 +131,16 @@ CAPTURE_JS = r"""(function() {
   });
   var bodyText = text(document.body) || '';
   var blocked = /captcha|Enter the characters you see below|Sorry, we just need to make sure/i.test(bodyText);
+  var unavailable = /Page Not Found|Sorry! We couldn't find that page|Looking for something\\?/i.test(document.title || bodyText);
+  var domTitle = firstText(['#productTitle', 'h1#title']);
+  var metaTitle = metaContent(['meta[property="og:title"]', 'meta[name="title"]']);
   return JSON.stringify({
     url: location.href,
     page_title: document.title || null,
     page_body_length: bodyText.length,
     blocked: blocked,
-    title: firstText(['#productTitle', 'h1#title', 'h1']),
+    unavailable: unavailable,
+    title: domTitle || amazonTitleFromPageTitle(metaTitle) || amazonTitleFromPageTitle(document.title),
     brand: firstText(['#bylineInfo', 'a#bylineInfo', '#brand', 'tr.po-brand td.a-span9 span']),
     seller: firstText(['#sellerProfileTriggerId', '#merchant-info a', '#merchant-info']),
     price: firstText(['#corePriceDisplay_desktop_feature_div .a-price .a-offscreen', '#corePrice_feature_div .a-offscreen', '.a-price .a-offscreen']),
@@ -213,11 +234,23 @@ async def capture_listing_for_candidate(
             ok = await chrome_navigate(url, wait=4.0)
             if not ok:
                 raise RuntimeError("Chrome 导航到 Amazon 失败")
-            raw = await chrome_execute_js(CAPTURE_JS, timeout=30)
-        raw_data = _safe_json_loads(raw)
-        if raw_data.get("blocked"):
+            raw = None
+            for attempt in range(3):
+                raw = await chrome_execute_js(CAPTURE_JS, timeout=30)
+                raw_data = _safe_json_loads(raw)
+                if raw_data.get("blocked") or raw_data.get("unavailable") or raw_data.get("title"):
+                    break
+                if attempt < 2:
+                    await asyncio.sleep(2)
+        if not raw:
+            status = "failed"
+            error = "Amazon listing 页面脚本未返回数据，请确认 Chrome worker tab 可执行脚本后重试"
+        elif raw_data.get("blocked"):
             status = "failed"
             error = "Amazon 页面疑似 CAPTCHA/风控拦截，请在 Chrome 人工处理后重试"
+        elif raw_data.get("unavailable"):
+            status = "failed"
+            error = "Amazon 商品页不存在或不可访问，请切换其它竞品"
         elif not raw_data.get("title"):
             status = "failed"
             error = "Amazon listing 页面未提取到标题"

@@ -330,8 +330,12 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
     offline_text = (ROOT / "backend" / "app" / "services" / "offline_tasks.py").read_text(encoding="utf-8")
     offline_api_text = (ROOT / "backend" / "app" / "api" / "offline_tasks.py").read_text(encoding="utf-8")
     products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
     catalog_page_text = (ROOT / "frontend" / "src" / "pages" / "CatalogList.tsx").read_text(encoding="utf-8")
+    product_page_text = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
+    product_detail_text = (ROOT / "frontend" / "src" / "pages" / "ProductDetail.tsx").read_text(encoding="utf-8")
     task_center_text = (ROOT / "frontend" / "src" / "pages" / "OfflineTaskCenter.tsx").read_text(encoding="utf-8")
+    task_center_spec_text = (ROOT / "docs" / "superpowers" / "specs" / "2026-06-03-offline-task-center.md").read_text(encoding="utf-8")
     main_text = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
 
     assert_true("def _claim_offline_step" in offline_text, "离线任务步骤必须先原子 claim，避免重复调度执行同一步")
@@ -369,9 +373,25 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
         "导出下载必须能从任务或步骤结果恢复，并在本地缓存缺失时创建目录后从 OSS 恢复",
     )
     assert_true(
-        "downloadOfflineTaskResult" in catalog_page_text
-        and "record.export_task_id" in catalog_page_text,
-        "导出中心已导出商品必须能通过关联导出任务下载结果",
+        "listCatalogExportFiles" in catalog_page_text
+        and "exportFileColumns" in catalog_page_text
+        and "file_product_count" in catalog_page_text
+        and "task_product_count" in catalog_page_text,
+        "导出中心已导出 Tab 必须按导出文件/任务维度展示文件内商品数和任务商品数，不能退回商品列表维度",
+    )
+    assert_true(
+        "itemsTotal" in catalog_page_text
+        and "exportFilesTotal" in catalog_page_text
+        and "itemsLoading" in catalog_page_text
+        and "exportFilesLoading" in catalog_page_text
+        and "scheduleExportCompletionRefresh" in catalog_page_text,
+        "导出中心待导出商品和已导出文件必须分离 total/loading，并在创建导出任务后自动刷新收敛",
+    )
+    assert_true(
+        "_collect_export_file_category" in products_api_text
+        and "_catalog_export_file_row(task)" in products_api_text
+        and "task_result = await db.execute(" in products_api_text,
+        "导出中心已导出类目筛选也必须从 catalog_export 文件/任务结果聚合，不能沿用已导出商品聚合",
     )
     assert_true(
         "resultSummary" in task_center_text
@@ -406,6 +426,109 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
         "已有真实 ASIN" not in offline_text.split("async def create_catalog_export_tasks", 1)[1].split("async def _active_aplus_product_ids", 1)[0],
         "导出任务创建层不能用真实 ASIN 前置过滤；防重复首次导入表保护必须由导出构建器写入逐商品报告",
     )
+    assert_true(
+        'COMPLETED_TASK_STATUSES = {"done", "partial_failed"}' in offline_api_text
+        and "response.error_message = None" in offline_api_text
+        and "_task_detail_response" in offline_api_text,
+        "完成或部分完成的离线任务 API 顶层不能继续暴露陈旧 error_message",
+    )
+    assert_true(
+        "total_products: int = 0" in schemas_text
+        and "WORKBENCH_STATUS_KEYS" in products_api_text
+        and "data_source_id: int | None = Query(None, ge=1)" in products_api_text
+        and "Product.current_step >= 6" in products_api_text,
+        "商品工作台必须提供全库状态桶，并且系统状态=待导出只能返回 current_step>=6 的商品",
+    )
+    assert_true(
+        "create_product_bulk_advance_task" in products_api_text
+        and "PRODUCT_BULK_ADVANCE_MAX_PRODUCTS = 1000" in products_api_text
+        and 'task_type="product_bulk_advance"' in products_api_text
+        and '"rows": rows' in products_api_text
+        and "尚未完成图片确认、竞品选择和竞品详情抓取" in products_api_text,
+        "批量推进必须走可审计任务中心 rows/report，不能直接把未就绪商品改成待导出",
+    )
+    assert_true(
+        "createProductBulkAdvanceTask" in product_page_text
+        and "批量推进当前筛选" in product_page_text
+        and "overviewStatusCounts" in product_page_text
+        and "表格当前筛选" in product_page_text,
+        "商品工作台页面必须提供全库状态桶说明和页面触发的批量推进审计任务入口",
+    )
+    assert_true(
+        "product_bulk_advance" in task_center_text
+        and "resultRows" in task_center_text
+        and "明细" in task_center_text,
+        "任务中心必须能展示批量推进任务的逐商品 rows/report",
+    )
+    assert_true(
+        "_with_product_bulk_advance_progress" in offline_api_text
+        and '"latest_result"' in offline_api_text
+        and '"export_ready_count"' in offline_api_text
+        and "当前结果" in task_center_text
+        and "已到待导出" in task_center_text,
+        "批量推进任务报告必须只读补充 started 商品当前是否已到待导出，不能只停留在 enqueue 结果",
+    )
+    assert_true(
+        "导出文件" in catalog_page_text
+        and "task_id" in catalog_page_text
+        and "导出时间" in catalog_page_text
+        and "暂无导出文件记录" in catalog_page_text,
+        "导出中心已导出 Tab 必须能按文件审计历史任务、导出时间和下载入口",
+    )
+    assert_true(
+        "确认基于该历史任务再次导出" in catalog_page_text
+        and "原文件和任务记录会保留" in catalog_page_text
+        and "createExportTasksByIds(record.catalog_product_ids" in catalog_page_text,
+        "导出中心已导出再次导出必须以历史任务商品快照为入口并先确认副作用",
+    )
+    assert_true(
+        "serverFilterSummary" in product_page_text
+        and "当前服务端筛选" in product_page_text
+        and "下方工作状态按钮只筛当前页展示，不会加入本次提交范围" in product_page_text,
+        "批量推进当前筛选必须在确认前展示服务端筛选范围，并明确不包含只筛当前页的工作状态按钮",
+    )
+    assert_true(
+        "download_images=False" in offline_text
+        and "GIGA 主数据拉取只保存商品、SKU、库存、价格和图片 URL 候选" in task_center_spec_text
+        and "自动继续执行该 batch 的图片下载步骤" not in task_center_spec_text
+        and "giga_image_download` 仅用于历史任务兼容" in task_center_spec_text,
+        "拉品后不能再表达为全量下载 GIGA 图片；旧图片下载任务只能作为历史兼容",
+    )
+    assert_true(
+        "isDisplayImageCandidate" in product_detail_text
+        and "['main', 'gallery'].includes(type)" in product_detail_text
+        and "if (typeof item === 'string') return false;" in product_detail_text
+        and 'image_type or "unknown"' in products_api_text
+        and "representative_sku" in products_api_text
+        and "variant_" in products_api_text
+        and "asset_source" in products_api_text
+        and "DEFAULT_LISTING_IMAGE_LIMIT = 9" in product_detail_text
+        and "const mainPath = gigaMainPath" in product_detail_text
+        and "persistedListingImagePathsFromImages" in product_detail_text
+        and "listingImageDraftIsDirty" in product_detail_text
+        and "nextPaths.length && nextPaths.join" in product_detail_text
+        and "gigaMainImagePathFromOrder" in product_detail_text
+        and "galleryPaths.slice(-(DEFAULT_LISTING_IMAGE_LIMIT - 1))" in product_detail_text
+        and "nextPaths.length >= DEFAULT_LISTING_IMAGE_LIMIT" in product_detail_text
+        and "isCompetitorSearchFailed &&" in product_detail_text
+        and "重新搜索候选" in product_detail_text
+        and "同款搜索|StyleSnap" in product_page_text
+        and "候选竞品搜索失败" in products_api_text
+        and "大健详情页 Gallery" in product_detail_text
+        and "其它 SKU 详情页 Gallery" in product_detail_text
+        and "素材包/附件素材" in product_detail_text
+        and "备用/未选素材" in product_detail_text
+        and "_giga_image_candidates_for_product" in products_api_text,
+        "商品详情图片确认必须默认用代表 SKU 的 GIGA mainImage 做主图，再从 gallery 末尾取 8 张；旧纯路径、未知类型和其它 SKU 图片不能全量默认选中，file/brand 留作备用素材",
+    )
+    stylesnap_text = (ROOT / "backend" / "app" / "services" / "amazon_stylesnap_search.py").read_text(encoding="utf-8")
+    assert_true(
+        "chrome_get_page_info" in stylesnap_text
+        and "_ensure_stylesnap_upload_page" in stylesnap_text
+        and '"amazon.com/stylesnap" in url' in stylesnap_text
+        and "timeout=3" in stylesnap_text,
+        "StyleSnap 搜索在同一个 Chrome worker tab 中应优先复用已有页面/token，失效时再导航重新获取",
+    )
 
 
 def test_product_pipeline_recovers_interrupted_competitor_capture() -> None:
@@ -433,6 +556,71 @@ def test_product_pipeline_recovers_interrupted_competitor_capture() -> None:
     )
 
 
+def test_catalog_export_uses_snapshot_and_reuses_orphan_zip() -> None:
+    catalog_page_text = (ROOT / "frontend" / "src" / "pages" / "CatalogList.tsx").read_text(encoding="utf-8")
+    offline_tasks_text = (ROOT / "backend" / "app" / "services" / "offline_tasks.py").read_text(encoding="utf-8")
+
+    assert_true(
+        "商品再导出" in catalog_page_text
+        and "文件历史" in catalog_page_text
+        and "再次导出选中(${selectedIds.length})" in catalog_page_text
+        and "请先勾选要导出的商品" in catalog_page_text
+        and "exportView" in catalog_page_text
+        and "isCatalogProductExported" in catalog_page_text
+        and "isProductListView ? fetchItems() : fetchExportFiles()" in catalog_page_text
+        and "selectedIds.map(Number)" in catalog_page_text
+        and "isProductListView ? (" in catalog_page_text
+        and "disabled={exporting || currentLoading || exportDisabled}" in catalog_page_text,
+        "导出中心商品导出必须拆成商品再导出/文件历史；商品再导出用状态列区分待导出和已导出，并且创建任务只来自勾选商品；文件历史仍按文件维度展示",
+    )
+    assert_true(
+        "_recover_catalog_export_result_from_file" in offline_tasks_text
+        and "_report_rows_from_export_zip" in offline_tasks_text
+        and "glob(\"*.zip\")" in offline_tasks_text
+        and "catalog_export_t{step.task_id}_s{step.id}.zip" in offline_tasks_text,
+        "catalog_export step 重入时必须复用已有 zip/report 并使用稳定短文件名，避免生成未被任务 result 引用的孤儿 zip 或过长文件名",
+    )
+
+
+def test_amazon_export_binds_upc_after_prechecks_and_rolls_back() -> None:
+    products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    step10_text = (ROOT / "backend" / "app" / "pipeline" / "step10_amazon_template.py").read_text(encoding="utf-8")
+
+    catalog_section = products_text.split("for offset, entry in enumerate(chunk):", 1)[1].split("if exported_in_workbook:", 1)[0]
+    assert_true(
+        catalog_section.index("if sku and not latest_inventory:") < catalog_section.index("await ensure_product_upc(db, product)"),
+        "catalog export 必须先确认最新 GIGA 库存快照存在，再绑定 UPC，避免失败商品消耗 UPC",
+    )
+    assert_true(
+        catalog_section.index("await ensure_amazon_template_semantic_fields") < catalog_section.index("await ensure_product_upc(db, product)"),
+        "catalog export 必须先完成模板语义字段前置检查，再绑定 UPC",
+    )
+    upc_flush_index = catalog_section.index("await db.flush()")
+    row_copy_index = catalog_section.index("_copy_import_data_row")
+    row_commit_index = catalog_section.index("await db.commit()", row_copy_index)
+    assert_true(
+        upc_flush_index < row_copy_index < row_commit_index,
+        "catalog export 行复制成功前只能 flush UPC 绑定，不能提前 commit",
+    )
+    assert_true(
+        "except Exception as exc:\n                        await db.rollback()" in catalog_section,
+        "catalog export 单行失败必须 rollback 未提交的 UPC 绑定",
+    )
+
+    step10_section = step10_text.split("async def run_amazon_template", 1)[1].split("output_path = Path(template_result", 1)[0]
+    assert_true(
+        step10_section.index("if not pd.item_code:") < step10_section.index("await ensure_product_upc(db, product)")
+        and step10_section.index("if not pd.listing_title or not pd.listing_bullets:") < step10_section.index("await ensure_product_upc(db, product)")
+        and step10_section.index("await ensure_amazon_template_semantic_fields") < step10_section.index("await ensure_product_upc(db, product)"),
+        "Step10 单品模板必须先通过 item_code/Listing/语义字段检查，再绑定 UPC",
+    )
+    assert_true(
+        "template_result = await asyncio.to_thread(_build_amazon_template_file" in step10_section
+        and "except Exception:\n            await db.rollback()" in step10_section,
+        "Step10 模板文件生成失败必须 rollback 未提交的 UPC 绑定",
+    )
+
+
 def main() -> int:
     tests = [
         test_category_conflict_only_overrides_conflict,
@@ -451,6 +639,8 @@ def main() -> int:
         test_upc_pool_is_source_of_new_task_upcs,
         test_offline_tasks_are_claimed_and_idempotent,
         test_product_pipeline_recovers_interrupted_competitor_capture,
+        test_catalog_export_uses_snapshot_and_reuses_orphan_zip,
+        test_amazon_export_binds_upc_after_prechecks_and_rolls_back,
     ]
     for test in tests:
         test()

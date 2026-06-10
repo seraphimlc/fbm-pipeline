@@ -14,11 +14,13 @@ from app.api.schemas import (
     OfflineTaskGigaDynamicSyncRequest,
     OfflineTaskGigaPullRequest,
     OfflineTaskQueuedResponse,
+    OfflineTaskResponse,
     PaginatedOfflineTasks,
 )
 from app.config import settings
 from app.database import get_db
-from app.models import OfflineTask
+from app.models import OfflineTask, Product
+from app.models.status import COMPLETED
 from app.services.oss_uploader import download_private_file
 from app.services.offline_tasks import (
     create_catalog_export_tasks,
@@ -31,6 +33,7 @@ from app.services.offline_tasks import (
 
 
 router = APIRouter(prefix="/api/offline-tasks", tags=["offline-tasks"])
+COMPLETED_TASK_STATUSES = {"done", "partial_failed"}
 
 
 async def _load_task_with_steps(db: AsyncSession, task_id: int) -> OfflineTask:
@@ -56,6 +59,82 @@ def _json_loads(value: str | None) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _task_response(task: OfflineTask) -> OfflineTaskResponse:
+    response = OfflineTaskResponse.model_validate(task)
+    if response.status in COMPLETED_TASK_STATUSES:
+        response.error_message = None
+    return response
+
+
+def _task_detail_response(task: OfflineTask) -> OfflineTaskDetailResponse:
+    response = OfflineTaskDetailResponse.model_validate(task)
+    if response.status in COMPLETED_TASK_STATUSES:
+        response.error_message = None
+    return response
+
+
+def _product_bulk_advance_latest_result(product: Product | None) -> tuple[str, str]:
+    if not product:
+        return "missing", "商品记录不存在或已删除"
+    if product.status == COMPLETED and (product.current_step or 0) >= 6:
+        return "export_ready", "已到达待导出"
+    if product.status == "failed":
+        return "failed", product.error_message or "后续生成失败"
+    if product.status == "paused":
+        return "paused", "后续流程已挂起"
+    if product.status in {"source_unavailable", "unavailable"}:
+        return "blocked", f"当前状态不能继续推进: {product.status}"
+    if (product.current_step or 0) < 5:
+        return "blocked", "仍未满足生成前置条件"
+    return "in_progress", "已提交后续生成或仍在可生成阶段"
+
+
+async def _with_product_bulk_advance_progress(
+    db: AsyncSession,
+    response: OfflineTaskResponse,
+) -> OfflineTaskResponse:
+    if response.task_type != "product_bulk_advance":
+        return response
+    payload = _json_loads(response.result_json)
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        return response
+    product_ids = [
+        int(row["product_id"])
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("product_id") is not None
+        and str(row.get("product_id")).isdigit()
+    ]
+    if not product_ids:
+        return response
+    result = await db.execute(
+        select(Product)
+        .options(selectinload(Product.data))
+        .where(Product.id.in_(set(product_ids)))
+    )
+    products = {product.id: product for product in result.scalars().all()}
+    latest_counts = {"export_ready": 0, "in_progress": 0, "blocked": 0, "failed": 0, "paused": 0, "missing": 0}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        product_id = row.get("product_id")
+        product = products.get(int(product_id)) if product_id is not None and str(product_id).isdigit() else None
+        latest_result, latest_reason = _product_bulk_advance_latest_result(product)
+        latest_counts[latest_result] = latest_counts.get(latest_result, 0) + 1
+        row["latest_status"] = product.status if product else None
+        row["latest_step"] = product.current_step if product else None
+        row["latest_result"] = latest_result
+        row["latest_reason"] = latest_reason
+        if product and not row.get("item_code") and product.data:
+            row["item_code"] = product.data.item_code
+    payload["rows"] = rows
+    payload["latest_counts"] = latest_counts
+    payload["export_ready_count"] = latest_counts.get("export_ready", 0)
+    response.result_json = json.dumps(payload, ensure_ascii=False, default=str)
+    return response
+
+
 def _catalog_export_payload(task: OfflineTask) -> dict:
     payload = _json_loads(task.result_json)
     if payload.get("filename") or payload.get("file_path") or payload.get("oss_object_key"):
@@ -75,6 +154,7 @@ async def list_offline_tasks(
     page_size: int = Query(20, ge=1, le=100),
     task_type: str | None = None,
     status: str | None = None,
+    include_progress: bool = Query(False, description="是否为 product_bulk_advance 任务补充 rows 最新状态"),
     db: AsyncSession = Depends(get_db),
 ):
     query = select(OfflineTask).order_by(OfflineTask.id.desc())
@@ -87,8 +167,15 @@ async def list_offline_tasks(
         count_query = count_query.where(OfflineTask.status == status)
     total_result = await db.execute(count_query)
     result = await db.execute(query.offset((page - 1) * page_size).limit(page_size))
+    tasks = result.scalars().all()
+    responses = []
+    for task in tasks:
+        response = _task_response(task)
+        if include_progress:
+            response = await _with_product_bulk_advance_progress(db, response)
+        responses.append(response)
     return PaginatedOfflineTasks(
-        items=result.scalars().all(),
+        items=responses,
         total=total_result.scalar() or 0,
         page=page,
         page_size=page_size,
@@ -105,7 +192,7 @@ async def create_giga_pull_offline_task(
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     created = await _load_task_with_steps(db, task.id)
-    return OfflineTaskQueuedResponse(task=created, steps=created.steps)
+    return OfflineTaskQueuedResponse(task=_task_response(created), steps=created.steps)
 
 
 @router.post("/giga-inventory-sync", response_model=OfflineTaskQueuedResponse)
@@ -118,7 +205,7 @@ async def create_giga_inventory_sync_offline_task(
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     created = await _load_task_with_steps(db, task.id)
-    return OfflineTaskQueuedResponse(task=created, steps=created.steps)
+    return OfflineTaskQueuedResponse(task=_task_response(created), steps=created.steps)
 
 
 @router.post("/giga-price-sync", response_model=OfflineTaskQueuedResponse)
@@ -131,7 +218,7 @@ async def create_giga_price_sync_offline_task(
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     created = await _load_task_with_steps(db, task.id)
-    return OfflineTaskQueuedResponse(task=created, steps=created.steps)
+    return OfflineTaskQueuedResponse(task=_task_response(created), steps=created.steps)
 
 
 @router.post("/catalog-export", response_model=OfflineTaskBatchQueuedResponse)
@@ -143,12 +230,14 @@ async def create_catalog_export_offline_tasks(
         tasks, errors = await create_catalog_export_tasks(db, body)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    return OfflineTaskBatchQueuedResponse(tasks=tasks, errors=errors)
+    return OfflineTaskBatchQueuedResponse(tasks=[_task_response(task) for task in tasks], errors=errors)
 
 
 @router.get("/{task_id}", response_model=OfflineTaskDetailResponse)
 async def get_offline_task(task_id: int, db: AsyncSession = Depends(get_db)):
-    return await _load_task_with_steps(db, task_id)
+    task = await _load_task_with_steps(db, task_id)
+    response = _task_detail_response(task)
+    return await _with_product_bulk_advance_progress(db, response)
 
 
 @router.get("/{task_id}/download")
@@ -188,7 +277,8 @@ async def rerun_offline_task_api(task_id: int, db: AsyncSession = Depends(get_db
         task = await rerun_offline_task(db, task_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    return await _load_task_with_steps(db, task.id)
+    task = await _load_task_with_steps(db, task.id)
+    return _task_detail_response(task)
 
 
 @router.post("/{task_id}/pause", response_model=OfflineTaskDetailResponse)
@@ -197,7 +287,8 @@ async def pause_offline_task_api(task_id: int, db: AsyncSession = Depends(get_db
         task = await pause_offline_task(db, task_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    return await _load_task_with_steps(db, task.id)
+    task = await _load_task_with_steps(db, task.id)
+    return _task_detail_response(task)
 
 
 @router.post("/{task_id}/resume", response_model=OfflineTaskDetailResponse)
@@ -206,4 +297,5 @@ async def resume_offline_task_api(task_id: int, db: AsyncSession = Depends(get_d
         task = await resume_offline_task(db, task_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
-    return await _load_task_with_steps(db, task.id)
+    task = await _load_task_with_steps(db, task.id)
+    return _task_detail_response(task)

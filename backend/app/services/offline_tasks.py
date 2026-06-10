@@ -2,8 +2,11 @@ import asyncio
 import json
 import logging
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
+from zipfile import ZipFile
 
+from openpyxl import load_workbook
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -146,6 +149,66 @@ def _catalog_export_result_payload(
     }
 
 
+def _report_rows_from_export_zip(path: Path) -> list[dict]:
+    with ZipFile(path) as archive:
+        report_name = next((name for name in archive.namelist() if name.lower().endswith(".xlsx")), None)
+        if not report_name:
+            return []
+        workbook = load_workbook(BytesIO(archive.read(report_name)), read_only=True, data_only=True)
+        sheet = workbook[workbook.sheetnames[0]]
+        rows = list(sheet.iter_rows(values_only=True))
+    if not rows:
+        return []
+    headers = [str(value or "").strip() for value in rows[0]]
+    report_rows: list[dict] = []
+    for row in rows[1:]:
+        record = {
+            header: row[index] if index < len(row) else None
+            for index, header in enumerate(headers)
+            if header
+        }
+        if any(value not in (None, "") for value in record.values()):
+            report_rows.append(record)
+    return report_rows
+
+
+def _recover_catalog_export_result_from_file(
+    *,
+    export_dir: Path,
+    category: str,
+    categories: list[str],
+    template_name: str | None,
+    template_path: object,
+    catalog_ids: list[int],
+) -> dict | None:
+    existing_files = sorted(
+        export_dir.glob("*.zip"),
+        key=lambda path: path.stat().st_mtime if path.exists() else 0,
+        reverse=True,
+    )
+    for path in existing_files:
+        try:
+            report_rows = _report_rows_from_export_zip(path)
+        except Exception:
+            logger.warning("[OfflineTask] cannot recover catalog export result from %s", path, exc_info=True)
+            continue
+        if not report_rows:
+            continue
+        return _catalog_export_result_payload(
+            category=category,
+            categories=categories,
+            template_name=template_name,
+            template_path=template_path,
+            catalog_ids=catalog_ids,
+            report_rows=report_rows,
+            created_at=datetime.fromtimestamp(path.stat().st_mtime),
+            filename=path.name,
+            file_path=str(path),
+            file_size=path.stat().st_size,
+        )
+    return None
+
+
 async def _refresh_task_stats(db: AsyncSession, task_id: int) -> OfflineTask | None:
     task = await db.get(OfflineTask, task_id)
     if not task:
@@ -258,6 +321,7 @@ async def _claim_offline_step(db: AsyncSession, step_id: int) -> OfflineTaskStep
 
 
 async def _ensure_image_step(db: AsyncSession, sync_step: OfflineTaskStep) -> OfflineTaskStep:
+    """Legacy helper for old GIGA image download tasks; new pull tasks keep image URLs and download selected images on demand."""
     result = await db.execute(
         select(OfflineTaskStep).where(
             OfflineTaskStep.task_id == sync_step.task_id,
@@ -589,6 +653,34 @@ async def _run_catalog_export_step(db: AsyncSession, step: OfflineTaskStep) -> N
     from app.api.products import CatalogExportBuildError, build_catalog_export_zip
 
     try:
+        export_dir = settings.DATA_DIR / "exports" / f"task_{step.task_id}"
+        export_dir.mkdir(parents=True, exist_ok=True)
+        recovered_result = _recover_catalog_export_result_from_file(
+            export_dir=export_dir,
+            category=category,
+            categories=categories,
+            template_name=template_name or None,
+            template_path=payload.get("template_path"),
+            catalog_ids=catalog_ids,
+        )
+        if recovered_result:
+            await _set_step_status(
+                db,
+                step,
+                "done",
+                result=recovered_result,
+                progress_current=len(catalog_ids),
+                progress_total=len(catalog_ids),
+            )
+            task = await db.get(OfflineTask, step.task_id)
+            if task:
+                task.result_json = _json_dumps(recovered_result)
+                task.status = recovered_result["status"]
+                task.error_message = None if recovered_result["status"] in {"done", "partial_failed"} else task.error_message
+                task.updated_at = datetime.now()
+                await db.commit()
+            return
+
         await _set_step_status(db, step, "running", progress_current=0, progress_total=len(catalog_ids))
         result = await db.execute(select(CatalogProduct).where(CatalogProduct.id.in_(catalog_ids)))
         catalog_items = result.scalars().all()
@@ -597,11 +689,8 @@ async def _run_catalog_export_step(db: AsyncSession, step: OfflineTaskStep) -> N
 
         # Reuse the exact same export builder as the direct download endpoint,
         # so task export and manual export cannot drift apart.
-        zip_bytes, filename, report_rows = await build_catalog_export_zip(catalog_items, db)
-        export_dir = settings.DATA_DIR / "exports" / f"task_{step.task_id}"
-        export_dir.mkdir(parents=True, exist_ok=True)
-        safe_scope = _safe_filename_part(Path(template_name).stem if template_name else category, "template")
-        target_path = export_dir / f"{safe_scope}_{filename}"
+        zip_bytes, _filename, report_rows = await build_catalog_export_zip(catalog_items, db)
+        target_path = export_dir / f"catalog_export_t{step.task_id}_s{step.id}.zip"
         target_path.write_bytes(zip_bytes)
         uploaded = upload_private_file(target_path, _catalog_export_object_key(step.task_id, target_path.name))
         exported_source_ids = {
@@ -1301,13 +1390,28 @@ async def recover_offline_tasks() -> None:
             task.updated_at = datetime.now()
         step_result = await db.execute(select(OfflineTaskStep).where(OfflineTaskStep.status.in_(("running", "interrupted"))))
         steps = step_result.scalars().all()
+        now = datetime.now()
         for step in steps:
             affected_task_ids.add(step.task_id)
+            if step.step_type == "giga_image_download":
+                payload = _json_loads(step.result_json, {})
+                total = int(payload.get("total") or step.progress_total or 0) if isinstance(payload, dict) else 0
+                done = int(payload.get("done") or step.progress_current or 0) if isinstance(payload, dict) else 0
+                failed = int(payload.get("failed") or 0) if isinstance(payload, dict) else 0
+                pending = int(payload.get("pending") or 0) if isinstance(payload, dict) else 0
+                if total > 0 and pending == 0 and done + failed >= total:
+                    step.status = "done" if failed == 0 else "failed"
+                    step.progress_current = done
+                    step.progress_total = total
+                    step.error_message = None if failed == 0 else f"{failed} 张图片下载失败"
+                    step.finished_at = step.finished_at or now
+                    step.updated_at = now
+                    continue
             if step.status == "running":
                 step.status = "interrupted"
                 step.error_message = "服务重启导致步骤中断，系统正在恢复执行。"
                 step.finished_at = None
-            step.updated_at = datetime.now()
+            step.updated_at = now
         for task_id in affected_task_ids:
             await _refresh_task_stats(db, task_id)
 

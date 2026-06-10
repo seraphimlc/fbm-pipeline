@@ -38,6 +38,9 @@ COMPETITOR_SWITCH_BLOCKING_STATUSES = {
 }
 LISTING_CAPTURE_ACTIVE_TTL = timedelta(minutes=5)
 LISTING_CAPTURE_QUEUED_TTL = timedelta(seconds=30)
+LISTING_PREFETCH_LIMIT = 10
+LISTING_PREFETCH_CONCURRENCY = 1
+_listing_prefetch_semaphore = asyncio.Semaphore(LISTING_PREFETCH_CONCURRENCY)
 
 
 def _start_generation_after_competitor(product_id: int) -> None:
@@ -54,7 +57,23 @@ def _candidate_response(
     if capture:
         data.listing_capture_id = capture.id
         data.listing_capture_status = capture.capture_status
+        data.listing_capture_error = capture.capture_error
+        data.listing_capture_has_main_image = bool(capture.main_image_url)
         data.listing_captured_at = capture.captured_at
+        data.url = capture.page_url or capture.url or data.url
+        data.title = capture.title
+        data.brand = capture.brand or data.brand
+        data.seller = capture.seller or data.seller
+        data.price = capture.price or data.price
+        data.rating = capture.rating or data.rating
+        data.review_count = capture.review_count
+        data.leaf_category = capture.leaf_category
+        data.category_rank = capture.category_rank or data.category_rank
+        data.amazon_image_url = capture.main_image_url or data.amazon_image_url
+        bullets = _json_loads(capture.bullets_json, [])
+        if isinstance(bullets, list) and bullets:
+            data.listing_summary = " / ".join(str(item).strip() for item in bullets[:3] if str(item).strip()) or None
+        data.listing_summary = data.listing_summary or capture.description or data.raw_snippet
     return data
 
 
@@ -323,6 +342,8 @@ async def _load_product_candidate_group(
     db: AsyncSession,
     product: Product,
     snapshot: dict,
+    *,
+    enrich_images: bool = True,
 ) -> AmazonStyleSnapCandidateGroupResponse:
     batch_id, site, item_code, representative_sku = _product_competitor_query_values(product, snapshot)
     if not batch_id or not item_code:
@@ -353,7 +374,8 @@ async def _load_product_candidate_group(
     if not candidates:
         raise HTTPException(404, "当前商品未找到 StyleSnap 候选竞品")
 
-    await _enrich_candidate_images_from_sellersprite(db, candidates, site)
+    if enrich_images:
+        await _enrich_candidate_images_from_sellersprite(db, candidates, site)
     captures = await _captures_by_candidate(db, [candidate.id for candidate in candidates])
     return _build_group(candidates, captures, {item_code: product})
 
@@ -516,6 +538,9 @@ async def _run_product_competitor_search_background(product_id: int):
                 catalog.status = product.status
                 catalog.updated_at = now
             await db.commit()
+            queued_candidate_ids = await _queue_listing_prefetches(db, all_candidates)
+            if queued_candidate_ids:
+                await _run_listing_prefetch_background(queued_candidate_ids)
         except asyncio.CancelledError:
             product.status = FAILED
             product.current_step = 2
@@ -592,6 +617,72 @@ async def _queue_listing_capture(
     return capture
 
 
+async def _queue_listing_prefetches(
+    db: AsyncSession,
+    candidates: list[AmazonStyleSnapCandidate],
+    *,
+    force: bool = False,
+) -> list[int]:
+    queued_candidate_ids: list[int] = []
+    now = datetime.now()
+    for candidate in sorted(candidates, key=lambda item: (item.rank, item.id))[:LISTING_PREFETCH_LIMIT]:
+        result = await db.execute(
+            select(AmazonListingCapture).where(AmazonListingCapture.selected_candidate_id == candidate.id)
+        )
+        capture = result.scalar_one_or_none()
+        if capture and capture.capture_status == "captured" and not force:
+            continue
+        if _is_active_listing_capture(capture) and not force:
+            continue
+        if not capture:
+            capture = AmazonListingCapture(
+                selected_candidate_id=candidate.id,
+                batch_id=candidate.batch_id,
+                site=candidate.site,
+                item_code=candidate.item_code,
+                sku_code=candidate.sku_code,
+                asin=candidate.asin,
+                created_at=now,
+            )
+            db.add(capture)
+        capture.url = candidate.url or f"https://www.amazon.com/dp/{candidate.asin}"
+        capture.capture_status = "queued"
+        capture.capture_error = None
+        capture.updated_at = now
+        queued_candidate_ids.append(candidate.id)
+    if queued_candidate_ids:
+        await db.commit()
+    return queued_candidate_ids
+
+
+async def _capture_prefetched_listing(candidate_id: int, *, force: bool = False) -> None:
+    async with _listing_prefetch_semaphore:
+        async with async_session() as db:
+            result = await db.execute(select(AmazonStyleSnapCandidate).where(AmazonStyleSnapCandidate.id == candidate_id))
+            candidate = result.scalar_one_or_none()
+            if not candidate:
+                return
+            existing = await db.execute(
+                select(AmazonListingCapture).where(AmazonListingCapture.selected_candidate_id == candidate.id)
+            )
+            capture = existing.scalar_one_or_none()
+            if capture and capture.capture_status == "captured" and not force:
+                return
+            if _is_active_listing_capture(capture) and capture.capture_status == "running" and not force:
+                return
+            await capture_listing_for_candidate(db, candidate, force=True)
+
+
+async def _run_listing_prefetch_background(candidate_ids: list[int], *, force: bool = False) -> None:
+    for candidate_id in list(dict.fromkeys(candidate_ids)):
+        try:
+            await _capture_prefetched_listing(candidate_id, force=force)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            continue
+
+
 async def _capture_and_sync_product_competitor_background(
     product_id: int,
     candidate_id: int,
@@ -663,10 +754,11 @@ async def _capture_and_sync_product_competitor_background(
 @router.get("/products/{product_id}/competitor-candidates", response_model=AmazonStyleSnapCandidateGroupResponse)
 async def list_product_competitor_candidates(
     product_id: int,
+    enrich_images: bool = Query(True),
     db: AsyncSession = Depends(get_db),
 ):
     product, snapshot = await _load_product_for_competitor_selection(db, product_id)
-    return await _load_product_candidate_group(db, product, snapshot)
+    return await _load_product_candidate_group(db, product, snapshot, enrich_images=enrich_images)
 
 
 @router.post("/products/{product_id}/competitor-candidates/search", response_model=ProductResponse)
@@ -700,6 +792,9 @@ async def search_product_competitor_candidates(
         product.updated_at = now
         await db.commit()
         await db.refresh(product)
+        queued_candidate_ids = await _queue_listing_prefetches(db, existing)
+        if queued_candidate_ids:
+            background_tasks.add_task(_run_listing_prefetch_background, queued_candidate_ids)
         return product
 
     product.status = COMPETITOR_SEARCHING
@@ -766,29 +861,6 @@ async def select_product_competitor_candidate(
     switching = bool(product.competitor_asin and product.competitor_asin != selected.asin)
     if switching or force_capture:
         _clear_generation_outputs(product)
-    stale_result = await db.execute(
-        select(AmazonStyleSnapCandidate.id).where(
-            AmazonStyleSnapCandidate.batch_id == selected.batch_id,
-            AmazonStyleSnapCandidate.site == selected.site,
-            AmazonStyleSnapCandidate.item_code == selected.item_code,
-            AmazonStyleSnapCandidate.sku_code == selected.sku_code,
-            AmazonStyleSnapCandidate.id != selected.id,
-        )
-    )
-    stale_candidate_ids = list(stale_result.scalars().all())
-    if stale_candidate_ids:
-        await db.execute(
-            update(AmazonListingCapture)
-            .where(
-                AmazonListingCapture.selected_candidate_id.in_(stale_candidate_ids),
-                AmazonListingCapture.capture_status == "queued",
-            )
-            .values(
-                capture_status="failed",
-                capture_error="已切换竞品，旧抓取未执行",
-                updated_at=now,
-            )
-        )
     await db.execute(
         update(AmazonStyleSnapCandidate)
         .where(
@@ -834,3 +906,28 @@ async def select_product_competitor_candidate(
             force_capture=True,
         )
     return await _load_group(db, selected.batch_id, selected.site, selected.item_code, selected.sku_code)
+
+
+@router.post("/products/{product_id}/competitor-candidates/{candidate_id}/capture", response_model=AmazonStyleSnapCandidateGroupResponse)
+async def retry_product_competitor_candidate_capture(
+    product_id: int,
+    candidate_id: int,
+    background_tasks: BackgroundTasks,
+    force: bool = Query(True),
+    db: AsyncSession = Depends(get_db),
+):
+    product, snapshot = await _load_product_for_competitor_selection(db, product_id)
+    batch_id, site, item_code, _representative_sku = _product_competitor_query_values(product, snapshot)
+    result = await db.execute(select(AmazonStyleSnapCandidate).where(AmazonStyleSnapCandidate.id == candidate_id))
+    candidate = result.scalar_one_or_none()
+    if not candidate:
+        raise HTTPException(404, "StyleSnap candidate not found")
+    if batch_id and candidate.batch_id != batch_id:
+        raise HTTPException(400, "候选竞品批次与当前商品不一致")
+    if candidate.site != site or candidate.item_code != item_code:
+        raise HTTPException(400, "候选竞品不属于当前商品")
+
+    queued_candidate_ids = await _queue_listing_prefetches(db, [candidate], force=force)
+    if queued_candidate_ids:
+        background_tasks.add_task(_run_listing_prefetch_background, queued_candidate_ids, force=force)
+    return await _load_product_candidate_group(db, product, snapshot, enrich_images=False)

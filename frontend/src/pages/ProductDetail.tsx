@@ -14,6 +14,7 @@ import type { AmazonStyleSnapCandidateGroup, CategoryOption, ProductDetail } fro
 
 const { Title, Text } = Typography;
 const PRODUCT_LIST_RETURN_KEY = 'fbm.productList.returnPath';
+const DEFAULT_LISTING_IMAGE_LIMIT = 9;
 
 const APLUS_REGEN_ACTIVE_STATUSES = ['queued', 'planning', 'scripting', 'imaging', 'regen_queued', 'regen_script_running', 'regen_image_running'];
 const APLUS_REGEN_RETRYABLE_STATUSES = ['regen_failed', 'regen_interrupted'];
@@ -55,13 +56,69 @@ const normalizeImagePath = (item: any) => {
   return path ? String(path).trim() : '';
 };
 
+const normalizeImageSourceType = (value: string | null | undefined) => String(value || '').trim().toLowerCase();
+const isDisplayImageCandidate = (item: any) => {
+  if (typeof item === 'string') return false;
+  const type = normalizeImageSourceType(item?.image_type || item?.source);
+  return ['main', 'gallery'].includes(type);
+};
+const uniqueImagePaths = (paths: string[]) => paths.filter((path, index) => path && paths.indexOf(path) === index);
+const gigaMainImagePathFromOrder = (galleryOrderPaths: any[]) => (
+  Array.isArray(galleryOrderPaths)
+    ? normalizeImagePath(galleryOrderPaths.find((item: any) => normalizeImageSourceType(item?.image_type || item?.source) === 'main'))
+    : ''
+);
+const imageSourceLabel = (item: any, fallback = '图片素材') => {
+  const type = normalizeImageSourceType(item?.image_type || item?.source);
+  if (type === 'main') return '大健详情页主图';
+  if (type === 'gallery') return '大健详情页 Gallery';
+  if (type === 'variant_main') return '其它 SKU 详情页主图';
+  if (type === 'variant_gallery') return '其它 SKU 详情页 Gallery';
+  if (type === 'file') return '素材包/附件素材';
+  if (type === 'brand') return '品牌素材';
+  return fallback;
+};
+
 const listingImagePathsFromImages = (images: any) => {
   const galleryImagePaths = parseJson(images?.gallery_images, []);
-  const paths = [
+  const galleryOrderPaths = parseJson(images?.gallery_order, []);
+  const gigaMainPath = gigaMainImagePathFromOrder(galleryOrderPaths);
+  const savedPaths = [
     images?.main_image_path ? String(images.main_image_path).trim() : '',
     ...(Array.isArray(galleryImagePaths) ? galleryImagePaths.map(normalizeImagePath) : []),
   ].filter(Boolean);
-  return paths.filter((path, index) => paths.indexOf(path) === index);
+  if (savedPaths.length) {
+    return uniqueImagePaths([
+      gigaMainPath || savedPaths[0],
+      ...savedPaths.filter((path) => path !== (gigaMainPath || savedPaths[0])),
+    ]).slice(0, DEFAULT_LISTING_IMAGE_LIMIT);
+  }
+  if (!Array.isArray(galleryOrderPaths)) return [];
+  const mainPath = gigaMainPath;
+  const galleryPaths = uniqueImagePaths(
+    galleryOrderPaths
+      .filter((item: any) => normalizeImageSourceType(item?.image_type || item?.source) === 'gallery')
+      .map(normalizeImagePath)
+      .filter(Boolean)
+  ).filter((path) => path !== mainPath);
+  return uniqueImagePaths([
+    mainPath,
+    ...galleryPaths.slice(-(DEFAULT_LISTING_IMAGE_LIMIT - 1)),
+  ]).slice(0, DEFAULT_LISTING_IMAGE_LIMIT);
+};
+
+const persistedListingImagePathsFromImages = (images: any) => {
+  const galleryImagePaths = parseJson(images?.gallery_images, []);
+  return uniqueImagePaths([
+    images?.main_image_path ? String(images.main_image_path).trim() : '',
+    ...(Array.isArray(galleryImagePaths) ? galleryImagePaths.map(normalizeImagePath) : []),
+  ].filter(Boolean)).slice(0, DEFAULT_LISTING_IMAGE_LIMIT);
+};
+
+const listingImageDraftIsDirty = (images: any, draftPaths: string[]) => {
+  const nextPaths = uniqueImagePaths(draftPaths.filter(Boolean)).slice(0, DEFAULT_LISTING_IMAGE_LIMIT);
+  const persistedPaths = persistedListingImagePathsFromImages(images);
+  return Boolean(nextPaths.length && nextPaths.join('\n') !== persistedPaths.join('\n'));
 };
 
 const money = (value: number | null | undefined) => value != null ? `$${value}` : '-';
@@ -248,14 +305,16 @@ const ProductDetail: React.FC = () => {
   useEffect(() => {
     if (!product) return;
     if (listingImageDraftProductId !== product.id || !listingImageDirty) {
-      setListingImageDraftPaths(listingImagePathsFromImages(product.images));
-      setListingImageDirty(false);
+      const nextPaths = listingImagePathsFromImages(product.images);
+      setListingImageDraftPaths(nextPaths);
+      setListingImageDirty(listingImageDraftIsDirty(product.images, nextPaths));
       setListingImageDraftProductId(product.id);
     }
   }, [
     product?.id,
     product?.images?.main_image_path,
     product?.images?.gallery_images,
+    product?.images?.gallery_order,
     listingImageDirty,
     listingImageDraftProductId,
   ]);
@@ -412,8 +471,8 @@ const ProductDetail: React.FC = () => {
         const path = normalizeImagePath(item);
         addItem({ path }, {
           image_id: `#${index + 1}`,
-          image_type: index === 0 ? '主图素材' : '副图素材',
-          reason: index === 0 ? '大健 listing 首图' : `大健 listing 第 ${index + 1} 张`,
+          image_type: item?.image_type || (index === 0 ? 'main' : 'gallery'),
+          reason: imageSourceLabel(item, index === 0 ? '商品展示主图' : '商品展示图'),
         });
       });
     }
@@ -684,7 +743,19 @@ const ProductDetail: React.FC = () => {
       message.warning('当前未找到已选竞品，请先在候选竞品中选择一个');
       return;
     }
-    await chooseCompetitorCandidate({ ...selected, listing_capture_status: 'failed' });
+    setSelectingCompetitorId(selected.id);
+    message.loading({ content: '正在重新提交当前竞品详情抓取', key: 'competitor-select', duration: 0 });
+    try {
+      const { data: nextGroup } = await selectProductCompetitorCandidate(product.id, selected.id, true);
+      setCompetitorGroup(nextGroup);
+      message.success({ content: `已重新提交参考竞品 ${selected.asin}，竞品详情抓取已转后台执行`, key: 'competitor-select' });
+      await fetchDetail();
+    } catch (error: any) {
+      message.destroy('competitor-select');
+      message.error(error?.response?.data?.detail || '重新抓取竞品详情失败');
+    } finally {
+      setSelectingCompetitorId(null);
+    }
   };
 
   const extractZip = async (path: string) => {
@@ -768,6 +839,10 @@ const ProductDetail: React.FC = () => {
   const saveListingImagePaths = async () => {
     const orderedPaths = listingImageDraftPaths.filter(Boolean);
     if (!orderedPaths.length) return;
+    if (orderedPaths.length > DEFAULT_LISTING_IMAGE_LIMIT) {
+      message.warning(`已使用图片最多 ${DEFAULT_LISTING_IMAGE_LIMIT} 张，请先移出多余图片`);
+      return;
+    }
     setImageOrderSaving(true);
     try {
       await updateProductListingImages(product.id, {
@@ -786,8 +861,9 @@ const ProductDetail: React.FC = () => {
   };
 
   const resetListingImageDraft = () => {
-    setListingImageDraftPaths(listingImagePathsFromImages(images));
-    setListingImageDirty(false);
+    const nextPaths = listingImagePathsFromImages(images);
+    setListingImageDraftPaths(nextPaths);
+    setListingImageDirty(listingImageDraftIsDirty(images, nextPaths));
     setImageDragPayload(null);
   };
 
@@ -840,6 +916,11 @@ const ProductDetail: React.FC = () => {
     if (!payload) return;
     if (payload.source === 'pool' && payload.path) {
       const nextPaths = selectedListingImages.map((item: any) => item?.path).filter(Boolean);
+      if (!nextPaths.includes(payload.path) && nextPaths.length >= DEFAULT_LISTING_IMAGE_LIMIT) {
+        message.warning(`已使用图片最多 ${DEFAULT_LISTING_IMAGE_LIMIT} 张，请先移出一张`);
+        setImageDragPayload(null);
+        return;
+      }
       setDraftListingImagePaths([...nextPaths.filter((path) => path !== payload.path), payload.path]);
     }
     setImageDragPayload(null);
@@ -873,6 +954,10 @@ const ProductDetail: React.FC = () => {
   const addListingImageFromPool = (path: string | null | undefined) => {
     if (imageOrderSaving || !path) return;
     const nextPaths = selectedListingImages.map((item: any) => item?.path).filter(Boolean);
+    if (!nextPaths.includes(path) && nextPaths.length >= DEFAULT_LISTING_IMAGE_LIMIT) {
+      message.warning(`已使用图片最多 ${DEFAULT_LISTING_IMAGE_LIMIT} 张，请先移出一张`);
+      return;
+    }
     setDraftListingImagePaths([...nextPaths.filter((itemPath) => itemPath !== path), path]);
   };
 
@@ -2220,7 +2305,7 @@ const ProductDetail: React.FC = () => {
                 <div>
                   <Space style={{ justifyContent: 'space-between', width: '100%', marginBottom: 8 }}>
                     <Text strong>已使用图片</Text>
-                    <Text type="secondary" style={{ fontSize: 12 }}>第一张为主图，其余为副图</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>最多 9 张，第一张为主图，其余为已确认展示图</Text>
                   </Space>
                   <div
                     onDragOver={(event) => {
@@ -2292,7 +2377,7 @@ const ProductDetail: React.FC = () => {
                       </div>
                     ) : (
                       <Space direction="vertical" size={4} style={{ width: '100%', alignItems: 'center', justifyContent: 'center', minHeight: 96 }}>
-                        <Text type="secondary">把未选图片拖到这里，或双击未选图片作为主图/副图</Text>
+                        <Text type="secondary">把备用/未选素材拖到这里，或双击素材加入已使用图片</Text>
                         <Text type="secondary" style={{ fontSize: 12 }}>至少保留一张主图后才能保存</Text>
                       </Space>
                     )}
@@ -2301,8 +2386,8 @@ const ProductDetail: React.FC = () => {
 
                 <div>
                   <Space style={{ justifyContent: 'space-between', width: '100%', marginBottom: 8 }}>
-                    <Text strong>未选图片</Text>
-                    <Text type="secondary" style={{ fontSize: 12 }}>拖回这里或双击已使用图片表示不使用</Text>
+                    <Text strong>备用/未选素材</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>备用文件和品牌图默认停留在这里</Text>
                   </Space>
                   <div
                     onDragOver={(event) => {
@@ -2362,7 +2447,7 @@ const ProductDetail: React.FC = () => {
                       </div>
                     ) : (
                       <Space direction="vertical" size={4} style={{ width: '100%', alignItems: 'center', justifyContent: 'center', minHeight: 96 }}>
-                        <Text type="secondary">全部图片都已使用</Text>
+                        <Text type="secondary">暂无备用/未选素材</Text>
                         <Text type="secondary" style={{ fontSize: 12 }}>把上方图片拖到这里，或双击已使用图片即可移出使用区</Text>
                       </Space>
                     )}
@@ -2803,7 +2888,12 @@ const ProductDetail: React.FC = () => {
         </Title>
         <Space>
           <Button icon={<ReloadOutlined />} onClick={fetchDetail}>刷新</Button>
-          {product.status === 'failed' && !isLegacyGigaBrowserCollectError && (
+          {isCompetitorSearchFailed && (
+            <Button type="primary" icon={<ReloadOutlined />} loading={competitorSearchLoading} onClick={() => searchCompetitorCandidates(true)}>
+              重新搜索候选
+            </Button>
+          )}
+          {product.status === 'failed' && !isLegacyGigaBrowserCollectError && !isCompetitorSearchFailed && (
             <Button icon={<RedoOutlined />} onClick={async () => { await retryStep(product.id); fetchDetail(); }}>
               重试
             </Button>
@@ -2878,6 +2968,14 @@ const ProductDetail: React.FC = () => {
         <Card size="small" style={{ marginBottom: 16, borderColor: '#d9d9d9' }}>
           <Text type="secondary">已挂起：不会继续执行后续自动流程，点击继续后从当前步骤恢复。</Text>
         </Card>
+      )}
+      {isPipelineRunning && product.current_task_status && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={product.current_task_status}
+        />
       )}
       {product.status === 'step5_listing' && /竞品.*抓取中|Listing.*抓取中/i.test(product.error_message || '') && (
         <Card size="small" style={{ marginBottom: 16, borderColor: '#1677ff' }}>

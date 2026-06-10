@@ -556,12 +556,15 @@ class AmazonStyleSnapCandidateResponse(BaseModel):
     source_image_path: str | None = None
     rank: int
     asin: str
+    title: str | None = None
     url: str | None = None
     brand: str | None = None
     seller: str | None = None
     delivery: str | None = None
     price: str | None = None
     rating: str | None = None
+    review_count: str | None = None
+    leaf_category: str | None = None
     category_rank: str | None = None
     color: str | None = None
     size: str | None = None
@@ -572,6 +575,9 @@ class AmazonStyleSnapCandidateResponse(BaseModel):
     selected_at: datetime | None = None
     listing_capture_id: int | None = None
     listing_capture_status: str | None = None
+    listing_capture_error: str | None = None
+    listing_capture_has_main_image: bool = False
+    listing_summary: str | None = None
     listing_captured_at: datetime | None = None
     captured_at: datetime | None = None
     imported_at: datetime | None = None
@@ -636,6 +642,11 @@ class ProductResponse(BaseModel):
     aplus_status: str | None = None
     upc: str | None = None
     brand: str = "Vindhvisk"
+    source_data_source_id: int | None = None
+    source_site: str | None = None
+    source_batch_id: str | None = None
+    catalog_exported_at: datetime | None = None
+    catalog_export_task_id: int | None = None
     status: str
     current_step: int = 0
     current_task_status: str | None = None
@@ -650,6 +661,98 @@ class ProductListItem(ProductResponse):
     item_code: str | None = None
     title: str | None = None
     leaf_category: str | None = None
+
+
+class ProductImageReviewQueueItem(BaseModel):
+    id: int
+    gigab2b_product_id: str | None = None
+    status: str
+    current_step: int = 0
+    current_task_status: str | None = None
+    item_code: str | None = None
+    title: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class ProductImageReviewQueueResponse(BaseModel):
+    items: list[ProductImageReviewQueueItem]
+    total: int
+    limit: int
+
+
+class ProductImageReviewDetailData(BaseModel):
+    item_code: str | None = None
+    title: str | None = None
+
+
+class ProductImageReviewDetailImages(BaseModel):
+    id: int | None = None
+    product_id: int
+    main_image_path: str | None = None
+    main_image_source: str | None = None
+    gallery_images: str | None = None
+    gallery_order: str | None = None
+    gallery_order_total: int | None = None
+    gallery_order_limit: int | None = None
+
+
+class ProductImageReviewDetailResponse(BaseModel):
+    id: int
+    source_item_id: str | None = None
+    gigab2b_product_id: str | None = None
+    status: str
+    current_step: int = 0
+    current_task_status: str | None = None
+    data: ProductImageReviewDetailData | None = None
+    images: ProductImageReviewDetailImages | None = None
+
+
+class ProductCompetitorReviewQueueItem(BaseModel):
+    id: int
+    source_item_id: str | None = None
+    gigab2b_product_id: str | None = None
+    competitor_asin: str | None = None
+    status: str
+    current_step: int = 0
+    current_task_status: str | None = None
+    error_message: str | None = None
+    item_code: str | None = None
+    title: str | None = None
+    leaf_category: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class ProductCompetitorReviewQueueResponse(BaseModel):
+    items: list[ProductCompetitorReviewQueueItem]
+    total: int
+    limit: int
+
+
+class ProductCompetitorReviewDetailData(ProductImageReviewDetailData):
+    gigab2b_raw_snapshot: str | None = None
+
+
+class ProductCompetitorReviewDetailImages(BaseModel):
+    id: int | None = None
+    product_id: int
+    main_image_path: str | None = None
+    main_image_source: str | None = None
+
+
+class ProductCompetitorReviewDetailResponse(BaseModel):
+    id: int
+    source_item_id: str | None = None
+    gigab2b_product_id: str | None = None
+    competitor_asin: str | None = None
+    status: str
+    current_step: int = 0
+    current_task_status: str | None = None
+    error_message: str | None = None
+    leaf_category: str | None = None
+    data: ProductCompetitorReviewDetailData | None = None
+    images: ProductCompetitorReviewDetailImages | None = None
 
 
 class ProductFileEntry(BaseModel):
@@ -851,6 +954,40 @@ class CatalogAsinUpdateRequest(BaseModel):
 
 class PaginatedCatalogProducts(BaseModel):
     items: list[CatalogProductResponse]
+    total: int
+    page: int
+    page_size: int
+
+
+class CatalogExportFileResponse(BaseModel):
+    task_id: int
+    task_status: str
+    title: str | None = None
+    filename: str | None = None
+    file_path: str | None = None
+    oss_url: str | None = None
+    file_size: int | None = None
+    exported_at: datetime | None = None
+    category: str | None = None
+    categories: list[str] = Field(default_factory=list)
+    category_count: int = 0
+    template_name: str | None = None
+    catalog_product_ids: list[int] = Field(default_factory=list)
+    task_product_count: int = 0
+    file_product_count: int = 0
+    success_count: int = 0
+    exported_count: int = 0
+    skipped_count: int = 0
+    failed_count: int = 0
+    report_count: int = 0
+    can_download: bool = False
+    created_at: datetime | None = None
+    finished_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class PaginatedCatalogExportFiles(BaseModel):
+    items: list[CatalogExportFileResponse]
     total: int
     page: int
     page_size: int
@@ -1068,6 +1205,22 @@ class BulkStartRequest(BaseModel):
     product_ids: list[int] = Field(..., min_length=1)
 
 
+class ProductBulkAdvanceRequest(BaseModel):
+    product_ids: list[int] = Field(..., min_length=1, max_length=1000)
+
+
+class ProductBulkAdvanceFilterRequest(BaseModel):
+    status: str | None = None
+    item_id: str | None = None
+    data_source_id: int | None = Field(default=None, ge=1)
+    competitor_asin: str | None = None
+    upc: str | None = None
+    created_from: datetime | None = None
+    created_to: datetime | None = None
+    sku_keyword: str | None = None
+    limit: int = Field(default=1000, ge=1, le=1000)
+
+
 class BulkStartResponse(BaseModel):
     requested: int
     started: int
@@ -1085,6 +1238,19 @@ class BulkImportResponse(BaseModel):
 
 
 class WorkbenchOverview(BaseModel):
+    total_products: int = 0
+    select_images: int = 0
+    competitor_searching: int = 0
+    select_competitor: int = 0
+    capture_detail: int = 0
+    ready_to_generate: int = 0
+    running: int = 0
+    suspended: int = 0
+    manual_review: int = 0
+    export_ready: int = 0
+    export_ready_unexported: int = 0
+    export_ready_exported: int = 0
+    failed: int = 0
     running_tasks: int = 0
     manual_review_tasks: int = 0
     failed_tasks: int = 0

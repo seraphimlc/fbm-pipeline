@@ -1,7 +1,7 @@
 # FBM Pipeline Topic Tree
 
 状态：协作主题树，持续维护
-更新：2026-06-06 17:27 CST
+更新：2026-06-08 13:50 CST
 Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
 
 本文件用于记录项目讨论的大纲、目录、进展和未完话题，避免因为深入某个子话题而丢失其它待讨论事项。轻量跨会话消息写 `docs/collaboration/inbox.md`；复杂交接写 `docs/codex-handoff-YYYY-MM-DD-*.md` 并在 inbox 留链接。
@@ -53,7 +53,7 @@ Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
 
 ### TT-090 - 商品拉取到导出主链路闭环
 
-- Status: REVIEWING
+- Status: PASS
 - Owner: 若命（agentKey: `ruoming`）主控
 - Implementation owner: 听云（agentKey: `tingyun`）
 - UX owner: 清秋（agentKey: `qingqiu`）
@@ -106,7 +106,7 @@ Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
 
 ### TT-095 - Raw Data 到 Product 草稿转换设计复核
 
-- Status: OPEN
+- Status: BLOCKED
 - Owner: 若命（agentKey: `ruoming`）
 - Related topic:
   - `TT-090 - 商品拉取到导出主链路闭环`
@@ -226,7 +226,7 @@ Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
 
 ### TT-120 - 全库商品 Excel 导出
 
-- Status: NEEDS_FIX
+- Status: PASS
 - Owner: 若命（agentKey: `ruoming`）主控
 - Execution owner: 清秋（agentKey: `qingqiu`）页面主操
 - Support owner: 听云（agentKey: `tingyun`）技术待命
@@ -244,6 +244,10 @@ Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
   - `MSG-20260606-006 - REQUEST` 若命：派听云修复首屏、旧错误残留和导出报告覆盖
   - `MSG-20260606-007 - REVIEW` 观止：任务 #16-#19 下载可用，但 #17 库存 0 仍旧口径跳过，项目规则测试失败
   - `MSG-20260606-008 - STATUS` 若命：要求听云把观止新发现并入修复范围
+  - `MSG-20260606-009 - REVIEW` 观止：库存 0 新口径、规则测试、商品详情首屏已有通过证据；旧错误残留仍 NEEDS_FIX
+  - `MSG-20260606-010 - REQUEST` 若命：剩余阻塞收敛为完成任务旧错误残留
+  - `MSG-20260606-010 / DONE_CLAIMED` 听云：声明已屏蔽完成态顶层陈旧 `error_message`，等待观止复验
+  - `MSG-20260606-010 / REVIEW` 观止：`PASS` 当前 TT-120 复验范围；#15 旧错误不再展示，#16-#19 下载/报告可追溯
 - User request:
   - 2026-06-06 17:10 CST：用户表示可以进入下一步，把库里所有商品导出到 Excel，并要求若命安排协作身份执行。
   - 2026-06-06 17:12 CST：用户明确该任务必须通过操作页面完成，不能直接调用接口。
@@ -265,14 +269,63 @@ Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
   - 清秋给出页面操作截图、筛选/选择范围、任务 id、请求商品数、成功/跳过/失败数量、文件/报告路径或下载入口。
   - 观止基于任务记录、接口/数据库事实、下载入口和报告验收；如遇页面证据不足、任务状态不一致、下载入口不可用、报告无法解释原因或环境阻塞，必须及时反馈若命调度，不能自行绕过页面或默认接受。
   - 霜弦复核运营口径是否符合真实 ASIN、库存、模板、字段和类目边界。
-- Current blockers:
-  - 观止实测 `/products/1071` 首屏仍被 spinner 卡住，TT-090/TT-110 不能 PASS。
-  - Task 15 顶层 `error_message` 残留旧中断文案，任务中心可能混淆完成和旧错误。
-  - 真实 ASIN、模板未就绪、类目无覆盖等拦截原因需进入 task `result_json.rows` 或导出报告，不能只在创建阶段 `errors` 后丢失。
-  - 全库页面导出任务 #17 仍用旧口径把库存 0 商品跳过，需改为当前新口径：库存 0 继续导出，Quantity 写 0。
-  - `make test-project-rules` 失败，真实 ASIN 防重复首次导入表保护必须恢复。
+- Current state:
+  - 观止在 `MSG-20260606-009` 已确认库存 0 新口径、项目规则测试和 `/products/1071` 首屏有通过证据。
+  - 听云在 `MSG-20260606-010 / DONE_CLAIMED` 声明 Task 15 等完成态 API/列表已不再展示陈旧顶层 `error_message`。
+  - 观止在 `MSG-20260606-010 / REVIEW` 已给 `PASS`：任务中心/API 不再展示完成态旧顶层错误，页面创建任务下载/报告可追溯。
+  - 本 PASS 不表示 Amazon 平台已接受 Quantity `0`；平台 processing summary 仍需后续人工/运营回执验证。
 - Blocker watch:
   - 若当前大型 GIGA 图片下载任务占用后端 worker，需先确认是否会干扰全量导出；无法安全执行则标 `BLOCKED`。
+
+### TT-121 - 全库商品推进到待导出并重新导出
+
+- Status: REVIEWING
+- Owner: 若命（agentKey: `ruoming`）主控
+- Page workflow owner: 清秋（agentKey: `qingqiu`）
+- Technical support owner: 听云（agentKey: `tingyun`）
+- QA owner: 观止（agentKey: `guanzhi`）
+- Ops reviewer: 霜弦（agentKey: `shuangxian`）
+- Related topic:
+  - `TT-090 - 商品拉取到导出主链路闭环`
+  - `TT-110 - 导出文件链路完善`
+  - `TT-120 - 全库商品 Excel 导出`
+- Related inbox:
+  - `MSG-20260606-011 - REQUEST` 若命：用户纠正全库导出目标，要求 200+ 商品按页面正常流程推进到待导出并导出
+  - `MSG-20260606-011 / BLOCKED` 清秋：页面无 200+ 批量推进主路径，导出中心历史记录/重导对象不可审计
+  - `MSG-20260606-011 / STATUS` 若命：派听云接手页面/接口能力修复，清秋暂停逐商品推进
+  - `MSG-20260606-011 / ACK` 听云：已接手工程阻塞，先修导出中心历史/重导、状态桶口径、待导出筛选、批量推进任务方案
+  - `MSG-20260606-011 / DONE_CLAIMED` 听云：声明已补 P0 页面/接口能力；2026-06-08 自检补修批量推进 1000 上限，等待观止/霜弦/清秋复验
+  - `MSG-20260606-011 / REVIEW` 观止：服务未启动且遗留 running 任务存在，页面/接口现场验收 BLOCKED
+  - `MSG-20260606-011 / STATUS` 听云：已启动测试服务、处理遗留 running GIGA 任务 `#1`，请求观止继续现场复验
+  - `MSG-20260606-011 / REVIEW ADDENDUM` 观止：资深 QA 场景补充标记 NEEDS_FIX，要求补重导确认、批量推进确认范围和 product_bulk_advance 后续追踪
+  - `MSG-20260606-011 / DONE_CLAIMED` 听云：补已导出重导拆分/确认、批量推进服务端筛选确认、product_bulk_advance rows 当前结果追踪，测试服务运行中，等待观止继续现场复验
+- User request:
+  - 2026-06-06 18:01 CST：用户指出导出中心无历史导出记录不符合预期；已导出的商品应允许再次导出，以便在不确定文件正确时重新生成。
+  - 用户指出任务中心很多任务只有少量记录，不符合“商品库 200+ 商品全部推进到待导出并导出到 Excel”的预期。
+- Product interpretation:
+  - 此节点是 `TT-120` 的上层纠偏：此前 `PASS` 只覆盖少量 confirmed 商品的页面导出闭环，不代表 200+ 全商品库都已完成正常流程推进和导出。
+  - 正确目标是通过页面流程把商品库中可推进商品推进到“待导出/可导出”，再通过导出中心页面发起 Excel/Amazon 首次导入表导出。
+- Execution rule:
+  - 清秋必须先通过页面梳理商品总量、状态桶、历史导出记录、重导入口和批量推进路径。
+  - 听云只在页面/接口能力缺失或状态表达不一致时修工程；不得用脚本/API/DB 直接批量改状态或创建导出任务替代页面。
+  - 如果页面无法支持 200+ 商品正常推进，必须 `BLOCKED` 给若命，不得默认接受少量 task rows。
+- Original blockers:
+  - 清秋页面事实显示当前商品库合计 401，其中 389 个仍为 `created/current_step=0`；页面没有可审计的 200+ 批量推进主路径。
+  - 商品工作台顶部状态桶是当前页口径但未清楚表达；`系统状态=待导出` 筛选疑似与表格不同步。
+  - 导出中心已导出统计为 11 / 8 类目，但表格为空，历史记录和重导对象不可审计。
+- Current state:
+  - 听云已于 2026-06-06 20:37 CST 写 `DONE_CLAIMED`；2026-06-08 11:42 CST 自检补修批量推进审计任务 1000 商品上限，并补充验证结果。
+  - 2026-06-08 13:50 CST：测试服务已启动，前端 `http://localhost:3190`、后端 `http://localhost:8190`；遗留 GIGA 拉品任务 `#1` 已从 running 收口为 `partial_failed`，active offline/pipeline/A+ 均为 none。
+  - 听云未执行真实 200+ 商品批量推进，也未创建新导出任务；观止/霜弦仍需现场复验页面流程、任务 rows/report 和后续生成文件逐列核对。
+- Verification target:
+  - 导出中心能看到历史导出记录，且已导出但无真实 ASIN 的商品能从页面再次创建新导出任务；旧任务/旧文件保留。
+  - 页面证据能解释 200+ 商品各自处于哪些状态，哪些已推进到待导出，哪些因真实 ASIN、模板、类目、素材或其它原因不能导出。
+  - 任务中心/导出报告应能追溯到全量目标，而不是只留下少量记录且无法解释未覆盖原因。
+  - 生成文件必须被实际打开/解析并逐列核对：任务 rows/report、Excel 工作表行数、商品识别字段、类目/模板、价格、库存 Quantity、图片/素材、真实 ASIN 跳过规则和失败/跳过原因必须能对上来源事实；观止不能只引用听云摘要。
+  - 逐列核对必须参考同一 Excel/模板中的其它 sheet 要求，包括说明、示例、字段枚举、必填项、格式和值域；不能只看主导出 sheet 表头或任务完成状态。
+- Boundaries:
+  - 不覆盖真实商品数据、人工类目、真实 ASIN、已生成素材或 Amazon 导入模板输出。
+  - 不修改 Step 10、template mappings 或模板文件；若必须触及，先按模板映射 SOP 和 change log 规则处理。
 
 ## P1 并行口径
 
@@ -307,6 +360,8 @@ Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
 - Primary owner: 清秋（agentKey: `qingqiu`）
 - Product boundary: 若命（agentKey: `ruoming`）
 - Related inbox:
+  - `MSG-20260608-002 - REQUEST` 给听云：商品图片确认默认选中 GIGA `main/gallery`，备用图只进未选素材池
+  - `MSG-20260608-002 / DONE_CLAIMED` 听云：后端返回候选来源结构，前端无已保存选择时默认选 main/gallery，file/brand 保留备用/未选素材
   - `MSG-20260605-005 - REQUEST` 给清秋
   - `MSG-20260605-032 - REQUEST` 清秋给听云：页面体验巡检和 UI 修正
   - `MSG-20260605-034 - REQUEST` 若命给听云：导出任务工作台口径落地
@@ -458,6 +513,7 @@ Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
 - Status: OPEN
 - Owner: 若命（agentKey: `ruoming`）主控，听云可协助
 - Related inbox:
+  - `MSG-20260608-001 - REQUEST` 给听云：清理 GIGA 图片全量下载旧口径，改为 URL 候选 + 已选图片按需下载
   - `MSG-20260605-043 - STATUS` 若命：文档补全身份分工
   - `MSG-20260605-044 - REQUEST` 给听云：工程事实文档
   - `MSG-20260605-045 - REQUEST` 给清秋：页面路径和状态语言

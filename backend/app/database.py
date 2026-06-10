@@ -21,10 +21,12 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
         if conn.dialect.name != "sqlite":
             if conn.dialect.name in {"mysql", "mariadb"}:
+                await _ensure_mysql_product_source_columns_and_indexes(conn)
                 await _ensure_mysql_catalog_export_columns(conn)
                 await _ensure_mysql_longtext_columns(conn)
                 await _ensure_mysql_giga_relation_columns(conn)
                 await _ensure_mysql_giga_store_scoped_unique_indexes(conn)
+                await _ensure_mysql_hot_path_indexes(conn)
             return
         result = await conn.execute(text("PRAGMA table_info(products)"))
         existing_product_columns = {row[1] for row in result.fetchall()}
@@ -41,9 +43,59 @@ async def init_db():
             ("aplus_upload_status", "VARCHAR(20) DEFAULT 'not_uploaded'"),
             ("aplus_uploaded_at", "DATETIME"),
             ("aplus_upload_error", "TEXT"),
+            ("source_data_source_id", "INTEGER"),
+            ("source_site", "VARCHAR(20)"),
+            ("source_batch_id", "VARCHAR(100)"),
         ):
             if column_name not in existing_product_columns:
                 await conn.execute(text(f"ALTER TABLE products ADD COLUMN {column_name} {column_type}"))
+        await conn.execute(text("""
+            UPDATE products
+            SET source_data_source_id = (
+                    SELECT CAST(json_extract(pd.gigab2b_raw_snapshot, '$.data_source_id') AS INTEGER)
+                    FROM product_data pd
+                    WHERE pd.product_id = products.id
+                      AND json_valid(pd.gigab2b_raw_snapshot)
+                      AND json_extract(pd.gigab2b_raw_snapshot, '$.data_source_id') IS NOT NULL
+                    LIMIT 1
+                ),
+                source_site = (
+                    SELECT json_extract(pd.gigab2b_raw_snapshot, '$.site')
+                    FROM product_data pd
+                    WHERE pd.product_id = products.id
+                      AND json_valid(pd.gigab2b_raw_snapshot)
+                      AND json_extract(pd.gigab2b_raw_snapshot, '$.site') IS NOT NULL
+                    LIMIT 1
+                ),
+                source_batch_id = (
+                    SELECT json_extract(pd.gigab2b_raw_snapshot, '$.batch_id')
+                    FROM product_data pd
+                    WHERE pd.product_id = products.id
+                      AND json_valid(pd.gigab2b_raw_snapshot)
+                      AND json_extract(pd.gigab2b_raw_snapshot, '$.batch_id') IS NOT NULL
+                    LIMIT 1
+                )
+            WHERE source_data_source_id IS NULL
+              AND EXISTS (
+                  SELECT 1
+                  FROM product_data pd
+                  WHERE pd.product_id = products.id
+                    AND json_valid(pd.gigab2b_raw_snapshot)
+                    AND json_extract(pd.gigab2b_raw_snapshot, '$.data_source_id') IS NOT NULL
+              )
+        """))
+        await conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_products_source_status_updated
+            ON products(source_data_source_id, status, current_step, updated_at)
+        """))
+        await conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_products_source_updated
+            ON products(source_data_source_id, updated_at)
+        """))
+        await conn.execute(text("""
+            CREATE INDEX IF NOT EXISTS ix_products_status_step_updated
+            ON products(status, current_step, updated_at)
+        """))
 
         await conn.execute(text("""
             CREATE TABLE IF NOT EXISTS upc_pool_items (
@@ -938,6 +990,9 @@ async def _ensure_mysql_longtext_columns(conn) -> None:
     for table in Base.metadata.sorted_tables:
         for column in table.columns:
             if isinstance(column.type, SAText):
+                current_type = await _mysql_column_type(conn, table.name, column.name)
+                if current_type == "longtext":
+                    continue
                 nullable = "NULL" if column.nullable else "NOT NULL"
                 await conn.execute(text(
                     f"ALTER TABLE `{table.name}` MODIFY COLUMN `{column.name}` LONGTEXT {nullable}"
@@ -947,6 +1002,22 @@ async def _ensure_mysql_longtext_columns(conn) -> None:
 async def _mysql_column_exists(conn, table_name: str, column_name: str) -> bool:
     result = await conn.execute(text(f"SHOW COLUMNS FROM `{table_name}` LIKE :column_name"), {"column_name": column_name})
     return result.first() is not None
+
+
+async def _mysql_column_type(conn, table_name: str, column_name: str) -> str | None:
+    result = await conn.execute(
+        text("""
+            SELECT DATA_TYPE
+            FROM information_schema.columns
+            WHERE table_schema = DATABASE()
+              AND table_name = :table_name
+              AND column_name = :column_name
+            LIMIT 1
+        """),
+        {"table_name": table_name, "column_name": column_name},
+    )
+    value = result.scalar_one_or_none()
+    return str(value).lower() if value else None
 
 
 async def _mysql_index_exists(conn, table_name: str, index_name: str) -> bool:
@@ -974,6 +1045,44 @@ async def _ensure_mysql_catalog_export_columns(conn) -> None:
     ):
         if not await _mysql_column_exists(conn, "catalog_products", column_name):
             await conn.execute(text(f"ALTER TABLE `catalog_products` ADD COLUMN `{column_name}` {column_type}"))
+
+
+async def _ensure_mysql_product_source_columns_and_indexes(conn) -> None:
+    for column_name, column_type in (
+        ("source_data_source_id", "INTEGER NULL"),
+        ("source_site", "VARCHAR(20) NULL"),
+        ("source_batch_id", "VARCHAR(100) NULL"),
+    ):
+        if not await _mysql_column_exists(conn, "products", column_name):
+            await conn.execute(text(f"ALTER TABLE `products` ADD COLUMN `{column_name}` {column_type}"))
+    await conn.execute(text("""
+        UPDATE `products` p
+        JOIN `product_data` pd ON pd.`product_id` = p.`id`
+        SET p.`source_data_source_id` = CAST(JSON_UNQUOTE(JSON_EXTRACT(pd.`gigab2b_raw_snapshot`, '$.data_source_id')) AS UNSIGNED),
+            p.`source_site` = JSON_UNQUOTE(JSON_EXTRACT(pd.`gigab2b_raw_snapshot`, '$.site')),
+            p.`source_batch_id` = JSON_UNQUOTE(JSON_EXTRACT(pd.`gigab2b_raw_snapshot`, '$.batch_id'))
+        WHERE p.`source_data_source_id` IS NULL
+          AND pd.`gigab2b_raw_snapshot` IS NOT NULL
+          AND JSON_VALID(pd.`gigab2b_raw_snapshot`)
+          AND JSON_UNQUOTE(JSON_EXTRACT(pd.`gigab2b_raw_snapshot`, '$.data_source_id')) REGEXP '^[0-9]+$'
+    """))
+
+
+async def _ensure_mysql_hot_path_indexes(conn) -> None:
+    indexes = (
+        ("products", "ix_products_source_status_updated", ("source_data_source_id", "status", "current_step", "updated_at")),
+        ("products", "ix_products_source_updated", ("source_data_source_id", "updated_at")),
+        ("products", "ix_products_status_step_updated", ("status", "current_step", "updated_at")),
+        ("catalog_products", "ix_catalog_confirmed_export_updated", ("confirmed_at", "exported_at", "updated_at")),
+        ("catalog_products", "ix_catalog_confirmed_asin_status", ("confirmed_at", "amazon_asin", "asin_sync_status")),
+        ("offline_tasks", "ix_offline_tasks_type_status_id", ("task_type", "status", "id")),
+        ("offline_task_steps", "ix_offline_task_steps_task_id", ("task_id", "id")),
+    )
+    for table_name, index_name, columns in indexes:
+        if await _mysql_index_exists(conn, table_name, index_name):
+            continue
+        columns_sql = ", ".join(f"`{column}`" for column in columns)
+        await conn.execute(text(f"ALTER TABLE `{table_name}` ADD INDEX `{index_name}` ({columns_sql})"))
 
 
 async def _ensure_mysql_giga_relation_columns(conn) -> None:

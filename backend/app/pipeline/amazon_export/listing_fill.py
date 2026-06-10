@@ -12,11 +12,14 @@ def apply_listing_fill(ctx: AmazonExportContext) -> None:
     pd = ctx.product_data
     fields = ctx.fields
 
+    if not product.upc:
+        ctx.warnings.append("缺少 UPC，Product Id Type/Product Id 暂未填写；生成前应先从 UPC 池绑定。")
+
     ctx.fill.update({
         fields["sku"]: pd.item_code,
         fields["title"]: pd.listing_title,
         fields["brand"]: product.brand,
-        fields["product_id_type"]: "UPC" if product.upc else "GTIN Exempt",
+        fields["product_id_type"]: "UPC" if product.upc else None,
         fields["product_id_value"]: product.upc,
         fields["model_number"]: pd.item_code,
         fields["model_name"]: pd.item_code,

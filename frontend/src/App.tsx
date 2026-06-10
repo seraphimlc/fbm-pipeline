@@ -5,6 +5,8 @@ import zhCN from 'antd/locale/zh_CN';
 import MainLayout from './components/MainLayout';
 import ProductList from './pages/ProductList';
 import ProductDetail from './pages/ProductDetail';
+import ProductImageReview from './pages/ProductImageReview';
+import ProductCompetitorReview from './pages/ProductCompetitorReview';
 import CreateProduct from './pages/CreateProduct';
 import CatalogList from './pages/CatalogList';
 import InventorySyncList from './pages/InventorySyncList';
@@ -25,6 +27,8 @@ const App: React.FC = () => (
             <Route path="/giga-items" element={<Navigate to="/products" replace />} />
             <Route path="/amazon-stylesnap" element={<Navigate to="/products" replace />} />
             <Route path="/products" element={<ProductList />} />
+            <Route path="/products/image-review" element={<ProductImageReview />} />
+            <Route path="/products/competitor-review" element={<ProductCompetitorReview />} />
             <Route path="/offline-tasks" element={<OfflineTaskCenter />} />
             <Route path="/export-center" element={<CatalogList />} />
             <Route path="/inventory-sync" element={<InventorySyncList />} />

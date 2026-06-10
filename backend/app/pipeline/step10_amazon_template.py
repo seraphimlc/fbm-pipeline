@@ -2,7 +2,7 @@
 模块10：Amazon 导入模板 — 将商品数据写入类目专用 Excel 模板
 
 当前支持 Vindhvisk / Sofas & Couches、Vindhvisk / Bicycle，以及儿童骑乘玩具 RIDE_ON_TOY。
-模板字段映射保存在 template_mappings/*.json，运行时不依赖大模型。
+模板字段映射保存在 template_mappings/*.json；少数语义字段会先由模型在模板下拉项内做选择。
 """
 
 import json
@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from openpyxl import load_workbook
+from openpyxl.utils import range_boundaries
 
 from app.config import settings
 from app.database import async_session
@@ -168,6 +169,98 @@ def _json_loads(value: str | None, fallback: Any) -> Any:
         return json.loads(value)
     except Exception:
         return fallback
+
+
+def _compact_template_text(value: Any, limit: int = 1200) -> str:
+    text = " ".join(str(value or "").split()).strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip(" ,;-") + "..."
+
+
+def _listing_check_dict(pd: ProductData) -> dict[str, Any]:
+    check = _json_loads(pd.listing_check, {})
+    return check if isinstance(check, dict) else {}
+
+
+def _set_listing_check_template_field(pd: ProductData, key: str, value: dict[str, Any]) -> None:
+    check = _listing_check_dict(pd)
+    fields = check.get("amazon_template_fields")
+    if not isinstance(fields, dict):
+        fields = {}
+    fields[key] = value
+    check["amazon_template_fields"] = fields
+    pd.listing_check = json.dumps(check, ensure_ascii=False)
+
+
+SEMANTIC_DROPDOWN_FIELD_KEYS = (
+    "target_audience",
+    "included_components",
+    "recommended_uses_for_product",
+    "specific_uses_for_product",
+    "room_type",
+    "item_shape",
+    "container_shape",
+    "mounting_type",
+    "age_range_description",
+    "style",
+    "target_gender",
+    "theme",
+)
+
+
+def _template_field_key(key: str) -> str:
+    return "target_audience_keyword" if key == "target_audience" else key
+
+
+def _semantic_values_from_listing_check(pd: ProductData, key: str) -> list[str]:
+    fields = _listing_check_dict(pd).get("amazon_template_fields")
+    if not isinstance(fields, dict):
+        return []
+    payload = fields.get(_template_field_key(key))
+    if not isinstance(payload, dict):
+        return []
+    values = payload.get("values")
+    if not isinstance(values, list):
+        return []
+    return [str(value).strip() for value in values if str(value or "").strip()][:5]
+
+
+def _defined_name_values(wb: Any, name: str) -> list[str]:
+    try:
+        defined_name = wb.defined_names[name]
+    except KeyError:
+        return []
+    values: list[str] = []
+    for title, coord in defined_name.destinations:
+        if title not in wb.sheetnames:
+            continue
+        min_col, min_row, max_col, max_row = range_boundaries(coord.replace("$", ""))
+        sheet = wb[title]
+        for row in sheet.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col):
+            for cell in row:
+                if cell.value not in (None, ""):
+                    values.append(str(cell.value))
+    return values
+
+
+def _defined_name_suffix_for_attr(attr: str) -> str:
+    return re.sub(r"[\[\]=#]", "", attr)
+
+
+def _allowed_values_for_template_attr(template_path: Path, product_type: str | None, attr: str) -> list[str]:
+    if not product_type:
+        return []
+    prefix = str(product_type).replace("-", "_").replace(" ", "")
+    if prefix[:1].isdigit():
+        prefix = "_" + prefix
+    expected_name = prefix + _defined_name_suffix_for_attr(attr)
+    wb = load_workbook(template_path, keep_vba=True, data_only=False, read_only=False)
+    values: list[str] = []
+    for value in _defined_name_values(wb, expected_name):
+        if value not in values:
+            values.append(value)
+    return values
 
 
 def _selected_stylesnap_category_text(pd: ProductData) -> str:
@@ -1178,6 +1271,152 @@ def _select_general_category_option(mapping: dict, pd: ProductData) -> dict[str,
     return options[0] if options and isinstance(options[0], dict) else None
 
 
+def _template_product_type_for_semantic_fields(mapping: dict, pd: ProductData) -> str | None:
+    category_type = str(mapping.get("category_type") or "")
+    option: dict[str, Any] | None = None
+    if category_type in {"shelf_table_cabinet_gate", "home_storage_furniture"}:
+        option = _select_general_category_option(mapping, pd)
+    elif not category_type and mapping.get("browse_category_options"):
+        option = _select_furniture_category_option(mapping, pd)
+    if option and option.get("product_type"):
+        return str(option["product_type"])
+    fixed_values = mapping.get("fixed_values") if isinstance(mapping.get("fixed_values"), dict) else {}
+    fixed_product_type = fixed_values.get("product_type#1.value")
+    return str(fixed_product_type).strip() if fixed_product_type else None
+
+
+def _semantic_dropdown_options(mapping: dict, template_path: Path, product_type: str | None) -> dict[str, list[str]]:
+    fields = mapping.get("dynamic_fields") if isinstance(mapping.get("dynamic_fields"), dict) else {}
+    options: dict[str, list[str]] = {}
+    for key in SEMANTIC_DROPDOWN_FIELD_KEYS:
+        attrs = _flatten_mapping_values(fields.get(key))
+        if key == "target_audience":
+            for field_key, field_value in fields.items():
+                if str(field_key).startswith("target_audience_"):
+                    attrs.extend(_flatten_mapping_values(field_value))
+        if key == "theme":
+            for field_key, field_value in fields.items():
+                if str(field_key).startswith("theme_"):
+                    attrs.extend(_flatten_mapping_values(field_value))
+        allowed: list[str] = []
+        for attr in attrs:
+            for value in _allowed_values_for_template_attr(template_path, product_type, attr):
+                if value not in allowed:
+                    allowed.append(value)
+        if allowed:
+            options[key] = allowed
+    return options
+
+
+def _semantic_dropdown_prompt(product: Product, pd: ProductData, options: dict[str, list[str]]) -> str:
+    bullets = _json_loads(pd.listing_bullets, [])
+    bullets = bullets if isinstance(bullets, list) else []
+    categories = _json_loads(pd.categories, pd.categories)
+    snapshot = _json_loads(pd.gigab2b_raw_snapshot, {})
+    capture = snapshot.get("amazon_listing_capture") if isinstance(snapshot, dict) else None
+    capture = capture if isinstance(capture, dict) else {}
+    selected = snapshot.get("selected_stylesnap") if isinstance(snapshot, dict) else None
+    selected = selected if isinstance(selected, dict) else {}
+    return f"""Analyze Amazon import template semantic dropdown fields for this product.
+
+Rules:
+- For each field, choose only from that field's allowed_values list.
+- Return [] for a field when none of its allowed values is explicitly supported by the product facts, listing, or competitor reference.
+- Do not infer generic audience, use, room, shape, component, mounting, style, theme, gender, or age range details unless the selected value is directly supported.
+- Do not invent a value outside the allowed list. Values must be exact string matches.
+- Output valid JSON only in this shape:
+{{
+  "fields": {{
+    "field_key": {{"values": ["..."], "reason": "short evidence"}}
+  }}
+}}
+
+Allowed values by field:
+{json.dumps(options, ensure_ascii=False, indent=2)}
+
+Product facts:
+- Brand: {product.brand}
+- Supplier title: {_compact_template_text(pd.title, 500)}
+- Listing title: {_compact_template_text(pd.listing_title, 500)}
+- Listing bullets: {json.dumps([_compact_template_text(item, 350) for item in bullets[:5]], ensure_ascii=False)}
+- Listing description: {_compact_template_text(pd.listing_description, 900)}
+- Supplier description: {_compact_template_text(pd.description, 900)}
+- Product type: {_compact_template_text(pd.product_type, 200)}
+- Category: {_compact_template_text(categories, 500)}
+- Leaf category: {_compact_template_text(pd.leaf_category, 200)}
+- Features: {_compact_template_text(pd.features, 700)}
+- Variants: {_compact_template_text(pd.variants, 700)}
+
+Selected competitor reference:
+- ASIN: {capture.get("asin") or selected.get("asin") or "N/A"}
+- Title: {_compact_template_text(capture.get("title"), 500)}
+- Category rank: {_compact_template_text(capture.get("category_rank") or selected.get("category_rank"), 500)}
+- Bullets: {json.dumps([_compact_template_text(item, 300) for item in (capture.get("bullets") or [])[:5]], ensure_ascii=False) if isinstance(capture.get("bullets"), list) else "[]"}
+"""
+
+
+async def ensure_amazon_template_semantic_fields(product: Product, pd: ProductData, mapping: dict, template_path: Path) -> None:
+    product_type = _template_product_type_for_semantic_fields(mapping, pd)
+    options = _semantic_dropdown_options(mapping, template_path, product_type)
+    if not options:
+        return
+
+    existing = _listing_check_dict(pd).get("amazon_template_fields")
+    if isinstance(existing, dict) and all(
+        isinstance(existing.get(_template_field_key(key)), dict)
+        and isinstance(existing[_template_field_key(key)].get("values"), list)
+        and all(str(value) in allowed_values for value in existing[_template_field_key(key)].get("values", []))
+        for key, allowed_values in options.items()
+    ):
+        return
+
+    try:
+        client = settings.get_llm_client()
+        response = await client.chat.completions.create(
+            model=settings.LLM_MODEL,
+            messages=[
+                {"role": "system", "content": "You choose Amazon template dropdown values from evidence. Return JSON only."},
+                {"role": "user", "content": _semantic_dropdown_prompt(product, pd, options)},
+            ],
+            temperature=0,
+            max_tokens=1200,
+            response_format={"type": "json_object"},
+        )
+        content = response.choices[0].message.content or "{}"
+        payload = json.loads(content)
+    except Exception as exc:
+        logger.warning("[Step10] 模板语义下拉字段模型分析失败 product_id=%s: %s", product.id, exc)
+        for key, allowed_values in options.items():
+            _set_listing_check_template_field(pd, _template_field_key(key), {
+                "values": [],
+                "reason": f"Model analysis failed: {type(exc).__name__}: {exc}",
+                "source": "llm_error",
+                "allowed_values": allowed_values,
+                "product_type": product_type,
+            })
+        return
+
+    fields_payload = payload.get("fields") if isinstance(payload, dict) else {}
+    fields_payload = fields_payload if isinstance(fields_payload, dict) else {}
+    for key, allowed_values in options.items():
+        item = fields_payload.get(key)
+        item = item if isinstance(item, dict) else {}
+        values = item.get("values")
+        values = values if isinstance(values, list) else []
+        selected_values: list[str] = []
+        for value in values:
+            text = str(value or "").strip()
+            if text in allowed_values and text not in selected_values:
+                selected_values.append(text)
+        _set_listing_check_template_field(pd, _template_field_key(key), {
+            "values": selected_values[:5],
+            "reason": _compact_template_text(item.get("reason") or "", 600),
+            "source": "llm",
+            "allowed_values": allowed_values,
+            "product_type": product_type,
+        })
+
+
 def _field(fill: dict[str, Any], fields: dict[str, Any], key: str, value: Any) -> None:
     target = fields.get(key)
     if not target:
@@ -1222,58 +1461,14 @@ def _count_from_text(pd: ProductData, nouns: tuple[str, ...]) -> int | None:
     return words.get(match.group(1)) if match else None
 
 
-def _room_values(pd: ProductData) -> list[str]:
-    text = _furniture_match_text(pd)
-    rooms: list[str] = []
-    for marker, room in (
-        ("bathroom", "Bathroom"),
-        ("bedroom", "Bedroom"),
-        ("living room", "Living Room"),
-        ("livingroom", "Living Room"),
-        ("kitchen", "Kitchen"),
-        ("entryway", "Entryway"),
-        ("hallway", "Hallway"),
-        ("nursery", "Nursery"),
-        ("playroom", "Kids Room"),
-        ("kids room", "Kids Room"),
-        ("office", "Home Office"),
-        ("classroom", "Classroom"),
-        ("patio", "Patio"),
-    ):
-        if marker in text and room not in rooms:
-            rooms.append(room)
-    return rooms[:5] or ["Living Room"]
-
-
-def _use_values(pd: ProductData, option: dict[str, Any] | None) -> list[str]:
-    text = _furniture_match_text(pd)
-    uses: list[str] = []
-    for marker, value in (
-        ("book", "Books"),
-        ("toy", "Toy Storage"),
-        ("shoe", "Shoes"),
-        ("bathroom", "Bathroom Storage"),
-        ("kitchen", "Kitchen Storage"),
-        ("litter", "Cat Litter Box"),
-        ("dog", "Dog Crate"),
-        ("pet", "Pet Enclosure"),
-        ("gate", "Safety Gate"),
-        ("coffee table", "Coffee Table"),
-        ("dining", "Dining"),
-        ("nightstand", "Bedside Storage"),
-        ("dresser", "Clothing Storage"),
-        ("vanity", "Makeup"),
-    ):
-        if marker in text and value not in uses:
-            uses.append(value)
-    if not uses and option:
-        leaf = str(option.get("node") or option.get("path") or "Home Storage").replace("-", " ").title()
-        uses.append(leaf[:80])
-    return uses[:5]
-
-
 def _material_from_product(pd: ProductData) -> str:
-    return (pd.material or "").strip() or _frame_material_value(pd)
+    raw = (pd.material or "").strip()
+    normalized = raw.lower().replace(".", "")
+    if normalized in {"mdf", "medium density fiberboard", "engineered wood"}:
+        return "Engineered Wood"
+    if "metal" in normalized and "wood" in normalized:
+        return "Engineered Wood"
+    return raw or _frame_material_value(pd)
 
 
 def _general_weight_capacity(pd: ProductData) -> int:
@@ -1296,7 +1491,6 @@ def _apply_general_template_fill(fill: dict[str, Any], fields: dict[str, Any], m
 
     material = _material_from_product(pd)
     frame_material = _frame_material_value(pd)
-    shape = "Round" if any(marker in _furniture_match_text(pd) for marker in ("round", "circle", "circular")) else "Rectangular"
     text = _furniture_match_text(pd)
 
     _field(fill, fields, "material", material)
@@ -1306,13 +1500,13 @@ def _apply_general_template_fill(fill: dict[str, Any], fields: dict[str, Any], m
     _field(fill, fields, "number_of_items", 1)
     _field(fill, fields, "number_of_pieces", _count_from_text(pd, ("piece", "pc")) or 1)
     _field(fill, fields, "number_of_packs", 1)
-    _field(fill, fields, "item_shape", shape)
-    _field(fill, fields, "container_shape", shape)
+    _fields(fill, fields, "item_shape", _semantic_values_from_listing_check(pd, "item_shape"))
+    _fields(fill, fields, "container_shape", _semantic_values_from_listing_check(pd, "container_shape"))
     _field(fill, fields, "unit_count", 1)
     _field(fill, fields, "unit_count_type", "Count")
-    _field(fill, fields, "included_components", (pd.leaf_category or "Furniture"))
+    _fields(fill, fields, "included_components", _semantic_values_from_listing_check(pd, "included_components"))
     _field(fill, fields, "is_assembly_required", "Yes")
-    _field(fill, fields, "assembly_instructions", "Assembly required. Follow the included instructions before use.")
+    _field(fill, fields, "assembly_instructions", "Require Assembly")
     _field(fill, fields, "assembly_instructions_description", "Assembly required. Follow the included instructions before use.")
     _field(fill, fields, "frame_material", frame_material)
     _field(fill, fields, "frame_material_structured", frame_material)
@@ -1322,7 +1516,7 @@ def _apply_general_template_fill(fill: dict[str, Any], fields: dict[str, Any], m
     _field(fill, fields, "case_material", material)
     _field(fill, fields, "furniture_finish", pd.color)
     _field(fill, fields, "finish_type", "Painted" if pd.color else None)
-    _field(fill, fields, "mounting_type", "Freestanding" if "wall" not in text and "mounted" not in text else "Wall Mount")
+    _fields(fill, fields, "mounting_type", _semantic_values_from_listing_check(pd, "mounting_type"))
     _field(fill, fields, "weight_capacity_maximum", _general_weight_capacity(pd))
     _field(fill, fields, "weight_capacity_maximum_unit", "Pounds")
     _field(fill, fields, "maximum_weight_recommendation", _general_weight_capacity(pd))
@@ -1337,7 +1531,7 @@ def _apply_general_template_fill(fill: dict[str, Any], fields: dict[str, Any], m
     _field(fill, fields, "dog_breed_size", "Small" if "small" in text else ("Medium" if "medium" in text else None))
     _field(fill, fields, "indoor_outdoor_usage", "Indoor")
     _field(fill, fields, "table_design", "Coffee Table" if "coffee table" in text else ("Dining Table" if "dining" in text else None))
-    _field(fill, fields, "target_audience", "Children" if any(marker in text for marker in ("kids", "children", "child", "toddler", "baby")) else "Adult")
+    _fields(fill, fields, "target_audience", _semantic_values_from_listing_check(pd, "target_audience"))
 
     if pd.dimension_length and pd.dimension_width and pd.dimension_height:
         for prefix in ("item_lwh", "item_dwh", "item_dimensions"):
@@ -1361,10 +1555,9 @@ def _apply_general_template_fill(fill: dict[str, Any], fields: dict[str, Any], m
         _field(fill, fields, "item_weight_value", pd.weight)
         _field(fill, fields, "item_weight_unit", "Pounds")
 
-    _fields(fill, fields, "room_type", _room_values(pd))
-    uses = _use_values(pd, option)
-    _fields(fill, fields, "recommended_uses_for_product", uses)
-    _fields(fill, fields, "specific_uses_for_product", uses)
+    _fields(fill, fields, "room_type", _semantic_values_from_listing_check(pd, "room_type"))
+    _fields(fill, fields, "recommended_uses_for_product", _semantic_values_from_listing_check(pd, "recommended_uses_for_product"))
+    _fields(fill, fields, "specific_uses_for_product", _semantic_values_from_listing_check(pd, "specific_uses_for_product"))
     return warnings
 
 
@@ -1644,50 +1837,6 @@ def _bicycle_bike_type(option: dict[str, Any] | None, pd: ProductData) -> str:
     return "Bicycle"
 
 
-def _bicycle_style(option: dict[str, Any] | None, pd: ProductData) -> str:
-    bike_type = _bicycle_bike_type(option, pd)
-    if bike_type in {"Cruiser Bike", "Electric Bike"}:
-        return "Urban"
-    if bike_type == "Mountain Bike":
-        return "Trail"
-    if bike_type == "Road Bike":
-        return "Road"
-    if bike_type == "Kids Bike":
-        return "Kids"
-    return "Cycling"
-
-
-def _bicycle_specific_uses(option: dict[str, Any] | None, pd: ProductData) -> list[str]:
-    bike_type = _bicycle_bike_type(option, pd)
-    if bike_type == "Mountain Bike":
-        return ["Trail", "Off Road", "Recreation"]
-    if bike_type in {"Cruiser Bike", "Electric Bike"}:
-        return ["Commuting", "City Riding", "Recreation"]
-    if bike_type == "Road Bike":
-        return ["Road Cycling", "Commuting", "Fitness"]
-    if bike_type == "Folding Bike":
-        return ["Commuting", "Travel", "City Riding"]
-    if bike_type == "BMX Bike":
-        return ["Freestyle", "Recreation"]
-    return ["Recreation", "Cycling"]
-
-
-def _bicycle_included_components(pd: ProductData) -> list[str]:
-    text = _bicycle_match_text(pd)
-    parts = ["Bicycle", "User Manual"]
-    if "basket" in text:
-        parts.append("Basket")
-    if "fender" in text:
-        parts.append("Fenders")
-    if "rear rack" in text or "rack" in text:
-        parts.append("Rear Rack")
-    if "training wheel" in text:
-        parts.append("Training Wheels")
-    if "bell" in text:
-        parts.append("Bell")
-    return list(dict.fromkeys(parts))[:5]
-
-
 def _bicycle_special_features(pd: ProductData) -> list[str]:
     text = _bicycle_match_text(pd)
     features: list[str] = []
@@ -1709,20 +1858,20 @@ def _bicycle_special_features(pd: ProductData) -> list[str]:
     return list(dict.fromkeys(features))[:5]
 
 
-def _bicycle_age_range(pd: ProductData) -> tuple[str, int | None, int | None]:
+def _bicycle_age_bounds(pd: ProductData) -> tuple[int | None, int | None]:
     text = _bicycle_match_text(pd)
     range_match = re.search(r"ages?\s*(\d{1,2})\s*[-~–]\s*(\d{1,2})", text)
     if range_match:
         minimum = int(range_match.group(1))
         maximum = int(range_match.group(2))
-        return f"Ages {minimum}-{maximum}", minimum, maximum
+        return minimum, maximum
     plus_match = re.search(r"ages?\s*(\d{1,2})\s*\\+", text)
     if plus_match:
         minimum = int(plus_match.group(1))
-        return f"Ages {minimum}+", minimum, None
+        return minimum, None
     if _bicycle_is_child(pd):
-        return "Kids", 6, 12
-    return "Adult", None, None
+        return 6, 12
+    return None, None
 
 
 def _bicycle_is_electric(option: dict[str, Any] | None, pd: ProductData) -> bool:
@@ -1748,7 +1897,7 @@ def _apply_bicycle_fill(fill: dict[str, Any], fields: dict[str, Any], product: P
     color = _bicycle_color_value(pd)
     wheel_size = _bicycle_wheel_size(pd)
     number_of_speeds, defaulted_speeds = _bicycle_number_of_speeds(pd)
-    age_description, min_age, max_age = _bicycle_age_range(pd)
+    min_age, max_age = _bicycle_age_bounds(pd)
     is_electric = _bicycle_is_electric(category_option, pd)
 
     if defaulted_speeds:
@@ -1796,12 +1945,12 @@ def _apply_bicycle_fill(fill: dict[str, Any], fields: dict[str, Any], product: P
         fields["wheel_set"]: "Front and Rear Wheels",
         fields["number_of_speeds"]: number_of_speeds,
         fields["bicycle_gear_shifter_type"]: "Trigger" if number_of_speeds > 1 else None,
-        fields["age_range_description"]: age_description,
-        fields["style"]: _bicycle_style(category_option, pd),
+        fields["age_range_description"]: (_semantic_values_from_listing_check(pd, "age_range_description") or [None])[0],
+        fields["style"]: (_semantic_values_from_listing_check(pd, "style") or [None])[0],
     })
     _set_sequence_fields(fill, fields.get("brake_style"), _bicycle_brake_styles(pd))
-    _set_sequence_fields(fill, fields.get("specific_uses_for_product"), _bicycle_specific_uses(category_option, pd))
-    _set_sequence_fields(fill, fields.get("included_components"), _bicycle_included_components(pd))
+    _set_sequence_fields(fill, fields.get("specific_uses_for_product"), _semantic_values_from_listing_check(pd, "specific_uses_for_product"))
+    _set_sequence_fields(fill, fields.get("included_components"), _semantic_values_from_listing_check(pd, "included_components"))
     _set_sequence_fields(fill, fields.get("special_features"), _bicycle_special_features(pd))
 
     if min_age is not None:
@@ -1855,15 +2004,6 @@ def _ride_on_material(pd: ProductData) -> str:
     if "wood" in raw:
         return "Plastic, Wood"
     return pd.material or "Plastic"
-
-
-def _ride_on_target_gender(pd: ProductData) -> str:
-    raw = _facts_text(pd).lower()
-    if any(word in raw for word in ("girl", "girls", "princess", "pink")):
-        return "Female"
-    if any(word in raw for word in ("boy", "boys")):
-        return "Male"
-    return "Unisex"
 
 
 def _ride_on_voltage(pd: ProductData) -> tuple[int, list[str]]:
@@ -1945,16 +2085,6 @@ def _ride_on_size(pd: ProductData) -> str | None:
     return None
 
 
-def _ride_on_included_components(pd: ProductData) -> list[str]:
-    raw = _facts_text(pd).lower()
-    parts = ["Ride-on toy", "Charger"]
-    if "remote" in raw or "2.4g" in raw or "parent control" in raw:
-        parts.append("Remote control")
-    if "manual" in raw or "instruction" in raw:
-        parts.append("User manual")
-    return parts[:5]
-
-
 def _ride_on_assembly(pd: ProductData) -> tuple[str, int | None, str | None]:
     raw = _facts_text(pd).lower()
     if any(phrase in raw for phrase in ("no assembly required", "fully assembled", "ready to use out of box", "ready to use out of the box")):
@@ -1979,15 +2109,11 @@ def _apply_ride_on_toy_fill(fill: dict[str, Any], fields: dict[str, str], produc
     ships_globally = str(fill.get(fields.get("ships_globally", ""), "No") or "No").strip().lower() == "yes"
 
     fill.update({
-        fields["target_audience_1"]: "Children",
-        fields["target_audience_2"]: "Kids",
-        fields["target_gender"]: _ride_on_target_gender(pd),
         fields["age_range_description"]: age_description,
         fields["material"]: _ride_on_material(pd),
         fields["color"]: pd.color,
         fields["size"]: _ride_on_size(pd),
         fields["part_number"]: pd.item_code,
-        fields["theme_1"]: "Cars",
         fields["is_assembly_required"]: assembly_required,
         fields["assembly_time"]: assembly_time,
         fields["assembly_time_unit"]: assembly_time_unit,
@@ -2051,8 +2177,10 @@ def _apply_ride_on_toy_fill(fill: dict[str, Any], fields: dict[str, str], produc
         warnings.append("商品疑似含遥控/无线功能，模板未自动填写 FCC ID 或 SDoC 联系资料；如上架报错需补 FCC 合规资料。")
     warnings.append("未自动填写 UL/TUV/Intertek 等监管证书编号或合规媒体 URL；这些字段需要真实证书资料后再补。")
 
-    for field, component in zip(fields.get("included_components", []), _ride_on_included_components(pd)):
-        fill[field] = component
+    _set_sequence_fields(fill, [fields.get("target_audience_1"), fields.get("target_audience_2")], _semantic_values_from_listing_check(pd, "target_audience"))
+    _fields(fill, fields, "target_gender", _semantic_values_from_listing_check(pd, "target_gender"))
+    _set_sequence_fields(fill, [fields.get("theme_1")], _semantic_values_from_listing_check(pd, "theme"))
+    _set_sequence_fields(fill, fields.get("included_components"), _semantic_values_from_listing_check(pd, "included_components"))
 
     return warnings
 
@@ -2092,7 +2220,12 @@ async def run_amazon_template(product_id: int) -> dict:
     async with async_session() as db:
         result = await db.execute(
             select(Product)
-            .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
+            .options(
+                selectinload(Product.data),
+                selectinload(Product.images),
+                selectinload(Product.aplus),
+                selectinload(Product.catalog_item),
+            )
             .where(Product.id == product_id)
         )
         product = result.scalar_one_or_none()
@@ -2113,6 +2246,19 @@ async def run_amazon_template(product_id: int) -> dict:
             raise ValueError("缺少商品Code，无法生成SKU")
         if not pd.listing_title or not pd.listing_bullets:
             raise ValueError("缺少Listing文案，请先执行Step5")
+        await ensure_amazon_template_semantic_fields(product, pd, mapping, template_path)
+        await db.commit()
+
+        if not product.upc:
+            from app.services.upc_pool import UpcPoolEmptyError, ensure_product_upc
+
+            try:
+                await ensure_product_upc(db, product)
+            except UpcPoolEmptyError as exc:
+                raise ValueError(str(exc)) from exc
+        if product.catalog_item:
+            product.catalog_item.upc = product.upc
+        await db.flush()
 
         product_snapshot = _snapshot_model(product)
         product_snapshot.data = _snapshot_model(product.data)
@@ -2124,7 +2270,13 @@ async def run_amazon_template(product_id: int) -> dict:
             pd_snapshot.amazon_stylesnap_selected_category_rank = selected_stylesnap_candidate.category_rank
             pd_snapshot.amazon_stylesnap_selected_raw_snippet = selected_stylesnap_candidate.raw_snippet
 
-    template_result = await asyncio.to_thread(_build_amazon_template_file, product_snapshot, pd_snapshot, mapping)
+        try:
+            template_result = await asyncio.to_thread(_build_amazon_template_file, product_snapshot, pd_snapshot, mapping)
+        except Exception:
+            await db.rollback()
+            raise
+        await db.commit()
+
     output_path = Path(template_result["path"])
 
     async with async_session() as db:

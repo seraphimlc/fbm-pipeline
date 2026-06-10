@@ -1,10 +1,12 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Table, Button, Tag, Space, Typography, message, Popconfirm, Input, Modal, DatePicker, Image, Select } from 'antd';
 import { ReloadOutlined, PlayCircleOutlined, RedoOutlined, DeleteOutlined, CloudDownloadOutlined, PauseOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import {
+  autoStartReadyGeneration,
   createGigaPullOfflineTask,
+  createProductBulkAdvanceTaskByFilter,
   deleteProduct,
   getOfflineTask,
   getProduct,
@@ -47,6 +49,7 @@ type WorkStatus =
   | 'suspended'
   | 'manual_review'
   | 'export_ready'
+  | 'exported'
   | 'failed';
 
 type ProductRow = {
@@ -177,10 +180,12 @@ const ProductList: React.FC = () => {
   const [skuState, setSkuState] = useState<Record<string, SkuState>>({});
   const [selectedReadyRows, setSelectedReadyRows] = useState<React.Key[]>([]);
   const [startingSelected, setStartingSelected] = useState(false);
+  const [creatingBulkAdvanceTask, setCreatingBulkAdvanceTask] = useState(false);
   const [rerunningId, setRerunningId] = useState<number | null>(null);
   const [pullingGigaProducts, setPullingGigaProducts] = useState(false);
   const [pullModalOpen, setPullModalOpen] = useState(false);
   const [selectedPullDataSourceIds, setSelectedPullDataSourceIds] = useState<number[]>([]);
+  const autoStartInFlightRef = useRef(false);
   const activeDataSource = useMemo(
     () => dataSources.find((source) => source.id === selectedDataSourceId),
     [dataSources, selectedDataSourceId],
@@ -199,13 +204,16 @@ const ProductList: React.FC = () => {
     [latestGigaPullTask, latestGigaPullTaskMatchesSelectedSource],
   );
 
+  const isProductExported = (product: Product) => Boolean(product.catalog_exported_at || product.catalog_export_task_id);
+
   const productWorkStatus = (product: Product): WorkStatus => {
+    if (product.status === 'failed' && /同款搜索|StyleSnap/i.test(product.error_message || '')) return 'select_competitor';
     if (product.status === 'failed') return 'failed';
     if (product.status === 'paused') return 'suspended';
     if (product.status === 'competitor_searching') return 'competitor_searching';
     if (product.status === 'step5_listing' && /竞品.*抓取中|Listing.*抓取中/i.test(product.error_message || '')) return 'capture_detail';
     if (RUNNING_STATUSES.includes(product.status)) return 'running';
-    if (product.status === 'completed') return 'export_ready';
+    if (product.status === 'completed') return isProductExported(product) ? 'exported' : 'export_ready';
     if (product.status === 'pending_review') return 'manual_review';
     if (product.status === 'created' && (product.current_step || 0) <= 0) return 'select_images';
     if (product.status === 'created' && !product.competitor_asin) return 'select_competitor';
@@ -261,7 +269,26 @@ const ProductList: React.FC = () => {
     navigate(`/products/${productId}`, { state: { from: returnPath } });
   };
 
+  const reviewPath = (path: string) => {
+    const params = new URLSearchParams();
+    if (selectedDataSourceId) params.set('data_source_id', String(selectedDataSourceId));
+    return `${path}${params.toString() ? `?${params.toString()}` : ''}`;
+  };
+
+  const handleWorkStatusClick = (value: 'all' | WorkStatus) => {
+    if (value === 'select_images') {
+      navigate(reviewPath('/products/image-review'));
+      return;
+    }
+    if (value === 'select_competitor') {
+      navigate(reviewPath('/products/competitor-review'));
+      return;
+    }
+    setGenerationStatusFilter(value);
+  };
+
   const fetchProducts = async () => {
+    if (!selectedDataSourceId) return;
     setLoading(true);
     try {
       const { data } = await listProducts({
@@ -285,8 +312,9 @@ const ProductList: React.FC = () => {
   };
 
   const fetchOverview = async () => {
+    if (!selectedDataSourceId) return;
     try {
-      const { data } = await getWorkbenchOverview();
+      const { data } = await getWorkbenchOverview({ data_source_id: selectedDataSourceId });
       setOverview(data);
     } catch {
       // 概览失败不影响列表。
@@ -345,18 +373,49 @@ const ProductList: React.FC = () => {
     await Promise.all([
       fetchProducts(),
       fetchOverview(),
+    ]);
+  };
+
+  const refreshTaskHints = async () => {
+    await Promise.all([
+      fetchGigaSyncBatches(),
+      fetchLatestGigaPullTask(),
+    ]);
+  };
+
+  const refreshWorkbenchWithHints = async () => {
+    await Promise.all([
+      fetchProducts(),
+      fetchOverview(),
       fetchGigaSyncBatches(),
       fetchLatestGigaPullTask(),
     ]);
   };
 
   useEffect(() => { fetchProducts(); }, [page, pageSize, itemId, competitorAsin, upc, statusFilter, dateRange, selectedDataSourceId]);
-  useEffect(() => { fetchOverview(); fetchDataSources(); fetchLatestGigaPullTask(); }, []);
-  useEffect(() => { fetchGigaSyncBatches(); }, [selectedDataSourceId, activeSite]);
+  useEffect(() => { fetchDataSources(); }, []);
+  useEffect(() => { fetchOverview(); }, [selectedDataSourceId]);
+  useEffect(() => {
+    if (!selectedDataSourceId || !overview?.ready_to_generate || autoStartInFlightRef.current) return;
+    autoStartInFlightRef.current = true;
+    autoStartReadyGeneration({ data_source_id: selectedDataSourceId })
+      .then(({ data }) => {
+        if (data.started > 0) {
+          message.success(`已自动启动 ${data.started} 个待生成商品`);
+          refreshWorkbenchRows();
+        }
+      })
+      .catch((error: any) => {
+        message.warning(error?.response?.data?.detail || '自动启动待生成商品失败');
+      })
+      .finally(() => {
+        autoStartInFlightRef.current = false;
+      });
+  }, [overview?.ready_to_generate, selectedDataSourceId]);
   useEffect(() => {
     if (!activeGigaSyncBatch && !['pending', 'running'].includes(latestGigaPullTask?.status || '')) return;
     const timer = window.setInterval(() => {
-      refreshWorkbenchRows();
+      refreshTaskHints();
     }, 5000);
     return () => window.clearInterval(timer);
   }, [activeGigaSyncBatch?.batch_id, latestGigaPullTask?.id, latestGigaPullTask?.status, selectedDataSourceId, activeSite]);
@@ -455,6 +514,69 @@ const ProductList: React.FC = () => {
     }
   };
 
+  const serverFilterSummary = () => {
+    const statusLabels: Record<string, string> = {
+      created: '待处理',
+      competitor_searching: '搜索候选竞品中',
+      paused: '已挂起',
+      pending_review: '待人工确认',
+      completed: '已生成 Listing',
+      failed: '失败',
+    };
+    const lines = [
+      '预计提交商品：当前服务端筛选命中的前 1000 个商品',
+      `店铺：${activeDataSource?.name || (selectedDataSourceId ? `店铺 #${selectedDataSourceId}` : '全部店铺')}`,
+      `系统状态：${statusFilter ? statusLabels[statusFilter] || statusFilter : '全部'}`,
+    ];
+    if (itemId.trim()) lines.push(`Item ID：${itemId.trim()}`);
+    if (competitorAsin.trim()) lines.push(`竞品 ASIN：${competitorAsin.trim()}`);
+    if (upc.trim()) lines.push(`UPC：${upc.trim()}`);
+    if (skuCode.trim()) lines.push(`SKU / Item Code 关键词：${skuCode.trim()}`);
+    if (dateRange) lines.push(`创建时间：${dayjs(dateRange[0]).format('YYYY-MM-DD')} 至 ${dayjs(dateRange[1]).format('YYYY-MM-DD')}`);
+    lines.push('下方工作状态按钮只筛当前页展示，不会加入本次提交范围。');
+    return lines;
+  };
+
+  const createBulkAdvanceTaskForCurrentFilter = async () => {
+    Modal.confirm({
+      title: '确认创建批量推进审计任务？',
+      content: (
+        <Space direction="vertical" size={6}>
+          {serverFilterSummary().map((line) => <Text key={line} type={line.startsWith('下方') ? 'secondary' : undefined}>{line}</Text>)}
+          <Text type="secondary">任务只会启动满足前置条件的商品；未确认图片、未选竞品等商品会写入 rows/report，不会被直接改到待导出。</Text>
+        </Space>
+      ),
+      okText: '创建任务',
+      cancelText: '取消',
+      onOk: async () => {
+        setCreatingBulkAdvanceTask(true);
+        const hideLoading = message.loading('正在按当前筛选创建批量推进审计任务...', 0);
+        try {
+          const { data } = await createProductBulkAdvanceTaskByFilter({
+            item_id: itemId.trim() || undefined,
+            competitor_asin: competitorAsin.trim() || undefined,
+            upc: upc.trim() || undefined,
+            status: statusFilter,
+            data_source_id: selectedDataSourceId,
+            created_from: dateRange?.[0],
+            created_to: dateRange?.[1],
+            sku_keyword: skuCode.trim() || undefined,
+            limit: 1000,
+          });
+          const result = parseJson<{ requested_count?: number; started_count?: number; skipped_count?: number }>(data.result_json, {});
+          message.success(`已创建任务中心 #${data.id}：提交 ${result.requested_count || 0}，启动 ${result.started_count || 0}，跳过 ${result.skipped_count || 0}`);
+          await refreshWorkbenchRows();
+          navigate('/offline-tasks');
+        } catch (error: any) {
+          message.error(error?.response?.data?.detail || '创建批量推进任务失败');
+        } finally {
+          hideLoading();
+          setCreatingBulkAdvanceTask(false);
+        }
+      },
+    });
+  };
+
   const handleDeleteProduct = async (record: Product) => {
     setDeletingId(record.id);
     try {
@@ -507,7 +629,7 @@ const ProductList: React.FC = () => {
     if (status === 'failed') return <Tag color="error">失败</Tag>;
     if (status === 'source_unavailable') return <Tag color="default">原商品下架</Tag>;
     if (status === 'unavailable') return <Tag color="default">不可售</Tag>;
-    if (status === 'completed') return <Tag color="success">待导出</Tag>;
+    if (status === 'completed') return <Tag color="success">已生成 Listing</Tag>;
     if (status === 'pending_review') return <Tag color="warning">待人工确认</Tag>;
     if (status === 'paused') return <Tag color="warning">已挂起</Tag>;
     if (status === 'competitor_searching') return <Tag color="processing">搜索候选竞品中</Tag>;
@@ -526,6 +648,7 @@ const ProductList: React.FC = () => {
     if (status === 'suspended') return <Tag color="default">已挂起</Tag>;
     if (status === 'manual_review') return <Tag color="warning">待人工处理</Tag>;
     if (status === 'export_ready') return <Tag color="success">待导出</Tag>;
+    if (status === 'exported') return <Tag color="green">已导出</Tag>;
     return <Tag color="error">失败</Tag>;
   };
 
@@ -538,11 +661,17 @@ const ProductList: React.FC = () => {
     if (status === 'suspended') return <Tag color="warning">继续任务</Tag>;
     if (status === 'manual_review') return <Tag color="warning">人工处理后继续</Tag>;
     if (status === 'export_ready') return <Tag color="success">等待批量导出</Tag>;
+    if (status === 'exported') return <Tag color="green">可再次导出</Tag>;
     if (status === 'failed') return <Tag color="error">查看错误并重试</Tag>;
     return <Tag color="processing">等待运行完成</Tag>;
   };
 
   const currentTaskStatus = (record: Product) => {
+    if (record.status === 'completed' && isProductExported(record)) {
+      return record.catalog_export_task_id
+        ? `已导出，可在导出中心再次导出（任务 #${record.catalog_export_task_id}）`
+        : '已导出，可在导出中心再次导出';
+    }
     if (record.current_task_status) return record.current_task_status;
     if (record.status === 'paused') return '已挂起：不会继续执行后续自动流程';
     if (record.status === 'failed' && record.error_message) return `失败：${record.error_message}`;
@@ -692,7 +821,8 @@ const ProductList: React.FC = () => {
                 继续
               </Button>
             )}
-            {['ready_to_generate', 'manual_review', 'failed'].includes(row.workStatus) && (
+            {['ready_to_generate', 'manual_review', 'failed'].includes(row.workStatus)
+              || (row.workStatus === 'suspended' && product.status !== 'paused') ? (
               <Popconfirm
                 title="挂起这个商品？"
                 description="挂起后不会继续执行后续自动流程，之后可以点继续恢复。"
@@ -702,7 +832,7 @@ const ProductList: React.FC = () => {
               >
                 <Button size="small" icon={<PauseOutlined />}>挂起</Button>
               </Popconfirm>
-            )}
+            ) : null}
             {canRestartProduct && (
               <Popconfirm
                 title="确定重新开始流程？"
@@ -723,7 +853,13 @@ const ProductList: React.FC = () => {
     },
   ];
 
-  const statusCounts = (status: WorkStatus) => rows.filter((row) => row.workStatus === status).length;
+  const pageStatusCounts = (status: WorkStatus) => rows.filter((row) => row.workStatus === status).length;
+  const overviewStatusCounts = (status: WorkStatus) => {
+    if (!overview) return pageStatusCounts(status);
+    if (status === 'exported') return Number(overview.export_ready_exported ?? pageStatusCounts(status));
+    if (status === 'export_ready') return Number(overview.export_ready_unexported ?? overview.export_ready ?? pageStatusCounts(status));
+    return Number(overview[status] ?? pageStatusCounts(status));
+  };
 
   return (
     <div>
@@ -731,17 +867,22 @@ const ProductList: React.FC = () => {
         <div>
           <Title level={4} style={{ margin: 0 }}>商品工作台</Title>
           <Text type="secondary">
-            待确认图片 {statusCounts('select_images')}
-            {' '}· 待找/选竞品 {statusCounts('select_competitor')}
-            {' '}· 搜索中 {statusCounts('competitor_searching')}
-            {' '}· 抓详情中 {statusCounts('capture_detail')}
-            {' '}· 待生成 {statusCounts('ready_to_generate')}
-            {' '}· 生成中 {statusCounts('running')}
-            {' '}· 已挂起 {statusCounts('suspended')}
-            {' '}· 待人工处理 {statusCounts('manual_review')}
-            {' '}· 待导出 {statusCounts('export_ready')}
-            {' '}· 失败 {statusCounts('failed')}
+            全库 {overview?.total_products ?? total}
+            {' '}· 待确认图片 {overviewStatusCounts('select_images')}
+            {' '}· 待找/选竞品 {overviewStatusCounts('select_competitor')}
+            {' '}· 搜索中 {overviewStatusCounts('competitor_searching')}
+            {' '}· 抓详情中 {overviewStatusCounts('capture_detail')}
+            {' '}· 待生成 {overviewStatusCounts('ready_to_generate')}
+            {' '}· 生成中 {overviewStatusCounts('running')}
+            {' '}· 已挂起 {overviewStatusCounts('suspended')}
+            {' '}· 待人工处理 {overviewStatusCounts('manual_review')}
+            {' '}· 待导出 {overview?.export_ready_unexported ?? overviewStatusCounts('export_ready')}
+            {' '}· 已导出可重导 {overview?.export_ready_exported ?? 0}
+            {' '}· 失败 {overviewStatusCounts('failed')}
           </Text>
+          <div>
+            <Text type="secondary">表格当前筛选 {total} 条；下方状态按钮只筛当前页。</Text>
+          </div>
           {latestGigaPullSummary && (
             <div style={{ marginTop: 6 }}>
               <Space size={8} wrap>
@@ -803,13 +944,17 @@ const ProductList: React.FC = () => {
           placeholder="系统状态"
           style={{ width: 160 }}
           value={statusFilter}
-          onChange={(value) => { setStatusFilter(value); setPage(1); }}
+          onChange={(value) => {
+            setStatusFilter(value);
+            setGenerationStatusFilter('all');
+            setPage(1);
+          }}
           options={[
             { value: 'created', label: '待处理' },
             { value: 'competitor_searching', label: '搜索候选竞品中' },
             { value: 'paused', label: '已挂起' },
             { value: 'pending_review', label: '待人工确认' },
-            { value: 'completed', label: '待导出' },
+            { value: 'completed', label: '已生成 Listing' },
             { value: 'failed', label: '失败' },
           ]}
         />
@@ -847,6 +992,7 @@ const ProductList: React.FC = () => {
                 ['suspended', '已挂起'],
                 ['manual_review', '待人工处理'],
                 ['export_ready', '待导出'],
+                ['exported', '已导出可重导'],
                 ['failed', '失败'],
               ].map(([value, label]) => (
                 <Button
@@ -854,13 +1000,21 @@ const ProductList: React.FC = () => {
                   size="small"
                   danger={value === 'failed' && generationStatusFilter === 'failed'}
                   type={generationStatusFilter === value ? 'primary' : 'default'}
-                  onClick={() => setGenerationStatusFilter(value as 'all' | WorkStatus)}
+                  onClick={() => handleWorkStatusClick(value as 'all' | WorkStatus)}
                 >
                   {label}
                 </Button>
               ))}
             </Space>
             <Space>
+              <Button
+                icon={<PlayCircleOutlined />}
+                loading={creatingBulkAdvanceTask}
+                disabled={loading || creatingBulkAdvanceTask}
+                onClick={createBulkAdvanceTaskForCurrentFilter}
+              >
+                批量推进当前筛选
+              </Button>
               <Button
                 onClick={() => {
                   const keys = readyRows.slice(0, 10).map((row) => row.key);

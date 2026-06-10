@@ -7,6 +7,8 @@ import {
   DatabaseOutlined,
   ExportOutlined,
   PictureOutlined,
+  CheckSquareOutlined,
+  AimOutlined,
   SettingOutlined,
   UnorderedListOutlined,
   ApiOutlined,
@@ -21,7 +23,16 @@ const MainLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const location = useLocation();
 
   const menuItems = [
-    { key: '/products', icon: <UnorderedListOutlined />, label: '商品工作台' },
+    {
+      key: '/products-root',
+      icon: <UnorderedListOutlined />,
+      label: '商品工作台',
+      children: [
+        { key: '/products', icon: <UnorderedListOutlined />, label: '商品列表' },
+        { key: '/products/image-review', icon: <CheckSquareOutlined />, label: '图片确认' },
+        { key: '/products/competitor-review', icon: <AimOutlined />, label: '选竞品' },
+      ],
+    },
     { key: '/offline-tasks', icon: <BarsOutlined />, label: '任务中心' },
     { key: '/export-center', icon: <ExportOutlined />, label: '导出中心' },
     { key: '/inventory-sync', icon: <CloudSyncOutlined />, label: '库存同步' },
@@ -34,9 +45,14 @@ const MainLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
 
   const selectedKey = location.pathname === '/'
     ? '/products'
-    : location.pathname.startsWith('/products/')
+    : location.pathname.startsWith('/products/image-review')
+        ? '/products/image-review'
+        : location.pathname.startsWith('/products/competitor-review')
+          ? '/products/competitor-review'
+          : location.pathname.startsWith('/products/')
         ? '/products'
         : location.pathname;
+  const defaultOpenKeys = selectedKey.startsWith('/products') ? ['/products-root'] : [];
 
   return (
     <Layout style={{ minHeight: '100vh', background: '#f5f7fb' }}>
@@ -60,8 +76,11 @@ const MainLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
         <Menu
           mode="inline"
           selectedKeys={[selectedKey]}
+          defaultOpenKeys={defaultOpenKeys}
           items={menuItems}
-          onClick={({ key }) => navigate(key)}
+          onClick={({ key }) => {
+            if (key !== '/products-root') navigate(key);
+          }}
           style={{ border: 'none', paddingTop: 8 }}
         />
       </Sider>

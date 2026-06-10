@@ -27,17 +27,31 @@ const taskTypeLabel = (type: string) => {
   if (type === 'giga_price_sync') return '同步大健价格';
   if (type === 'aplus_generate') return 'A+生成';
   if (type === 'catalog_export') return 'Amazon表格导出';
+  if (type === 'product_bulk_advance') return '批量推进商品';
   return type;
 };
 
 const stepTypeLabel = (type: string) => {
   if (type === 'giga_sync') return '同步商品';
-  if (type === 'giga_image_download') return '下载图片';
+  if (type === 'giga_image_download') return '历史图片下载';
   if (type === 'giga_inventory_sync') return '库存同步';
   if (type === 'giga_price_sync') return '价格同步';
   if (type === 'aplus_generate_product') return 'A+生成';
   if (type === 'catalog_export_template') return '模板导出';
   return type;
+};
+
+const latestResultLabel = (value?: string | null) => {
+  const map: Record<string, { color: string; label: string }> = {
+    export_ready: { color: 'success', label: '已到待导出' },
+    in_progress: { color: 'processing', label: '后续推进中' },
+    blocked: { color: 'warning', label: '仍阻塞' },
+    failed: { color: 'error', label: '后续失败' },
+    paused: { color: 'warning', label: '已挂起' },
+    missing: { color: 'default', label: '商品缺失' },
+  };
+  const item = map[value || ''] || { color: 'default', label: value || '-' };
+  return <Tag color={item.color}>{item.label}</Tag>;
 };
 
 const formatTime = (value: string | null) => value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-';
@@ -62,6 +76,9 @@ const progressText = (record: OfflineTaskStep) => {
     return `${stageMap[record.progress_current] || '生成中'} ${record.progress_current}/${record.progress_total}`;
   }
   if (record.step_type === 'catalog_export_template' && record.progress_total > 0) {
+    return `商品 ${record.progress_current}/${record.progress_total}`;
+  }
+  if (record.step_type === 'product_bulk_advance' && record.progress_total > 0) {
     return `商品 ${record.progress_current}/${record.progress_total}`;
   }
   return record.status === 'running' ? '执行中，正在统计...' : '-';
@@ -91,10 +108,33 @@ const resultSummary = (record: OfflineTask) => {
       </Space>
     );
   }
+  if (record.task_type === 'product_bulk_advance' && Object.keys(result).length) {
+    const started = Number((result as any).started_count || 0);
+    const skipped = Number((result as any).skipped_count || 0);
+    const rows = Array.isArray((result as any).rows) ? (result as any).rows.length : 0;
+    const latestCounts = (result as any).latest_counts || {};
+    const exportReady = Number((result as any).export_ready_count || latestCounts.export_ready || 0);
+    const inProgress = Number(latestCounts.in_progress || 0);
+    return (
+      <Space size={4} wrap>
+        <Tag color="success">启动 {started}</Tag>
+        {exportReady ? <Tag color="success">已到待导出 {exportReady}</Tag> : null}
+        {inProgress ? <Tag color="processing">后续推进中 {inProgress}</Tag> : null}
+        {skipped ? <Tag color="warning">跳过 {skipped}</Tag> : null}
+        {rows ? <Tag>明细 {rows}</Tag> : null}
+      </Space>
+    );
+  }
   if (record.error_message) {
     return <Typography.Text type="danger" ellipsis style={{ maxWidth: 220 }}>{record.error_message}</Typography.Text>;
   }
   return <Text type="secondary">-</Text>;
+};
+
+const resultRows = (record: OfflineTask) => {
+  const result = parseResult(record.result_json);
+  const rows = (result as any).rows;
+  return Array.isArray(rows) ? rows : [];
 };
 
 const OfflineTaskCenter: React.FC = () => {
@@ -220,7 +260,7 @@ const OfflineTaskCenter: React.FC = () => {
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <div>
           <Title level={4} style={{ margin: 0 }}>任务中心</Title>
-          <Text type="secondary">承载店铺商品同步、库存同步、价格同步、A+生成、图片下载、导出等离线操作；商品工作台只负责提交和查看商品状态。</Text>
+          <Text type="secondary">承载店铺商品同步、库存同步、价格同步、A+生成、历史图片下载、导出等离线操作；商品工作台只负责提交和查看商品状态。</Text>
         </div>
         <Button icon={<ReloadOutlined />} onClick={fetchTasks}>刷新</Button>
       </div>
@@ -319,15 +359,40 @@ const OfflineTaskCenter: React.FC = () => {
         expandable={{
           expandedRowRender: (record) => {
             const detail = details[record.id];
+            const rows = resultRows(detail || record);
             return (
-              <Table
-                rowKey="id"
-                size="small"
-                pagination={false}
-                columns={stepColumns}
-                dataSource={detail?.steps || []}
-                locale={{ emptyText: detail ? '暂无步骤' : '正在加载步骤...' }}
-              />
+              <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                <Table
+                  rowKey="id"
+                  size="small"
+                  pagination={false}
+                  columns={stepColumns}
+                  dataSource={detail?.steps || []}
+                  locale={{ emptyText: detail ? '暂无步骤' : '正在加载步骤...' }}
+                />
+                {rows.length ? (
+                  <Table
+                    rowKey={(row) => `${row.catalog_id || row.product_id || row.item_code}-${row.status}-${row.reason}`}
+                    size="small"
+                    pagination={{ pageSize: 10, size: 'small' }}
+                    dataSource={rows}
+                    columns={[
+                      { title: '商品ID', dataIndex: 'product_id', width: 90, render: (value: number | null) => value || '-' },
+                      { title: '商品资料ID', dataIndex: 'catalog_id', width: 110, render: (value: number | null) => value || '-' },
+                      { title: '商品Code', dataIndex: 'item_code', width: 160, render: (value: string | null) => value || '-' },
+                      { title: '状态', dataIndex: 'status', width: 110, render: (value: string) => statusLabel(value === 'started' ? 'done' : value) },
+                      { title: '当前结果', dataIndex: 'latest_result', width: 130, render: latestResultLabel },
+                      {
+                        title: '当前状态',
+                        width: 130,
+                        render: (_: unknown, row: any) => row.latest_status ? `${row.latest_status} / Step ${row.latest_step ?? '-'}` : '-',
+                      },
+                      { title: '原因', dataIndex: 'reason', ellipsis: true, render: (value: string | null) => value || '-' },
+                      { title: '当前说明', dataIndex: 'latest_reason', ellipsis: true, render: (value: string | null) => value || '-' },
+                    ]}
+                  />
+                ) : null}
+              </Space>
             );
           },
           onExpand: (expanded, record) => {

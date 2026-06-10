@@ -30,6 +30,11 @@ export interface Product {
   item_code?: string | null;
   title?: string | null;
   brand: string;
+  source_data_source_id?: number | null;
+  source_site?: string | null;
+  source_batch_id?: string | null;
+  catalog_exported_at?: string | null;
+  catalog_export_task_id?: number | null;
   status: string;
   current_step: number;
   current_task_status?: string | null;
@@ -138,6 +143,7 @@ export interface ProductImage {
   product_id: number;
   main_image_path: string | null;
   gallery_images: string | null;
+  gallery_order: string | null;
   image_analysis: string | null;
   [key: string]: unknown;
 }
@@ -162,6 +168,92 @@ export interface ProductDetail extends Product {
   video_folder: ProductFolderEntry | null;
   aplus_folder: ProductFolderEntry | null;
   amazon_export_preview: Record<string, any> | null;
+}
+
+export interface ProductImageReviewQueueItem {
+  id: number;
+  gigab2b_product_id: string | null;
+  status: string;
+  current_step: number;
+  current_task_status: string | null;
+  item_code: string | null;
+  title: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ProductImageReviewQueue {
+  items: ProductImageReviewQueueItem[];
+  total: number;
+  limit: number;
+}
+
+export interface ProductImageReviewDetail {
+  id: number;
+  source_item_id: string | null;
+  gigab2b_product_id: string | null;
+  status: string;
+  current_step: number;
+  current_task_status: string | null;
+  data: {
+    item_code: string | null;
+    title: string | null;
+  } | null;
+  images: {
+    id: number | null;
+    product_id: number;
+    main_image_path: string | null;
+    main_image_source: string | null;
+    gallery_images: string | null;
+    gallery_order: string | null;
+    gallery_order_total?: number | null;
+    gallery_order_limit?: number | null;
+  } | null;
+}
+
+export interface ProductCompetitorReviewQueueItem {
+  id: number;
+  source_item_id: string | null;
+  gigab2b_product_id: string | null;
+  competitor_asin: string | null;
+  status: string;
+  current_step: number;
+  current_task_status: string | null;
+  error_message: string | null;
+  item_code: string | null;
+  title: string | null;
+  leaf_category: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ProductCompetitorReviewQueue {
+  items: ProductCompetitorReviewQueueItem[];
+  total: number;
+  limit: number;
+}
+
+export interface ProductCompetitorReviewDetail {
+  id: number;
+  source_item_id: string | null;
+  gigab2b_product_id: string | null;
+  competitor_asin: string | null;
+  status: string;
+  current_step: number;
+  current_task_status: string | null;
+  error_message: string | null;
+  leaf_category: string | null;
+  data: {
+    item_code: string | null;
+    title: string | null;
+    gigab2b_raw_snapshot: string | null;
+  } | null;
+  images: {
+    id: number | null;
+    product_id: number;
+    main_image_path: string | null;
+    main_image_source: string | null;
+  } | null;
 }
 
 export interface CategoryOption {
@@ -210,6 +302,40 @@ export interface PaginatedProducts {
 
 export interface PaginatedCatalogProducts {
   items: CatalogProduct[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface CatalogExportFile {
+  task_id: number;
+  task_status: string;
+  title: string | null;
+  filename: string | null;
+  file_path: string | null;
+  oss_url: string | null;
+  file_size: number | null;
+  exported_at: string | null;
+  category: string | null;
+  categories: string[];
+  category_count: number;
+  template_name: string | null;
+  catalog_product_ids: number[];
+  task_product_count: number;
+  file_product_count: number;
+  success_count: number;
+  exported_count: number;
+  skipped_count: number;
+  failed_count: number;
+  report_count: number;
+  can_download: boolean;
+  created_at: string | null;
+  finished_at: string | null;
+  updated_at: string | null;
+}
+
+export interface PaginatedCatalogExportFiles {
+  items: CatalogExportFile[];
   total: number;
   page: number;
   page_size: number;
@@ -531,12 +657,15 @@ export interface AmazonStyleSnapCandidate {
   source_image_path: string | null;
   rank: number;
   asin: string;
+  title: string | null;
   url: string | null;
   brand: string | null;
   seller: string | null;
   delivery: string | null;
   price: string | null;
   rating: string | null;
+  review_count: string | null;
+  leaf_category: string | null;
   category_rank: string | null;
   color: string | null;
   size: string | null;
@@ -547,6 +676,9 @@ export interface AmazonStyleSnapCandidate {
   selected_at: string | null;
   listing_capture_id: number | null;
   listing_capture_status: string | null;
+  listing_capture_error: string | null;
+  listing_capture_has_main_image: boolean;
+  listing_summary: string | null;
   listing_captured_at: string | null;
   captured_at: string | null;
   imported_at: string | null;
@@ -676,6 +808,19 @@ export interface PaginatedGigaInventory {
 }
 
 export interface WorkbenchOverview {
+  total_products: number;
+  select_images: number;
+  competitor_searching: number;
+  select_competitor: number;
+  capture_detail: number;
+  ready_to_generate: number;
+  running: number;
+  suspended: number;
+  manual_review: number;
+  export_ready: number;
+  export_ready_unexported?: number;
+  export_ready_exported?: number;
+  failed: number;
   running_tasks: number;
   manual_review_tasks: number;
   failed_tasks: number;
@@ -955,6 +1100,18 @@ export const createProduct = (data: { gigab2b_url: string; competitor_asin?: str
 export const listProducts = (params?: { page?: number; page_size?: number; status?: string; item_id?: string; data_source_id?: number; competitor_asin?: string; upc?: string; created_from?: string; created_to?: string }) =>
   api.get<PaginatedProducts>('/products', { params });
 
+export const listProductImageReviewQueue = (params?: { data_source_id?: number; limit?: number }) =>
+  api.get<ProductImageReviewQueue>('/products/image-review-queue', { params });
+
+export const getProductImageReviewDetail = (productId: number, params?: { image_limit?: number }) =>
+  api.get<ProductImageReviewDetail>(`/products/image-review-detail/${productId}`, { params });
+
+export const listProductCompetitorReviewQueue = (params?: { data_source_id?: number; limit?: number }) =>
+  api.get<ProductCompetitorReviewQueue>('/products/competitor-review-queue', { params });
+
+export const getProductCompetitorReviewDetail = (productId: number) =>
+  api.get<ProductCompetitorReviewDetail>(`/products/competitor-review-detail/${productId}`);
+
 export const downloadImportTemplate = () =>
   api.get<Blob>('/products/import/template', { responseType: 'blob' });
 
@@ -970,8 +1127,26 @@ export const importProducts = (file: File) => {
 export const bulkStartPipelines = (productIds: number[]) =>
   api.post<BulkStartResult>('/products/bulk-start', { product_ids: productIds }, { timeout: 120000 });
 
-export const getWorkbenchOverview = () =>
-  api.get<WorkbenchOverview>('/products/overview');
+export const autoStartReadyGeneration = (params?: { data_source_id?: number; limit?: number }) =>
+  api.post<BulkStartResult>('/products/auto-start-ready-generation', null, { params, timeout: 120000 });
+
+export const createProductBulkAdvanceTask = (productIds: number[]) =>
+  api.post<OfflineTask>('/products/bulk-advance-task', { product_ids: productIds }, { timeout: 120000 });
+
+export const createProductBulkAdvanceTaskByFilter = (params: {
+  status?: string;
+  item_id?: string;
+  data_source_id?: number;
+  competitor_asin?: string;
+  upc?: string;
+  created_from?: string;
+  created_to?: string;
+  sku_keyword?: string;
+  limit?: number;
+}) => api.post<OfflineTask>('/products/bulk-advance-task/by-filter', params, { timeout: 120000 });
+
+export const getWorkbenchOverview = (params?: { data_source_id?: number }) =>
+  api.get<WorkbenchOverview>('/products/overview', { params });
 
 export const listUpcPool = (params?: { page?: number; page_size?: number; status?: string; q?: string }) =>
   api.get<PaginatedUpcPoolItems>('/products/upc-pool', { params });
@@ -1001,6 +1176,12 @@ export const listCatalogProducts = (params?: {
   stock_synced_from?: string;
   stock_synced_to?: string;
 }) => api.get<PaginatedCatalogProducts>('/products/catalog', { params });
+
+export const listCatalogExportFiles = (params?: {
+  page?: number;
+  page_size?: number;
+  category?: string;
+}) => api.get<PaginatedCatalogExportFiles>('/products/catalog/export-files', { params });
 
 export const listCatalogExportCategories = () =>
   api.get<CatalogExportCategories>('/products/catalog/export-categories');
@@ -1075,7 +1256,7 @@ export const createGigaInventorySyncOfflineTask = (body: { data_source_ids: numb
 export const createGigaPriceSyncOfflineTask = (body: { data_source_ids: number[]; sku_codes?: string[] | null }) =>
   api.post<OfflineTaskQueuedResult>('/offline-tasks/giga-price-sync', body, { timeout: 30000 });
 
-export const listOfflineTasks = (params?: { page?: number; page_size?: number; task_type?: string; status?: string }) =>
+export const listOfflineTasks = (params?: { page?: number; page_size?: number; task_type?: string; status?: string; include_progress?: boolean }) =>
   api.get<PaginatedOfflineTasks>('/offline-tasks', { params });
 
 export const getOfflineTask = (id: number) =>
@@ -1126,8 +1307,8 @@ export const listGigaInventoryAlerts = (params: { site: string; data_source_id?:
 export const listGigaPriceAlerts = (params: { site: string; data_source_id?: number; batch_id?: string; change_type?: string; page?: number; page_size?: number }) =>
   api.get<PaginatedGigaPriceAlerts>('/giga/price/alerts', { params });
 
-export const listProductCompetitorCandidates = (productId: number) =>
-  api.get<AmazonStyleSnapCandidateGroup>(`/amazon-stylesnap/products/${productId}/competitor-candidates`);
+export const listProductCompetitorCandidates = (productId: number, params?: { enrich_images?: boolean }) =>
+  api.get<AmazonStyleSnapCandidateGroup>(`/amazon-stylesnap/products/${productId}/competitor-candidates`, { params });
 
 export const searchProductCompetitorCandidates = (productId: number, force = false) =>
   api.post<Product>(
@@ -1141,6 +1322,13 @@ export const selectProductCompetitorCandidate = (productId: number, candidateId:
     `/amazon-stylesnap/products/${productId}/competitor-candidates/${candidateId}/select`,
     null,
     { params: { force_capture: forceCapture }, timeout: 180000 },
+  );
+
+export const retryProductCompetitorCandidateCapture = (productId: number, candidateId: number, force = true) =>
+  api.post<AmazonStyleSnapCandidateGroup>(
+    `/amazon-stylesnap/products/${productId}/competitor-candidates/${candidateId}/capture`,
+    null,
+    { params: { force }, timeout: 60000 },
   );
 
 export const getInventorySyncBatch = (id: number) =>

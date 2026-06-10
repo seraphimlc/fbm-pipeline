@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Button, Empty, message, Popconfirm, Segmented, Select, Space, Table, Tabs, Tag, Typography, Upload } from 'antd';
+import { Button, Empty, message, Modal, Popconfirm, Select, Space, Table, Tabs, Tag, Tooltip, Typography, Upload } from 'antd';
 import { DeleteOutlined, DownloadOutlined, PauseCircleOutlined, PlayCircleOutlined, ReloadOutlined, UploadOutlined } from '@ant-design/icons';
 import {
   createCatalogExportOfflineTasks,
@@ -8,13 +8,14 @@ import {
   downloadOfflineTaskResult,
   downloadCatalogTemplateFile,
   listCatalogExportCategories,
+  listCatalogExportFiles,
   listCatalogProducts,
   listCatalogTemplateCategories,
   listCatalogTemplateFiles,
   updateCatalogTemplateFileStatus,
   uploadCatalogCategoryTemplate,
 } from '../api';
-import type { CatalogExportCategorySummary, CatalogProduct, CatalogTemplateFileSummary } from '../api';
+import type { CatalogExportCategorySummary, CatalogExportFile, CatalogProduct, CatalogTemplateFileSummary } from '../api';
 
 const { Title, Text } = Typography;
 const ALL_CATEGORIES = '__all__';
@@ -22,12 +23,15 @@ const ALL_CATEGORIES = '__all__';
 const CatalogList: React.FC = () => {
   const navigate = useNavigate();
   const [items, setItems] = useState<CatalogProduct[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [exportFiles, setExportFiles] = useState<CatalogExportFile[]>([]);
+  const [itemsLoading, setItemsLoading] = useState(false);
+  const [exportFilesLoading, setExportFilesLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(50);
-  const [total, setTotal] = useState(0);
-  const [exportStatus, setExportStatus] = useState<'pending' | 'exported'>('pending');
+  const [pageSize, setPageSize] = useState(20);
+  const [itemsTotal, setItemsTotal] = useState(0);
+  const [exportFilesTotal, setExportFilesTotal] = useState(0);
+  const [exportView, setExportView] = useState<'products' | 'files'>('products');
   const [selectedCategory, setSelectedCategory] = useState<string>(ALL_CATEGORIES);
   const [exportCategories, setExportCategories] = useState<{ pending: CatalogExportCategorySummary[]; exported: CatalogExportCategorySummary[] }>({ pending: [], exported: [] });
   const [templateCategories, setTemplateCategories] = useState<CatalogExportCategorySummary[]>([]);
@@ -41,10 +45,14 @@ const CatalogList: React.FC = () => {
   const [selectedItemMap, setSelectedItemMap] = useState<Record<number, CatalogProduct>>({});
   const [activeTab, setActiveTab] = useState('export');
   const itemRequestId = useRef(0);
+  const exportFileRequestId = useRef(0);
 
-  const currentCategoryOptions = exportStatus === 'pending' ? exportCategories.pending : exportCategories.exported;
+  const isProductListView = exportView === 'products';
+  const isExportFileView = exportView === 'files';
+  const currentCategoryOptions = isExportFileView ? exportCategories.exported : [];
+  const currentTotal = isProductListView ? itemsTotal : exportFilesTotal;
+  const currentLoading = isProductListView ? itemsLoading : exportFilesLoading;
   const isAllCategories = selectedCategory === ALL_CATEGORIES;
-  const selectedCategorySummary = isAllCategories ? undefined : currentCategoryOptions.find((item) => item.category === selectedCategory);
   const aggregateSummary = currentCategoryOptions.reduce(
     (acc, item) => ({
       count: acc.count + item.count,
@@ -66,25 +74,53 @@ const CatalogList: React.FC = () => {
   const fetchItems = async () => {
     const requestId = itemRequestId.current + 1;
     itemRequestId.current = requestId;
-    setLoading(true);
+    setItemsLoading(true);
     try {
-      const { data } = await listCatalogProducts({
+      const params = {
         page,
         page_size: pageSize,
-        export_status: exportStatus,
-        category: isAllCategories ? undefined : selectedCategory,
-      });
-      if (requestId !== itemRequestId.current) return;
+        category: !isAllCategories ? selectedCategory : undefined,
+      };
+      let { data } = await listCatalogProducts(params);
       if (!data.items.length && data.total > 0 && page > 1) {
+        const retry = await listCatalogProducts({ ...params, page: 1 });
+        data = retry.data;
         setPage(1);
-        return;
       }
+      if (requestId !== itemRequestId.current) return;
       setItems(data.items);
-      setTotal(data.total);
+      setItemsTotal(data.total);
     } catch (error: any) {
       message.error(error?.response?.data?.detail || '加载导出商品失败');
     } finally {
-      setLoading(false);
+      setItemsLoading(false);
+    }
+  };
+
+  const fetchExportFiles = async () => {
+    const requestId = exportFileRequestId.current + 1;
+    exportFileRequestId.current = requestId;
+    setExportFilesLoading(true);
+    try {
+      const exportFilePageSize = Math.min(pageSize, 100);
+      const params = {
+        page,
+        page_size: exportFilePageSize,
+        category: isExportFileView && !isAllCategories ? selectedCategory : undefined,
+      };
+      let { data } = await listCatalogExportFiles(params);
+      if (!data.items.length && data.total > 0 && page > 1) {
+        const retry = await listCatalogExportFiles({ ...params, page: 1 });
+        data = retry.data;
+        setPage(1);
+      }
+      if (requestId !== exportFileRequestId.current) return;
+      setExportFiles(data.items);
+      setExportFilesTotal(data.total);
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '加载导出文件记录失败');
+    } finally {
+      setExportFilesLoading(false);
     }
   };
 
@@ -125,17 +161,60 @@ const CatalogList: React.FC = () => {
   };
 
   const refreshExportCenterData = async () => {
-    await Promise.all([fetchExportCategories(), fetchTemplateCategories(), fetchTemplateFiles()]);
+    const requests: Promise<void>[] = [];
+    if (isExportFileView) {
+      requests.push(fetchExportCategories());
+    }
+    if (activeTab === 'templates') {
+      requests.push(fetchTemplateCategories());
+      requests.push(fetchTemplateFiles());
+    }
+    await Promise.all(requests);
   };
 
-  useEffect(() => { refreshExportCenterData(); }, []);
-  useEffect(() => { fetchItems(); }, [page, pageSize, exportStatus, selectedCategory]);
+  const refreshVisibleExportView = async () => {
+    await Promise.all([
+      refreshExportCenterData(),
+      isProductListView ? fetchItems() : fetchExportFiles(),
+    ]);
+  };
+
+  const scheduleExportCompletionRefresh = () => {
+    [3000, 8000, 15000, 30000, 60000].forEach((delay) => {
+      window.setTimeout(() => {
+        refreshExportCenterData();
+        fetchItems();
+        if (isExportFileView) {
+          fetchExportFiles();
+        }
+      }, delay);
+    });
+  };
+
   useEffect(() => {
-    const categories = exportStatus === 'pending' ? exportCategories.pending : exportCategories.exported;
+    if (isExportFileView) {
+      fetchExportCategories();
+    }
+  }, [exportView]);
+  useEffect(() => {
+    if (activeTab === 'templates') {
+      fetchTemplateCategories();
+      fetchTemplateFiles();
+    }
+  }, [activeTab]);
+  useEffect(() => {
+    if (isProductListView) {
+      fetchItems();
+    } else {
+      fetchExportFiles();
+    }
+  }, [page, pageSize, exportView, selectedCategory]);
+  useEffect(() => {
+    const categories = isExportFileView ? exportCategories.exported : [];
     if (selectedCategory === ALL_CATEGORIES || categories.some((item) => item.category === selectedCategory)) return;
     setSelectedCategory(ALL_CATEGORIES);
     setPage(1);
-  }, [exportCategories, exportStatus]);
+  }, [exportCategories, exportView]);
   useEffect(() => {
     if (!selectedIds.length) return;
     const selectedSet = new Set(selectedIds.map(Number));
@@ -150,12 +229,13 @@ const CatalogList: React.FC = () => {
     });
   }, [items, selectedIds]);
 
-  const selectExportStatus = (status: 'pending' | 'exported') => {
-    setExportStatus(status);
+  const selectExportView = (view: 'products' | 'files') => {
+    setExportView(view);
     setSelectedCategory(ALL_CATEGORIES);
     setSelectedIds([]);
     setSelectedItemMap({});
     setPage(1);
+    refreshExportCenterData();
   };
 
   const saveBlob = (blob: Blob, filename: string) => {
@@ -183,27 +263,33 @@ const CatalogList: React.FC = () => {
     }
   };
 
-  const categoryTemplateTag = (summary?: CatalogExportCategorySummary) => {
-    if (!summary) return <Tag>未选择类目</Tag>;
-    if (summary.template_available) {
-      return <Tag color="success">有模板</Tag>;
-    }
-    if (summary.uploaded_template_name) {
-      return <Tag color="warning">已上传但未接入映射</Tag>;
-    }
-    return <Tag color="warning">缺模板</Tag>;
-  };
+  const confirmReExport = (params: { count: number; templateCount: number; realAsinCount: number; label: string }) => new Promise<boolean>((resolve) => {
+    Modal.confirm({
+      title: '确认再次导出这些商品？',
+      content: (
+        <Space direction="vertical" size={8}>
+          <Text>{params.label}：{params.count} 个商品。</Text>
+          <Text type="secondary">这会用当前商品、库存/价格、Listing 等最新数据创建新导出任务，并生成新的 zip/Excel；历史文件会保留。</Text>
+          <Text type="secondary">系统会在后台按实际模板拆分，任务报告会写明成功、失败和跳过原因。</Text>
+          <Text type="secondary">下载后仍需打开实际文件逐列核对。</Text>
+          <Text type="secondary">
+            已有真实 ASIN 的商品不会在这里静默放行，导出任务报告会逐商品写明跳过原因。
+          </Text>
+          {params.realAsinCount ? <Text type="warning">当前列表中可见 {params.realAsinCount} 个商品已有真实 ASIN。</Text> : null}
+        </Space>
+      ),
+      okText: '再次导出',
+      cancelText: '取消',
+      onOk: () => resolve(true),
+      onCancel: () => resolve(false),
+    });
+  });
 
-  const templateTag = (summary?: CatalogExportCategorySummary) => {
-    if (isAllCategories) {
-      if (!aggregateSummary.categoryCount) return <Tag>无类目</Tag>;
-      if (aggregateSummary.templateReadyCount === aggregateSummary.categoryCount) return <Tag color="success">全部类目有模板</Tag>;
-      return <Tag color="warning">{aggregateSummary.categoryCount - aggregateSummary.templateReadyCount} 个类目缺模板</Tag>;
-    }
-    return categoryTemplateTag(summary);
-  };
-
-  const createExportTasksByIds = async (ids: number[], label: string) => {
+  const createExportTasksByIds = async (
+    ids: number[],
+    label: string,
+    options?: { reExport?: boolean; templateCount?: number; realAsinCount?: number },
+  ) => {
     if (!ids.length) {
       message.warning('没有可导出的商品');
       return;
@@ -212,20 +298,29 @@ const CatalogList: React.FC = () => {
       message.warning('单次最多导出 1000 个商品，请缩小筛选范围');
       return;
     }
+    if (options?.reExport) {
+      const confirmed = await confirmReExport({
+        count: ids.length,
+        templateCount: options.templateCount || 0,
+        realAsinCount: options.realAsinCount || 0,
+        label,
+      });
+      if (!confirmed) return;
+    }
     setExporting(true);
     const hideLoading = message.loading(`正在为${label}创建导出任务，系统会按模板拆分...`, 0);
     try {
       const { data } = await createCatalogExportOfflineTasks(ids);
       if (data.tasks.length) {
         message.success(`已创建 ${data.tasks.length} 个导出任务，请到任务中心下载结果`);
+        scheduleExportCompletionRefresh();
       } else {
         message.warning('没有创建导出任务，请检查类目模板和商品状态');
       }
       if (data.errors?.length) {
         message.warning(`有 ${data.errors.length} 个商品未进入导出任务，可在任务中心任务详情或接口返回中查看原因`);
       }
-      await refreshExportCenterData();
-      await fetchItems();
+      await refreshVisibleExportView();
     } catch (error: any) {
       message.error(error?.response?.data?.detail || '创建导出任务失败');
     } finally {
@@ -235,39 +330,19 @@ const CatalogList: React.FC = () => {
   };
 
   const exportCatalog = async () => {
-    if (selectedIds.length) {
-      await createExportTasksByIds(selectedIds.map(Number), `选中的 ${selectedIds.length} 个商品`);
+    if (!selectedIds.length) {
+      message.warning('请先勾选要导出的商品');
       return;
     }
-    const currentActionCount = exportStatus === 'pending'
-      ? (isAllCategories ? aggregateSummary.exportableCount : selectedCategorySummary?.exportable_count || 0)
-      : (isAllCategories ? aggregateSummary.count : selectedCategorySummary?.count || 0);
-    if (!isAllCategories && selectedCategorySummary && !currentActionCount) {
-      message.warning(exportStatus === 'pending' ? '当前类目没有可导出的商品' : '当前类目没有历史导出商品');
-      return;
-    }
-    if (isAllCategories && !currentActionCount) {
-      message.warning(exportStatus === 'pending' ? '当前没有待导出的商品' : '当前没有已导出商品');
-      return;
-    }
-    setExporting(true);
-    try {
-      const { data } = await listCatalogProducts({
-        page: 1,
-        page_size: 1000,
-        export_status: exportStatus,
-        category: isAllCategories ? undefined : selectedCategory,
-      });
-      await createExportTasksByIds(
-        data.items.map((item) => item.id),
-        isAllCategories
-          ? (exportStatus === 'pending' ? '全部待导出商品' : '全部已导出商品的新导出尝试')
-          : `「${selectedCategory}」下的${exportStatus === 'pending' ? '商品' : '已导出商品新导出尝试'}`,
-      );
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '加载待导出商品失败');
-      setExporting(false);
-    }
+    await createExportTasksByIds(
+      selectedIds.map(Number),
+      `选中的 ${selectedIds.length} 个商品`,
+      {
+        reExport: selectedItems.some((item) => isCatalogProductExported(item)),
+          templateCount: 0,
+        realAsinCount: selectedItems.filter((item) => item.amazon_asin).length,
+      },
+    );
   };
 
   const uploadTemplateForCategory = async (category: string, file: File) => {
@@ -322,6 +397,38 @@ const CatalogList: React.FC = () => {
     }
   };
 
+  const downloadExportFileResult = async (record: CatalogExportFile) => {
+    setExportDownloadingTaskId(record.task_id);
+    try {
+      const response = await downloadOfflineTaskResult(record.task_id);
+      saveBlob(response.data, extractFilename(response.headers['content-disposition'], record.filename || `catalog_export_${record.task_id}.zip`));
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '下载导出文件失败');
+    } finally {
+      setExportDownloadingTaskId(null);
+    }
+  };
+
+  const reExportFileProducts = async (record: CatalogExportFile) => {
+    if (!record.catalog_product_ids.length) {
+      message.warning('该任务没有可再次导出的商品快照');
+      return;
+    }
+    Modal.confirm({
+      title: '确认基于该历史任务再次导出？',
+      content: (
+        <Space direction="vertical" size={8}>
+          <Text>原任务 #{record.task_id}：{record.task_product_count} 个商品，涉及 {record.category_count} 个类目。</Text>
+          <Text type="secondary">这会用该历史任务的商品快照创建新的导出任务和新文件；原文件和任务记录会保留。</Text>
+          <Text type="secondary">已有真实 ASIN 或其它业务限制会进入新任务 rows/report，不会静默跳过。</Text>
+        </Space>
+      ),
+      okText: '再次导出',
+      cancelText: '取消',
+      onOk: () => createExportTasksByIds(record.catalog_product_ids, `任务 #${record.task_id} 的 ${record.catalog_product_ids.length} 个商品`, { reExport: false }),
+    });
+  };
+
   const toggleTemplateFile = async (record: CatalogTemplateFileSummary) => {
     setTemplateFileMutatingId(record.file_id);
     try {
@@ -358,6 +465,16 @@ const CatalogList: React.FC = () => {
     return <Tag>未检查</Tag>;
   };
 
+  const exportTaskStatusTag = (status: string) => {
+    if (status === 'done') return <Tag color="success">已完成</Tag>;
+    if (status === 'partial_failed') return <Tag color="warning">部分完成</Tag>;
+    if (status === 'failed') return <Tag color="error">失败</Tag>;
+    return <Tag>{status}</Tag>;
+  };
+
+  const isCatalogProductExported = (record: CatalogProduct) =>
+    Boolean(record.exported_at || record.export_task_id || record.amazon_asin);
+
   const panelStyle: React.CSSProperties = {
     background: '#fff',
     border: '1px solid #eef0f4',
@@ -365,28 +482,10 @@ const CatalogList: React.FC = () => {
   };
 
   const selectedItems = selectedIds.map((id) => selectedItemMap[Number(id)]).filter(Boolean) as CatalogProduct[];
-  const templateSplitKey = (summary?: CatalogExportCategorySummary) =>
-    summary?.template_path || summary?.template_name || summary?.uploaded_template_object_key || summary?.category || '';
-  const selectedCategories = new Set(selectedItems.map((item) => item.leaf_category || '未分类'));
-  const selectedTemplateCount = new Set(
-    currentCategoryOptions
-      .filter((summary) => selectedCategories.has(summary.category) && summary.template_available)
-      .map((summary) => templateSplitKey(summary))
-      .filter(Boolean),
-  ).size;
-  const currentSplitCount = isAllCategories
-    ? new Set(currentCategoryOptions.filter((summary) => summary.template_available && summary.exportable_count > 0).map((summary) => templateSplitKey(summary))).size
-    : selectedCategorySummary?.template_available ? 1 : 0;
   const exportButtonText = selectedIds.length
-    ? `导出选中(${selectedIds.length})`
-    : `${exportStatus === 'pending' ? '导出当前筛选' : '新建导出任务'}${isAllCategories
-      ? `(${exportStatus === 'pending' ? aggregateSummary.exportableCount : aggregateSummary.count})`
-      : selectedCategorySummary
-        ? `(${exportStatus === 'pending' ? selectedCategorySummary.exportable_count : selectedCategorySummary.count})`
-        : ''}`;
-  const exportDisabled = !selectedIds.length && (isAllCategories
-    ? (exportStatus === 'pending' ? !aggregateSummary.exportableCount : !aggregateSummary.count) || aggregateSummary.templateReadyCount === 0
-    : (exportStatus === 'pending' ? !selectedCategorySummary?.exportable_count : !selectedCategorySummary?.count) || !selectedCategorySummary?.template_available);
+    ? `再次导出选中(${selectedIds.length})`
+    : '再次导出选中';
+  const exportDisabled = !selectedIds.length;
 
   const columns = [
     {
@@ -436,10 +535,25 @@ const CatalogList: React.FC = () => {
       width: 120,
       render: (_: unknown, record: CatalogProduct) => (
         <Space size={4} wrap>
-          {exportStatus === 'pending' ? <Tag color="blue">待导出</Tag> : <Tag color="success">历史文件</Tag>}
+          {isCatalogProductExported(record) ? <Tag color="success">已导出</Tag> : <Tag color="blue">待导出</Tag>}
           {record.amazon_asin ? <Tag color="purple">真实 ASIN</Tag> : null}
         </Space>
       ),
+    },
+    {
+      title: '导出任务',
+      width: 120,
+      render: (_: unknown, record: CatalogProduct) => record.export_task_id ? (
+        <Button size="small" type="link" onClick={() => navigate('/offline-tasks')}>
+          #{record.export_task_id}
+        </Button>
+      ) : <Text type="secondary">-</Text>,
+    },
+    {
+      title: '导出时间',
+      dataIndex: 'exported_at',
+      width: 170,
+      render: (value: string | null) => value ? new Date(value).toLocaleString('zh-CN') : '-',
     },
     {
       title: '更新时间',
@@ -453,7 +567,7 @@ const CatalogList: React.FC = () => {
       render: (_: unknown, record: CatalogProduct) => (
         <Space size="small">
           <Button size="small" onClick={() => navigate(`/products/${record.source_product_id}`)}>商品详情</Button>
-          {exportStatus === 'exported' && record.export_task_id ? (
+          {isCatalogProductExported(record) && record.export_task_id ? (
             <Button
               size="small"
               icon={<DownloadOutlined />}
@@ -463,6 +577,79 @@ const CatalogList: React.FC = () => {
               下载
             </Button>
           ) : null}
+        </Space>
+      ),
+    },
+  ];
+  const exportFileColumns = [
+    {
+      title: '任务',
+      width: 96,
+      render: (_: unknown, record: CatalogExportFile) => (
+        <Space direction="vertical" size={4}>
+          <Button size="small" type="link" style={{ padding: 0 }} onClick={() => navigate('/offline-tasks')}>
+            #{record.task_id}
+          </Button>
+          {exportTaskStatusTag(record.task_status)}
+        </Space>
+      ),
+    },
+    {
+      title: '商品统计',
+      width: 150,
+      render: (_: unknown, record: CatalogExportFile) => (
+        <Space direction="vertical" size={2}>
+          <Text>文件 {record.file_product_count} / 任务 {record.task_product_count}</Text>
+          <Text type="secondary">成功 {record.success_count} · 跳过 {record.skipped_count} · 失败 {record.failed_count}</Text>
+        </Space>
+      ),
+    },
+    {
+      title: '涉及类目 / 模板',
+      render: (_: unknown, record: CatalogExportFile) => (
+        <Space direction="vertical" size={4} style={{ width: '100%', minWidth: 0 }}>
+          <Space size={[4, 2]} wrap>
+            <Tag>{record.category_count} 类</Tag>
+            {record.categories.slice(0, 2).map((category) => (
+              <Tooltip key={category} title={category}>
+                <Tag style={{ maxWidth: 120, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  {category}
+                </Tag>
+              </Tooltip>
+            ))}
+            {record.categories.length > 2 ? <Tag>+{record.categories.length - 2}</Tag> : null}
+          </Space>
+          <Tooltip title={record.template_name || ''}>
+            <Typography.Text type="secondary" ellipsis style={{ width: '100%' }}>
+              {record.template_name || '-'}
+            </Typography.Text>
+          </Tooltip>
+        </Space>
+      ),
+    },
+    {
+      title: '导出时间',
+      dataIndex: 'exported_at',
+      width: 150,
+      render: (value: string | null) => value ? new Date(value).toLocaleString('zh-CN') : '-',
+    },
+    {
+      title: '操作',
+      width: 132,
+      render: (_: unknown, record: CatalogExportFile) => (
+        <Space size={4}>
+          <Button
+            size="small"
+            icon={<DownloadOutlined />}
+            disabled={!record.can_download}
+            loading={exportDownloadingTaskId === record.task_id}
+            onClick={() => downloadExportFileResult(record)}
+          >
+              下载
+          </Button>
+          <Button size="small" onClick={() => reExportFileProducts(record)}>
+            再次导出
+          </Button>
         </Space>
       ),
     },
@@ -603,7 +790,12 @@ const CatalogList: React.FC = () => {
         <div style={{ minWidth: 0 }}>
           <Title level={4} style={{ margin: 0 }}>导出中心</Title>
         </div>
-        <Button icon={<ReloadOutlined />} onClick={() => { fetchItems(); refreshExportCenterData(); }}>查询</Button>
+        <Button
+          icon={<ReloadOutlined />}
+          onClick={refreshVisibleExportView}
+        >
+          查询
+        </Button>
       </div>
 
       <Tabs
@@ -618,113 +810,168 @@ const CatalogList: React.FC = () => {
                 <div style={{ ...panelStyle, padding: 16, marginBottom: 16 }}>
                   <Space direction="vertical" size={14} style={{ width: '100%' }}>
                     <Space style={{ justifyContent: 'space-between', width: '100%' }}>
-                      <Segmented
-                        value={exportStatus}
-                        onChange={(value) => selectExportStatus(value as 'pending' | 'exported')}
-                        options={[
-                          { label: `待导出类目 ${exportCategories.pending.length}`, value: 'pending' },
-                          { label: `已导出类目 ${exportCategories.exported.length}`, value: 'exported' },
-                        ]}
-                      />
                       <Space wrap>
-                        {selectedIds.length > 0 && (
+                        <Tabs
+                          activeKey={exportView}
+                          onChange={(value) => selectExportView(value as 'products' | 'files')}
+                          items={[
+                            { key: 'products', label: '商品再导出' },
+                            { key: 'files', label: '文件历史' },
+                          ]}
+                          style={{ minWidth: 220 }}
+                        />
+                      </Space>
+                      <Space wrap>
+                        {isProductListView && selectedIds.length > 0 && (
                           <Button onClick={() => { setSelectedIds([]); setSelectedItemMap({}); }}>
                             清空选择
                           </Button>
                         )}
-                        <Button
-                          type="primary"
-                          icon={<DownloadOutlined />}
-                          loading={exporting}
-                          disabled={exportDisabled}
-                          onClick={exportCatalog}
-                        >
-                          {exportButtonText}
-                        </Button>
+                        {isProductListView ? (
+                          <Button
+                            type="primary"
+                            icon={<DownloadOutlined />}
+                            loading={exporting}
+                            disabled={exporting || currentLoading || exportDisabled}
+                            onClick={exportCatalog}
+                          >
+                            {exportButtonText}
+                          </Button>
+                        ) : null}
                       </Space>
                     </Space>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'minmax(320px, 520px) minmax(0, 1fr)', gap: 20, alignItems: 'start' }}>
-                      <Select
-                        loading={categoriesLoading}
-                        value={selectedCategory}
-                        placeholder={exportStatus === 'pending' ? '选择待导出商品所在类目' : '选择已导出商品所在类目'}
-                        onChange={(value) => { setSelectedCategory(value); setPage(1); }}
-                        style={{ width: '100%' }}
-                        options={[
-                          {
-                            value: ALL_CATEGORIES,
-                            label: `${exportStatus === 'pending' ? '全部待导出商品' : '全部已导出商品'} · ${exportStatus === 'pending' ? aggregateSummary.exportableCount : aggregateSummary.count}个 · ${aggregateSummary.categoryCount}个类目`,
-                          },
-                          ...currentCategoryOptions.map((item) => ({
-                            value: item.category,
-                            label: `${item.category} · ${exportStatus === 'pending' ? item.exportable_count : item.count}个 · ${item.template_available ? '有模板' : item.uploaded_template_name ? '已上传未接入' : '缺模板'}`,
-                          })),
-                        ]}
-                      />
-                      {currentCategoryOptions.length ? (
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(110px, 1fr))', gap: 16 }}>
-                          <div>
-                            <Text type="secondary">模板覆盖</Text>
-                            <div style={{ marginTop: 6 }}>{templateTag(selectedCategorySummary)}</div>
-                          </div>
-                          <div>
-                            <Text type="secondary">{exportStatus === 'pending' ? '待导出商品' : '已导出商品'}</Text>
-                            <div style={{ fontSize: 20, fontWeight: 600 }}>
-                              {isAllCategories ? aggregateSummary.count : selectedCategorySummary?.count || 0}
-                            </div>
-                          </div>
-                          <div>
-                            <Text type="secondary">导出拆分</Text>
-                            <div style={{ fontSize: 20, fontWeight: 600 }}>{selectedIds.length ? selectedTemplateCount : currentSplitCount} 个模板</div>
+                    {isProductListView ? (
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(110px, 1fr))', gap: 16, maxWidth: 560 }}>
+                        <div>
+                          <Text type="secondary">记录口径</Text>
+                          <div style={{ marginTop: 6 }}>
+                            <Tag color="processing">商品维度</Tag>
+                            <Tag color="success">可再次导出</Tag>
                           </div>
                         </div>
-                      ) : (
-                        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={exportStatus === 'pending' ? '暂无待导出类目' : '暂无已导出类目'} />
-                      )}
-                    </div>
+                        <div>
+                          <Text type="secondary">可选商品</Text>
+                          <div style={{ fontSize: 20, fontWeight: 600 }}>{itemsTotal}</div>
+                        </div>
+                        <div>
+                          <Text type="secondary">已选商品</Text>
+                          <div style={{ fontSize: 20, fontWeight: 600 }}>{selectedIds.length}</div>
+                        </div>
+                        <div style={{ gridColumn: '1 / -1' }}>
+                          <Text type="secondary">
+                            当前列表展示已进入导出中心的商品，包含已导出商品；勾选后会按当前数据创建新的导出任务，历史文件保留。
+                          </Text>
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{ display: 'grid', gridTemplateColumns: 'minmax(320px, 520px) minmax(0, 1fr)', gap: 20, alignItems: 'start' }}>
+                        <Select
+                          loading={categoriesLoading}
+                          value={selectedCategory}
+                          placeholder="选择导出文件涉及类目"
+                          onChange={(value) => { setSelectedCategory(value); setPage(1); }}
+                          style={{ width: '100%' }}
+                          options={[
+                            {
+                              value: ALL_CATEGORIES,
+                              label: `全部导出文件 · ${exportFilesTotal}个 · ${aggregateSummary.categoryCount}个类目`,
+                            },
+                            ...currentCategoryOptions.map((item) => ({
+                              value: item.category,
+                              label: `${item.category} · ${item.count}个文件`,
+                            })),
+                          ]}
+                        />
+                        {currentCategoryOptions.length ? (
+                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(110px, 1fr))', gap: 16 }}>
+                            <div>
+                              <Text type="secondary">记录口径</Text>
+                              <div style={{ marginTop: 6 }}>
+                                <Tag color="processing">文件/任务维度</Tag>
+                              </div>
+                            </div>
+                            <div>
+                              <Text type="secondary">导出文件</Text>
+                              <div style={{ fontSize: 20, fontWeight: 600 }}>{exportFilesTotal}</div>
+                            </div>
+                            <div>
+                              <Text type="secondary">涉及类目</Text>
+                              <div style={{ fontSize: 20, fontWeight: 600 }}>{aggregateSummary.categoryCount} 个类目</div>
+                            </div>
+                          </div>
+                        ) : (
+                          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无导出文件" />
+                        )}
+                      </div>
+                    )}
                   </Space>
                 </div>
 
                 <div style={panelStyle}>
-                  <Table
-                    dataSource={items}
-                    columns={columns}
-                    rowKey="id"
-                    loading={loading}
-                    size="middle"
-                    scroll={{ x: 1120 }}
-                    rowSelection={{
-                      selectedRowKeys: selectedIds,
-                      preserveSelectedRowKeys: true,
-                      onChange: (keys, selectedRows) => {
-                        setSelectedIds(keys);
-                        setSelectedItemMap((prev) => {
-                          const next: Record<number, CatalogProduct> = {};
-                          keys.forEach((key) => {
-                            const id = Number(key);
-                            const latestRow = selectedRows.find((row) => row.id === id);
-                            const currentPageRow = items.find((item) => item.id === id);
-                            const cachedRow = prev[id];
-                            if (latestRow || currentPageRow || cachedRow) {
-                              next[id] = latestRow || currentPageRow || cachedRow;
-                            }
+                  {isProductListView ? (
+                    <Table
+                      dataSource={items}
+                      columns={columns}
+                      rowKey="id"
+                      loading={itemsLoading}
+                      size="middle"
+                      scroll={{ x: 1360 }}
+                      locale={{ emptyText: '暂无商品' }}
+                      rowSelection={{
+                        selectedRowKeys: selectedIds,
+                        preserveSelectedRowKeys: true,
+                        onChange: (keys, selectedRows) => {
+                          setSelectedIds(keys);
+                          setSelectedItemMap((prev) => {
+                            const next: Record<number, CatalogProduct> = {};
+                            keys.forEach((key) => {
+                              const id = Number(key);
+                              const latestRow = selectedRows.find((row) => row.id === id);
+                              const currentPageRow = items.find((item) => item.id === id);
+                              const cachedRow = prev[id];
+                              if (latestRow || currentPageRow || cachedRow) {
+                                next[id] = latestRow || currentPageRow || cachedRow;
+                              }
+                            });
+                            return next;
                           });
-                          return next;
-                        });
-                      },
-                    }}
-                    pagination={{
-                      current: page,
-                      pageSize,
-                      total,
-                      showSizeChanger: true,
-                      pageSizeOptions: [20, 50, 100, 500, 1000],
-                      onChange: (nextPage, nextPageSize) => {
-                        setPage(nextPage);
-                        setPageSize(Math.min(nextPageSize, 1000));
-                      },
-                    }}
-                  />
+                        },
+                      }}
+                      pagination={{
+                        current: page,
+                        pageSize,
+                        total: itemsTotal,
+                        showSizeChanger: true,
+                        pageSizeOptions: [20, 50, 100, 500, 1000],
+                        onChange: (nextPage, nextPageSize) => {
+                          setPage(nextPage);
+                          setPageSize(Math.min(nextPageSize, 1000));
+                        },
+                      }}
+                    />
+                  ) : (
+                    <Table
+                      dataSource={exportFiles}
+                      columns={exportFileColumns}
+                      rowKey="task_id"
+                      loading={exportFilesLoading}
+                      size="middle"
+                      tableLayout="fixed"
+                      locale={{ emptyText: '暂无导出文件记录；请刷新或检查导出任务是否已完成' }}
+                      pagination={{
+                        current: page,
+                        pageSize: Math.min(pageSize, 100),
+                        total: exportFilesTotal,
+                        showSizeChanger: true,
+                        pageSizeOptions: [20, 50, 100],
+                        showTotal: (value) => `共 ${value} 个导出文件/任务`,
+                        onChange: (nextPage, nextPageSize) => {
+                          setPage(nextPage);
+                          setPageSize(nextPageSize);
+                        },
+                      }}
+                    />
+                  )}
                 </div>
               </>
             ),

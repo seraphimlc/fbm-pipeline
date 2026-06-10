@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AmazonStyleSnapCandidate
-from app.pipeline.chrome_ctrl import chrome_execute_js, chrome_navigate, chrome_workflow
+from app.pipeline.chrome_ctrl import chrome_execute_js, chrome_get_page_info, chrome_navigate, chrome_workflow
 from app.services.seller_sprite_openapi import SellerSpriteOpenApiError, competitor_lookup
 
 
@@ -289,6 +289,17 @@ async def _wait_for_stylesnap_token(timeout: int = 20) -> bool:
     return False
 
 
+async def _ensure_stylesnap_upload_page() -> bool:
+    page = await chrome_get_page_info()
+    url = str((page or {}).get("url") or "")
+    if "amazon.com/stylesnap" in url and await _wait_for_stylesnap_token(timeout=3):
+        return True
+    ok = await chrome_navigate("https://www.amazon.com/stylesnap#fbm-pipeline-worker", wait=3.0)
+    if not ok:
+        return False
+    return await _wait_for_stylesnap_token()
+
+
 def _extract_direct_candidates(upload_result: dict[str, Any]) -> list[dict[str, Any]]:
     response = upload_result.get("response") if isinstance(upload_result.get("response"), dict) else {}
     search_results = response.get("searchResults") if isinstance(response.get("searchResults"), list) else []
@@ -456,11 +467,10 @@ async def search_and_store_stylesnap_candidates(
     data_url = await asyncio.to_thread(_make_upload_data_url, upload_source_path)
 
     async with chrome_workflow(f"amazon_stylesnap_search item={options.item_code} sku={options.sku_code}"):
-        ok = await chrome_navigate("https://www.amazon.com/stylesnap#fbm-pipeline-worker", wait=3.0)
+        ok = await _ensure_stylesnap_upload_page()
         if not ok:
             raise RuntimeError("Chrome 导航到 Amazon StyleSnap 失败")
         try:
-            await _wait_for_stylesnap_token()
             upload_result = await _direct_stylesnap_upload(data_url)
             candidates = _extract_direct_candidates(upload_result)
             parsed = {

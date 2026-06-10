@@ -25,9 +25,7 @@ def apply_sofa_chair_strategy(ctx: AmazonExportContext) -> None:
         fields["size"]: f'{pd.dimension_length:g}" x {pd.dimension_width:g}" x {pd.dimension_height:g}"'
         if pd.dimension_length and pd.dimension_width and pd.dimension_height else None,
         fields["number_of_pieces"]: 1,
-        fields["item_shape"]: "Rectangular",
         fields["part_number"]: pd.item_code,
-        fields["included_components"]: legacy._included_components(pd, seating),
         fields["is_fragile"]: "No",
         fields["frame_material"]: frame_material,
         fields["frame_material_structured"]: frame_material,
@@ -52,10 +50,16 @@ def apply_sofa_chair_strategy(ctx: AmazonExportContext) -> None:
         fields["item_length_value"]: pd.dimension_width,
         fields["item_length_unit"]: "Inches",
     })
+    legacy._fields(ctx.fill, fields, "item_shape", legacy._semantic_values_from_listing_check(pd, "item_shape"))
+    legacy._fields(
+        ctx.fill,
+        fields,
+        "included_components",
+        legacy._semantic_values_from_listing_check(pd, "included_components"),
+    )
     if seating:
         ctx.fill[fields["seating_capacity"]] = seating
     if product_type == "CHAIR":
-        ctx.fill[fields["included_components"]] = "Chair"
         legacy._omit_fields(ctx.fill, fields, (
             "number_of_pieces",
             "seating_capacity",
@@ -67,4 +71,3 @@ def apply_sofa_chair_strategy(ctx: AmazonExportContext) -> None:
     if pd.weight:
         ctx.fill[fields["item_weight_value"]] = pd.weight
         ctx.fill[fields["item_weight_unit"]] = "Pounds"
-

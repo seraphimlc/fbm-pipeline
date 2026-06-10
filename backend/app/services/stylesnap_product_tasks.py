@@ -538,6 +538,9 @@ async def create_product_draft_from_giga_item(
 
     product.gigab2b_url = product.gigab2b_url or f"https://www.gigab2b.com/product-detail/{normalized_item_code}"
     product.gigab2b_product_id = product.gigab2b_product_id or normalized_item_code
+    product.source_data_source_id = giga_item.data_source_id
+    product.source_site = normalized_site
+    product.source_batch_id = batch_id
     if product.status == "created" and product.current_step <= 0:
         product.error_message = product.error_message or "待确认商品图片"
     product.updated_at = now

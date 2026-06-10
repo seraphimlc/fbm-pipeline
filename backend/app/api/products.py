@@ -6,13 +6,15 @@ import re
 from copy import copy
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from openpyxl import Workbook, load_workbook
-from sqlalchemy import delete, select, func
+from sqlalchemy import case, delete, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import load_only, selectinload
 from datetime import datetime
 
 from app.database import get_db
@@ -33,6 +35,8 @@ from app.models import (
     GigaProductImage,
     GigaSku,
     GigaSyncBatch,
+    OfflineTask,
+    OfflineTaskStep,
     Product,
     ProductData,
     ProductDataSource,
@@ -45,10 +49,13 @@ from app.models.status import COMPLETED, DUPLICATE_SKIPPED, PENDING_REVIEW, SOUR
 from app.api.schemas import (
     ProductCreate, ProductUpdate, ProductListingImagesUpdate, ProductGigaRefreshRequest, ProductResponse, ProductDetail, ProductImageResponse,
     PaginatedResponse, ProductFileEntry, AplusRegenerateRequest,
+    ProductCompetitorReviewDetailResponse, ProductCompetitorReviewQueueResponse,
+    ProductImageReviewDetailResponse, ProductImageReviewQueueResponse,
     AsinSyncBatchDetail, AsinSyncBatchResponse, AsinSyncCreateRequest,
     AplusUploadBatchDetail, AplusUploadBatchResponse, AplusUploadCreateRequest, AplusGenerateRequest,
-    BulkImportResponse, BulkStartRequest, BulkStartResponse,
+    BulkImportResponse, BulkStartRequest, BulkStartResponse, ProductBulkAdvanceFilterRequest, ProductBulkAdvanceRequest, OfflineTaskResponse,
     PaginatedAsinSyncBatches, PaginatedCatalogProducts, CatalogProductResponse,
+    CatalogExportFileResponse, PaginatedCatalogExportFiles,
     CatalogExportByCategoryRequest, CatalogExportCategoriesResponse, CatalogExportCategorySummary,
     CatalogTemplateFileSummary, CatalogTemplateUploadResponse,
     PaginatedAplusUploadBatches, WorkbenchOverview, CatalogAsinUpdateRequest,
@@ -67,9 +74,11 @@ from app.pipeline.step10_amazon_template import (
     AMAZON_TEMPLATE_LOGIC_VERSION,
     DATA_ROW,
     MAPPING_DIR,
+    SEMANTIC_DROPDOWN_FIELD_KEYS,
     _load_template_mapping,
     _offer_quantity,
     _representative_package,
+    ensure_amazon_template_semantic_fields,
     run_amazon_template,
 )
 from app.services.material_assets import (
@@ -131,6 +140,39 @@ RUNNING_STATUSES = {
 }
 
 APLUS_REGEN_ACTIVE_STATUSES = {"regen_queued", "regen_script_running", "regen_image_running"}
+WORKBENCH_STATUS_KEYS = (
+    "select_images",
+    "competitor_searching",
+    "select_competitor",
+    "capture_detail",
+    "ready_to_generate",
+    "running",
+    "suspended",
+    "manual_review",
+    "export_ready",
+    "failed",
+)
+PRODUCT_BULK_ADVANCE_MAX_PRODUCTS = 1000
+AUTO_START_READY_GENERATION_LIMIT = 100
+IMAGE_REVIEW_SELECTED_IMAGE_LIMIT = 9
+IMAGE_REVIEW_INITIAL_GALLERY_LIMIT = 36
+IMAGE_REVIEW_MAX_GALLERY_LIMIT = 200
+
+
+def _is_stale_running_product(product: Product) -> bool:
+    return product.status in RUNNING_STATUSES and not is_running(product.id)
+
+
+def _product_data_source_filter(data_source_id: int):
+    return Product.source_data_source_id == data_source_id
+
+
+def normalize_image_path(item: Any) -> str:
+    if isinstance(item, str):
+        return item.strip()
+    if isinstance(item, dict):
+        return str(item.get("path") or item.get("local_path") or item.get("image_url") or "").strip()
+    return ""
 
 
 class CatalogExportBuildError(Exception):
@@ -225,6 +267,13 @@ def _is_competitor_listing_capture_state(product: Product) -> bool:
     )
 
 
+def _is_competitor_search_failed(product: Product) -> bool:
+    return bool(
+        product.status == "failed"
+        and re.search(r"同款搜索|StyleSnap", product.error_message or "", re.I)
+    )
+
+
 async def _product_has_captured_competitor(db: AsyncSession, product: Product) -> bool:
     snapshot = _product_snapshot(product)
     selected = snapshot.get("selected_stylesnap")
@@ -295,6 +344,8 @@ def _current_task_status(product: Product) -> str:
         return competitor_capture_message
     if product.status == "competitor_searching":
         return competitor_capture_message or "竞品搜索中：正在用主图搜索 Amazon 同款"
+    if _is_stale_running_product(product):
+        return f"运行状态已中断：{step_label} 未在当前服务中运行，请先挂起后继续"
     if product.status in RUNNING_STATUSES:
         return f"运行中：{step_label}"
     if product.status == "created":
@@ -313,6 +364,9 @@ def _current_task_status(product: Product) -> str:
     if product.status == "failed":
         if _is_legacy_giga_browser_collect_error(product):
             return _legacy_giga_browser_collect_message()
+        if _is_competitor_search_failed(product):
+            detail = _compact_error_message(product.error_message)
+            return f"候选竞品搜索失败：{detail or '请重新搜索候选竞品'}"
         detail = _compact_error_message(product.error_message)
         return f"失败：{detail or step_label}"
     if product.status == SOURCE_UNAVAILABLE:
@@ -481,6 +535,14 @@ def _count_material_images(material_dir: Path) -> int:
 
 
 def _build_list_item(product: Product) -> dict:
+    catalog_exported = product.catalog_item and (product.catalog_item.exported_at or product.catalog_item.export_task_id)
+    current_task_status = (
+        f"已导出，可在导出中心再次导出（任务 #{product.catalog_item.export_task_id}）"
+        if catalog_exported and product.catalog_item and product.catalog_item.export_task_id
+        else "已导出，可在导出中心再次导出"
+        if catalog_exported
+        else _current_task_status(product)
+    )
     return {
         "id": product.id,
         "source_url": product.gigab2b_url,
@@ -501,9 +563,11 @@ def _build_list_item(product: Product) -> dict:
         "aplus_status": product.aplus.aplus_status if product.aplus else None,
         "upc": product.upc,
         "brand": product.brand,
+        "catalog_exported_at": product.catalog_item.exported_at if product.catalog_item else None,
+        "catalog_export_task_id": product.catalog_item.export_task_id if product.catalog_item else None,
         "status": product.status,
         "current_step": product.current_step,
-        "current_task_status": _current_task_status(product),
+        "current_task_status": current_task_status,
         "error_message": product.error_message,
         "created_at": product.created_at,
         "updated_at": product.updated_at,
@@ -511,6 +575,34 @@ def _build_list_item(product: Product) -> dict:
         "title": product.data.title if product.data else None,
         "leaf_category": product.data.leaf_category if product.data else None,
     }
+
+
+def _product_workbench_status(product: Product) -> str:
+    if _is_competitor_search_failed(product):
+        return "select_competitor"
+    if product.status == "failed":
+        return "failed"
+    if product.status == "paused":
+        return "suspended"
+    if product.status == "competitor_searching":
+        return "competitor_searching"
+    if product.status == STEP5_LISTING and re.search(r"竞品.*抓取中|Listing.*抓取中", product.error_message or "", re.I):
+        return "capture_detail"
+    if _is_stale_running_product(product):
+        return "suspended"
+    if product.status in RUNNING_STATUSES:
+        return "running"
+    if product.status == COMPLETED and (product.current_step or 0) >= 6:
+        return "export_ready"
+    if product.status == PENDING_REVIEW:
+        return "manual_review"
+    if product.status == "created" and (product.current_step or 0) <= 0:
+        return "select_images"
+    if product.status == "created" and not product.competitor_asin:
+        return "select_competitor"
+    if product.status == "created":
+        return "ready_to_generate"
+    return "running"
 
 
 def _template_risk_from_data(pd: ProductData | None) -> tuple[str | None, int | None]:
@@ -960,6 +1052,95 @@ def _catalog_has_export_file(product: Product | None, item: CatalogProduct | Non
     return bool((item.exported_at if item else None) or _catalog_existing_asin(product, item))
 
 
+def _catalog_export_task_payload(task: OfflineTask) -> dict:
+    payload = _json_loads(task.result_json, {})
+    if isinstance(payload, dict) and (
+        payload.get("filename") or payload.get("file_path") or payload.get("oss_object_key") or payload.get("rows")
+    ):
+        return payload
+    for step in sorted(task.steps, key=lambda item: item.id, reverse=True):
+        if step.step_type != "catalog_export_template":
+            continue
+        step_payload = _json_loads(step.result_json, {})
+        if isinstance(step_payload, dict) and (
+            step_payload.get("filename")
+            or step_payload.get("file_path")
+            or step_payload.get("oss_object_key")
+            or step_payload.get("rows")
+        ):
+            return step_payload
+    payload = _json_loads(task.payload_json, {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def _catalog_export_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _catalog_export_file_row(task: OfflineTask) -> CatalogExportFileResponse:
+    payload = _catalog_export_task_payload(task)
+    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+    catalog_ids = [
+        int(item_id)
+        for item_id in payload.get("catalog_product_ids") or []
+        if str(item_id).isdigit()
+    ]
+    categories = [
+        str(category).strip()
+        for category in payload.get("categories") or []
+        if str(category).strip()
+    ]
+    if not categories:
+        categories = sorted({
+            str(row.get("category")).strip()
+            for row in rows
+            if isinstance(row, dict) and str(row.get("category") or "").strip()
+        })
+    success_count = int(payload.get("success_count") or payload.get("exported_count") or 0)
+    skipped_count = int(payload.get("skipped_count") or 0)
+    failed_count = int(payload.get("failed_count") or 0)
+    if rows and not (success_count or skipped_count or failed_count):
+        success_count = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "exported")
+        skipped_count = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "skipped")
+        failed_count = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "failed")
+    filename = str(payload.get("filename") or "").strip() or None
+    file_path = str(payload.get("file_path") or "").strip() or None
+    oss_url = str(payload.get("oss_url") or "").strip() or None
+    return CatalogExportFileResponse(
+        task_id=task.id,
+        task_status=str(payload.get("status") or task.status),
+        title=task.title,
+        filename=filename,
+        file_path=file_path,
+        oss_url=oss_url,
+        file_size=payload.get("file_size"),
+        exported_at=_catalog_export_datetime(payload.get("created_at")) or task.finished_at or task.updated_at,
+        category=str(payload.get("category") or (categories[0] if categories else "")).strip() or None,
+        categories=categories,
+        category_count=len(categories),
+        template_name=str(payload.get("template_name") or "").strip() or None,
+        catalog_product_ids=catalog_ids,
+        task_product_count=int(payload.get("requested_count") or len(catalog_ids)),
+        file_product_count=success_count,
+        success_count=success_count,
+        exported_count=success_count,
+        skipped_count=skipped_count,
+        failed_count=failed_count,
+        report_count=int(payload.get("report_count") or len(rows)),
+        can_download=bool(filename or file_path or payload.get("oss_object_key")),
+        created_at=task.created_at,
+        finished_at=task.finished_at,
+        updated_at=task.updated_at,
+    )
+
+
 def _template_status_for_catalog(product: Product | None, item: CatalogProduct | None) -> tuple[bool, str | None, str | None, str | None]:
     pd = product.data if product else None
     category = _catalog_category(product, item)
@@ -1057,30 +1238,124 @@ def _export_category_summaries(groups: dict[str, dict]) -> list[CatalogExportCat
     )
 
 
-async def _catalog_template_category_samples(db: AsyncSession) -> list[tuple[str, int, CatalogProduct | None]]:
-    category_expr = func.coalesce(ProductData.leaf_category, CatalogProduct.leaf_category, "未分类")
+def _collect_export_file_category(groups: dict[str, dict], row: CatalogExportFileResponse) -> None:
+    categories = row.categories or ([row.category] if row.category else ["未分类"])
+    for category in categories:
+        group = groups.setdefault(
+            category,
+            {
+                "category": category,
+                "count": 0,
+                "exportable_count": 0,
+                "blocked_count": 0,
+                "template_available": True,
+                "template_name": row.template_name,
+                "template_path": None,
+                "template_error": None,
+                "uploaded_template_name": None,
+                "uploaded_template_cache_path": None,
+                "uploaded_template_oss_url": None,
+                "uploaded_template_object_key": None,
+                "uploaded_template_uploaded_at": None,
+                "sample_item_codes": [],
+                "_template_errors": [],
+            },
+        )
+        group["count"] += 1
+        group["exportable_count"] += 1
+        if not group.get("template_name"):
+            group["template_name"] = row.template_name
+
+
+async def _catalog_template_category_samples(db: AsyncSession) -> list[dict[str, Any]]:
+    category_expr = func.coalesce(func.nullif(CatalogProduct.leaf_category, ""), "未分类")
+    brand_expr = func.coalesce(func.nullif(CatalogProduct.brand, ""), "Vindhvisk")
     category_result = await db.execute(
-        select(category_expr.label("category"), func.count(CatalogProduct.id))
+        select(
+            category_expr.label("category"),
+            brand_expr.label("brand"),
+            func.count(CatalogProduct.id).label("count"),
+            func.min(CatalogProduct.item_code).label("sample_item_code"),
+        )
         .select_from(CatalogProduct)
-        .join(Product, CatalogProduct.source_product_id == Product.id, isouter=True)
-        .outerjoin(ProductData, ProductData.product_id == Product.id)
         .where(category_expr != "未分类")
-        .group_by(category_expr)
+        .group_by(category_expr, brand_expr)
         .order_by(category_expr)
     )
-    rows: list[tuple[str, int, CatalogProduct | None]] = []
-    for category, count in category_result.all():
-        normalized_category = str(category or "未分类")
-        result = await db.execute(
-            select(CatalogProduct)
-            .join(Product, CatalogProduct.source_product_id == Product.id, isouter=True)
-            .outerjoin(ProductData, ProductData.product_id == Product.id)
-            .where(category_expr == normalized_category)
-            .options(selectinload(CatalogProduct.source_product).selectinload(Product.data))
-            .limit(1)
+    groups: dict[str, dict[str, Any]] = {}
+    for category, brand, count, sample_item_code in category_result.all():
+        normalized_category = str(category or "未分类").strip() or "未分类"
+        group = groups.setdefault(
+            normalized_category,
+            {
+                "category": normalized_category,
+                "count": 0,
+                "brands": [],
+                "sample_item_codes": [],
+            },
         )
-        rows.append((normalized_category, int(count or 0), result.scalar_one_or_none()))
-    return rows
+        group["count"] += int(count or 0)
+        normalized_brand = str(brand or "Vindhvisk").strip() or "Vindhvisk"
+        if normalized_brand not in group["brands"]:
+            group["brands"].append(normalized_brand)
+        sample = str(sample_item_code or "").strip()
+        if sample and sample not in group["sample_item_codes"] and len(group["sample_item_codes"]) < 5:
+            group["sample_item_codes"].append(sample)
+    return sorted(groups.values(), key=lambda item: item["category"])
+
+
+def _category_upload_summary(category: str) -> dict[str, Any]:
+    upload = _category_template_upload_for(category)
+    if not upload:
+        return {}
+    return {
+        "uploaded_template_name": upload.get("filename"),
+        "uploaded_template_cache_path": upload.get("cache_path"),
+        "uploaded_template_oss_url": upload.get("oss_url"),
+        "uploaded_template_object_key": upload.get("object_key"),
+        "uploaded_template_uploaded_at": upload.get("uploaded_at"),
+    }
+
+
+def _catalog_template_status_for_category(
+    category: str,
+    brands: list[str] | None = None,
+) -> tuple[bool, str | None, str | None, str | None]:
+    upload = _category_template_upload_for(category)
+    if upload:
+        cache_path = str(upload.get("cache_path") or "").strip()
+        object_key = str(upload.get("object_key") or "").strip()
+        if cache_path:
+            path = Path(cache_path).expanduser()
+            enabled = _template_file_enabled(path)
+            if enabled and (path.is_file() or object_key):
+                return True, str(upload.get("filename") or path.name), str(path), None
+            if not enabled:
+                return False, str(upload.get("filename") or path.name), str(path), "模板文件已停用"
+            return False, str(upload.get("filename") or path.name), str(path), "模板本地缓存不存在"
+
+    errors: list[str] = []
+    for brand in brands or ["Vindhvisk"]:
+        product = SimpleNamespace(brand=brand or "Vindhvisk")
+        pd = SimpleNamespace(
+            leaf_category=category,
+            categories=category,
+            product_type="",
+            title="",
+            amazon_stylesnap_selected_asin=None,
+            amazon_stylesnap_selected_category_rank=None,
+        )
+        try:
+            mapping = _load_template_mapping(product, pd)
+            template_path = Path(mapping["template_path"]).expanduser()
+            if not template_path.is_file():
+                return False, template_path.name, str(template_path), f"模板文件不存在: {template_path}"
+            if not _template_file_enabled(template_path):
+                return False, template_path.name, str(template_path), "模板文件已停用"
+            return True, template_path.name, str(template_path), None
+        except Exception as exc:
+            errors.append(f"{type(exc).__name__}: {exc}")
+    return False, None, None, errors[0] if errors else "未配置类目导入模板映射"
 
 
 def _template_file_source(path: Path) -> str:
@@ -1102,24 +1377,25 @@ def _template_file_status(enabled: bool, errors: list[str]) -> str:
 
 async def _catalog_template_file_summaries(db: AsyncSession) -> list[CatalogTemplateFileSummary]:
     files: dict[str, dict] = {}
+    template_file_state = _load_template_file_state()
 
-    def add_file(path: Path, category: str, *, error: str | None = None, preferred_object_key: str | None = None) -> None:
-        if not path.is_file():
+    def add_file(
+        path: Path,
+        category: str,
+        *,
+        error: str | None = None,
+        preferred_object_key: str | None = None,
+        preferred_oss_url: str | None = None,
+    ) -> None:
+        if not path.is_file() and not preferred_object_key:
             return
         resolved = path.expanduser().resolve()
         file_id = _template_file_id(resolved)
-        state = _load_template_file_state().get(file_id)
+        state = template_file_state.get(file_id)
         enabled = bool(state.get("enabled", True)) if isinstance(state, dict) else True
         source = _template_file_source(resolved)
-        oss_error = None
-        object_key = None
-        oss_url = None
-        try:
-            oss_state = _ensure_template_file_oss_metadata(resolved, preferred_object_key=preferred_object_key)
-            object_key = oss_state.get("object_key")
-            oss_url = oss_state.get("oss_url")
-        except Exception as exc:
-            oss_error = f"OSS同步失败: {type(exc).__name__}: {exc}"
+        object_key = str(preferred_object_key or (state or {}).get("object_key") or "").strip() or None
+        oss_url = str(preferred_oss_url or (state or {}).get("oss_url") or "").strip() or None
         row = files.setdefault(
             file_id,
             {
@@ -1133,7 +1409,7 @@ async def _catalog_template_file_summaries(db: AsyncSession) -> list[CatalogTemp
                 "oss_url": oss_url,
                 "support_categories": [],
                 "template_errors": [],
-                "can_download": True,
+                "can_download": bool(path.is_file() or object_key),
                 "can_delete": True,
             },
         )
@@ -1145,36 +1421,31 @@ async def _catalog_template_file_summaries(db: AsyncSession) -> list[CatalogTemp
             row["support_categories"].append(category)
         if error and error not in row["template_errors"]:
             row["template_errors"].append(error)
-        if oss_error and oss_error not in row["template_errors"]:
-            row["template_errors"].append(oss_error)
 
-    for category, _count, item in await _catalog_template_category_samples(db):
+    for category_row in await _catalog_template_category_samples(db):
+        category = category_row["category"]
         upload = _category_template_upload_for(category)
-        upload_path = None
         if upload:
             cache_path = str(upload.get("cache_path") or "").strip()
             if cache_path:
-                upload_path = Path(cache_path).expanduser()
+                add_file(
+                    Path(cache_path).expanduser(),
+                    category,
+                    preferred_object_key=upload.get("object_key"),
+                    preferred_oss_url=upload.get("oss_url"),
+                )
+                continue
 
-        mapping_error: str | None = None
-        mapping_path: Path | None = None
-        product = item.source_product if item else None
-        pd = product.data if product else None
-        if product and pd:
-            try:
-                mapping = _load_template_mapping(product, pd)
-                mapping_path = Path(mapping["template_path"]).expanduser()
-                if not mapping_path.is_file():
-                    mapping_error = f"模板文件不存在: {mapping_path}"
-            except Exception as exc:
-                mapping_error = f"{type(exc).__name__}: {exc}"
-        else:
-            mapping_error = "没有可用于检测模板的代表商品"
-
-        if upload_path and upload_path.is_file():
-            add_file(upload_path, category, error=mapping_error, preferred_object_key=upload.get("object_key") if upload else None)
-        if mapping_path and mapping_path.is_file():
-            add_file(mapping_path, category, error=None)
+        available, _template_name, template_path, template_error = _catalog_template_status_for_category(
+            category,
+            category_row.get("brands") or [],
+        )
+        if template_path:
+            add_file(
+                Path(template_path).expanduser(),
+                category,
+                error=None if available else template_error,
+            )
 
     summaries: list[CatalogTemplateFileSummary] = []
     for row in files.values():
@@ -1245,6 +1516,70 @@ def _copy_import_data_row(source_path: Path, target_ws, target_row: int) -> None
         target_col = target_columns.get(attr)
         if target_col:
             target_ws.cell(target_row, target_col).value = source_ws.cell(DATA_ROW, source_col).value
+
+
+PRODUCT_ID_TYPE_ATTR = "amzn1.volt.ca.product_id_type"
+PRODUCT_ID_VALUE_ATTR = "amzn1.volt.ca.product_id_value"
+
+
+def _set_import_row_attr(ws, row_number: int, attr: str, value: Any) -> None:
+    column = _template_attribute_columns(ws).get(attr)
+    if column:
+        ws.cell(row_number, column).value = value
+
+
+def _flatten_template_field_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        result: list[str] = []
+        for item in value:
+            result.extend(_flatten_template_field_values(item))
+        return result
+    if isinstance(value, dict):
+        result: list[str] = []
+        for item in value.values():
+            result.extend(_flatten_template_field_values(item))
+        return result
+    return []
+
+
+def _template_semantic_field_key(key: str) -> str:
+    return "target_audience_keyword" if key == "target_audience" else key
+
+
+def _catalog_export_semantic_values(pd: ProductData, key: str) -> list[str]:
+    listing_check = _json_loads(pd.listing_check, {})
+    fields = listing_check.get("amazon_template_fields") if isinstance(listing_check, dict) else None
+    payload = fields.get(_template_semantic_field_key(key)) if isinstance(fields, dict) else None
+    values = payload.get("values") if isinstance(payload, dict) else None
+    if not isinstance(values, list):
+        return []
+    return [str(value).strip() for value in values if str(value or "").strip()][:5]
+
+
+def _apply_catalog_export_row_overrides(ws, row_number: int, product: Product, pd: ProductData, mapping: dict) -> None:
+    columns = _template_attribute_columns(ws)
+    if product.upc:
+        _set_import_row_attr(ws, row_number, PRODUCT_ID_TYPE_ATTR, "UPC")
+        _set_import_row_attr(ws, row_number, PRODUCT_ID_VALUE_ATTR, product.upc)
+
+    dynamic_fields = mapping.get("dynamic_fields") if isinstance(mapping.get("dynamic_fields"), dict) else {}
+    for key in SEMANTIC_DROPDOWN_FIELD_KEYS:
+        attrs = _flatten_template_field_values(dynamic_fields.get(key))
+        if key == "target_audience":
+            for field_key, field_value in dynamic_fields.items():
+                if str(field_key).startswith("target_audience_"):
+                    attrs.extend(_flatten_template_field_values(field_value))
+        if key == "theme":
+            for field_key, field_value in dynamic_fields.items():
+                if str(field_key).startswith("theme_"):
+                    attrs.extend(_flatten_template_field_values(field_value))
+        columns_for_key = [columns[attr] for attr in attrs if attr in columns]
+        for column in columns_for_key:
+            ws.cell(row_number, column).value = None
+        for column, value in zip(columns_for_key, _catalog_export_semantic_values(pd, key)):
+            ws.cell(row_number, column).value = value
 
 
 def _catalog_stock_export_override(ws, mapping: dict, catalog: CatalogProduct | None, stock: int | None = None) -> tuple[int, int] | None:
@@ -1500,14 +1835,37 @@ async def _delete_product_competitor_records(db: AsyncSession, product: Product)
         await db.execute(delete(AmazonStyleSnapCandidate).where(AmazonStyleSnapCandidate.id.in_(candidate_ids)))
 
 
-async def _giga_image_paths_for_product(db: AsyncSession, product: Product) -> list[str]:
-    if not product.data or not product.data.item_code:
+async def _giga_image_candidates_for_source(
+    db: AsyncSession,
+    item_code: str | None,
+    raw_snapshot: str | None,
+) -> list[dict[str, Any]]:
+    if not item_code:
         return []
-    snapshot = _json_loads(product.data.gigab2b_raw_snapshot, {})
+    snapshot = _json_loads(raw_snapshot, {})
     batch_id = snapshot.get("batch_id") if isinstance(snapshot, dict) else None
     site = str(snapshot.get("site") or "").strip().upper() if isinstance(snapshot, dict) else ""
     data_source_id = snapshot.get("data_source_id") if isinstance(snapshot, dict) else None
-    query = select(GigaProductImage).where(GigaProductImage.item_code == product.data.item_code)
+    representative_sku = str(snapshot.get("representative_sku") or "").strip() if isinstance(snapshot, dict) else ""
+
+    def candidate_asset_source(image_type: Any) -> str:
+        candidate_type = str(image_type or "unknown").strip().lower()
+        if candidate_type in {"main", "gallery", "variant_main", "variant_gallery"}:
+            return "giga_detail_gallery"
+        if candidate_type == "file":
+            return "giga_material_package"
+        if candidate_type == "brand":
+            return "giga_brand_asset"
+        return "unknown"
+
+    def classify_candidate_type(image_type: Any, sku_code: Any) -> str:
+        candidate_type = str(image_type or "unknown").strip().lower()
+        sku_text = str(sku_code or "").strip()
+        if representative_sku and sku_text and sku_text != representative_sku and candidate_type in {"main", "gallery"}:
+            return f"variant_{candidate_type}"
+        return candidate_type
+
+    query = select(GigaProductImage).where(GigaProductImage.item_code == item_code)
     if batch_id:
         query = query.where(GigaProductImage.batch_id == batch_id)
     if site:
@@ -1524,15 +1882,190 @@ async def _giga_image_paths_for_product(db: AsyncSession, product: Product) -> l
             GigaProductImage.id.asc(),
         )
     )
-    paths: list[str] = []
+    candidates: list[dict[str, Any]] = []
     seen: set[str] = set()
     for row in result.scalars().all():
         path = (row.local_path or row.image_url or "").strip()
         if not path or path in seen:
             continue
         seen.add(path)
-        paths.append(path)
-    return paths
+        image_type = classify_candidate_type(row.image_type, row.sku_code)
+        candidates.append({
+            "path": path,
+            "image_url": row.image_url,
+            "local_path": row.local_path,
+            "image_type": image_type,
+            "sku_code": row.sku_code,
+            "representative_sku": representative_sku or None,
+            "is_representative_sku": bool(representative_sku and row.sku_code == representative_sku),
+            "sort_order": row.sort_order,
+            "download_status": row.download_status,
+            "asset_source": candidate_asset_source(image_type),
+            "source": "giga_product_images",
+        })
+    if candidates:
+        return candidates
+
+    snapshot_images = snapshot.get("giga_listing_images") if isinstance(snapshot, dict) else None
+    if not isinstance(snapshot_images, list):
+        return []
+    for index, item in enumerate(snapshot_images, start=1):
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("path") or item.get("local_path") or item.get("image_url") or "").strip()
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        raw_type = item.get("image_type") or item.get("source") or ("main" if index == 1 else "gallery")
+        sku_code = item.get("sku_code")
+        image_type = classify_candidate_type(raw_type, sku_code)
+        candidates.append({
+            "path": path,
+            "image_url": item.get("image_url"),
+            "local_path": item.get("local_path"),
+            "image_type": image_type,
+            "sku_code": sku_code,
+            "representative_sku": representative_sku or None,
+            "is_representative_sku": bool(representative_sku and sku_code == representative_sku),
+            "sort_order": item.get("sort_order") or index,
+            "download_status": item.get("download_status"),
+            "asset_source": candidate_asset_source(image_type),
+            "source": item.get("source") or "giga_listing_images",
+        })
+    return candidates
+
+
+async def _giga_image_candidates_for_product(db: AsyncSession, product: Product) -> list[dict[str, Any]]:
+    if not product.data:
+        return []
+    return await _giga_image_candidates_for_source(
+        db,
+        product.data.item_code,
+        product.data.gigab2b_raw_snapshot,
+    )
+
+
+async def _gallery_order_for_image_review(
+    db: AsyncSession,
+    item_code: str | None,
+    raw_snapshot: str | None,
+    gallery_order: str | None,
+) -> str | None:
+    existing_order = _json_loads(gallery_order, [])
+    if isinstance(existing_order, list) and any(
+        isinstance(item, dict) and (item.get("image_type") or item.get("source"))
+        for item in existing_order
+    ):
+        return gallery_order
+    if isinstance(existing_order, list) and existing_order:
+        structured_order = []
+        seen: set[str] = set()
+        for index, item in enumerate(existing_order):
+            path = normalize_image_path(item)
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            structured_order.append({
+                "path": path,
+                "image_type": "main" if index == 0 else "gallery",
+                "source": "saved_gallery_order",
+                "sort_order": index + 1,
+                "asset_source": "giga_listing",
+            })
+        if structured_order:
+            return json.dumps(structured_order, ensure_ascii=False)
+    fallback_images = await _giga_image_candidates_for_source(db, item_code, raw_snapshot)
+    if fallback_images:
+        return json.dumps(fallback_images, ensure_ascii=False)
+    return gallery_order
+
+
+def _limited_image_review_gallery_order(
+    gallery_order: str | None,
+    *,
+    gallery_images: str | None = None,
+    main_image_path: str | None = None,
+    limit: int = IMAGE_REVIEW_INITIAL_GALLERY_LIMIT,
+) -> tuple[str | None, int | None, int | None]:
+    items = _json_loads(gallery_order, [])
+    if not isinstance(items, list):
+        return gallery_order, None, None
+    total = len(items)
+    if total <= limit:
+        return gallery_order, total, limit
+
+    saved_gallery_images = _json_loads(gallery_images, [])
+    if not isinstance(saved_gallery_images, list):
+        saved_gallery_images = []
+    selected_paths = {
+        path
+        for path in [main_image_path, *[normalize_image_path(item) for item in saved_gallery_images if item]]
+        if path
+    }
+    seen: set[str] = set()
+    selected: list[Any] = []
+    main_items: list[Any] = []
+    gallery_items: list[Any] = []
+    other_items: list[Any] = []
+
+    for index, item in enumerate(items):
+        path = normalize_image_path(item)
+        if path in seen:
+            continue
+        seen.add(path)
+        item_type = str((item or {}).get("image_type") or (item or {}).get("source") or "").strip().lower() if isinstance(item, dict) else ""
+        if path and path in selected_paths:
+            selected.append(item)
+        elif item_type == "main":
+            main_items.append(item)
+        elif item_type == "gallery":
+            gallery_items.append(item)
+        else:
+            other_items.append(item)
+
+    limited: list[Any] = []
+    limited_paths: set[str] = set()
+
+    def add(entries: list[Any]) -> None:
+        for entry in entries:
+            if len(limited) >= limit:
+                return
+            path = normalize_image_path(entry)
+            if path and path in limited_paths:
+                continue
+            if path:
+                limited_paths.add(path)
+            limited.append(entry)
+
+    add(selected)
+    add(main_items)
+    add(gallery_items[-IMAGE_REVIEW_SELECTED_IMAGE_LIMIT:])
+    add(other_items)
+    add(items)
+    return json.dumps(limited, ensure_ascii=False), total, limit
+
+
+async def _ensure_product_detail_gallery_order(db: AsyncSession, product: Product, detail: ProductDetail) -> None:
+    if detail.images and detail.images.gallery_order:
+        existing_order = _json_loads(detail.images.gallery_order, [])
+        if isinstance(existing_order, list) and any(
+            isinstance(item, dict) and (item.get("image_type") or item.get("source"))
+            for item in existing_order
+        ):
+            return
+    fallback_images = await _giga_image_candidates_for_product(db, product)
+    if not fallback_images:
+        return
+    gallery_order = json.dumps(fallback_images, ensure_ascii=False)
+    if detail.images:
+        detail.images.gallery_order = gallery_order
+    else:
+        detail.images = ProductImageResponse(
+            id=0,
+            product_id=product.id,
+            gallery_order=gallery_order,
+            vlm_model=settings.VLM_MODEL,
+        )
 
 
 def _snapshot_for_product(product: Product) -> dict:
@@ -1681,11 +2214,46 @@ async def create_product(body: ProductCreate, db: AsyncSession = Depends(get_db)
 
 
 @router.get("/overview", response_model=WorkbenchOverview)
-async def get_workbench_overview(db: AsyncSession = Depends(get_db)):
+async def get_workbench_overview(
+    data_source_id: int | None = Query(None, ge=1),
+    db: AsyncSession = Depends(get_db),
+):
     """工作台概览：用于顶部快速发现需要处理的任务和商品。"""
-    running_result = await db.execute(select(func.count(Product.id)).where(Product.status.in_(RUNNING_STATUSES)))
-    manual_result = await db.execute(select(func.count(Product.id)).where(Product.status == PENDING_REVIEW))
-    failed_result = await db.execute(select(func.count(Product.id)).where(Product.status == "failed"))
+    product_query = select(Product).options(
+        load_only(
+            Product.id,
+            Product.status,
+            Product.current_step,
+            Product.competitor_asin,
+            Product.error_message,
+            Product.source_data_source_id,
+        )
+    )
+    if data_source_id:
+        product_query = product_query.where(_product_data_source_filter(data_source_id))
+    product_result = await db.execute(product_query)
+    products = product_result.scalars().all()
+    status_counts = {key: 0 for key in WORKBENCH_STATUS_KEYS}
+    for product in products:
+        status_counts[_product_workbench_status(product)] += 1
+
+    exported_condition = (CatalogProduct.exported_at.is_not(None)) | (CatalogProduct.export_task_id.is_not(None))
+    export_ready_query = (
+        select(
+            func.count(Product.id).label("total"),
+            func.coalesce(func.sum(case((exported_condition, 1), else_=0)), 0).label("exported"),
+        )
+        .select_from(Product)
+        .join(CatalogProduct, CatalogProduct.source_product_id == Product.id, isouter=True)
+        .where(Product.status == COMPLETED, Product.current_step >= 6)
+    )
+    if data_source_id:
+        export_ready_query = export_ready_query.where(_product_data_source_filter(data_source_id))
+    export_ready_row = (await db.execute(export_ready_query)).one()
+    export_ready_total = int(export_ready_row.total or 0)
+    export_ready_exported = int(export_ready_row.exported or 0)
+    export_ready_unexported = max(export_ready_total - export_ready_exported, 0)
+
     asin_not_synced_result = await db.execute(
         select(func.count(CatalogProduct.id)).where(
             CatalogProduct.confirmed_at.is_not(None),
@@ -1714,9 +2282,22 @@ async def get_workbench_overview(db: AsyncSession = Depends(get_db)):
         )
     )
     return WorkbenchOverview(
-        running_tasks=running_result.scalar() or 0,
-        manual_review_tasks=manual_result.scalar() or 0,
-        failed_tasks=failed_result.scalar() or 0,
+        total_products=len(products),
+        select_images=status_counts["select_images"],
+        competitor_searching=status_counts["competitor_searching"],
+        select_competitor=status_counts["select_competitor"],
+        capture_detail=status_counts["capture_detail"],
+        ready_to_generate=status_counts["ready_to_generate"],
+        running=status_counts["running"],
+        suspended=status_counts["suspended"],
+        manual_review=status_counts["manual_review"],
+        export_ready=status_counts["export_ready"],
+        export_ready_unexported=export_ready_unexported,
+        export_ready_exported=export_ready_exported,
+        failed=status_counts["failed"],
+        running_tasks=status_counts["running"],
+        manual_review_tasks=status_counts["manual_review"],
+        failed_tasks=status_counts["failed"],
         confirmable_tasks=0,
         asin_not_synced=asin_not_synced_result.scalar() or 0,
         asin_attention=asin_attention_result.scalar() or 0,
@@ -1781,19 +2362,43 @@ async def list_products(
     """商品任务列表（分页）"""
     query = (
         select(Product)
-        .options(selectinload(Product.data), selectinload(Product.aplus))
+        .options(
+            selectinload(Product.data).load_only(
+                ProductData.id,
+                ProductData.product_id,
+                ProductData.item_code,
+                ProductData.title,
+                ProductData.leaf_category,
+            ),
+            selectinload(Product.aplus).load_only(
+                ProductAplus.id,
+                ProductAplus.product_id,
+                ProductAplus.aplus_status,
+                ProductAplus.aplus_image_count,
+            ),
+            selectinload(Product.catalog_item).load_only(
+                CatalogProduct.id,
+                CatalogProduct.source_product_id,
+                CatalogProduct.exported_at,
+                CatalogProduct.export_task_id,
+            ),
+        )
         .order_by(Product.updated_at.is_(None).asc(), Product.updated_at.desc(), Product.created_at.desc())
     )
     count_query = select(func.count(Product.id))
 
-    needs_product_data_join = bool(item_id or data_source_id)
+    needs_product_data_join = bool(item_id)
     if needs_product_data_join:
         query = query.join(ProductData, ProductData.product_id == Product.id, isouter=True)
         count_query = count_query.join(ProductData, ProductData.product_id == Product.id, isouter=True)
 
     if status:
-        query = query.where(Product.status == status)
-        count_query = count_query.where(Product.status == status)
+        if status == COMPLETED:
+            query = query.where(Product.status == COMPLETED, Product.current_step >= 6)
+            count_query = count_query.where(Product.status == COMPLETED, Product.current_step >= 6)
+        else:
+            query = query.where(Product.status == status)
+            count_query = count_query.where(Product.status == status)
     if item_id:
         pattern = f"%{item_id.strip()}%"
         query = query.where(
@@ -1803,16 +2408,8 @@ async def list_products(
             (Product.gigab2b_product_id.ilike(pattern)) | (ProductData.item_code.ilike(pattern))
         )
     if data_source_id:
-        snapshot_pattern = f'%"data_source_id": {data_source_id}%'
-        compact_snapshot_pattern = f'%"data_source_id":{data_source_id}%'
-        query = query.where(
-            ProductData.gigab2b_raw_snapshot.ilike(snapshot_pattern)
-            | ProductData.gigab2b_raw_snapshot.ilike(compact_snapshot_pattern)
-        )
-        count_query = count_query.where(
-            ProductData.gigab2b_raw_snapshot.ilike(snapshot_pattern)
-            | ProductData.gigab2b_raw_snapshot.ilike(compact_snapshot_pattern)
-        )
+        query = query.where(_product_data_source_filter(data_source_id))
+        count_query = count_query.where(_product_data_source_filter(data_source_id))
     if competitor_asin:
         pattern = f"%{competitor_asin.strip()}%"
         query = query.where(Product.competitor_asin.ilike(pattern))
@@ -1839,6 +2436,283 @@ async def list_products(
     items = result.scalars().all()
 
     return PaginatedResponse(items=[_build_list_item(item) for item in items], total=total, page=page, page_size=page_size)
+
+
+@router.get("/image-review-queue", response_model=ProductImageReviewQueueResponse)
+async def list_product_image_review_queue(
+    data_source_id: int | None = Query(None, ge=1),
+    limit: int = Query(100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lightweight queue for the image review page.
+
+    The full product list loads large ORM objects and response fields that this
+    workflow does not need. Keep this endpoint narrow so switching into image
+    review remains fast.
+    """
+    base_filter = [
+        Product.status == "created",
+        ((Product.current_step.is_(None)) | (Product.current_step <= 0)),
+    ]
+    query = (
+        select(
+            Product.id,
+            Product.gigab2b_product_id,
+            Product.status,
+            Product.current_step,
+            Product.created_at,
+            Product.updated_at,
+            ProductData.item_code,
+            ProductData.title,
+        )
+        .select_from(Product)
+        .join(ProductData, ProductData.product_id == Product.id, isouter=True)
+        .where(*base_filter)
+        .order_by(Product.updated_at.is_(None).asc(), Product.updated_at.desc(), Product.created_at.desc())
+        .limit(limit)
+    )
+    if data_source_id:
+        query = query.where(_product_data_source_filter(data_source_id))
+
+    result = await db.execute(query)
+    items = [
+        {
+            "id": row.id,
+            "gigab2b_product_id": row.gigab2b_product_id,
+            "status": row.status,
+            "current_step": row.current_step or 0,
+            "current_task_status": "待确认商品图片",
+            "item_code": row.item_code,
+            "title": row.title,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
+        for row in result.all()
+    ]
+    return ProductImageReviewQueueResponse(items=items, total=len(items), limit=limit)
+
+
+@router.get("/image-review-detail/{product_id}", response_model=ProductImageReviewDetailResponse)
+async def get_product_image_review_detail(
+    product_id: int,
+    image_limit: int = Query(IMAGE_REVIEW_INITIAL_GALLERY_LIMIT, ge=12, le=IMAGE_REVIEW_MAX_GALLERY_LIMIT),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lightweight product detail for the image review page."""
+    result = await db.execute(
+        select(
+            Product.id,
+            Product.gigab2b_product_id,
+            Product.status,
+            Product.current_step,
+            Product.error_message,
+            ProductData.item_code,
+            ProductData.title,
+            ProductData.gigab2b_raw_snapshot,
+            ProductImage.id.label("image_id"),
+            ProductImage.main_image_path,
+            ProductImage.main_image_source,
+            ProductImage.gallery_images,
+            ProductImage.gallery_order,
+        )
+        .select_from(Product)
+        .join(ProductData, ProductData.product_id == Product.id, isouter=True)
+        .join(ProductImage, ProductImage.product_id == Product.id, isouter=True)
+        .where(Product.id == product_id)
+    )
+    row = result.one_or_none()
+    if not row:
+        raise HTTPException(404, "Product not found")
+
+    product = Product(
+        id=row.id,
+        gigab2b_url="",
+        gigab2b_product_id=row.gigab2b_product_id,
+        status=row.status,
+        current_step=row.current_step or 0,
+        error_message=row.error_message,
+    )
+    gallery_order = await _gallery_order_for_image_review(
+        db,
+        row.item_code,
+        row.gigab2b_raw_snapshot,
+        row.gallery_order,
+    )
+    gallery_order, gallery_order_total, gallery_order_limit = _limited_image_review_gallery_order(
+        gallery_order,
+        gallery_images=row.gallery_images,
+        main_image_path=row.main_image_path,
+        limit=image_limit,
+    )
+    images = None
+    if row.image_id or row.main_image_path or row.gallery_images or gallery_order:
+        images = {
+            "id": row.image_id or 0,
+            "product_id": row.id,
+            "main_image_path": row.main_image_path,
+            "main_image_source": row.main_image_source,
+            "gallery_images": row.gallery_images,
+            "gallery_order": gallery_order,
+            "gallery_order_total": gallery_order_total,
+            "gallery_order_limit": gallery_order_limit,
+        }
+    return {
+        "id": row.id,
+        "source_item_id": row.gigab2b_product_id,
+        "gigab2b_product_id": row.gigab2b_product_id,
+        "status": row.status,
+        "current_step": row.current_step or 0,
+        "current_task_status": _current_task_status(product),
+        "data": {
+            "item_code": row.item_code,
+            "title": row.title,
+        },
+        "images": images,
+    }
+
+
+@router.get("/competitor-review-queue", response_model=ProductCompetitorReviewQueueResponse)
+async def list_product_competitor_review_queue(
+    data_source_id: int | None = Query(None, ge=1),
+    limit: int = Query(100, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+):
+    """Lightweight queue for products that need competitor review."""
+    competitor_search_failed = Product.status == "failed"
+    created_needs_competitor = (
+        (Product.status == "created")
+        & (Product.current_step > 0)
+        & (Product.competitor_asin.is_(None))
+    )
+    query = (
+        select(
+            Product.id,
+            Product.gigab2b_product_id,
+            Product.competitor_asin,
+            Product.status,
+            Product.current_step,
+            Product.error_message,
+            Product.created_at,
+            Product.updated_at,
+            ProductData.item_code,
+            ProductData.title,
+            ProductData.leaf_category,
+        )
+        .select_from(Product)
+        .join(ProductData, ProductData.product_id == Product.id, isouter=True)
+        .where(
+            created_needs_competitor
+            | (
+                competitor_search_failed
+                & (
+                    Product.error_message.ilike("%同款搜索%")
+                    | Product.error_message.ilike("%StyleSnap%")
+                    | Product.error_message.ilike("%竞品详情%")
+                    | Product.error_message.ilike("%Amazon listing%")
+                )
+            )
+        )
+        .order_by(Product.updated_at.is_(None).asc(), Product.updated_at.desc(), Product.created_at.desc())
+        .limit(limit)
+    )
+    if data_source_id:
+        query = query.where(_product_data_source_filter(data_source_id))
+
+    result = await db.execute(query)
+    items = []
+    for row in result.all():
+        product = Product(
+            id=row.id,
+            gigab2b_url="",
+            gigab2b_product_id=row.gigab2b_product_id,
+            competitor_asin=row.competitor_asin,
+            status=row.status,
+            current_step=row.current_step or 0,
+            error_message=row.error_message,
+        )
+        items.append({
+            "id": row.id,
+            "source_item_id": row.gigab2b_product_id,
+            "gigab2b_product_id": row.gigab2b_product_id,
+            "competitor_asin": row.competitor_asin,
+            "status": row.status,
+            "current_step": row.current_step or 0,
+            "current_task_status": _current_task_status(product),
+            "error_message": row.error_message,
+            "item_code": row.item_code,
+            "title": row.title,
+            "leaf_category": row.leaf_category,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        })
+    return ProductCompetitorReviewQueueResponse(items=items, total=len(items), limit=limit)
+
+
+@router.get("/competitor-review-detail/{product_id}", response_model=ProductCompetitorReviewDetailResponse)
+async def get_product_competitor_review_detail(
+    product_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Lightweight product detail for the competitor review page."""
+    result = await db.execute(
+        select(
+            Product.id,
+            Product.gigab2b_product_id,
+            Product.competitor_asin,
+            Product.status,
+            Product.current_step,
+            Product.error_message,
+            ProductData.item_code,
+            ProductData.title,
+            ProductData.leaf_category,
+            ProductData.gigab2b_raw_snapshot,
+            ProductImage.id.label("image_id"),
+            ProductImage.main_image_path,
+            ProductImage.main_image_source,
+        )
+        .select_from(Product)
+        .join(ProductData, ProductData.product_id == Product.id, isouter=True)
+        .join(ProductImage, ProductImage.product_id == Product.id, isouter=True)
+        .where(Product.id == product_id)
+    )
+    row = result.one_or_none()
+    if not row:
+        raise HTTPException(404, "Product not found")
+
+    product = Product(
+        id=row.id,
+        gigab2b_url="",
+        gigab2b_product_id=row.gigab2b_product_id,
+        competitor_asin=row.competitor_asin,
+        status=row.status,
+        current_step=row.current_step or 0,
+        error_message=row.error_message,
+    )
+    images = None
+    if row.image_id or row.main_image_path:
+        images = {
+            "id": row.image_id or 0,
+            "product_id": row.id,
+            "main_image_path": row.main_image_path,
+            "main_image_source": row.main_image_source,
+        }
+    return {
+        "id": row.id,
+        "source_item_id": row.gigab2b_product_id,
+        "gigab2b_product_id": row.gigab2b_product_id,
+        "competitor_asin": row.competitor_asin,
+        "status": row.status,
+        "current_step": row.current_step or 0,
+        "current_task_status": _current_task_status(product),
+        "error_message": row.error_message,
+        "leaf_category": row.leaf_category,
+        "data": {
+            "item_code": row.item_code,
+            "title": row.title,
+            "gigab2b_raw_snapshot": _compact_gigab2b_snapshot(row.gigab2b_raw_snapshot),
+        },
+        "images": images,
+    }
 
 
 @router.get("/import/template")
@@ -2083,6 +2957,289 @@ async def bulk_start_pipeline(body: BulkStartRequest, db: AsyncSession = Depends
     )
 
 
+@router.post("/auto-start-ready-generation", response_model=BulkStartResponse)
+async def auto_start_ready_generation(
+    data_source_id: int | None = Query(None, ge=1),
+    limit: int = Query(AUTO_START_READY_GENERATION_LIMIT, ge=1, le=AUTO_START_READY_GENERATION_LIMIT),
+    db: AsyncSession = Depends(get_db),
+):
+    """自动认领已满足前置条件的待生成商品，避免停留在“待启动/待生成”。"""
+    query = (
+        select(Product)
+        .options(
+            selectinload(Product.data),
+            selectinload(Product.images),
+            selectinload(Product.aplus),
+            selectinload(Product.catalog_item),
+        )
+        .where(
+            Product.status == "created",
+            Product.current_step >= 5,
+            Product.competitor_asin.is_not(None),
+            Product.competitor_asin != "",
+        )
+        .order_by(Product.updated_at.asc(), Product.id.asc())
+        .limit(limit)
+    )
+    if data_source_id:
+        query = query.where(_product_data_source_filter(data_source_id))
+
+    result = await db.execute(query)
+    products = result.scalars().all()
+    errors: list[str] = []
+    startable: list[tuple[int, int, str, int, str | None]] = []
+
+    for product in products:
+        if is_running(product.id):
+            errors.append(f"任务 {product.id} 已在运行中，已跳过")
+            continue
+        start_step = max(product.current_step or 5, 5)
+        try:
+            await _require_generation_prerequisites(db, product, start_step)
+        except HTTPException as exc:
+            errors.append(f"任务 {product.id} {exc.detail}")
+            continue
+        startable.append((product.id, start_step, product.status, product.current_step or 0, product.error_message))
+        _mark_pipeline_starting(product)
+        _sync_catalog_item(product, db)
+
+    if startable:
+        await db.commit()
+
+    started_ids: list[int] = []
+    for product_id, start_step, original_status, original_step, original_error in startable:
+        product = next((item for item in products if item.id == product_id), None)
+        if enqueue_pipeline(product_id, start_step=start_step):
+            started_ids.append(product_id)
+            continue
+        errors.append(f"任务 {product_id} 后台队列已存在，已跳过")
+        if product:
+            product.status = original_status
+            product.current_step = original_step
+            product.error_message = original_error
+            product.updated_at = datetime.now()
+            _sync_catalog_item(product, db)
+
+    if len(started_ids) != len(startable):
+        await db.commit()
+
+    return BulkStartResponse(
+        requested=len(products),
+        started=len(started_ids),
+        skipped=len(products) - len(started_ids),
+        errors=errors,
+        started_ids=started_ids,
+    )
+
+
+async def _create_product_bulk_advance_task_for_ids(
+    db: AsyncSession,
+    product_ids: list[int],
+    *,
+    payload_extra: dict | None = None,
+    title_suffix: str | None = None,
+) -> OfflineTask:
+    """创建可审计的批量推进任务；只启动满足前置条件的商品，其余写入逐商品阻塞原因。"""
+    requested_ids = list(dict.fromkeys(product_ids))
+    if len(requested_ids) > PRODUCT_BULK_ADVANCE_MAX_PRODUCTS:
+        raise HTTPException(400, f"单次最多批量推进 {PRODUCT_BULK_ADVANCE_MAX_PRODUCTS} 个商品")
+
+    result = await db.execute(
+        select(Product)
+        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
+        .where(Product.id.in_(requested_ids))
+    )
+    products = {product.id: product for product in result.scalars().all()}
+
+    rows: list[dict] = []
+    startable: list[tuple[int, int, str, int, str | None]] = []
+    now = datetime.now()
+    for product_id in requested_ids:
+        product = products.get(product_id)
+        if not product:
+            rows.append({
+                "product_id": product_id,
+                "item_code": None,
+                "status": "skipped",
+                "reason": "商品不存在",
+                "current_status": None,
+                "current_step": None,
+            })
+            continue
+
+        item_code = product.data.item_code if product.data else product.gigab2b_product_id
+        base_row = {
+            "product_id": product.id,
+            "item_code": item_code,
+            "current_status": product.status,
+            "current_step": product.current_step,
+        }
+        if product.status == COMPLETED and (product.current_step or 0) >= 6:
+            rows.append({**base_row, "status": "skipped", "reason": "已在待导出状态，无需推进"})
+            continue
+        if product.status in {"source_unavailable", "unavailable"}:
+            rows.append({**base_row, "status": "skipped", "reason": f"当前状态不能推进: {product.status}"})
+            continue
+        if product.status == "paused":
+            rows.append({**base_row, "status": "skipped", "reason": "商品已挂起，请先在页面点击继续"})
+            continue
+        if is_running(product.id):
+            rows.append({**base_row, "status": "skipped", "reason": "商品流程正在运行中"})
+            continue
+        if (product.current_step or 0) < 5:
+            rows.append({**base_row, "status": "skipped", "reason": "尚未完成图片确认、竞品选择和竞品详情抓取，不能批量进入生成"})
+            continue
+        start_step = max(product.current_step or 5, 5)
+        try:
+            await _require_generation_prerequisites(db, product, start_step)
+        except HTTPException as exc:
+            rows.append({**base_row, "status": "skipped", "reason": str(exc.detail)})
+            continue
+
+        startable.append((product.id, start_step, product.status, product.current_step or 0, product.error_message))
+        _mark_pipeline_starting(product)
+
+    await db.commit()
+
+    started_ids: list[int] = []
+    for product_id, start_step, original_status, original_step, original_error in startable:
+        product = products.get(product_id)
+        item_code = product.data.item_code if product and product.data else product.gigab2b_product_id if product else None
+        if enqueue_pipeline(product_id, start_step=start_step):
+            started_ids.append(product_id)
+            rows.append({
+                "product_id": product_id,
+                "item_code": item_code,
+                "status": "started",
+                "reason": f"已从 Step {start_step} 加入后台生成队列",
+                "current_status": original_status,
+                "current_step": original_step,
+            })
+        else:
+            if product:
+                product.status = original_status
+                product.current_step = original_step
+                product.error_message = original_error
+                product.updated_at = datetime.now()
+            rows.append({
+                "product_id": product_id,
+                "item_code": item_code,
+                "status": "skipped",
+                "reason": "后台队列已存在，未重复启动",
+                "current_status": original_status,
+                "current_step": original_step,
+            })
+
+    started_count = len(started_ids)
+    skipped_count = len(rows) - started_count
+    task_status = "done" if skipped_count == 0 else "partial_failed"
+    result_payload = {
+        "status": task_status,
+        "requested_count": len(requested_ids),
+        "started_count": started_count,
+        "skipped_count": skipped_count,
+        "failed_count": 0,
+        "rows": rows,
+        "created_at": now.isoformat(),
+    }
+    payload = {"product_ids": requested_ids}
+    if payload_extra:
+        payload.update(payload_extra)
+    task = OfflineTask(
+        task_type="product_bulk_advance",
+        title=f"批量推进商品到待导出：{len(requested_ids)} 个商品{title_suffix or ''}",
+        status=task_status,
+        total_steps=1,
+        success_steps=1,
+        failed_steps=0,
+        running_steps=0,
+        created_by="web",
+        payload_json=json.dumps(payload, ensure_ascii=False, default=str),
+        result_json=json.dumps(result_payload, ensure_ascii=False, default=str),
+        error_message=None,
+        created_at=now,
+        started_at=now,
+        finished_at=datetime.now(),
+        updated_at=datetime.now(),
+    )
+    db.add(task)
+    await db.flush()
+    db.add(OfflineTaskStep(
+        task_id=task.id,
+        step_type="product_bulk_advance",
+        title="逐商品检查并启动可推进商品",
+        status="done",
+        progress_current=len(requested_ids),
+        progress_total=len(requested_ids),
+        payload_json=json.dumps(payload, ensure_ascii=False, default=str),
+        result_json=json.dumps(result_payload, ensure_ascii=False, default=str),
+        error_message=None,
+        started_at=now,
+        finished_at=task.finished_at,
+        updated_at=task.finished_at,
+    ))
+    await db.commit()
+    await db.refresh(task)
+    return task
+
+
+@router.post("/bulk-advance-task", response_model=OfflineTaskResponse)
+async def create_product_bulk_advance_task(body: ProductBulkAdvanceRequest, db: AsyncSession = Depends(get_db)):
+    return await _create_product_bulk_advance_task_for_ids(db, body.product_ids)
+
+
+@router.post("/bulk-advance-task/by-filter", response_model=OfflineTaskResponse)
+async def create_product_bulk_advance_task_by_filter(body: ProductBulkAdvanceFilterRequest, db: AsyncSession = Depends(get_db)):
+    query = select(Product.id).order_by(Product.updated_at.desc(), Product.created_at.desc()).limit(body.limit)
+    needs_product_data_join = bool(body.item_id or body.sku_keyword)
+    if needs_product_data_join:
+        query = query.join(ProductData, ProductData.product_id == Product.id, isouter=True)
+
+    if body.status:
+        if body.status == COMPLETED:
+            query = query.where(Product.status == COMPLETED, Product.current_step >= 6)
+        else:
+            query = query.where(Product.status == body.status)
+    if body.item_id:
+        pattern = f"%{body.item_id.strip()}%"
+        query = query.where(
+            (Product.gigab2b_product_id.ilike(pattern)) | (ProductData.item_code.ilike(pattern))
+        )
+    if body.data_source_id:
+        query = query.where(_product_data_source_filter(body.data_source_id))
+    if body.competitor_asin:
+        query = query.where(Product.competitor_asin.ilike(f"%{body.competitor_asin.strip()}%"))
+    if body.upc:
+        query = query.where(Product.upc.ilike(f"%{body.upc.strip()}%"))
+    created_from = _naive_datetime(body.created_from)
+    created_to = _naive_datetime(body.created_to)
+    if created_from:
+        query = query.where(Product.created_at >= created_from)
+    if created_to:
+        query = query.where(Product.created_at <= created_to)
+    if body.sku_keyword:
+        keyword = f"%{body.sku_keyword.strip()}%"
+        query = query.where(
+            (Product.gigab2b_product_id.ilike(keyword))
+            | (ProductData.item_code.ilike(keyword))
+            | (ProductData.title.ilike(keyword))
+        )
+
+    result = await db.execute(query)
+    ids = [int(product_id) for product_id in result.scalars().all()]
+    if not ids:
+        raise HTTPException(400, "当前筛选下没有商品")
+    return await _create_product_bulk_advance_task_for_ids(
+        db,
+        ids,
+        payload_extra={
+            "filter": body.model_dump(mode="json"),
+            "filter_matched_count": len(ids),
+        },
+        title_suffix="（按筛选）",
+    )
+
+
 @router.get("/catalog", response_model=PaginatedCatalogProducts)
 async def list_catalog_products(
     page: int = Query(1, ge=1),
@@ -2105,63 +3262,102 @@ async def list_catalog_products(
     db: AsyncSession = Depends(get_db),
 ):
     """独立商品资料列表，最多单页返回 1000 条。"""
-    query = select(CatalogProduct).join(
-        Product, CatalogProduct.source_product_id == Product.id
-    ).outerjoin(
-        ProductData, ProductData.product_id == Product.id
-    ).options(
-        selectinload(CatalogProduct.source_product).selectinload(Product.data),
-        selectinload(CatalogProduct.source_product).selectinload(Product.aplus),
-    ).order_by(
-        func.coalesce(Product.updated_at, CatalogProduct.updated_at, CatalogProduct.imported_at).desc(),
+    needs_product_join = False
+    needs_product_data_join = bool(template_risk_level)
+    if needs_product_data_join:
+        needs_product_join = True
+
+    query = select(CatalogProduct).order_by(
+        CatalogProduct.updated_at.desc(),
         CatalogProduct.imported_at.desc(),
     )
-    count_query = select(func.count(CatalogProduct.id)).join(
-        Product, CatalogProduct.source_product_id == Product.id
-    ).outerjoin(ProductData, ProductData.product_id == Product.id)
+    if needs_product_join or needs_product_data_join:
+        query = query.options(
+            selectinload(CatalogProduct.source_product).load_only(
+            Product.id,
+            Product.gigab2b_url,
+            Product.gigab2b_product_id,
+            Product.competitor_asin,
+            Product.amazon_asin,
+            Product.asin_sync_status,
+            Product.asin_synced_at,
+            Product.asin_sync_error,
+            Product.amazon_product_status,
+            Product.amazon_product_status_synced_at,
+            Product.amazon_product_status_error,
+            Product.aplus_upload_status,
+            Product.aplus_uploaded_at,
+            Product.aplus_upload_error,
+            Product.upc,
+            Product.brand,
+            Product.status,
+            Product.updated_at,
+            ).selectinload(Product.data).load_only(
+                ProductData.id,
+                ProductData.product_id,
+                ProductData.item_code,
+                ProductData.title,
+                ProductData.leaf_category,
+                ProductData.amazon_template_fill_summary,
+            ),
+            selectinload(CatalogProduct.source_product).selectinload(Product.aplus).load_only(
+                ProductAplus.id,
+                ProductAplus.product_id,
+                ProductAplus.aplus_status,
+                ProductAplus.aplus_image_count,
+            ),
+        )
+    count_query = select(func.count(CatalogProduct.id))
+
+    if needs_product_join:
+        query = query.join(Product, CatalogProduct.source_product_id == Product.id)
+        count_query = count_query.join(Product, CatalogProduct.source_product_id == Product.id)
+    if needs_product_data_join:
+        query = query.outerjoin(ProductData, ProductData.product_id == Product.id)
+        count_query = count_query.outerjoin(ProductData, ProductData.product_id == Product.id)
 
     query = query.where(CatalogProduct.confirmed_at.is_not(None))
     count_query = count_query.where(CatalogProduct.confirmed_at.is_not(None))
 
     if item_id:
         pattern = f"%{item_id.strip()}%"
-        query = query.where((Product.gigab2b_product_id.ilike(pattern)) | (ProductData.item_code.ilike(pattern)))
-        count_query = count_query.where((Product.gigab2b_product_id.ilike(pattern)) | (ProductData.item_code.ilike(pattern)))
+        query = query.where((CatalogProduct.gigab2b_product_id.ilike(pattern)) | (CatalogProduct.item_code.ilike(pattern)))
+        count_query = count_query.where((CatalogProduct.gigab2b_product_id.ilike(pattern)) | (CatalogProduct.item_code.ilike(pattern)))
     if competitor_asin:
         pattern = f"%{competitor_asin.strip()}%"
-        query = query.where(Product.competitor_asin.ilike(pattern))
-        count_query = count_query.where(Product.competitor_asin.ilike(pattern))
+        query = query.where(CatalogProduct.competitor_asin.ilike(pattern))
+        count_query = count_query.where(CatalogProduct.competitor_asin.ilike(pattern))
     if amazon_asin:
         pattern = f"%{amazon_asin.strip()}%"
-        query = query.where((Product.amazon_asin.ilike(pattern)) | (CatalogProduct.amazon_asin.ilike(pattern)))
-        count_query = count_query.where((Product.amazon_asin.ilike(pattern)) | (CatalogProduct.amazon_asin.ilike(pattern)))
+        query = query.where(CatalogProduct.amazon_asin.ilike(pattern))
+        count_query = count_query.where(CatalogProduct.amazon_asin.ilike(pattern))
     if asin_sync_status:
         if asin_sync_status == "synced":
-            query = query.where(((Product.amazon_asin.is_not(None)) & (Product.amazon_asin != "")) | ((CatalogProduct.amazon_asin.is_not(None)) & (CatalogProduct.amazon_asin != "")))
-            count_query = count_query.where(((Product.amazon_asin.is_not(None)) & (Product.amazon_asin != "")) | ((CatalogProduct.amazon_asin.is_not(None)) & (CatalogProduct.amazon_asin != "")))
+            query = query.where((CatalogProduct.amazon_asin.is_not(None)) & (CatalogProduct.amazon_asin != ""))
+            count_query = count_query.where((CatalogProduct.amazon_asin.is_not(None)) & (CatalogProduct.amazon_asin != ""))
         elif asin_sync_status == "not_synced":
-            query = query.where(((Product.amazon_asin.is_(None)) | (Product.amazon_asin == "")) & ((CatalogProduct.amazon_asin.is_(None)) | (CatalogProduct.amazon_asin == "")))
-            count_query = count_query.where(((Product.amazon_asin.is_(None)) | (Product.amazon_asin == "")) & ((CatalogProduct.amazon_asin.is_(None)) | (CatalogProduct.amazon_asin == "")))
+            query = query.where((CatalogProduct.amazon_asin.is_(None)) | (CatalogProduct.amazon_asin == ""))
+            count_query = count_query.where((CatalogProduct.amazon_asin.is_(None)) | (CatalogProduct.amazon_asin == ""))
         elif asin_sync_status == "manual_linked":
-            query = query.where((Product.asin_sync_status == "manual_linked") | (CatalogProduct.asin_sync_status == "manual_linked"))
-            count_query = count_query.where((Product.asin_sync_status == "manual_linked") | (CatalogProduct.asin_sync_status == "manual_linked"))
+            query = query.where(CatalogProduct.asin_sync_status == "manual_linked")
+            count_query = count_query.where(CatalogProduct.asin_sync_status == "manual_linked")
         else:
-            query = query.where((Product.asin_sync_status == asin_sync_status) | (CatalogProduct.asin_sync_status == asin_sync_status))
-            count_query = count_query.where((Product.asin_sync_status == asin_sync_status) | (CatalogProduct.asin_sync_status == asin_sync_status))
+            query = query.where(CatalogProduct.asin_sync_status == asin_sync_status)
+            count_query = count_query.where(CatalogProduct.asin_sync_status == asin_sync_status)
     if amazon_product_status:
         if amazon_product_status == "sellable":
-            query = query.where((Product.amazon_product_status.ilike("%售卖%")) | (Product.amazon_product_status.ilike("%在售%")) | (CatalogProduct.amazon_product_status.ilike("%售卖%")) | (CatalogProduct.amazon_product_status.ilike("%在售%")))
-            count_query = count_query.where((Product.amazon_product_status.ilike("%售卖%")) | (Product.amazon_product_status.ilike("%在售%")) | (CatalogProduct.amazon_product_status.ilike("%售卖%")) | (CatalogProduct.amazon_product_status.ilike("%在售%")))
+            query = query.where((CatalogProduct.amazon_product_status.ilike("%售卖%")) | (CatalogProduct.amazon_product_status.ilike("%在售%")))
+            count_query = count_query.where((CatalogProduct.amazon_product_status.ilike("%售卖%")) | (CatalogProduct.amazon_product_status.ilike("%在售%")))
         elif amazon_product_status == "not_synced":
-            query = query.where(((Product.amazon_product_status.is_(None)) | (Product.amazon_product_status == "")) & ((CatalogProduct.amazon_product_status.is_(None)) | (CatalogProduct.amazon_product_status == "")))
-            count_query = count_query.where(((Product.amazon_product_status.is_(None)) | (Product.amazon_product_status == "")) & ((CatalogProduct.amazon_product_status.is_(None)) | (CatalogProduct.amazon_product_status == "")))
+            query = query.where((CatalogProduct.amazon_product_status.is_(None)) | (CatalogProduct.amazon_product_status == ""))
+            count_query = count_query.where((CatalogProduct.amazon_product_status.is_(None)) | (CatalogProduct.amazon_product_status == ""))
         else:
             pattern = f"%{amazon_product_status.strip()}%"
-            query = query.where((Product.amazon_product_status.ilike(pattern)) | (CatalogProduct.amazon_product_status.ilike(pattern)))
-            count_query = count_query.where((Product.amazon_product_status.ilike(pattern)) | (CatalogProduct.amazon_product_status.ilike(pattern)))
+            query = query.where(CatalogProduct.amazon_product_status.ilike(pattern))
+            count_query = count_query.where(CatalogProduct.amazon_product_status.ilike(pattern))
     if aplus_upload_status:
-        query = query.where((Product.aplus_upload_status == aplus_upload_status) | (CatalogProduct.aplus_upload_status == aplus_upload_status))
-        count_query = count_query.where((Product.aplus_upload_status == aplus_upload_status) | (CatalogProduct.aplus_upload_status == aplus_upload_status))
+        query = query.where(CatalogProduct.aplus_upload_status == aplus_upload_status)
+        count_query = count_query.where(CatalogProduct.aplus_upload_status == aplus_upload_status)
     if stock_sync_status:
         if stock_sync_status == "not_synced":
             query = query.where((CatalogProduct.stock_sync_status.is_(None)) | (CatalogProduct.stock_sync_status == "not_synced"))
@@ -2175,25 +3371,23 @@ async def list_catalog_products(
         count_query = count_query.where(ProductData.amazon_template_fill_summary.like(pattern))
     if upc:
         pattern = f"%{upc.strip()}%"
-        query = query.where((Product.upc.ilike(pattern)) | (CatalogProduct.upc.ilike(pattern)))
-        count_query = count_query.where((Product.upc.ilike(pattern)) | (CatalogProduct.upc.ilike(pattern)))
+        query = query.where(CatalogProduct.upc.ilike(pattern))
+        count_query = count_query.where(CatalogProduct.upc.ilike(pattern))
     if category:
         pattern = f"%{category.strip()}%"
-        query = query.where((ProductData.leaf_category.ilike(pattern)) | (CatalogProduct.leaf_category.ilike(pattern)))
-        count_query = count_query.where((ProductData.leaf_category.ilike(pattern)) | (CatalogProduct.leaf_category.ilike(pattern)))
+        query = query.where(CatalogProduct.leaf_category.ilike(pattern))
+        count_query = count_query.where(CatalogProduct.leaf_category.ilike(pattern))
     if export_status == "pending":
         no_export_file = CatalogProduct.exported_at.is_(None)
         no_asin = (
-            ((Product.amazon_asin.is_(None)) | (Product.amazon_asin == ""))
-            & ((CatalogProduct.amazon_asin.is_(None)) | (CatalogProduct.amazon_asin == ""))
+            (CatalogProduct.amazon_asin.is_(None)) | (CatalogProduct.amazon_asin == "")
         )
         query = query.where(no_export_file & no_asin)
         count_query = count_query.where(no_export_file & no_asin)
     elif export_status == "exported":
         has_export_file = CatalogProduct.exported_at.is_not(None)
         has_asin = (
-            ((Product.amazon_asin.is_not(None)) & (Product.amazon_asin != ""))
-            | ((CatalogProduct.amazon_asin.is_not(None)) & (CatalogProduct.amazon_asin != ""))
+            (CatalogProduct.amazon_asin.is_not(None)) & (CatalogProduct.amazon_asin != "")
         )
         query = query.where(has_export_file | has_asin)
         count_query = count_query.where(has_export_file | has_asin)
@@ -2219,7 +3413,7 @@ async def list_catalog_products(
     result = await db.execute(query.offset((page - 1) * page_size).limit(page_size))
     items = result.scalars().all()
     for item in items:
-        product = item.source_product
+        product = item.__dict__.get("source_product")
         if product:
             pd = product.data
             item.gigab2b_url = product.gigab2b_url
@@ -2251,28 +3445,54 @@ async def list_catalog_products(
     return PaginatedCatalogProducts(items=items, total=total, page=page, page_size=page_size)
 
 
+@router.get("/catalog/export-files", response_model=PaginatedCatalogExportFiles)
+async def list_catalog_export_files(
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    category: str | None = None,
+    db: AsyncSession = Depends(get_db),
+):
+    """按导出文件/任务维度列出 Amazon 导入表历史记录。"""
+    result = await db.execute(
+        select(OfflineTask)
+        .where(OfflineTask.task_type == "catalog_export")
+        .where(OfflineTask.status.in_(("done", "partial_failed", "failed")))
+        .options(selectinload(OfflineTask.steps))
+        .order_by(OfflineTask.id.desc())
+    )
+    rows = [_catalog_export_file_row(task) for task in result.scalars().unique().all()]
+    normalized_category = str(category or "").strip()
+    if normalized_category:
+        rows = [
+            row
+            for row in rows
+            if normalized_category in row.categories or row.category == normalized_category
+        ]
+    total = len(rows)
+    start = (page - 1) * page_size
+    return PaginatedCatalogExportFiles(
+        items=rows[start:start + page_size],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
 @router.get("/catalog/export-categories", response_model=CatalogExportCategoriesResponse)
 async def list_catalog_export_categories(db: AsyncSession = Depends(get_db)):
-    """按导出状态聚合可选类目，供 Amazon Excel 导出入口使用。"""
-    result = await db.execute(
-        select(CatalogProduct)
-        .options(selectinload(CatalogProduct.source_product).selectinload(Product.data))
-        .where(CatalogProduct.confirmed_at.is_not(None))
-        .order_by(CatalogProduct.updated_at.desc(), CatalogProduct.imported_at.desc())
-    )
-    pending_groups: dict[str, dict] = {}
+    """按已导出文件/任务维度聚合可选类目。"""
     exported_groups: dict[str, dict] = {}
-    for item in result.scalars().all():
-        product = item.source_product
-        exported = _catalog_has_export_file(product, item)
-        _collect_export_category(
-            exported_groups if exported else pending_groups,
-            product,
-            item,
-            exported=exported,
-        )
+    task_result = await db.execute(
+        select(OfflineTask)
+        .where(OfflineTask.task_type == "catalog_export")
+        .where(OfflineTask.status.in_(("done", "partial_failed", "failed")))
+        .options(selectinload(OfflineTask.steps))
+        .order_by(OfflineTask.id.desc())
+    )
+    for task in task_result.scalars().unique().all():
+        _collect_export_file_category(exported_groups, _catalog_export_file_row(task))
     return CatalogExportCategoriesResponse(
-        pending=_export_category_summaries(pending_groups),
+        pending=[],
         exported=_export_category_summaries(exported_groups),
     )
 
@@ -2281,27 +3501,25 @@ async def list_catalog_export_categories(db: AsyncSession = Depends(get_db)):
 async def list_catalog_template_categories(db: AsyncSession = Depends(get_db)):
     """列出库里所有商品类目，用于类目模板管理。"""
     groups: dict[str, dict] = {}
-    for category, count, item in await _catalog_template_category_samples(db):
-        if item:
-            _collect_export_category(groups, item.source_product, item, exported=False)
-            groups[category]["count"] = count
-        else:
-            groups[category] = {
-                "category": category,
-                "count": count,
-                "exportable_count": 0,
-                "blocked_count": count,
-                "template_available": False,
-                "template_name": None,
-                "template_path": None,
-                "template_error": "没有可用于检测模板的代表商品",
-                "uploaded_template_name": None,
-                "uploaded_template_cache_path": None,
-                "uploaded_template_oss_url": None,
-                "uploaded_template_object_key": None,
-                "uploaded_template_uploaded_at": None,
-                "sample_item_codes": [],
-            }
+    for row in await _catalog_template_category_samples(db):
+        category = row["category"]
+        count = int(row["count"] or 0)
+        available, template_name, template_path, template_error = _catalog_template_status_for_category(
+            category,
+            row.get("brands") or [],
+        )
+        groups[category] = {
+            "category": category,
+            "count": count,
+            "exportable_count": count if available else 0,
+            "blocked_count": 0 if available else count,
+            "template_available": available,
+            "template_name": template_name,
+            "template_path": template_path,
+            "template_error": template_error,
+            **_category_upload_summary(category),
+            "sample_item_codes": row.get("sample_item_codes") or [],
+        }
     return _export_category_summaries(groups)
 
 
@@ -2639,15 +3857,31 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                             catalog,
                             latest_inventory.stock_qty if latest_inventory else None,
                         )
+                        await ensure_amazon_template_semantic_fields(product, pd, mapping, template_path)
+                        await db.commit()
                         source_path = _amazon_template_cache_path(pd)
                         template_result = None
                         if not source_path:
                             template_result = await run_amazon_template(product.id)
                             source_path = Path(template_result["path"]).expanduser()
+                            await db.refresh(product)
+                            if catalog:
+                                await db.refresh(catalog)
+                        if not product.upc:
+                            try:
+                                await ensure_product_upc(db, product)
+                            except UpcPoolEmptyError as exc:
+                                raise ValueError(str(exc)) from exc
+                        if catalog and catalog.upc != product.upc:
+                            catalog.upc = product.upc
+                            catalog.updated_at = datetime.now()
+                        await db.flush()
                         _copy_import_data_row(source_path, ws, row_number)
+                        _apply_catalog_export_row_overrides(ws, row_number, product, pd, mapping)
                         if stock_override:
                             quantity_col, stock_quantity = stock_override
                             ws.cell(row_number, quantity_col).value = stock_quantity
+                        await db.commit()
                         exported_in_workbook += 1
                         report_rows.append({
                             **report_base,
@@ -2656,6 +3890,7 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                             + (f"，数量按最新 GIGA 库存 {stock_override[1]} 覆盖" if stock_override else ""),
                         })
                     except Exception as exc:
+                        await db.rollback()
                         report_rows.append({
                             **report_base,
                             "状态": _catalog_export_exception_status(exc),
@@ -3316,25 +4551,12 @@ async def get_product(
         raise HTTPException(404, "Product not found")
 
     detail = ProductDetail.model_validate(product)
+    await _ensure_product_detail_gallery_order(db, product, detail)
     if compact:
         detail.current_task_status = _current_task_status(product)
         return _compact_product_detail(detail)
 
     await _ensure_contact_sheet_oss_urls(product, db)
-    fallback_image_paths = []
-    if not (detail.images and detail.images.gallery_order):
-        fallback_image_paths = await _giga_image_paths_for_product(db, product)
-    if fallback_image_paths:
-        gallery_order = json.dumps(fallback_image_paths, ensure_ascii=False)
-        if detail.images:
-            detail.images.gallery_order = detail.images.gallery_order or gallery_order
-        else:
-            detail.images = ProductImageResponse(
-                id=0,
-                product_id=product.id,
-                gallery_order=gallery_order,
-                vlm_model=settings.VLM_MODEL,
-            )
     detail.current_task_status = _current_task_status(product)
     detail.amazon_export_preview = _build_amazon_export_preview(product)
     if product.data and product.data.material_dir:
@@ -3569,7 +4791,7 @@ async def update_product_listing_images(
             candidate_count_query = candidate_count_query.where(AmazonStyleSnapCandidate.sku_code == representative_sku)
         existing_candidate_count = int((await db.execute(candidate_count_query)).scalar_one() or 0)
     should_search_candidates = bool(
-        product.status == "created"
+        (product.status == "created" or _is_competitor_search_failed(product))
         and not product.competitor_asin
         and batch_id
         and item_code
