@@ -786,20 +786,23 @@ async def _analyze_contact_sheet(client, image_analysis_model: str, sheet: dict,
     response = None
     for attempt in range(1, max_attempts + 1):
         try:
-            response = await request_client.chat.completions.create(
-                model=image_analysis_model,
-                messages=[
-                    {"role": "system", "content": VLM_SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "image_url", "image_url": {"url": image_url}},
-                            {"type": "text", "text": prompt},
-                        ],
-                    },
-                ],
-                max_tokens=4000,
-                temperature=0.2,
+            response = await asyncio.wait_for(
+                request_client.chat.completions.create(
+                    model=image_analysis_model,
+                    messages=[
+                        {"role": "system", "content": VLM_SYSTEM_PROMPT},
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "image_url", "image_url": {"url": image_url}},
+                                {"type": "text", "text": prompt},
+                            ],
+                        },
+                    ],
+                    max_tokens=4000,
+                    temperature=0.2,
+                ),
+                timeout=60,
             )
             break
         except Exception as exc:
@@ -872,14 +875,17 @@ async def _analyze_image_url_batch(client, image_analysis_model: str, batch: dic
     response = None
     for attempt in range(1, max_attempts + 1):
         try:
-            response = await request_client.chat.completions.create(
-                model=image_analysis_model,
-                messages=[
-                    {"role": "system", "content": VLM_SYSTEM_PROMPT},
-                    {"role": "user", "content": content},
-                ],
-                max_tokens=4000,
-                temperature=0.2,
+            response = await asyncio.wait_for(
+                request_client.chat.completions.create(
+                    model=image_analysis_model,
+                    messages=[
+                        {"role": "system", "content": VLM_SYSTEM_PROMPT},
+                        {"role": "user", "content": content},
+                    ],
+                    max_tokens=4000,
+                    temperature=0.2,
+                ),
+                timeout=75,
             )
             break
         except Exception as exc:

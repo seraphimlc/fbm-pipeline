@@ -23,6 +23,7 @@ async def init_db():
             if conn.dialect.name in {"mysql", "mariadb"}:
                 await _ensure_mysql_product_source_columns_and_indexes(conn)
                 await _ensure_mysql_catalog_export_columns(conn)
+                await _ensure_mysql_stylesnap_candidate_columns(conn)
                 await _ensure_mysql_longtext_columns(conn)
                 await _ensure_mysql_giga_relation_columns(conn)
                 await _ensure_mysql_giga_store_scoped_unique_indexes(conn)
@@ -123,6 +124,7 @@ async def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name VARCHAR(100) NOT NULL UNIQUE,
                 platform VARCHAR(30),
+                sales_channel VARCHAR(30),
                 site VARCHAR(20) NOT NULL,
                 country VARCHAR(20) NOT NULL,
                 fulfillment_mode VARCHAR(30),
@@ -627,6 +629,7 @@ async def init_db():
 
         await ensure_columns("product_data_sources", (
             ("platform", "VARCHAR(30)"),
+            ("sales_channel", "VARCHAR(30)"),
             ("country", "VARCHAR(20)"),
             ("fulfillment_mode", "VARCHAR(30)"),
             ("api_base", "TEXT"),
@@ -644,6 +647,7 @@ async def init_db():
             UPDATE product_data_sources
             SET
                 platform = COALESCE(platform, 'giga'),
+                sales_channel = COALESCE(sales_channel, 'amazon'),
                 country = COALESCE(country, site),
                 fulfillment_mode = COALESCE(fulfillment_mode, 'dropship'),
                 shipping_cost_mode = COALESCE(shipping_cost_mode, 'giga_shipping_fee'),
@@ -750,6 +754,7 @@ async def init_db():
                 source_image_path TEXT,
                 rank INTEGER NOT NULL,
                 asin VARCHAR(20) NOT NULL,
+                title TEXT,
                 url TEXT,
                 brand VARCHAR(200),
                 seller VARCHAR(200),
@@ -790,6 +795,7 @@ async def init_db():
             ON amazon_stylesnap_candidates(asin)
         """))
         await ensure_columns("amazon_stylesnap_candidates", (
+            ("title", "TEXT"),
             ("source_image_url", "TEXT"),
             ("source_image_path", "TEXT"),
             ("amazon_image_url", "TEXT"),
@@ -1045,6 +1051,14 @@ async def _ensure_mysql_catalog_export_columns(conn) -> None:
     ):
         if not await _mysql_column_exists(conn, "catalog_products", column_name):
             await conn.execute(text(f"ALTER TABLE `catalog_products` ADD COLUMN `{column_name}` {column_type}"))
+
+
+async def _ensure_mysql_stylesnap_candidate_columns(conn) -> None:
+    for column_name, column_type in (
+        ("title", "LONGTEXT NULL"),
+    ):
+        if not await _mysql_column_exists(conn, "amazon_stylesnap_candidates", column_name):
+            await conn.execute(text(f"ALTER TABLE `amazon_stylesnap_candidates` ADD COLUMN `{column_name}` {column_type}"))
 
 
 async def _ensure_mysql_product_source_columns_and_indexes(conn) -> None:

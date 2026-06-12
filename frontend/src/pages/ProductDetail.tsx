@@ -9,7 +9,7 @@ import {
   CheckOutlined, DragOutlined, CopyOutlined, ExportOutlined,
   PictureOutlined,
 } from '@ant-design/icons';
-import { getProduct, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, generateProductAplus, runProductFromStep, updateProduct, updateProductListingImages, listCategoryOptions, listProductCompetitorCandidates, searchProductCompetitorCandidates, selectProductCompetitorCandidate } from '../api';
+import { getProduct, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, generateProductAplus, runProductFromStep, updateProduct, updateProductListingImages, listCategoryOptions, listProductCompetitorCandidates, searchProductCompetitorCandidates, selectProductCompetitorCandidate, retryProductCompetitorCandidateCapture } from '../api';
 import type { AmazonStyleSnapCandidateGroup, CategoryOption, ProductDetail } from '../api';
 
 const { Title, Text } = Typography;
@@ -203,6 +203,7 @@ const ProductDetail: React.FC = () => {
   const [regenRetryLoading, setRegenRetryLoading] = useState(false);
   const [aplusGenerateLoading, setAplusGenerateLoading] = useState(false);
   const [listingRegenerateLoading, setListingRegenerateLoading] = useState(false);
+  const [pipelineRetryLoading, setPipelineRetryLoading] = useState(false);
   const [restartLoading, setRestartLoading] = useState(false);
   const [activeTabKey, setActiveTabKey] = useState('basic');
   const [categoryEditOpen, setCategoryEditOpen] = useState(false);
@@ -215,6 +216,7 @@ const ProductDetail: React.FC = () => {
   const [competitorLoading, setCompetitorLoading] = useState(false);
   const [competitorSearchLoading, setCompetitorSearchLoading] = useState(false);
   const [selectingCompetitorId, setSelectingCompetitorId] = useState<number | null>(null);
+  const [retryingCompetitorCandidateId, setRetryingCompetitorCandidateId] = useState<number | null>(null);
   const [listingEditOpen, setListingEditOpen] = useState(false);
   const [listingTitleInput, setListingTitleInput] = useState('');
   const [listingBulletsInput, setListingBulletsInput] = useState('');
@@ -237,6 +239,12 @@ const ProductDetail: React.FC = () => {
   const userTouchedTabRef = useRef(false);
 
   const refreshCompetitorGroupFromProduct = async (detail: ProductDetail) => {
+    if (activeTabKey !== 'competitor' && !competitorModalOpen) {
+      return;
+    }
+    if (competitorLoading || competitorGroup?.product_task_id === detail.id) {
+      return;
+    }
     const snapshot = parseJson(detail.data?.gigab2b_raw_snapshot, {});
     const searchStatus = snapshot?.stylesnap_search?.status;
     const shouldLoadCandidates = Boolean(
@@ -253,7 +261,7 @@ const ProductDetail: React.FC = () => {
     }
     setCompetitorLoading(true);
     try {
-      const { data: group } = await listProductCompetitorCandidates(detail.id);
+      const { data: group } = await listProductCompetitorCandidates(detail.id, { enrich_images: true });
       setCompetitorGroup(group);
     } catch {
       setCompetitorGroup(null);
@@ -272,6 +280,7 @@ const ProductDetail: React.FC = () => {
       if (isNewProduct) {
         autoTabProductIdRef.current = data.id;
         userTouchedTabRef.current = false;
+        setCompetitorGroup(null);
         setActiveTabKey(nextDefaultTab);
       } else if (!userTouchedTabRef.current) {
         setActiveTabKey(nextDefaultTab);
@@ -318,6 +327,13 @@ const ProductDetail: React.FC = () => {
     listingImageDirty,
     listingImageDraftProductId,
   ]);
+
+  useEffect(() => {
+    if (!product) return;
+    if (activeTabKey !== 'competitor' && !competitorModalOpen) return;
+    if (competitorGroup || competitorLoading) return;
+    void refreshCompetitorGroupFromProduct(product);
+  }, [product?.id, activeTabKey, competitorModalOpen]);
 
   if (loading) return <Spin size="large" style={{ display: 'block', margin: '100px auto' }} />;
   if (!product) return <div>商品不存在</div>;
@@ -644,7 +660,7 @@ const ProductDetail: React.FC = () => {
   const loadCompetitorCandidates = async (silent = false) => {
     setCompetitorLoading(true);
     try {
-      const { data: group } = await listProductCompetitorCandidates(product.id);
+      const { data: group } = await listProductCompetitorCandidates(product.id, { enrich_images: true });
       setCompetitorGroup(group);
     } catch (error: any) {
       setCompetitorGroup(null);
@@ -663,7 +679,7 @@ const ProductDetail: React.FC = () => {
       await fetchDetail();
       if (!force) {
         try {
-          const { data: group } = await listProductCompetitorCandidates(product.id);
+          const { data: group } = await listProductCompetitorCandidates(product.id, { enrich_images: true });
           setCompetitorGroup(group);
         } catch {
           setCompetitorGroup(null);
@@ -680,7 +696,13 @@ const ProductDetail: React.FC = () => {
   const chooseCompetitorCandidate = async (candidate: any) => {
     const selectedId = competitorGroup?.selected_candidate_id;
     const isSwitching = selectedId && selectedId !== candidate.id;
-    const forceCapture = selectedId === candidate.id || candidate.listing_capture_status === 'failed';
+    const selected = selectedId === candidate.id || candidate.is_selected === 1;
+    const selectionReady = candidate.title && candidate.amazon_image_url;
+    if (!selected && !selectionReady) {
+      message.warning('这个候选列表信息还没有标题和主图，请先重新抓取后再选择');
+      return;
+    }
+    const forceCapture = selected || candidate.listing_capture_status === 'failed';
     const hasDownstreamOutput = hasListingContent || hasListingImages || hasImageAnalysis || hasAplusOutput || product.current_step >= 5;
     const doSelect = async () => {
       setSelectingCompetitorId(candidate.id);
@@ -726,7 +748,7 @@ const ProductDetail: React.FC = () => {
     if (!group) {
       setCompetitorLoading(true);
       try {
-        const { data } = await listProductCompetitorCandidates(product.id);
+        const { data } = await listProductCompetitorCandidates(product.id, { enrich_images: true });
         group = data;
         setCompetitorGroup(data);
       } catch (error: any) {
@@ -755,6 +777,22 @@ const ProductDetail: React.FC = () => {
       message.error(error?.response?.data?.detail || '重新抓取竞品详情失败');
     } finally {
       setSelectingCompetitorId(null);
+    }
+  };
+
+  const retryCompetitorCandidateCapture = async (candidate: any) => {
+    if (!product?.id || !candidate?.id) return;
+    setRetryingCompetitorCandidateId(candidate.id);
+    message.loading({ content: `正在重新抓取候选 ${candidate.asin || ''} 的竞品详情`, key: 'competitor-candidate-retry', duration: 0 });
+    try {
+      const { data: nextGroup } = await retryProductCompetitorCandidateCapture(product.id, candidate.id, true);
+      setCompetitorGroup(nextGroup);
+      message.success({ content: `已提交候选 ${candidate.asin || ''} 重新抓取`, key: 'competitor-candidate-retry' });
+    } catch (error: any) {
+      message.destroy('competitor-candidate-retry');
+      message.error(error?.response?.data?.detail || '重新抓取候选竞品失败');
+    } finally {
+      setRetryingCompetitorCandidateId(null);
     }
   };
 
@@ -822,12 +860,25 @@ const ProductDetail: React.FC = () => {
     setListingRegenerateLoading(true);
     try {
       await runProductFromStep(product.id, 6);
-      message.success('已开始重新生成 Listing 文案，完成后会自动回到待导出');
+      message.success('已提交任务中心：重新生成 Listing 文案，完成后会自动回到待导出');
       await fetchDetail();
     } catch (e: any) {
       message.error(e?.response?.data?.detail || 'Listing 文案重新生成失败');
     } finally {
       setListingRegenerateLoading(false);
+    }
+  };
+
+  const retryInterruptedPipeline = async () => {
+    setPipelineRetryLoading(true);
+    try {
+      await runProductFromStep(product.id, Math.max(Number(product.current_step || 5), 5));
+      message.success('已提交任务中心：重试当前节点');
+      await fetchDetail();
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '重试当前节点失败');
+    } finally {
+      setPipelineRetryLoading(false);
     }
   };
 
@@ -1418,9 +1469,12 @@ const ProductDetail: React.FC = () => {
     return pipelineSteps.length - 1;
   })();
 
-  const isPipelineRunning = !['completed', 'pending_review', 'failed', 'unavailable', 'source_unavailable', 'created', 'paused'].includes(product.status);
+  const isInterruptedProduct = /运行状态已中断|未在当前服务中运行/.test(product.current_task_status || '');
+  const isPipelineRunning = !isInterruptedProduct
+    && !['completed', 'pending_review', 'failed', 'unavailable', 'source_unavailable', 'created', 'paused'].includes(product.status);
   const canRegenerateListing = Boolean(hasListingCapture && hasImageAnalysis && !isPipelineRunning && !isPaused && !isHardStopped);
   const canSuspendProduct = product.status !== 'paused'
+    && !isInterruptedProduct
     && !['completed', 'unavailable', 'source_unavailable'].includes(product.status)
     && !(product.status === 'pending_review' && product.current_step >= 6);
   const hasRestartableDownstreamState = Boolean(
@@ -1434,6 +1488,7 @@ const ProductDetail: React.FC = () => {
     || visibleGeneratedFiles.length
   );
   const canRestartProduct = !isPipelineRunning
+    && !isInterruptedProduct
     && !['unavailable', 'source_unavailable'].includes(product.status)
     && hasRestartableDownstreamState;
   const canOperateCompetitor = product.status !== 'completed'
@@ -1446,7 +1501,7 @@ const ProductDetail: React.FC = () => {
     || isListingCaptureRunning;
   const competitorCandidateButtonText = (selected: boolean) => {
     if (isListingCaptureRunning && selected) return '抓取中';
-    return selected ? '重新抓详情' : '选择并抓详情';
+    return selected ? '重新抓详情' : '选择';
   };
   const shouldForceCompetitorSearch = Boolean(hasCompetitorCandidates || isCompetitorSearchFailed || hasReferenceCompetitor);
   const competitorSearchButtonText = shouldForceCompetitorSearch ? '重新搜索候选' : '搜索候选';
@@ -1868,6 +1923,15 @@ const ProductDetail: React.FC = () => {
                     <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(185px, 1fr))', gap: 12 }}>
                       {competitorGroup.candidates.map((candidate: any) => {
                         const selected = competitorGroup.selected_candidate_id === candidate.id || candidate.is_selected === 1;
+                        const captureStatus = candidate.listing_capture_status;
+                        const captureFailed = captureStatus === 'failed';
+                        const captureRunning = captureStatus === 'queued' || captureStatus === 'running';
+                        const captureMissingImage = captureStatus === 'captured' && !candidate.amazon_image_url;
+                        const captureMissingTitle = captureStatus === 'captured' && !candidate.title;
+                        const selectionReady = candidate.title && candidate.amazon_image_url;
+                        const canRetryCapture = !captureRunning && (!selectionReady || captureFailed || captureMissingImage || captureMissingTitle);
+                        const captureReady = captureStatus === 'captured' && candidate.title && candidate.amazon_image_url;
+                        const selectDisabled = competitorCandidateActionDisabled || (!selected && !selectionReady);
                         return (
                           <div
                             key={candidate.id}
@@ -1925,6 +1989,8 @@ const ProductDetail: React.FC = () => {
                                 </Text>
                               ) : null}
                               {captureStatusTag(candidate.listing_capture_status)}
+                              {captureMissingImage ? <Tag color="warning">缺主图</Tag> : null}
+                              {captureMissingTitle ? <Tag color="warning">缺标题</Tag> : null}
                             </div>
                             <Typography.Paragraph
                               type="secondary"
@@ -1938,11 +2004,20 @@ const ProductDetail: React.FC = () => {
                                 type={selected ? 'primary' : 'default'}
                                 icon={<CheckOutlined />}
                                 loading={selectingCompetitorId === candidate.id}
-                                disabled={competitorCandidateActionDisabled}
+                                disabled={selectDisabled}
                                 onClick={() => chooseCompetitorCandidate(candidate)}
                                 block
                               >
                                 {competitorCandidateButtonText(selected)}
+                              </Button>
+                              <Button
+                                icon={<ReloadOutlined />}
+                                loading={retryingCompetitorCandidateId === candidate.id}
+                                disabled={retryingCompetitorCandidateId !== null && retryingCompetitorCandidateId !== candidate.id}
+                                onClick={() => retryCompetitorCandidateCapture(candidate)}
+                                style={{ display: canRetryCapture ? undefined : 'none' }}
+                              >
+                                重新抓取
                               </Button>
                               <Button
                                 icon={<ExportOutlined />}
@@ -2913,6 +2988,11 @@ const ProductDetail: React.FC = () => {
               重试A+重新生图
             </Button>
           )}
+          {isInterruptedProduct && (
+            <Button type="primary" icon={<RedoOutlined />} loading={pipelineRetryLoading} onClick={retryInterruptedPipeline}>
+              重试当前节点
+            </Button>
+          )}
           {isPipelineRunning && (
             <Button icon={<PauseOutlined />} onClick={async () => { await pausePipeline(product.id); fetchDetail(); }}>
               挂起
@@ -2969,6 +3049,14 @@ const ProductDetail: React.FC = () => {
           <Text type="secondary">已挂起：不会继续执行后续自动流程，点击继续后从当前步骤恢复。</Text>
         </Card>
       )}
+      {isInterruptedProduct && product.current_task_status && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={product.current_task_status}
+        />
+      )}
       {isPipelineRunning && product.current_task_status && (
         <Alert
           type="info"
@@ -2995,9 +3083,6 @@ const ProductDetail: React.FC = () => {
         onChange={(key) => {
           userTouchedTabRef.current = true;
           setActiveTabKey(key);
-          if (key === 'competitor' && !competitorGroup && !competitorLoading) {
-            loadCompetitorCandidates();
-          }
         }}
       />
     </div>
@@ -3059,6 +3144,15 @@ const ProductDetail: React.FC = () => {
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(185px, 1fr))', gap: 12 }}>
                 {competitorGroup.candidates.map((candidate: any) => {
                   const selected = competitorGroup.selected_candidate_id === candidate.id || candidate.is_selected === 1;
+                  const captureStatus = candidate.listing_capture_status;
+                  const captureFailed = captureStatus === 'failed';
+                  const captureRunning = captureStatus === 'queued' || captureStatus === 'running';
+                  const captureMissingImage = captureStatus === 'captured' && !candidate.amazon_image_url;
+                  const captureMissingTitle = captureStatus === 'captured' && !candidate.title;
+                  const selectionReady = candidate.title && candidate.amazon_image_url;
+                  const canRetryCapture = !captureRunning && (!selectionReady || captureFailed || captureMissingImage || captureMissingTitle);
+                  const captureReady = captureStatus === 'captured' && candidate.title && candidate.amazon_image_url;
+                  const selectDisabled = competitorCandidateActionDisabled || (!selected && !selectionReady);
                   return (
                     <div
                       key={candidate.id}
@@ -3116,6 +3210,8 @@ const ProductDetail: React.FC = () => {
                           </Text>
                         ) : null}
                         {captureStatusTag(candidate.listing_capture_status)}
+                        {captureMissingImage ? <Tag color="warning">缺主图</Tag> : null}
+                        {captureMissingTitle ? <Tag color="warning">缺标题</Tag> : null}
                       </div>
                       <Typography.Paragraph
                         type="secondary"
@@ -3129,15 +3225,24 @@ const ProductDetail: React.FC = () => {
                           type={selected ? 'primary' : 'default'}
                           icon={<CheckOutlined />}
                           loading={selectingCompetitorId === candidate.id}
-                          disabled={competitorCandidateActionDisabled}
+                          disabled={selectDisabled}
                           onClick={() => chooseCompetitorCandidate(candidate)}
                           block
                         >
-                          {competitorCandidateButtonText(selected)}
-                        </Button>
-                        <Button
-                          icon={<ExportOutlined />}
-                          href={candidate.url || `https://www.amazon.com/dp/${candidate.asin}`}
+                        {competitorCandidateButtonText(selected)}
+                      </Button>
+                      <Button
+                        icon={<ReloadOutlined />}
+                        loading={retryingCompetitorCandidateId === candidate.id}
+                        disabled={retryingCompetitorCandidateId !== null && retryingCompetitorCandidateId !== candidate.id}
+                        onClick={() => retryCompetitorCandidateCapture(candidate)}
+                        style={{ display: canRetryCapture ? undefined : 'none' }}
+                      >
+                        重新抓取
+                      </Button>
+                      <Button
+                        icon={<ExportOutlined />}
+                        href={candidate.url || `https://www.amazon.com/dp/${candidate.asin}`}
                           target="_blank"
                         />
                       </div>

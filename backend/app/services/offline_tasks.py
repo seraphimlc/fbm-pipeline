@@ -15,7 +15,8 @@ from app.api.schemas import OfflineTaskCatalogExportRequest, OfflineTaskGigaDyna
 from app.config import settings
 from app.database import async_session
 from app.models import CatalogProduct, OfflineTask, OfflineTaskStep, Product, ProductAplus, ProductDataSource
-from app.pipeline.engine import is_running
+from app.models.status import COMPLETED, FAILED, PAUSED
+from app.pipeline.engine import get_step_status, is_running, run_pipeline_tracked
 from app.pipeline.step7_aplus_plan import run_aplus_plan
 from app.pipeline.step8_aplus_script import run_aplus_script
 from app.pipeline.step9_aplus_image import run_aplus_image
@@ -35,7 +36,14 @@ STEP_STATUS_SUCCESS = "done"
 STEP_STATUS_FAILURES = {"failed", "interrupted"}
 STEP_STATUS_RESUMABLE = {"pending", "running", "paused", "interrupted"}
 STEP_STATUS_CLAIMABLE = {"pending", "interrupted"}
-SUPPORTED_TASK_TYPES = {"giga_pull", "giga_inventory_sync", "giga_price_sync", "aplus_generate", "catalog_export"}
+SUPPORTED_TASK_TYPES = {
+    "giga_pull",
+    "giga_inventory_sync",
+    "giga_price_sync",
+    "aplus_generate",
+    "catalog_export",
+    "product_bulk_advance",
+}
 APLUS_GENERATE_ACTIVE_STATUSES = {"queued", "planning", "scripting", "imaging"}
 
 
@@ -209,6 +217,80 @@ def _recover_catalog_export_result_from_file(
     return None
 
 
+def _product_bulk_advance_row_status(step: OfflineTaskStep) -> tuple[str, str]:
+    if step.status == "done":
+        return "done", "已推进到待导出"
+    if step.status == "running":
+        return "running", "任务中心正在推进"
+    if step.status == "pending":
+        return "queued", "已加入任务中心队列"
+    if step.status == "paused":
+        return "paused", step.error_message or "任务已挂起"
+    if step.status == "interrupted":
+        return "interrupted", step.error_message or "任务中心步骤被中断，可重跑"
+    if step.status == "failed":
+        return "failed", step.error_message or "推进失败"
+    return step.status, step.error_message or step.status
+
+
+def _product_bulk_advance_step_row(step: OfflineTaskStep) -> dict | None:
+    payload = _json_loads(step.payload_json, {})
+    result = _json_loads(step.result_json, {})
+    if not isinstance(payload, dict):
+        return None
+    product_id = payload.get("product_id")
+    if product_id is None:
+        return None
+    status, reason = _product_bulk_advance_row_status(step)
+    row = {
+        "product_id": product_id,
+        "item_code": payload.get("item_code"),
+        "status": result.get("status") if isinstance(result, dict) and result.get("status") else status,
+        "reason": result.get("reason") if isinstance(result, dict) and result.get("reason") else reason,
+        "current_status": payload.get("current_status"),
+        "current_step": payload.get("current_step"),
+        "start_step": payload.get("start_step"),
+    }
+    if isinstance(result, dict):
+        for key in ("latest_status", "latest_step", "latest_result", "latest_reason"):
+            if key in result:
+                row[key] = result[key]
+    return row
+
+
+def _refresh_product_bulk_advance_result(task: OfflineTask, steps: list[OfflineTaskStep]) -> None:
+    payload = _json_loads(task.result_json, {})
+    if not isinstance(payload, dict):
+        payload = {}
+    existing_rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+    rows_by_id = {
+        str(row.get("product_id")): dict(row)
+        for row in existing_rows
+        if isinstance(row, dict) and row.get("product_id") is not None
+    }
+    for step in steps:
+        if step.step_type != "product_bulk_advance_product":
+            continue
+        row = _product_bulk_advance_step_row(step)
+        if not row:
+            continue
+        existing = rows_by_id.get(str(row["product_id"]), {})
+        existing.update(row)
+        rows_by_id[str(row["product_id"])] = existing
+    rows = list(rows_by_id.values())
+    payload["rows"] = rows
+    payload["requested_count"] = int(payload.get("requested_count") or len(rows))
+    payload["started_count"] = sum(
+        1 for row in rows
+        if row.get("status") in {"queued", "running", "done", "failed", "interrupted", "paused"}
+    )
+    payload["skipped_count"] = sum(1 for row in rows if row.get("status") == "skipped")
+    payload["failed_count"] = sum(1 for row in rows if row.get("status") in {"failed", "interrupted"})
+    payload["done_count"] = sum(1 for row in rows if row.get("status") == "done")
+    payload["status"] = task.status
+    task.result_json = _json_dumps(payload)
+
+
 async def _refresh_task_stats(db: AsyncSession, task_id: int) -> OfflineTask | None:
     task = await db.get(OfflineTask, task_id)
     if not task:
@@ -259,6 +341,8 @@ async def _refresh_task_stats(db: AsyncSession, task_id: int) -> OfflineTask | N
                         break
         if isinstance(payload, dict) and payload.get("status") == "partial_failed":
             task.status = "partial_failed"
+    if task.task_type == "product_bulk_advance":
+        _refresh_product_bulk_advance_result(task, steps)
     return task
 
 
@@ -605,6 +689,181 @@ async def _run_aplus_generate_step(db: AsyncSession, step: OfflineTaskStep) -> N
         await _set_step_status(db, step, "failed", error=error)
 
 
+async def _run_product_bulk_advance_step(db: AsyncSession, step: OfflineTaskStep) -> None:
+    payload = _json_loads(step.payload_json, {})
+    product_id = int(payload.get("product_id") or 0) if isinstance(payload, dict) else 0
+    start_step = int(payload.get("start_step") or 5) if isinstance(payload, dict) else 5
+    item_code = payload.get("item_code") if isinstance(payload, dict) else None
+    progress_total = 2 if start_step <= 5 else 1
+    if product_id <= 0:
+        await _set_step_status(db, step, "failed", error="商品推进步骤缺少 product_id")
+        return
+    if is_running(product_id):
+        await _set_step_status(db, step, "failed", error="商品流程正在运行中")
+        return
+
+    try:
+        await _set_step_status(
+            db,
+            step,
+            "running",
+            result={
+                "product_id": product_id,
+                "item_code": item_code,
+                "status": "running",
+                "reason": f"正在从 Step {start_step} 推进",
+            },
+            progress_current=0,
+            progress_total=progress_total,
+        )
+        async with async_session() as session:
+            result = await session.execute(
+                select(Product)
+                .where(Product.id == product_id)
+                .options(selectinload(Product.catalog_item))
+            )
+            product = result.scalar_one_or_none()
+            if not product:
+                await _set_step_status(db, step, "failed", error=f"商品 {product_id} 不存在")
+                return
+            product.status = get_step_status(start_step)
+            product.current_step = start_step
+            product.error_message = None
+            product.updated_at = datetime.now()
+            if product.catalog_item:
+                product.catalog_item.status = product.status
+                product.catalog_item.updated_at = product.updated_at
+            await session.commit()
+
+        await run_pipeline_tracked(product_id, start_step=start_step)
+        await _ensure_task_not_paused(db, step.task_id)
+
+        async with async_session() as session:
+            result = await session.execute(
+                select(Product)
+                .where(Product.id == product_id)
+                .options(selectinload(Product.data))
+            )
+            product = result.scalar_one_or_none()
+            if not product:
+                await _set_step_status(db, step, "failed", error=f"商品 {product_id} 不存在")
+                return
+            latest_status = product.status
+            latest_step = product.current_step
+            if latest_status == COMPLETED and (latest_step or 0) >= 6:
+                await _set_step_status(
+                    db,
+                    step,
+                    "done",
+                    result={
+                        "product_id": product_id,
+                        "item_code": item_code or (product.data.item_code if product.data else None),
+                        "status": "done",
+                        "reason": "已推进到待导出",
+                        "latest_status": latest_status,
+                        "latest_step": latest_step,
+                        "latest_result": "export_ready",
+                        "latest_reason": "已到达待导出",
+                    },
+                    progress_current=progress_total,
+                    progress_total=progress_total,
+                )
+                return
+            if latest_status == FAILED:
+                error = product.error_message or "商品推进失败"
+                await _set_step_status(
+                    db,
+                    step,
+                    "failed",
+                    result={
+                        "product_id": product_id,
+                        "item_code": item_code or (product.data.item_code if product.data else None),
+                        "status": "failed",
+                        "reason": error,
+                        "latest_status": latest_status,
+                        "latest_step": latest_step,
+                        "latest_result": "failed",
+                        "latest_reason": error,
+                    },
+                    error=error,
+                    progress_current=0,
+                    progress_total=progress_total,
+                )
+                return
+            if latest_status == PAUSED:
+                await _set_step_status(
+                    db,
+                    step,
+                    "interrupted",
+                    result={
+                        "product_id": product_id,
+                        "item_code": item_code or (product.data.item_code if product.data else None),
+                        "status": "interrupted",
+                        "reason": "商品流程已挂起",
+                        "latest_status": latest_status,
+                        "latest_step": latest_step,
+                        "latest_result": "paused",
+                        "latest_reason": "商品流程已挂起",
+                    },
+                    error="商品流程已挂起",
+                    progress_current=0,
+                    progress_total=progress_total,
+                )
+                return
+            reason = f"商品未到待导出，当前状态 {latest_status}"
+            await _set_step_status(
+                db,
+                step,
+                "failed",
+                result={
+                    "product_id": product_id,
+                    "item_code": item_code or (product.data.item_code if product.data else None),
+                    "status": "failed",
+                    "reason": reason,
+                    "latest_status": latest_status,
+                    "latest_step": latest_step,
+                    "latest_result": "blocked",
+                    "latest_reason": reason,
+                },
+                error=reason,
+                progress_current=0,
+                progress_total=progress_total,
+            )
+    except asyncio.CancelledError:
+        await _set_step_status(
+            db,
+            step,
+            "interrupted",
+            result={
+                "product_id": product_id,
+                "item_code": item_code,
+                "status": "interrupted",
+                "reason": "任务中心步骤被中断，可重跑",
+            },
+            error="任务中心步骤被中断，可重跑",
+            progress_current=0,
+            progress_total=progress_total,
+        )
+        raise
+    except Exception as exc:
+        error = f"商品推进失败: {type(exc).__name__}: {exc}"
+        logger.exception("[OfflineTask] product bulk advance step failed: task=%s step=%s product=%s", step.task_id, step.id, product_id)
+        await _set_step_status(
+            db,
+            step,
+            "failed",
+            result={
+                "product_id": product_id,
+                "item_code": item_code,
+                "status": "failed",
+                "reason": error,
+            },
+            error=error,
+            progress_current=0,
+            progress_total=progress_total,
+        )
+
+
 async def _run_catalog_export_step(db: AsyncSession, step: OfflineTaskStep) -> None:
     step_id = step.id
     task_id = step.task_id
@@ -812,6 +1071,8 @@ async def _execute_offline_task(task_id: int, step_ids: list[int] | None = None)
                     await _run_aplus_generate_step(db, step)
                 elif step.step_type == "catalog_export_template":
                     await _run_catalog_export_step(db, step)
+                elif step.step_type == "product_bulk_advance_product":
+                    await _run_product_bulk_advance_step(db, step)
             await _refresh_task_stats(db, task_id)
             await db.commit()
     finally:
@@ -823,6 +1084,10 @@ def _schedule_offline_task(task_id: int, step_ids: list[int] | None = None) -> N
     if existing and not existing.done():
         return
     _active_offline_tasks[task_id] = asyncio.create_task(_execute_offline_task(task_id, step_ids))
+
+
+def schedule_offline_task(task_id: int, step_ids: list[int] | None = None) -> None:
+    _schedule_offline_task(task_id, step_ids)
 
 
 async def _cancel_active_offline_task(task_id: int) -> None:

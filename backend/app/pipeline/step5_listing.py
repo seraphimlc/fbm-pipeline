@@ -440,7 +440,8 @@ async def run_listing(product_id: int) -> dict:
         client = settings.get_llm_client()
 
         logger.info(f"[Step5] 调用LLM生成Listing: {pd.title}")
-        response = await client.chat.completions.create(
+        request_client = client.with_options(timeout=60, max_retries=0) if hasattr(client, "with_options") else client
+        response = await request_client.chat.completions.create(
             model=settings.LLM_MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},

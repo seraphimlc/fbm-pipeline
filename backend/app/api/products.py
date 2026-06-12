@@ -90,7 +90,7 @@ from app.services.material_assets import (
     organize_video_files,
 )
 from app.services.oss_uploader import download_private_file, sign_private_url, upload_private_file
-from app.services.offline_tasks import create_aplus_generate_task
+from app.services.offline_tasks import create_aplus_generate_task, schedule_offline_task
 from app.services.asin_sync import build_sync_item, start_asin_sync_batch
 from app.services.inventory_sync import (
     InventorySyncLoginRequired,
@@ -140,6 +140,7 @@ RUNNING_STATUSES = {
 }
 
 APLUS_REGEN_ACTIVE_STATUSES = {"regen_queued", "regen_script_running", "regen_image_running"}
+COMPETITOR_REVIEW_ERROR_KEYWORDS = ("同款搜索", "StyleSnap", "候选竞品", "参考竞品", "选择竞品")
 WORKBENCH_STATUS_KEYS = (
     "select_images",
     "competitor_searching",
@@ -147,6 +148,7 @@ WORKBENCH_STATUS_KEYS = (
     "capture_detail",
     "ready_to_generate",
     "running",
+    "interrupted",
     "suspended",
     "manual_review",
     "export_ready",
@@ -270,8 +272,17 @@ def _is_competitor_listing_capture_state(product: Product) -> bool:
 def _is_competitor_search_failed(product: Product) -> bool:
     return bool(
         product.status == "failed"
-        and re.search(r"同款搜索|StyleSnap", product.error_message or "", re.I)
+        and re.search("|".join(re.escape(keyword) for keyword in COMPETITOR_REVIEW_ERROR_KEYWORDS), product.error_message or "", re.I)
     )
+
+
+def _competitor_search_failed_sql_condition():
+    condition = Product.status == "failed"
+    keyword_condition = None
+    for keyword in COMPETITOR_REVIEW_ERROR_KEYWORDS:
+        next_condition = Product.error_message.ilike(f"%{keyword}%")
+        keyword_condition = next_condition if keyword_condition is None else keyword_condition | next_condition
+    return condition & keyword_condition
 
 
 async def _product_has_captured_competitor(db: AsyncSession, product: Product) -> bool:
@@ -345,7 +356,7 @@ def _current_task_status(product: Product) -> str:
     if product.status == "competitor_searching":
         return competitor_capture_message or "竞品搜索中：正在用主图搜索 Amazon 同款"
     if _is_stale_running_product(product):
-        return f"运行状态已中断：{step_label} 未在当前服务中运行，请先挂起后继续"
+        return f"运行状态已中断：{step_label} 未在当前服务中运行，可直接重试当前节点"
     if product.status in RUNNING_STATUSES:
         return f"运行中：{step_label}"
     if product.status == "created":
@@ -589,7 +600,7 @@ def _product_workbench_status(product: Product) -> str:
     if product.status == STEP5_LISTING and re.search(r"竞品.*抓取中|Listing.*抓取中", product.error_message or "", re.I):
         return "capture_detail"
     if _is_stale_running_product(product):
-        return "suspended"
+        return "interrupted"
     if product.status in RUNNING_STATUSES:
         return "running"
     if product.status == COMPLETED and (product.current_step or 0) >= 6:
@@ -2289,6 +2300,7 @@ async def get_workbench_overview(
         capture_detail=status_counts["capture_detail"],
         ready_to_generate=status_counts["ready_to_generate"],
         running=status_counts["running"],
+        interrupted=status_counts["interrupted"],
         suspended=status_counts["suspended"],
         manual_review=status_counts["manual_review"],
         export_ready=status_counts["export_ready"],
@@ -2352,6 +2364,7 @@ async def list_products(
     page_size: int = Query(20, ge=1, le=100),
     status: str | None = None,
     item_id: str | None = None,
+    sku_code: str | None = None,
     data_source_id: int | None = Query(None, ge=1),
     competitor_asin: str | None = None,
     upc: str | None = None,
@@ -2387,7 +2400,7 @@ async def list_products(
     )
     count_query = select(func.count(Product.id))
 
-    needs_product_data_join = bool(item_id)
+    needs_product_data_join = bool(item_id or sku_code)
     if needs_product_data_join:
         query = query.join(ProductData, ProductData.product_id == Product.id, isouter=True)
         count_query = count_query.join(ProductData, ProductData.product_id == Product.id, isouter=True)
@@ -2406,6 +2419,20 @@ async def list_products(
         )
         count_query = count_query.where(
             (Product.gigab2b_product_id.ilike(pattern)) | (ProductData.item_code.ilike(pattern))
+        )
+    if sku_code:
+        pattern = f"%{sku_code.strip()}%"
+        query = query.where(
+            (Product.gigab2b_product_id.ilike(pattern))
+            | (Product.source_item_id.ilike(pattern))
+            | (ProductData.item_code.ilike(pattern))
+            | (ProductData.title.ilike(pattern))
+        )
+        count_query = count_query.where(
+            (Product.gigab2b_product_id.ilike(pattern))
+            | (Product.source_item_id.ilike(pattern))
+            | (ProductData.item_code.ilike(pattern))
+            | (ProductData.title.ilike(pattern))
         )
     if data_source_id:
         query = query.where(_product_data_source_filter(data_source_id))
@@ -2578,7 +2605,6 @@ async def list_product_competitor_review_queue(
     db: AsyncSession = Depends(get_db),
 ):
     """Lightweight queue for products that need competitor review."""
-    competitor_search_failed = Product.status == "failed"
     created_needs_competitor = (
         (Product.status == "created")
         & (Product.current_step > 0)
@@ -2602,15 +2628,7 @@ async def list_product_competitor_review_queue(
         .join(ProductData, ProductData.product_id == Product.id, isouter=True)
         .where(
             created_needs_competitor
-            | (
-                competitor_search_failed
-                & (
-                    Product.error_message.ilike("%同款搜索%")
-                    | Product.error_message.ilike("%StyleSnap%")
-                    | Product.error_message.ilike("%竞品详情%")
-                    | Product.error_message.ilike("%Amazon listing%")
-                )
-            )
+            | _competitor_search_failed_sql_condition()
         )
         .order_by(Product.updated_at.is_(None).asc(), Product.updated_at.desc(), Product.created_at.desc())
         .limit(limit)
@@ -3038,8 +3056,9 @@ async def _create_product_bulk_advance_task_for_ids(
     *,
     payload_extra: dict | None = None,
     title_suffix: str | None = None,
+    start_step_override: int | None = None,
 ) -> OfflineTask:
-    """创建可审计的批量推进任务；只启动满足前置条件的商品，其余写入逐商品阻塞原因。"""
+    """创建可审计的批量推进任务；满足条件的商品进入任务中心队列，其余写入逐商品阻塞原因。"""
     requested_ids = list(dict.fromkeys(product_ids))
     if len(requested_ids) > PRODUCT_BULK_ADVANCE_MAX_PRODUCTS:
         raise HTTPException(400, f"单次最多批量推进 {PRODUCT_BULK_ADVANCE_MAX_PRODUCTS} 个商品")
@@ -3052,7 +3071,7 @@ async def _create_product_bulk_advance_task_for_ids(
     products = {product.id: product for product in result.scalars().all()}
 
     rows: list[dict] = []
-    startable: list[tuple[int, int, str, int, str | None]] = []
+    startable: list[dict] = []
     now = datetime.now()
     for product_id in requested_ids:
         product = products.get(product_id)
@@ -3074,7 +3093,10 @@ async def _create_product_bulk_advance_task_for_ids(
             "current_status": product.status,
             "current_step": product.current_step,
         }
-        if product.status == COMPLETED and (product.current_step or 0) >= 6:
+        start_step = start_step_override or max(product.current_step or 5, 5)
+        if start_step > 6:
+            start_step = 6
+        if product.status == COMPLETED and (product.current_step or 0) >= 6 and start_step != 6:
             rows.append({**base_row, "status": "skipped", "reason": "已在待导出状态，无需推进"})
             continue
         if product.status in {"source_unavailable", "unavailable"}:
@@ -3089,50 +3111,24 @@ async def _create_product_bulk_advance_task_for_ids(
         if (product.current_step or 0) < 5:
             rows.append({**base_row, "status": "skipped", "reason": "尚未完成图片确认、竞品选择和竞品详情抓取，不能批量进入生成"})
             continue
-        start_step = max(product.current_step or 5, 5)
         try:
             await _require_generation_prerequisites(db, product, start_step)
         except HTTPException as exc:
             rows.append({**base_row, "status": "skipped", "reason": str(exc.detail)})
             continue
 
-        startable.append((product.id, start_step, product.status, product.current_step or 0, product.error_message))
-        _mark_pipeline_starting(product)
+        row = {
+            **base_row,
+            "status": "queued",
+            "reason": f"已加入任务中心队列，从 Step {start_step} 推进",
+            "start_step": start_step,
+        }
+        rows.append(row)
+        startable.append(row)
 
-    await db.commit()
-
-    started_ids: list[int] = []
-    for product_id, start_step, original_status, original_step, original_error in startable:
-        product = products.get(product_id)
-        item_code = product.data.item_code if product and product.data else product.gigab2b_product_id if product else None
-        if enqueue_pipeline(product_id, start_step=start_step):
-            started_ids.append(product_id)
-            rows.append({
-                "product_id": product_id,
-                "item_code": item_code,
-                "status": "started",
-                "reason": f"已从 Step {start_step} 加入后台生成队列",
-                "current_status": original_status,
-                "current_step": original_step,
-            })
-        else:
-            if product:
-                product.status = original_status
-                product.current_step = original_step
-                product.error_message = original_error
-                product.updated_at = datetime.now()
-            rows.append({
-                "product_id": product_id,
-                "item_code": item_code,
-                "status": "skipped",
-                "reason": "后台队列已存在，未重复启动",
-                "current_status": original_status,
-                "current_step": original_step,
-            })
-
-    started_count = len(started_ids)
+    started_count = len(startable)
     skipped_count = len(rows) - started_count
-    task_status = "done" if skipped_count == 0 else "partial_failed"
+    task_status = "pending" if started_count else "partial_failed"
     result_payload = {
         "status": task_status,
         "requested_count": len(requested_ids),
@@ -3149,8 +3145,8 @@ async def _create_product_bulk_advance_task_for_ids(
         task_type="product_bulk_advance",
         title=f"批量推进商品到待导出：{len(requested_ids)} 个商品{title_suffix or ''}",
         status=task_status,
-        total_steps=1,
-        success_steps=1,
+        total_steps=started_count,
+        success_steps=0,
         failed_steps=0,
         running_steps=0,
         created_by="web",
@@ -3158,28 +3154,35 @@ async def _create_product_bulk_advance_task_for_ids(
         result_json=json.dumps(result_payload, ensure_ascii=False, default=str),
         error_message=None,
         created_at=now,
-        started_at=now,
-        finished_at=datetime.now(),
+        started_at=None,
+        finished_at=None if started_count else datetime.now(),
         updated_at=datetime.now(),
     )
     db.add(task)
     await db.flush()
-    db.add(OfflineTaskStep(
-        task_id=task.id,
-        step_type="product_bulk_advance",
-        title="逐商品检查并启动可推进商品",
-        status="done",
-        progress_current=len(requested_ids),
-        progress_total=len(requested_ids),
-        payload_json=json.dumps(payload, ensure_ascii=False, default=str),
-        result_json=json.dumps(result_payload, ensure_ascii=False, default=str),
-        error_message=None,
-        started_at=now,
-        finished_at=task.finished_at,
-        updated_at=task.finished_at,
-    ))
+    for row in startable:
+        db.add(OfflineTaskStep(
+            task_id=task.id,
+            step_type="product_bulk_advance_product",
+            title=f"推进商品：{row.get('item_code') or row['product_id']}",
+            status="pending",
+            progress_current=0,
+            progress_total=2 if int(row["start_step"] or 5) <= 5 else 1,
+            payload_json=json.dumps({
+                "product_id": row["product_id"],
+                "item_code": row.get("item_code"),
+                "start_step": row["start_step"],
+                "current_status": row.get("current_status"),
+                "current_step": row.get("current_step"),
+            }, ensure_ascii=False, default=str),
+            result_json=None,
+            error_message=None,
+            updated_at=now,
+        ))
     await db.commit()
     await db.refresh(task)
+    if started_count:
+        schedule_offline_task(task.id)
     return task
 
 
@@ -3190,7 +3193,12 @@ async def create_product_bulk_advance_task(body: ProductBulkAdvanceRequest, db: 
 
 @router.post("/bulk-advance-task/by-filter", response_model=OfflineTaskResponse)
 async def create_product_bulk_advance_task_by_filter(body: ProductBulkAdvanceFilterRequest, db: AsyncSession = Depends(get_db)):
-    query = select(Product.id).order_by(Product.updated_at.desc(), Product.created_at.desc()).limit(body.limit)
+    query = (
+        select(Product)
+        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
+        .order_by(Product.updated_at.desc(), Product.created_at.desc())
+        .limit(body.limit)
+    )
     needs_product_data_join = bool(body.item_id or body.sku_keyword)
     if needs_product_data_join:
         query = query.join(ProductData, ProductData.product_id == Product.id, isouter=True)
@@ -3226,7 +3234,10 @@ async def create_product_bulk_advance_task_by_filter(body: ProductBulkAdvanceFil
         )
 
     result = await db.execute(query)
-    ids = [int(product_id) for product_id in result.scalars().all()]
+    products = result.scalars().unique().all()
+    if body.work_status:
+        products = [product for product in products if _product_workbench_status(product) == body.work_status]
+    ids = [int(product.id) for product in products]
     if not ids:
         raise HTTPException(400, "当前筛选下没有商品")
     return await _create_product_bulk_advance_task_for_ids(
@@ -5100,6 +5111,27 @@ async def retry_step(product_id: int, db: AsyncSession = Depends(get_db)):
         _raise_step1_browser_collect_removed()
     if (step or 0) >= 5:
         await _require_generation_prerequisites(db, product, step)
+        if step == 6 and product.catalog_item:
+            product.catalog_item.confirmed_at = None
+            product.catalog_item.updated_at = datetime.now()
+            await db.commit()
+        await _create_product_bulk_advance_task_for_ids(
+            db,
+            [product.id],
+            payload_extra={"source": "retry_step", "start_step": step},
+            title_suffix=f"（商品 #{product.id}）",
+            start_step_override=step,
+        )
+        refreshed = await db.execute(
+            select(Product)
+            .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
+            .where(Product.id == product_id)
+        )
+        queued_product = refreshed.scalar_one_or_none()
+        if not queued_product:
+            raise HTTPException(404, "Product not found")
+        queued_product.current_task_status = _current_task_status(queued_product)
+        return queued_product
     product.status = STEP_STATUS_MAP.get(step, "created")
     product.error_message = None
     product.updated_at = datetime.now()
@@ -5139,16 +5171,24 @@ async def run_product_from_step(
     if start_step == 6 and product.catalog_item:
         product.catalog_item.confirmed_at = None
         product.catalog_item.updated_at = datetime.now()
-    product.status = STEP_STATUS_MAP.get(start_step, "step5_listing")
-    product.current_step = start_step
-    product.error_message = None
-    product.updated_at = datetime.now()
-    _sync_catalog_item(product, db)
     await db.commit()
-    await db.refresh(product)
-
-    enqueue_pipeline(product.id, start_step=start_step)
-    return product
+    await _create_product_bulk_advance_task_for_ids(
+        db,
+        [product.id],
+        payload_extra={"source": "run_from_step", "start_step": start_step},
+        title_suffix=f"（商品 #{product.id}）",
+        start_step_override=start_step,
+    )
+    refreshed = await db.execute(
+        select(Product)
+        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
+        .where(Product.id == product_id)
+    )
+    queued_product = refreshed.scalar_one_or_none()
+    if not queued_product:
+        raise HTTPException(404, "Product not found")
+    queued_product.current_task_status = _current_task_status(queued_product)
+    return queued_product
 
 
 @router.post("/{product_id}/resume", response_model=ProductResponse)

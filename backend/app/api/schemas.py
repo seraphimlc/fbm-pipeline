@@ -75,6 +75,7 @@ class UpcPoolSummary(BaseModel):
 class ProductDataSourceBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     platform: str = Field(default="giga", max_length=30)
+    sales_channel: str = Field(default="amazon", max_length=30)
     site: str = Field(..., min_length=1, max_length=20)
     country: str | None = Field(default=None, min_length=1, max_length=20)
     fulfillment_mode: str = Field(default="dropship", max_length=30)
@@ -94,6 +95,7 @@ class ProductDataSourceCreate(ProductDataSourceBase):
 class ProductDataSourceUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=100)
     platform: str | None = Field(default=None, max_length=30)
+    sales_channel: str | None = Field(default=None, max_length=30)
     site: str | None = Field(default=None, min_length=1, max_length=20)
     country: str | None = Field(default=None, min_length=1, max_length=20)
     fulfillment_mode: str | None = Field(default=None, max_length=30)
@@ -1211,6 +1213,7 @@ class ProductBulkAdvanceRequest(BaseModel):
 
 class ProductBulkAdvanceFilterRequest(BaseModel):
     status: str | None = None
+    work_status: str | None = None
     item_id: str | None = None
     data_source_id: int | None = Field(default=None, ge=1)
     competitor_asin: str | None = None
@@ -1245,6 +1248,7 @@ class WorkbenchOverview(BaseModel):
     capture_detail: int = 0
     ready_to_generate: int = 0
     running: int = 0
+    interrupted: int = 0
     suspended: int = 0
     manual_review: int = 0
     export_ready: int = 0

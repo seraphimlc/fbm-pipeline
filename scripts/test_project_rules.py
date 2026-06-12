@@ -484,8 +484,9 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
     assert_true(
         "serverFilterSummary" in product_page_text
         and "当前服务端筛选" in product_page_text
-        and "下方工作状态按钮只筛当前页展示，不会加入本次提交范围" in product_page_text,
-        "批量推进当前筛选必须在确认前展示服务端筛选范围，并明确不包含只筛当前页的工作状态按钮",
+        and "工作状态：" in product_page_text
+        and "工作状态会按服务端同一口径筛选" in product_page_text,
+        "批量推进当前筛选必须在确认前展示服务端筛选范围，并明确工作状态按服务端同一口径筛选",
     )
     assert_true(
         "download_images=False" in offline_text
@@ -553,6 +554,53 @@ def test_product_pipeline_recovers_interrupted_competitor_capture() -> None:
     assert_true(
         "start_pipeline(product_id, start_step=step)" in engine_text,
         "真正的商品生成节点重启后仍应按原步骤重新排队续跑",
+    )
+
+
+def test_competitor_review_queue_uses_workbench_status_scope() -> None:
+    products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+
+    assert_true(
+        "COMPETITOR_REVIEW_ERROR_KEYWORDS" in products_api_text
+        and '"候选竞品"' in products_api_text
+        and '"参考竞品"' in products_api_text
+        and '"选择竞品"' in products_api_text,
+        "商品工作台和选竞品队列必须共享候选/参考/选择竞品失败关键词，避免数量不一致",
+    )
+    assert_true(
+        "def _competitor_search_failed_sql_condition" in products_api_text
+        and "| _competitor_search_failed_sql_condition()" in products_api_text,
+        "选竞品队列必须使用与工作台同源的竞品失败 SQL 条件，不能另写一套较窄筛选",
+    )
+
+
+def test_product_bulk_advance_runs_in_offline_task_queue() -> None:
+    products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    offline_tasks_text = (ROOT / "backend" / "app" / "services" / "offline_tasks.py").read_text(encoding="utf-8")
+    product_list_text = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
+
+    assert_true(
+        '"product_bulk_advance"' in offline_tasks_text
+        and '"product_bulk_advance_product"' in offline_tasks_text
+        and "run_pipeline_tracked" in offline_tasks_text,
+        "批量推进商品必须作为任务中心 step 执行，不能只写审计记录后把真实 pipeline 丢到内存后台",
+    )
+    assert_true(
+        "schedule_offline_task(task.id)" in products_api_text
+        and "status=\"pending\"" in products_api_text
+        and "enqueue_pipeline(product_id, start_step=start_step)" not in products_api_text.split("async def _create_product_bulk_advance_task_for_ids", 1)[1].split("@router.post(\"/bulk-advance-task\"", 1)[0],
+        "product_bulk_advance 创建时必须入任务中心 pending 队列，不得直接 enqueue_pipeline",
+    )
+    assert_true(
+        "autoStartReadyGeneration" not in product_list_text,
+        "商品列表页不能打开后自动启动待生成商品；离线推进必须由用户显式提交任务中心",
+    )
+    schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
+    assert_true(
+        "work_status" in schemas_text
+        and "_product_workbench_status(product) == body.work_status" in products_api_text
+        and "work_status: generationStatusFilter === 'all' ? undefined : generationStatusFilter" in product_list_text,
+        "批量推进当前筛选必须支持工作台状态分桶，已中断等前端工作状态不能只筛当前页",
     )
 
 
@@ -639,6 +687,8 @@ def main() -> int:
         test_upc_pool_is_source_of_new_task_upcs,
         test_offline_tasks_are_claimed_and_idempotent,
         test_product_pipeline_recovers_interrupted_competitor_capture,
+        test_competitor_review_queue_uses_workbench_status_scope,
+        test_product_bulk_advance_runs_in_offline_task_queue,
         test_catalog_export_uses_snapshot_and_reuses_orphan_zip,
         test_amazon_export_binds_upc_after_prechecks_and_rolls_back,
     ]

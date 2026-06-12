@@ -558,6 +558,7 @@ async def search_and_store_stylesnap_candidates(
         record.product_name = _clean_text(options.product_name)
         record.source_image_url = _clean_text(source_image_url)
         record.source_image_path = options.source_image_path
+        record.title = _clean_text(seller_item.get("title") if seller_item else None) or _clean_text(candidate.get("title"))
         record.url = _clean_text(candidate.get("url")) or f"https://www.amazon.com/dp/{asin}"
         record.brand = _clean_text(seller_item.get("brand") if seller_item else None) or _clean_text(candidate.get("brand"))
         record.seller = _clean_text(seller_item.get("sellerName") if seller_item else None) or _clean_text(candidate.get("seller"))

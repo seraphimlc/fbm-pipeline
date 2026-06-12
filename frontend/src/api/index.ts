@@ -815,6 +815,7 @@ export interface WorkbenchOverview {
   capture_detail: number;
   ready_to_generate: number;
   running: number;
+  interrupted: number;
   suspended: number;
   manual_review: number;
   export_ready: number;
@@ -1097,7 +1098,7 @@ export const STATUS_COLORS: Record<string, string> = {
 export const createProduct = (data: { gigab2b_url: string; competitor_asin?: string; upc?: string; brand?: string }) =>
   api.post<Product>('/products', data);
 
-export const listProducts = (params?: { page?: number; page_size?: number; status?: string; item_id?: string; data_source_id?: number; competitor_asin?: string; upc?: string; created_from?: string; created_to?: string }) =>
+export const listProducts = (params?: { page?: number; page_size?: number; status?: string; item_id?: string; sku_code?: string; data_source_id?: number; competitor_asin?: string; upc?: string; created_from?: string; created_to?: string }) =>
   api.get<PaginatedProducts>('/products', { params });
 
 export const listProductImageReviewQueue = (params?: { data_source_id?: number; limit?: number }) =>
@@ -1135,6 +1136,7 @@ export const createProductBulkAdvanceTask = (productIds: number[]) =>
 
 export const createProductBulkAdvanceTaskByFilter = (params: {
   status?: string;
+  work_status?: string;
   item_id?: string;
   data_source_id?: number;
   competitor_asin?: string;
@@ -1327,6 +1329,13 @@ export const selectProductCompetitorCandidate = (productId: number, candidateId:
 export const retryProductCompetitorCandidateCapture = (productId: number, candidateId: number, force = true) =>
   api.post<AmazonStyleSnapCandidateGroup>(
     `/amazon-stylesnap/products/${productId}/competitor-candidates/${candidateId}/capture`,
+    null,
+    { params: { force }, timeout: 60000 },
+  );
+
+export const captureMissingProductCompetitorCandidates = (productId: number, force = false) =>
+  api.post<AmazonStyleSnapCandidateGroup>(
+    `/amazon-stylesnap/products/${productId}/competitor-candidates/capture-missing`,
     null,
     { params: { force }, timeout: 60000 },
   );

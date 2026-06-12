@@ -38,6 +38,7 @@ const stepTypeLabel = (type: string) => {
   if (type === 'giga_price_sync') return '价格同步';
   if (type === 'aplus_generate_product') return 'A+生成';
   if (type === 'catalog_export_template') return '模板导出';
+  if (type === 'product_bulk_advance_product') return '商品推进';
   return type;
 };
 
@@ -78,8 +79,8 @@ const progressText = (record: OfflineTaskStep) => {
   if (record.step_type === 'catalog_export_template' && record.progress_total > 0) {
     return `商品 ${record.progress_current}/${record.progress_total}`;
   }
-  if (record.step_type === 'product_bulk_advance' && record.progress_total > 0) {
-    return `商品 ${record.progress_current}/${record.progress_total}`;
+  if (record.step_type === 'product_bulk_advance_product' && record.progress_total > 0) {
+    return `节点 ${record.progress_current}/${record.progress_total}`;
   }
   return record.status === 'running' ? '执行中，正在统计...' : '-';
 };

@@ -343,6 +343,19 @@ def start_pipeline(product_id: int, start_step: int = 1) -> bool:
     return True
 
 
+async def run_pipeline_tracked(product_id: int, start_step: int = 1) -> None:
+    """Run a product pipeline in the current task while exposing it via is_running()."""
+    current_task = asyncio.current_task()
+    if current_task is None:
+        await _run_pipeline_with_limit(product_id, start_step=start_step)
+        return
+    existing = _running_tasks.get(product_id)
+    if existing and not existing.done() and existing is not current_task:
+        raise RuntimeError("商品流程正在运行中")
+    _running_tasks[product_id] = current_task
+    await _run_pipeline_with_limit(product_id, start_step=start_step)
+
+
 def cancel_pipeline(product_id: int) -> bool:
     """取消/挂起Pipeline"""
     task = _running_tasks.get(product_id)

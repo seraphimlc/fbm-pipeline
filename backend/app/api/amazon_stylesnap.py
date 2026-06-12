@@ -61,7 +61,7 @@ def _candidate_response(
         data.listing_capture_has_main_image = bool(capture.main_image_url)
         data.listing_captured_at = capture.captured_at
         data.url = capture.page_url or capture.url or data.url
-        data.title = capture.title
+        data.title = capture.title or data.title
         data.brand = capture.brand or data.brand
         data.seller = capture.seller or data.seller
         data.price = capture.price or data.price
@@ -374,10 +374,48 @@ async def _load_product_candidate_group(
     if not candidates:
         raise HTTPException(404, "当前商品未找到 StyleSnap 候选竞品")
 
+    await _backfill_candidate_basic_info_from_raw(db, candidates)
     if enrich_images:
         await _enrich_candidate_images_from_sellersprite(db, candidates, site)
     captures = await _captures_by_candidate(db, [candidate.id for candidate in candidates])
     return _build_group(candidates, captures, {item_code: product})
+
+
+def _clean_optional_text(value: object) -> str | None:
+    text_value = str(value or "").strip()
+    return text_value or None
+
+
+async def _backfill_candidate_basic_info_from_raw(
+    db: AsyncSession,
+    candidates: list[AmazonStyleSnapCandidate],
+) -> None:
+    changed = False
+    now = datetime.now()
+    for candidate in candidates:
+        if candidate.title and candidate.amazon_image_url:
+            continue
+        raw = _json_loads(candidate.raw_candidate_json, {})
+        if not isinstance(raw, dict):
+            continue
+        stylesnap = raw.get("stylesnap") if isinstance(raw.get("stylesnap"), dict) else {}
+        sellersprite = raw.get("sellersprite") if isinstance(raw.get("sellersprite"), dict) else {}
+        next_title = _clean_optional_text(sellersprite.get("title")) or _clean_optional_text(stylesnap.get("title"))
+        next_image = _clean_optional_text(sellersprite.get("imageUrl")) or _clean_optional_text(stylesnap.get("amazon_image_url"))
+        candidate_changed = False
+        if next_title and not candidate.title:
+            candidate.title = next_title
+            candidate_changed = True
+        if next_image and not candidate.amazon_image_url:
+            candidate.amazon_image_url = next_image
+            candidate_changed = True
+        if candidate_changed:
+            changed = True
+            candidate.updated_at = now
+    if changed:
+        await db.commit()
+        for candidate in candidates:
+            await db.refresh(candidate)
 
 
 async def _enrich_candidate_images_from_sellersprite(
@@ -388,7 +426,7 @@ async def _enrich_candidate_images_from_sellersprite(
     missing = [
         candidate.asin
         for candidate in candidates
-        if candidate.asin and not candidate.amazon_image_url
+        if candidate.asin and (not candidate.title or not candidate.amazon_image_url)
     ]
     missing = list(dict.fromkeys(missing))[:40]
     if not missing:
@@ -397,28 +435,27 @@ async def _enrich_candidate_images_from_sellersprite(
         seller_data = await competitor_lookup(missing, marketplace=site, size=max(len(missing), 10))
     except Exception:
         return
-    for asin in [asin for asin in missing if asin not in seller_data]:
-        try:
-            single_data = await competitor_lookup([asin], marketplace=site, size=1)
-        except Exception:
-            continue
-        if single_data.get(asin):
-            seller_data[asin] = single_data[asin]
 
     changed = False
     now = datetime.now()
     for candidate in candidates:
-        if candidate.amazon_image_url:
+        if candidate.title and candidate.amazon_image_url:
             continue
         item = seller_data.get(candidate.asin)
-        if not item or not item.get("imageUrl"):
+        if not item:
             continue
-        candidate.amazon_image_url = str(item.get("imageUrl")).strip() or None
+        next_title = str(item.get("title") or "").strip() or None
+        next_image = str(item.get("imageUrl") or "").strip() or None
+        if next_title and not candidate.title:
+            candidate.title = next_title
+        if next_image and not candidate.amazon_image_url:
+            candidate.amazon_image_url = next_image
         candidate.brand = candidate.brand or item.get("brand")
         candidate.seller = candidate.seller or item.get("sellerName")
         candidate.delivery = candidate.delivery or item.get("fulfillment")
-        candidate.updated_at = now
-        changed = True
+        if next_title or next_image:
+            candidate.updated_at = now
+            changed = True
     if changed:
         await db.commit()
         for candidate in candidates:
@@ -538,9 +575,6 @@ async def _run_product_competitor_search_background(product_id: int):
                 catalog.status = product.status
                 catalog.updated_at = now
             await db.commit()
-            queued_candidate_ids = await _queue_listing_prefetches(db, all_candidates)
-            if queued_candidate_ids:
-                await _run_listing_prefetch_background(queued_candidate_ids)
         except asyncio.CancelledError:
             product.status = FAILED
             product.current_step = 2
@@ -792,9 +826,6 @@ async def search_product_competitor_candidates(
         product.updated_at = now
         await db.commit()
         await db.refresh(product)
-        queued_candidate_ids = await _queue_listing_prefetches(db, existing)
-        if queued_candidate_ids:
-            background_tasks.add_task(_run_listing_prefetch_background, queued_candidate_ids)
         return product
 
     product.status = COMPETITOR_SEARCHING
@@ -906,6 +937,30 @@ async def select_product_competitor_candidate(
             force_capture=True,
         )
     return await _load_group(db, selected.batch_id, selected.site, selected.item_code, selected.sku_code)
+
+
+@router.post("/products/{product_id}/competitor-candidates/capture-missing", response_model=AmazonStyleSnapCandidateGroupResponse)
+async def capture_missing_product_competitor_candidates(
+    product_id: int,
+    background_tasks: BackgroundTasks,
+    force: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+):
+    product, snapshot = await _load_product_for_competitor_selection(db, product_id)
+    group = await _load_product_candidate_group(db, product, snapshot, enrich_images=True)
+    candidate_ids = [
+        candidate.id
+        for candidate in group.candidates
+        if not candidate.title
+        or not candidate.amazon_image_url
+        or candidate.listing_capture_status == "failed"
+    ]
+    if candidate_ids:
+        result = await db.execute(select(AmazonStyleSnapCandidate).where(AmazonStyleSnapCandidate.id.in_(candidate_ids)))
+        queued_candidate_ids = await _queue_listing_prefetches(db, result.scalars().all(), force=force)
+        if queued_candidate_ids:
+            background_tasks.add_task(_run_listing_prefetch_background, queued_candidate_ids, force=force)
+    return await _load_product_candidate_group(db, product, snapshot, enrich_images=False)
 
 
 @router.post("/products/{product_id}/competitor-candidates/{candidate_id}/capture", response_model=AmazonStyleSnapCandidateGroupResponse)
