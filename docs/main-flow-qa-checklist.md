@@ -1,5 +1,7 @@
 # Main Flow QA Checklist
 
+状态：历史 QA checklist / 候选背景；正式 QA 方法以 `docs/collaboration/playbooks/qa.md`，当前范围以最新 PRD/inbox 为准。
+
 更新：2026-06-05
 
 本文档是观止（`agentKey: guanzhi`）用于验收当前 P0 主链路的 QA gate 清单。范围聚焦“商品拉取 -> Product 草稿 -> CatalogProduct 待导出 -> 人工创建导出任务 -> 任务结果/文件”。A+ 生成/上传、多店铺 ASIN 模型、自动写 Amazon 价格策略不在当前 P0 验收范围。

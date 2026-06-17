@@ -11,23 +11,24 @@
 1. 当前用户消息
 2. `AGENTS.md`
 3. `git status --short`
-4. `docs/collaboration/inbox.md` 中给当前身份或全体的 OPEN/ACKED/待处理消息
+4. `docs/project-index.md`
+5. `docs/collaboration/inbox.md` 中给当前身份或全体的 OPEN/ACKED/待处理消息
 
 以下文件按条件补读：
 
-5. 多会话协作首次进入、身份/协作规约不确定或规则变化时，读 `docs/codex-collaboration-roles.md`
-6. 环境不熟、长时间缺席、复杂 handoff 或需要完整项目冷启动时，读 `README.md`、`docs/configuration.md`、`docs/runbook.md`
-7. 做商品拉取到导出主链路 QA 或发布前复核时，再读：
+6. 多会话协作首次进入、身份/协作规约不确定或规则变化时，读 `docs/collaboration.md`
+7. 环境不熟、长时间缺席、复杂 handoff 或需要完整项目冷启动时，读 `README.md`、`docs/README.md`、`docs/configuration.md`、`docs/runbook.md`
+8. 做商品拉取到导出主链路 QA 或发布前复核时，再读：
    - `docs/main-flow-qa-checklist.md`
    - `docs/main-flow-user-path.md`
-8. 涉及 GIGA 商品池、库存同步、价格同步、库存告警或库存模板导出时，再读：
+9. 涉及 GIGA 商品池、库存同步、价格同步、库存告警或库存模板导出时，再读：
    - `docs/giga-buyer-openapi-reference.md`
    - `docs/giga-inventory-sync.md`
    - `backend/app/services/giga_openapi.py`
    - `backend/app/services/giga_inventory_sync.py`
    - `backend/app/services/giga_price_sync.py`
    - `backend/app/api/giga.py`
-9. 涉及 Amazon 导入模板、类目、字段名或上架检查时，再读：
+10. 涉及 Amazon 导入模板、类目、字段名或上架检查时，再读：
    - `docs/template-mapping-spec.md`
    - `docs/add-category-template-sop.md`
    - `docs/template-mapping-change-log.md`
@@ -39,7 +40,7 @@
 ## 2. 项目定位
 
 - 本地路径：进入当前 clone 的仓库根目录即可；用户常用路径是 `/Users/jiyuhang/code/fbm-pipeline`
-- 后端：FastAPI + SQLAlchemy async + SQLite
+- 后端：FastAPI + SQLAlchemy async + MySQL
 - 前端：React + TypeScript + Ant Design + Vite
 - 默认端口：
   - 后端 API：`http://localhost:8190`
@@ -49,7 +50,7 @@
 
 ## 2.1 多会话身份协作
 
-当用户在不同 Codex 会话中指定身份时，按 `docs/codex-collaboration-roles.md` 工作：
+当用户在不同 Codex 会话中指定身份时，按 `docs/collaboration.md` 工作：
 
 - 若命（agentKey: `ruoming`）：产品方向、架构边界、review、handoff 和多 agent 协作控制。
 - 听云（agentKey: `tingyun`）：工程实现、测试、本地验证和收口。
@@ -150,13 +151,15 @@ SELLERSPRITE_TOKEN
 ```bash
 cd backend
 source .venv/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port 8190
+uvicorn app.main:app --host 127.0.0.1 --port 8190
 ```
 
 ```bash
 cd frontend
-npm run dev -- --host 0.0.0.0 --port 3190
+npm run dev -- --host 127.0.0.1 --port 3190
 ```
+
+不要默认使用 `0.0.0.0` 暴露服务；如确需远程访问，先按 `docs/superpowers/specs/2026-06-17-p0-security-startup-triage-prd.md` 确认访问边界。
 
 如果本机已配置开机启动，相关 LaunchAgent 文件在：
 

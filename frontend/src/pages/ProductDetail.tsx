@@ -18,6 +18,24 @@ const DEFAULT_LISTING_IMAGE_LIMIT = 9;
 
 const APLUS_REGEN_ACTIVE_STATUSES = ['queued', 'planning', 'scripting', 'imaging', 'regen_queued', 'regen_script_running', 'regen_image_running'];
 const APLUS_REGEN_RETRYABLE_STATUSES = ['regen_failed', 'regen_interrupted'];
+const PRODUCT_NON_RUNNING_STATUSES = [
+  'created',
+  'completed',
+  'pending_review',
+  'failed',
+  'paused',
+  'unavailable',
+  'source_unavailable',
+  'step1_done',
+  'step2_done',
+  'step3_4_done',
+  'step5_done',
+  'step6_done',
+  'step7_done',
+  'step8_done',
+  'step9_done',
+  'step10_done',
+];
 const APLUS_STATUS_LABELS: Record<string, { color: string; text: string }> = {
   done: { color: 'success', text: 'A+已完成' },
   partial: { color: 'warning', text: 'A+部分完成' },
@@ -50,6 +68,31 @@ const parseJson = (value: string | null | undefined, fallback: any = null) => {
     return fallback;
   }
 };
+
+const normalizeComparableImage = (value: string | null | undefined) => String(value || '').trim();
+
+const competitorSourceImageForDetail = (detail: ProductDetail | null | undefined) => {
+  if (!detail) return '';
+  const snapshot = parseJson(detail.data?.gigab2b_raw_snapshot, {});
+  return normalizeComparableImage(
+    detail.images?.main_image_path
+    || snapshot?.selected_stylesnap?.source_image_path
+    || snapshot?.stylesnap_search?.source_image_path
+  );
+};
+
+const competitorGroupMatchesProductDetail = (
+  detail: ProductDetail | null | undefined,
+  group: AmazonStyleSnapCandidateGroup | null | undefined,
+) => {
+  if (!detail || !group) return false;
+  if (group.product_task_id && group.product_task_id !== detail.id) return false;
+  const expectedSource = competitorSourceImageForDetail(detail);
+  const groupSource = normalizeComparableImage(group.source_image_path || group.source_image_url);
+  return !expectedSource || !groupSource || expectedSource === groupSource;
+};
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const normalizeImagePath = (item: any) => {
   const path = typeof item === 'string' ? item : item?.path;
@@ -242,7 +285,7 @@ const ProductDetail: React.FC = () => {
     if (activeTabKey !== 'competitor' && !competitorModalOpen) {
       return;
     }
-    if (competitorLoading || competitorGroup?.product_task_id === detail.id) {
+    if (competitorLoading || competitorGroupMatchesProductDetail(detail, competitorGroup)) {
       return;
     }
     const snapshot = parseJson(detail.data?.gigab2b_raw_snapshot, {});
@@ -262,7 +305,7 @@ const ProductDetail: React.FC = () => {
     setCompetitorLoading(true);
     try {
       const { data: group } = await listProductCompetitorCandidates(detail.id, { enrich_images: true });
-      setCompetitorGroup(group);
+      setCompetitorGroup(competitorGroupMatchesProductDetail(detail, group) ? group : null);
     } catch {
       setCompetitorGroup(null);
     } finally {
@@ -334,6 +377,19 @@ const ProductDetail: React.FC = () => {
     if (competitorGroup || competitorLoading) return;
     void refreshCompetitorGroupFromProduct(product);
   }, [product?.id, activeTabKey, competitorModalOpen]);
+
+  useEffect(() => {
+    if (!product || !competitorGroup) return;
+    if (!competitorGroupMatchesProductDetail(product, competitorGroup)) {
+      setCompetitorGroup(null);
+    }
+  }, [
+    product?.id,
+    product?.images?.main_image_path,
+    competitorGroup?.product_task_id,
+    competitorGroup?.source_image_path,
+    competitorGroup?.source_image_url,
+  ]);
 
   if (loading) return <Spin size="large" style={{ display: 'block', margin: '100px auto' }} />;
   if (!product) return <div>商品不存在</div>;
@@ -661,7 +717,7 @@ const ProductDetail: React.FC = () => {
     setCompetitorLoading(true);
     try {
       const { data: group } = await listProductCompetitorCandidates(product.id, { enrich_images: true });
-      setCompetitorGroup(group);
+      setCompetitorGroup(competitorGroupMatchesProductDetail(product, group) ? group : null);
     } catch (error: any) {
       setCompetitorGroup(null);
       if (!silent) message.error(error?.response?.data?.detail || '加载候选竞品失败');
@@ -670,24 +726,55 @@ const ProductDetail: React.FC = () => {
     }
   };
 
+  const waitForCompetitorCandidateGroup = async (productId: number) => {
+    let latestGroup: AmazonStyleSnapCandidateGroup | null = null;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      if (attempt > 0) await sleep(2000);
+      const { data: latestDetail } = await getProduct(productId, { compact: true });
+      setProduct(latestDetail);
+      const snapshot = parseJson(latestDetail.data?.gigab2b_raw_snapshot, {});
+      const searchState = snapshot?.stylesnap_search || {};
+      const failed = searchState?.status === 'failed'
+        || (latestDetail.status === 'failed' && /同款搜索|StyleSnap/i.test(latestDetail.error_message || ''));
+      if (failed) {
+        throw new Error(searchState?.error || latestDetail.error_message || '候选竞品搜索失败');
+      }
+      try {
+        const { data: group } = await listProductCompetitorCandidates(productId, { enrich_images: true });
+        if (competitorGroupMatchesProductDetail(latestDetail, group)) {
+          latestGroup = group;
+          setCompetitorGroup(group);
+          if (group.candidates?.length || searchState?.status === 'captured') {
+            return group;
+          }
+        } else {
+          setCompetitorGroup(null);
+        }
+      } catch {
+        if (searchState?.status === 'captured') return latestGroup;
+      }
+    }
+    return latestGroup;
+  };
+
   const searchCompetitorCandidates = async (force = false) => {
     setCompetitorSearchLoading(true);
     message.loading({ content: '正在启动 Amazon StyleSnap 同款搜索', key: 'competitor-search', duration: 0 });
     try {
+      if (force) {
+        setCompetitorGroup(null);
+      }
       await searchProductCompetitorCandidates(product.id, force);
-      message.success({ content: '已提交同款搜索，Chrome 会在后台用主图搜索 Amazon', key: 'competitor-search' });
-      await fetchDetail();
-      if (!force) {
-        try {
-          const { data: group } = await listProductCompetitorCandidates(product.id, { enrich_images: true });
-          setCompetitorGroup(group);
-        } catch {
-          setCompetitorGroup(null);
-        }
+      message.loading({ content: '已提交同款搜索，正在等待当前主图的候选写入', key: 'competitor-search', duration: 0 });
+      const group = await waitForCompetitorCandidateGroup(product.id);
+      if (group?.candidates?.length) {
+        message.success({ content: `已找到 ${group.candidates.length} 个候选竞品`, key: 'competitor-search' });
+      } else {
+        message.info({ content: '搜索已提交，候选写入较慢，请稍后刷新候选状态', key: 'competitor-search' });
       }
     } catch (error: any) {
       message.destroy('competitor-search');
-      message.error(error?.response?.data?.detail || '启动同款搜索失败');
+      message.error(error?.response?.data?.detail || error?.message || '启动同款搜索失败');
     } finally {
       setCompetitorSearchLoading(false);
     }
@@ -1253,7 +1340,15 @@ const ProductDetail: React.FC = () => {
   const isReadyToExport = product.status === 'completed' && product.current_step >= 6;
   const stylesnapSearch = rawSnapshot?.stylesnap_search || {};
   const stylesnapSearchStatus = stylesnapSearch?.status || '';
-  const competitorCandidateCount = competitorGroup?.candidates?.length || Number(stylesnapSearch?.count || 0);
+  const competitorGroupMatchesCurrentSource = competitorGroupMatchesProductDetail(product, competitorGroup);
+  const stylesnapSearchSourceMatchesCurrent = Boolean(
+    !stylesnapSearch?.source_image_path
+    || !images?.main_image_path
+    || normalizeComparableImage(stylesnapSearch.source_image_path) === normalizeComparableImage(images.main_image_path)
+  );
+  const competitorCandidateCount = competitorGroupMatchesCurrentSource
+    ? (competitorGroup?.candidates?.length || 0)
+    : (stylesnapSearchSourceMatchesCurrent ? Number(stylesnapSearch?.count || 0) : 0);
   const referenceAsin = selectedStyleSnap?.asin || product.competitor_asin || '';
   const hasConfirmedSearchImage = Boolean(
     images?.main_image_path
@@ -1471,8 +1566,13 @@ const ProductDetail: React.FC = () => {
 
   const isInterruptedProduct = /运行状态已中断|未在当前服务中运行/.test(product.current_task_status || '');
   const isPipelineRunning = !isInterruptedProduct
-    && !['completed', 'pending_review', 'failed', 'unavailable', 'source_unavailable', 'created', 'paused'].includes(product.status);
+    && !PRODUCT_NON_RUNNING_STATUSES.includes(product.status);
   const canRegenerateListing = Boolean(hasListingCapture && hasImageAnalysis && !isPipelineRunning && !isPaused && !isHardStopped);
+  const canGenerateMissingListing = Boolean(
+    canRegenerateListing
+    && !hasListingContent
+    && !isReadyToExport
+  );
   const canSuspendProduct = product.status !== 'paused'
     && !isInterruptedProduct
     && !['completed', 'unavailable', 'source_unavailable'].includes(product.status)
@@ -2986,6 +3086,11 @@ const ProductDetail: React.FC = () => {
           {canRetryAplusRegeneration && (
             <Button icon={<RedoOutlined />} loading={regenRetryLoading} onClick={retryInterruptedAplus}>
               重试A+重新生图
+            </Button>
+          )}
+          {canGenerateMissingListing && (
+            <Button type="primary" icon={<PlayCircleOutlined />} loading={listingRegenerateLoading} onClick={regenerateListing}>
+              生成Listing
             </Button>
           )}
           {isInterruptedProduct && (

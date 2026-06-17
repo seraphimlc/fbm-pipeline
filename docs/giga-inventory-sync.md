@@ -1,5 +1,7 @@
 # GIGA 库存与价格同步说明
 
+状态：候选背景；实现前必须对照 `docs/domain-index/data-sources.md` 和当前 GIGA service/API 代码核实。
+
 本文记录 GIGA Open API 库存与价格同步模块的当前约定，供后续 Codex/开发者冷启动、排查和扩展使用。
 
 ## 目标

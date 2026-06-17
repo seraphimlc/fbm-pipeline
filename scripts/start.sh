@@ -23,6 +23,8 @@ read_env() {
 
 BACKEND_PORT="$(read_env BACKEND_PORT 8190)"
 FRONTEND_PORT="$(read_env FRONTEND_PORT 3190)"
+BACKEND_HOST="$(read_env BACKEND_HOST 127.0.0.1)"
+FRONTEND_HOST="$(read_env FRONTEND_HOST 127.0.0.1)"
 
 echo "📦 FBM Pipeline 启动中..."
 
@@ -39,16 +41,16 @@ if [ ! -d "$FRONTEND_DIR/node_modules" ]; then
 fi
 
 # 启动后端
-echo "🔧 启动后端 (port $BACKEND_PORT)..."
+echo "🔧 启动后端 ($BACKEND_HOST:$BACKEND_PORT)..."
 cd "$BACKEND_DIR"
 source .venv/bin/activate
-uvicorn app.main:app --host 0.0.0.0 --port "$BACKEND_PORT" &
+uvicorn app.main:app --host "$BACKEND_HOST" --port "$BACKEND_PORT" &
 BACKEND_PID=$!
 
 # 启动前端
-echo "🎨 启动前端 (port $FRONTEND_PORT)..."
+echo "🎨 启动前端 ($FRONTEND_HOST:$FRONTEND_PORT)..."
 cd "$FRONTEND_DIR"
-FRONTEND_PORT="$FRONTEND_PORT" BACKEND_PORT="$BACKEND_PORT" npx vite --host 0.0.0.0 --port "$FRONTEND_PORT" &
+FRONTEND_PORT="$FRONTEND_PORT" BACKEND_PORT="$BACKEND_PORT" npx vite --host "$FRONTEND_HOST" --port "$FRONTEND_PORT" &
 FRONTEND_PID=$!
 
 echo ""

@@ -3,8 +3,8 @@ import { Alert, Button, Empty, Input, Popconfirm, Select, Space, Table, Tag, Typ
 import { CloudSyncOutlined, DollarOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import {
-  createGigaInventorySyncOfflineTask,
-  createGigaPriceSyncOfflineTask,
+  createGigaInventorySyncTaskRuns,
+  createGigaPriceSyncTaskRuns,
   listGigaInventory,
   listProductDataSources,
 } from '../api';
@@ -73,7 +73,7 @@ const InventorySyncList: React.FC = () => {
         <Empty description="当前店铺还没有库存同步快照">
           <Space>
             <Button type="primary" icon={<CloudSyncOutlined />} loading={syncing} onClick={handleSync}>同步库存</Button>
-            <Button onClick={() => navigate('/offline-tasks')}>查看任务中心</Button>
+            <Button onClick={() => navigate('/task-runs')}>查看任务中心</Button>
           </Space>
         </Empty>
       );
@@ -83,14 +83,14 @@ const InventorySyncList: React.FC = () => {
         <Empty description="当前筛选没有库存记录">
           <Space>
             <Button onClick={() => { setSkuInput(''); setSkuCode(''); setAvailabilityStatus(undefined); setPage(1); }}>清空筛选</Button>
-            <Button onClick={() => navigate('/offline-tasks')}>查看最近同步任务</Button>
+            <Button onClick={() => navigate('/task-runs')}>查看最近同步任务</Button>
           </Space>
         </Empty>
       );
     }
     return (
       <Empty description="当前店铺暂无库存记录">
-        <Button onClick={() => navigate('/offline-tasks')}>查看最近同步任务</Button>
+        <Button onClick={() => navigate('/task-runs')}>查看最近同步任务</Button>
       </Empty>
     );
   };
@@ -148,11 +148,11 @@ const InventorySyncList: React.FC = () => {
     }
     setSyncing(true);
     try {
-      const { data } = await createGigaInventorySyncOfflineTask({
+      const { data } = await createGigaInventorySyncTaskRuns({
         data_source_ids: [selectedDataSourceId],
       });
-      message.success(`已创建库存同步任务 #${data.task.id}`);
-      navigate('/offline-tasks');
+      message.success(`已创建库存同步任务：${data.runs.map((run) => `#${run.id}`).join('、')}`);
+      navigate('/task-runs');
     } catch (error: any) {
       message.error(error?.response?.data?.detail || '创建库存同步任务失败');
     } finally {
@@ -167,11 +167,11 @@ const InventorySyncList: React.FC = () => {
     }
     setPriceSyncing(true);
     try {
-      const { data } = await createGigaPriceSyncOfflineTask({
+      const { data } = await createGigaPriceSyncTaskRuns({
         data_source_ids: [selectedDataSourceId],
       });
-      message.success(`已创建价格同步任务 #${data.task.id}`);
-      navigate('/offline-tasks');
+      message.success(`已创建价格同步任务：${data.runs.map((run) => `#${run.id}`).join('、')}`);
+      navigate('/task-runs');
     } catch (error: any) {
       message.error(error?.response?.data?.detail || '创建价格同步任务失败');
     } finally {

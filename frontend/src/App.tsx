@@ -5,6 +5,7 @@ import zhCN from 'antd/locale/zh_CN';
 import MainLayout from './components/MainLayout';
 import ProductList from './pages/ProductList';
 import ProductDetail from './pages/ProductDetail';
+import TikTokProductDetail from './pages/TikTokProductDetail';
 import ProductImageReview from './pages/ProductImageReview';
 import ProductCompetitorReview from './pages/ProductCompetitorReview';
 import CreateProduct from './pages/CreateProduct';
@@ -15,6 +16,7 @@ import AplusManagement from './pages/AplusManagement';
 import ConfigPage from './pages/ConfigPage';
 import ProductDataSourceList from './pages/ProductDataSourceList';
 import OfflineTaskCenter from './pages/OfflineTaskCenter';
+import TaskRunCenter from './pages/TaskRunCenter';
 import UpcPoolPage from './pages/UpcPoolPage';
 
 const App: React.FC = () => (
@@ -30,6 +32,7 @@ const App: React.FC = () => (
             <Route path="/products/image-review" element={<ProductImageReview />} />
             <Route path="/products/competitor-review" element={<ProductCompetitorReview />} />
             <Route path="/offline-tasks" element={<OfflineTaskCenter />} />
+            <Route path="/task-runs" element={<TaskRunCenter />} />
             <Route path="/export-center" element={<CatalogList />} />
             <Route path="/inventory-sync" element={<InventorySyncList />} />
             <Route path="/asin-sync" element={<AsinSyncList />} />
@@ -40,6 +43,7 @@ const App: React.FC = () => (
             <Route path="/config" element={<ConfigPage />} />
             <Route path="/products/new" element={<CreateProduct />} />
             <Route path="/products/:id" element={<ProductDetail />} />
+            <Route path="/tiktok/products/:id" element={<TikTokProductDetail />} />
           </Routes>
         </MainLayout>
       </BrowserRouter>

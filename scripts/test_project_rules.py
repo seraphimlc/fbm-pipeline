@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
+import importlib.util
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -88,6 +90,127 @@ def test_real_asin_export_guard_is_present() -> None:
     text = products_py.read_text(encoding="utf-8")
     assert_true("已有真实 ASIN" in text, "导出逻辑必须保留真实 ASIN 防重复导出提示")
     assert_true("不能再次导出 Amazon 导入表格" in text, "已有真实 ASIN 的商品必须禁止再次导出导入表格")
+
+
+def test_amazon_workflow_t1_fields_and_enums_exist() -> None:
+    models_text = (ROOT / "backend" / "app" / "models" / "models.py").read_text(encoding="utf-8")
+    database_text = (ROOT / "backend" / "app" / "database.py").read_text(encoding="utf-8")
+    status_text = (ROOT / "backend" / "app" / "models" / "status.py").read_text(encoding="utf-8")
+
+    for field in ("workflow_node", "workflow_status", "workflow_error", "workflow_updated_at"):
+        assert_true(field in models_text, f"Product ORM 必须包含 Amazon workflow 字段: {field}")
+        assert_true(f'("{field}",' in database_text, f"MySQL schema ensure 必须补齐 products.{field}")
+
+    assert_true(
+        "workflow_node: Mapped[str | None] = mapped_column(String(80))" in models_text
+        and "workflow_status: Mapped[str | None] = mapped_column(String(40))" in models_text
+        and "workflow_error: Mapped[str | None] = mapped_column(Text)" in models_text
+        and "workflow_updated_at: Mapped[datetime | None] = mapped_column(DateTime)" in models_text,
+        "Amazon workflow T1 字段类型必须按 PRD 使用 String/Text/DateTime nullable 字段",
+    )
+    assert_true(
+        "workflow_version" not in models_text
+        and "workflow_version" not in database_text
+        and "workflow_version" not in status_text,
+        "Amazon workflow V1 不允许新增 workflow_version",
+    )
+
+    code = r'''
+from app.models.status import AMAZON_WORKFLOW_NODES, AMAZON_WORKFLOW_STATUSES
+
+assert AMAZON_WORKFLOW_NODES == (
+    "select_images",
+    "get_stylesnap_token",
+    "search_competitor",
+    "select_competitor",
+    "capture_competitor_detail",
+    "image_analysis",
+    "listing_generation",
+    "flow_done",
+), AMAZON_WORKFLOW_NODES
+assert AMAZON_WORKFLOW_STATUSES == (
+    "pending",
+    "processing",
+    "succeeded",
+    "failed",
+), AMAZON_WORKFLOW_STATUSES
+for forbidden in ("export", "catalog_export", "amazon_upload"):
+    assert forbidden not in AMAZON_WORKFLOW_NODES, forbidden
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"Amazon workflow T1 枚举常量验证失败: {result.stderr or result.stdout}")
+    assert_true(
+        "AMAZON_WORKFLOW_NODES" in status_text
+        and "AMAZON_WORKFLOW_STATUSES" in status_text
+        and "WORKFLOW_NODE_SELECT_IMAGES" in status_text
+        and "WORKFLOW_STATUS_PROCESSING" in status_text,
+        "Amazon workflow node/status 必须集中定义在 backend/app/models/status.py",
+    )
+
+
+def test_product_detail_get_is_readonly_for_material_videos() -> None:
+    products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    material_assets_text = (ROOT / "backend" / "app" / "services" / "material_assets.py").read_text(encoding="utf-8")
+    get_product_section = products_text.split('@router.get("/{product_id}"', 1)[1].split('@router.post("/{product_id}/files/open"', 1)[0]
+    assert_true(
+        "_ensure_contact_sheet_oss_urls" not in get_product_section
+        and "upload_private_file" not in get_product_section
+        and "await db.commit()" not in get_product_section
+        and "await db.refresh(" not in get_product_section,
+        "GET /api/products/{product_id} 详情链路必须只读，不能 ensure contact sheet、上传 OSS、commit 或 refresh 写回 DB",
+    )
+    assert_true(
+        "organize_video_files" not in get_product_section
+        and "shutil.move" not in get_product_section
+        and ".mkdir(" not in get_product_section
+        and ".rename(" not in get_product_section
+        and ".unlink(" not in get_product_section,
+        "GET /api/products/{product_id} 详情链路必须只读素材目录，不能整理/移动/创建/删除视频文件",
+    )
+    assert_true(
+        "video_folder_summary(material_dir)" in get_product_section
+        and "def video_folder_summary" in material_assets_text
+        and "shutil.move" not in material_assets_text.split("def video_folder_summary", 1)[1],
+        "商品详情视频摘要必须走只读 helper，不能复用 organize_video_files 的 mutating 行为",
+    )
+
+    code = r'''
+from tempfile import TemporaryDirectory
+from pathlib import Path
+from app.services.material_assets import video_folder_summary
+
+with TemporaryDirectory() as tmp:
+    root = Path(tmp)
+    loose = root / "loose.mov"
+    nested_dir = root / "nested"
+    nested_dir.mkdir()
+    nested = nested_dir / "clip.mp4"
+    loose.write_bytes(b"video")
+    nested.write_bytes(b"video")
+
+    summary = video_folder_summary(root)
+
+    assert summary is not None, summary
+    assert summary["exists"] is True, summary
+    assert summary["file_count"] == 2, summary
+    assert "loose.mov" in summary["files"], summary
+    assert "nested/clip.mp4" in summary["files"], summary
+    assert loose.is_file()
+    assert nested.is_file()
+    assert not (root / "video").exists()
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"商品详情视频只读摘要行为验证失败: {result.stderr or result.stdout}")
 
 
 def test_inventory_update_template_exports_stock_only_by_sku() -> None:
@@ -334,9 +457,12 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
     catalog_page_text = (ROOT / "frontend" / "src" / "pages" / "CatalogList.tsx").read_text(encoding="utf-8")
     product_page_text = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
     product_detail_text = (ROOT / "frontend" / "src" / "pages" / "ProductDetail.tsx").read_text(encoding="utf-8")
+    task_runs_api_text = (ROOT / "backend" / "app" / "api" / "task_runs.py").read_text(encoding="utf-8")
     task_center_text = (ROOT / "frontend" / "src" / "pages" / "OfflineTaskCenter.tsx").read_text(encoding="utf-8")
+    task_run_center_text = (ROOT / "frontend" / "src" / "pages" / "TaskRunCenter.tsx").read_text(encoding="utf-8")
     task_center_spec_text = (ROOT / "docs" / "superpowers" / "specs" / "2026-06-03-offline-task-center.md").read_text(encoding="utf-8")
     main_text = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+    product_bulk_planner_text = (ROOT / "backend" / "app" / "task_planners" / "product_bulk_advance.py").read_text(encoding="utf-8")
 
     assert_true("def _claim_offline_step" in offline_text, "离线任务步骤必须先原子 claim，避免重复调度执行同一步")
     assert_true(
@@ -440,11 +566,11 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
         "商品工作台必须提供全库状态桶，并且系统状态=待导出只能返回 current_step>=6 的商品",
     )
     assert_true(
-        "create_product_bulk_advance_task" in products_api_text
-        and "PRODUCT_BULK_ADVANCE_MAX_PRODUCTS = 1000" in products_api_text
-        and 'task_type="product_bulk_advance"' in products_api_text
-        and '"rows": rows' in products_api_text
-        and "尚未完成图片确认、竞品选择和竞品详情抓取" in products_api_text,
+        "create_product_bulk_advance_run" in products_api_text
+        and "PRODUCT_BULK_ADVANCE_MAX_PRODUCTS = 1000" in product_bulk_planner_text
+        and 'task_type="product_bulk_advance"' in product_bulk_planner_text
+        and '"rows": rows' in product_bulk_planner_text
+        and "尚未完成图片确认、竞品选择和竞品详情抓取" in product_bulk_planner_text,
         "批量推进必须走可审计任务中心 rows/report，不能直接把未就绪商品改成待导出",
     )
     assert_true(
@@ -455,18 +581,25 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
         "商品工作台页面必须提供全库状态桶说明和页面触发的批量推进审计任务入口",
     )
     assert_true(
-        "product_bulk_advance" in task_center_text
-        and "resultRows" in task_center_text
-        and "明细" in task_center_text,
+        "待自动生成 Listing" in product_page_text
+        and "自动入队" in product_page_text
+        and "启动选中商品" not in product_page_text
+        and "全选待生成" not in product_page_text
+        and "runProductFromStep" not in product_page_text,
+        "商品工作台不能让用户手动点启动待生成 Listing；图片确认/竞品完成后应自动进入任务中心，列表只保留可审计批量推进补救入口",
+    )
+    assert_true(
+        "product_bulk_advance" in task_run_center_text
+        and "productBulkRowsTable" in task_run_center_text
+        and "明细" in task_run_center_text,
         "任务中心必须能展示批量推进任务的逐商品 rows/report",
     )
     assert_true(
-        "_with_product_bulk_advance_progress" in offline_api_text
-        and '"latest_result"' in offline_api_text
-        and '"export_ready_count"' in offline_api_text
-        and "当前结果" in task_center_text
-        and "已到待导出" in task_center_text,
-        "批量推进任务报告必须只读补充 started 商品当前是否已到待导出，不能只停留在 enqueue 结果",
+        "_with_product_bulk_advance_progress" not in task_runs_api_text
+        and "latest_counts" not in task_runs_api_text
+        and "submitted_count" in product_bulk_planner_text
+        and "子任务" in task_run_center_text,
+        "批量提交生成任务不能在读接口动态改写 summary_json 来假装父任务追踪到待导出；父任务只展示提交子任务审计",
     )
     assert_true(
         "导出文件" in catalog_page_text
@@ -522,6 +655,17 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
         and "_giga_image_candidates_for_product" in products_api_text,
         "商品详情图片确认必须默认用代表 SKU 的 GIGA mainImage 做主图，再从 gallery 末尾取 8 张；旧纯路径、未知类型和其它 SKU 图片不能全量默认选中，file/brand 留作备用素材",
     )
+    image_review_text = (ROOT / "frontend" / "src" / "pages" / "ProductImageReview.tsx").read_text(encoding="utf-8")
+    image_queue_endpoint_text = products_api_text.split('@router.get("/image-review-queue"', 1)[1].split('@router.get("/image-review-detail', 1)[0]
+    assert_true(
+        "select(func.count(Product.id))" in image_queue_endpoint_text
+        and "total=total" in image_queue_endpoint_text
+        and "total=len(items)" not in image_queue_endpoint_text
+        and "queueTotal" in image_review_text
+        and "待确认 ${queueTotal} 个" in image_review_text
+        and "待确认 ${queue.length} 个" not in image_review_text,
+        "图片确认页统计必须使用同筛选条件的真实总数，不能把本次 limit 加载条数当待确认总数",
+    )
     stylesnap_text = (ROOT / "backend" / "app" / "services" / "amazon_stylesnap_search.py").read_text(encoding="utf-8")
     assert_true(
         "chrome_get_page_info" in stylesnap_text
@@ -529,6 +673,14 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
         and '"amazon.com/stylesnap" in url' in stylesnap_text
         and "timeout=3" in stylesnap_text,
         "StyleSnap 搜索在同一个 Chrome worker tab 中应优先复用已有页面/token，失效时再导航重新获取",
+    )
+    chrome_ctrl_text = (ROOT / "backend" / "app" / "pipeline" / "chrome_ctrl.py").read_text(encoding="utf-8")
+    assert_true(
+        "chrome_last_error" in chrome_ctrl_text
+        and "_chrome_js_permission_message" in stylesnap_text
+        and "允许 Apple 事件中的 JavaScript" in stylesnap_text
+        and "_chrome_js_disabled_error(chrome_last_error())" in stylesnap_text,
+        "StyleSnap 搜索必须区分 Chrome 导航失败和 Chrome 禁止 AppleScript JS；JS 权限关闭时要给用户准确操作提示",
     )
 
 
@@ -559,6 +711,11 @@ def test_product_pipeline_recovers_interrupted_competitor_capture() -> None:
 
 def test_competitor_review_queue_uses_workbench_status_scope() -> None:
     products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
+    product_detail_text = (ROOT / "frontend" / "src" / "pages" / "ProductDetail.tsx").read_text(encoding="utf-8")
+    competitor_review_text = (ROOT / "frontend" / "src" / "pages" / "ProductCompetitorReview.tsx").read_text(encoding="utf-8")
+    product_list_text = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
+    frontend_api_text = (ROOT / "frontend" / "src" / "api" / "index.ts").read_text(encoding="utf-8")
 
     assert_true(
         "COMPETITOR_REVIEW_ERROR_KEYWORDS" in products_api_text
@@ -572,24 +729,55 @@ def test_competitor_review_queue_uses_workbench_status_scope() -> None:
         and "| _competitor_search_failed_sql_condition()" in products_api_text,
         "选竞品队列必须使用与工作台同源的竞品失败 SQL 条件，不能另写一套较窄筛选",
     )
-
-
-def test_product_bulk_advance_runs_in_offline_task_queue() -> None:
-    products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
-    offline_tasks_text = (ROOT / "backend" / "app" / "services" / "offline_tasks.py").read_text(encoding="utf-8")
-    product_list_text = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
-
     assert_true(
-        '"product_bulk_advance"' in offline_tasks_text
-        and '"product_bulk_advance_product"' in offline_tasks_text
-        and "run_pipeline_tracked" in offline_tasks_text,
-        "批量推进商品必须作为任务中心 step 执行，不能只写审计记录后把真实 pipeline 丢到内存后台",
+        "competitorGroupMatchesProductDetail" in product_detail_text
+        and "competitorSourceImageForDetail" in product_detail_text
+        and "group.source_image_path || group.source_image_url" in product_detail_text
+        and "stylesnapSearchSourceMatchesCurrent" in product_detail_text
+        and "waitForCompetitorCandidateGroup" in product_detail_text
+        and "正在等待当前主图的候选写入" in product_detail_text
+        and "competitorGroupMatchesDetail" in competitor_review_text
+        and "competitorSourceImageForDetail" in competitor_review_text
+        and "waitForCandidates" in competitor_review_text,
+        "详情页和选竞品页重新搜索后必须按当前主图 source image 等候候选写入，不能只按 product id 复用旧候选缓存",
     )
     assert_true(
-        "schedule_offline_task(task.id)" in products_api_text
-        and "status=\"pending\"" in products_api_text
-        and "enqueue_pipeline(product_id, start_step=start_step)" not in products_api_text.split("async def _create_product_bulk_advance_task_for_ids", 1)[1].split("@router.post(\"/bulk-advance-task\"", 1)[0],
-        "product_bulk_advance 创建时必须入任务中心 pending 队列，不得直接 enqueue_pipeline",
+        "class ProductWorkflowState" in schemas_text
+        and "workflow: ProductWorkflowState | None = None" in schemas_text
+        and "def _workflow_state(" in products_api_text
+        and "A+ is intentionally excluded" in products_api_text
+        and '"workflow": workflow' in products_api_text
+        and "export interface ProductWorkflowState" in frontend_api_text
+        and "workflowStatusTag" in product_list_text
+        and "workflowAction = product.workflow?.primary_action" in product_list_text
+        and "if (product.workflow) return null" in product_list_text
+        and "workflowAllowedActions.includes('restart')" in product_list_text
+        and "workflowAllowedActions.includes('pause')" in product_list_text
+        and "系统状态" not in product_list_text
+        and "title: '系统状态'" not in product_list_text,
+        "商品列表主流程状态必须由后端 workflow 唯一提供，前端不能继续暴露系统技术状态列或自行推导主操作；A+ 不能混入主流程 workflow",
+    )
+
+
+def test_product_bulk_advance_runs_in_task_run_queue() -> None:
+    products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    bulk_planner_text = (ROOT / "backend" / "app" / "task_planners" / "product_bulk_advance.py").read_text(encoding="utf-8")
+    bulk_worker_text = (ROOT / "backend" / "app" / "task_runtime" / "product_bulk_advance_workers.py").read_text(encoding="utf-8")
+    product_list_text = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
+    bulk_endpoint_text = products_api_text.split('@router.post("/bulk-advance-task"', 1)[1].split('@router.get("/catalog"', 1)[0]
+
+    assert_true(
+        '"product_bulk_advance"' in bulk_planner_text
+        and '"product_bulk_advance_product"' in bulk_planner_text
+        and "register_worker(\"product_bulk_advance_product\"" in bulk_worker_text,
+        "批量推进商品必须作为新任务中心 step 执行，不能只写审计记录后把真实 pipeline 丢到内存后台",
+    )
+    assert_true(
+        "create_product_bulk_advance_run" in products_api_text
+        and "TaskRunResponse" in products_api_text
+        and "schedule_offline_task(task.id)" not in bulk_endpoint_text
+        and "enqueue_pipeline(product_id, start_step=start_step)" not in bulk_endpoint_text,
+        "product_bulk_advance 创建时必须入新任务中心队列，不得创建旧 offline task 或直接 enqueue_pipeline",
     )
     assert_true(
         "autoStartReadyGeneration" not in product_list_text,
@@ -609,9 +797,9 @@ def test_catalog_export_uses_snapshot_and_reuses_orphan_zip() -> None:
     offline_tasks_text = (ROOT / "backend" / "app" / "services" / "offline_tasks.py").read_text(encoding="utf-8")
 
     assert_true(
-        "商品再导出" in catalog_page_text
-        and "文件历史" in catalog_page_text
-        and "再次导出选中(${selectedIds.length})" in catalog_page_text
+        "商品列表" in catalog_page_text
+        and "已导出列表" in catalog_page_text
+        and "导出选中(${selectedIds.length})" in catalog_page_text
         and "请先勾选要导出的商品" in catalog_page_text
         and "exportView" in catalog_page_text
         and "isCatalogProductExported" in catalog_page_text
@@ -619,7 +807,7 @@ def test_catalog_export_uses_snapshot_and_reuses_orphan_zip() -> None:
         and "selectedIds.map(Number)" in catalog_page_text
         and "isProductListView ? (" in catalog_page_text
         and "disabled={exporting || currentLoading || exportDisabled}" in catalog_page_text,
-        "导出中心商品导出必须拆成商品再导出/文件历史；商品再导出用状态列区分待导出和已导出，并且创建任务只来自勾选商品；文件历史仍按文件维度展示",
+        "导出中心商品导出必须拆成商品列表/已导出列表；商品列表用状态列区分待导出和已导出，并且创建任务只来自勾选商品；已导出列表仍按文件维度展示",
     )
     assert_true(
         "_recover_catalog_export_result_from_file" in offline_tasks_text
@@ -627,6 +815,133 @@ def test_catalog_export_uses_snapshot_and_reuses_orphan_zip() -> None:
         and "glob(\"*.zip\")" in offline_tasks_text
         and "catalog_export_t{step.task_id}_s{step.id}.zip" in offline_tasks_text,
         "catalog_export step 重入时必须复用已有 zip/report 并使用稳定短文件名，避免生成未被任务 result 引用的孤儿 zip 或过长文件名",
+    )
+
+
+def test_export_listing_aplus_new_task_runtime_creation_paths() -> None:
+    products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    offline_api_text = (ROOT / "backend" / "app" / "api" / "offline_tasks.py").read_text(encoding="utf-8")
+    task_runs_api_text = (ROOT / "backend" / "app" / "api" / "task_runs.py").read_text(encoding="utf-8")
+    offline_tasks_text = (ROOT / "backend" / "app" / "services" / "offline_tasks.py").read_text(encoding="utf-8")
+    engine_text = (ROOT / "backend" / "app" / "pipeline" / "engine.py").read_text(encoding="utf-8")
+    scheduler_text = (ROOT / "backend" / "app" / "task_runtime" / "scheduler.py").read_text(encoding="utf-8")
+    catalog_export_worker_text = (ROOT / "backend" / "app" / "task_runtime" / "catalog_export_workers.py").read_text(encoding="utf-8")
+    catalog_page_text = (ROOT / "frontend" / "src" / "pages" / "CatalogList.tsx").read_text(encoding="utf-8")
+    frontend_api_text = (ROOT / "frontend" / "src" / "api" / "index.ts").read_text(encoding="utf-8")
+    task_run_center_text = (ROOT / "frontend" / "src" / "pages" / "TaskRunCenter.tsx").read_text(encoding="utf-8")
+
+    assert_true(
+        '"/catalog-export"' in task_runs_api_text
+        and "create_catalog_export_runs" in task_runs_api_text
+        and '"/aplus-generate"' in task_runs_api_text
+        and "create_aplus_generate_runs" in task_runs_api_text,
+        "导出文件和 A+ 生成的新创建入口必须暴露在 /api/task-runs 下，不能只留旧 offline task 入口",
+    )
+    assert_true(
+        "HTTPException(410" in offline_api_text
+        and "/api/task-runs/catalog-export" in offline_api_text,
+        "旧 /api/offline-tasks/catalog-export 创建入口必须停止创建旧任务，并明确提示迁移到新任务中心",
+    )
+    assert_true(
+        "createCatalogExportTaskRuns" in frontend_api_text
+        and "'/task-runs/catalog-export'" in frontend_api_text
+        and "'/offline-tasks/catalog-export'" not in frontend_api_text
+        and "createCatalogExportTaskRuns(ids)" in catalog_page_text,
+        "导出中心页面创建导出任务必须走 /task-runs/catalog-export，不能再提交旧 offline task",
+    )
+    assert_true(
+        "create_aplus_generate_runs" in products_api_text
+        and "create_aplus_generate_task(" not in products_api_text,
+        "A+ 页面/商品详情入口必须创建新 task_run，不能再创建旧 offline aplus_generate 任务",
+    )
+    assert_true(
+        '"/giga-inventory-sync"' in task_runs_api_text
+        and "create_giga_dynamic_sync_runs(db, body, kind=\"inventory\")" in task_runs_api_text
+        and '"/giga-price-sync"' in task_runs_api_text
+        and "create_giga_dynamic_sync_runs(db, body, kind=\"price\")" in task_runs_api_text,
+        "库存同步和价格同步的新创建入口必须暴露在 /api/task-runs 下",
+    )
+    assert_true(
+        "/api/task-runs/giga-inventory-sync" in offline_api_text
+        and "/api/task-runs/giga-price-sync" in offline_api_text
+        and "HTTPException(410" in offline_api_text,
+        "旧 /api/offline-tasks 库存/价格创建入口必须停止创建旧任务，并明确提示迁移到新任务中心",
+    )
+    assert_true(
+        "create_product_listing_runs" in products_api_text
+        and "create_product_listing_runs" in offline_tasks_text
+        and "Step5 图片分析和 Step6 Listing 已迁移到新任务中心" in engine_text,
+        "Listing 生成入口和批量推进 Step6 必须进入新任务中心，旧内存 pipeline 要拒绝 Step5/6",
+    )
+    product_actions_text = (ROOT / "backend" / "app" / "product_tasks" / "actions.py").read_text(encoding="utf-8")
+    image_planner_text = (ROOT / "backend" / "app" / "task_planners" / "product_image_analysis.py").read_text(encoding="utf-8")
+    listing_planner_text = (ROOT / "backend" / "app" / "task_planners" / "product_listing.py").read_text(encoding="utf-8")
+    product_detail_text = (ROOT / "frontend" / "src" / "pages" / "ProductDetail.tsx").read_text(encoding="utf-8")
+    assert_true(
+        "class ProductImageAnalysisAction" in product_actions_text
+        and "class ProductListingGenerationAction" in product_actions_text
+        and "create_product_action_runs" in product_actions_text
+        and "listing_task_run_ids" in product_actions_text
+        and "图片分析完成，已提交 Listing 生成" in product_actions_text,
+        "图片分析 task_run 成功后必须自动提交 Listing 生成任务，不能让商品停在图片分析已完成但页面只剩挂起",
+    )
+    assert_true(
+        "create_product_action_runs" in image_planner_text
+        and '"product_image_analysis"' in image_planner_text
+        and "create_product_action_runs" in listing_planner_text
+        and '"product_listing_generation"' in listing_planner_text
+        and "product.status = STEP6_CURATING" in product_actions_text
+        and "product.current_step = 5" in product_actions_text
+        and "图片分析已加入任务中心队列" in product_actions_text
+        and "product.status = STEP5_LISTING" in product_actions_text
+        and "product.current_step = 6" in product_actions_text
+        and "Listing 生成已加入任务中心队列" in product_actions_text,
+        "创建或复用图片分析/Listing task_run 必须通过 ProductTaskAction reserve 投影商品状态，不能继续在 planner/worker 中散落状态同步",
+    )
+    assert_true(
+        "PRODUCT_NON_RUNNING_STATUSES" in product_detail_text
+        and "'step6_done'" in product_detail_text
+        and "'step5_done'" in product_detail_text
+        and "canGenerateMissingListing" in product_detail_text
+        and "生成Listing" in product_detail_text,
+        "商品详情页不能把 done 状态当运行中；图片分析已完成但 Listing 未生成时必须露出生成 Listing 入口",
+    )
+    assert_true(
+        "_catalog_export_file_row_from_run" in products_api_text
+        and "task_source=\"task_run\"" in products_api_text
+        and "downloadTaskRunResult" in catalog_page_text
+        and "record.task_source === 'task_run'" in catalog_page_text,
+        "导出历史必须合并新 task_runs，并在前端按 task_source 分流下载/跳转",
+    )
+    assert_true(
+        "catalog_export: '导出文件'" in task_run_center_text
+        and "product_listing_generation: 'Listing 生成'" in task_run_center_text
+        and "aplus_generate: 'A+生成'" in task_run_center_text
+        and "giga_inventory_sync: 'GIGA 库存同步'" in task_run_center_text
+        and "giga_price_sync: 'GIGA 价格同步'" in task_run_center_text
+        and "product_bulk_advance: '批量提交生成'" in task_run_center_text
+        and "downloadTaskRunResult" in task_run_center_text,
+        "任务中心必须能识别 Listing、导出文件、A+、库存/价格同步、批量推进，并给导出文件提供下载入口",
+    )
+    assert_true(
+        "_catalog_export_fabric_type_values" in products_api_text
+        and 'dynamic_fields.get("fabric_type")' in products_api_text
+        and 'startswith("fabric_type[")' in products_api_text
+        and "100% MDF and Particle Board" in products_api_text,
+        "catalog_export 必须填充模板声明的 fabric_type 必填列，不能让 Required Fabric Type 空着",
+    )
+    assert_true(
+        "loop.call_later" in scheduler_text
+        and "_runner_handle" in scheduler_text,
+        "task runtime kick 必须延迟到响应发送后启动 worker，避免创建导出任务接口被同步 Excel 生成拖到超时",
+    )
+    assert_true(
+        "await asyncio.to_thread(load_workbook" in products_api_text
+        and "await asyncio.to_thread(_save_workbook_bytes" in products_api_text
+        and 'await asyncio.to_thread(archive.writestr, "导出报告.xlsx"' in products_api_text
+        and "await asyncio.to_thread(target_path.write_bytes" in catalog_export_worker_text
+        and "await asyncio.to_thread(upload_private_file" in catalog_export_worker_text,
+        "catalog_export 新任务执行期的 openpyxl/zip/OSS 同步重活必须移出主事件循环，避免导出期间拖死 health 和任务详情接口",
     )
 
 
@@ -669,11 +984,925 @@ def test_amazon_export_binds_upc_after_prechecks_and_rolls_back() -> None:
     )
 
 
+def test_tiktok_sales_channel_keeps_giga_source_and_uses_warehouse_inventory() -> None:
+    data_sources_api = (ROOT / "backend" / "app" / "api" / "data_sources.py").read_text(encoding="utf-8")
+    tiktok_api = (ROOT / "backend" / "app" / "api" / "tiktok.py").read_text(encoding="utf-8")
+    product_list = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
+    image_review = (ROOT / "frontend" / "src" / "pages" / "ProductImageReview.tsx").read_text(encoding="utf-8")
+    competitor_review = (ROOT / "frontend" / "src" / "pages" / "ProductCompetitorReview.tsx").read_text(encoding="utf-8")
+
+    assert_true(
+        'VALID_PLATFORMS = {"giga"}' in data_sources_api
+        and 'VALID_SALES_CHANNELS = {"amazon", "tiktok"}' in data_sources_api
+        and "_normalize_sales_channel" in data_sources_api,
+        "TikTok 店铺必须通过 sales_channel 表达，不能把 product_data_sources.platform 从 GIGA 来源平台改成销售渠道",
+    )
+    assert_true(
+        "seller_inventory_distribution" in tiktok_api
+        and "TIKTOK_FIXED_SHIPPING_FEE = 50.0" in tiktok_api
+        and "calculate_tiktok_price" in tiktok_api
+        and "catalog_export" not in tiktok_api,
+        "TikTok 详情/导出前置数据必须使用 GIGA 分仓库存和固定 50 运费，不能混用 Amazon catalog_export",
+    )
+    assert_true(
+        "isTikTokSource" in product_list
+        and "/tiktok/products/${productId}" in product_list
+        and "Amazon 竞品、Listing、批量推进入口已隐藏" in product_list,
+        "商品列表必须按销售渠道分流 TikTok 详情，并隐藏 Amazon 专属操作",
+    )
+    assert_true(
+        "sales_channel: 'amazon'" in image_review
+        and "sales_channel: 'amazon'" in competitor_review,
+        "图片确认和选竞品队列只能加载 Amazon 渠道店铺，TikTok 店铺不能进入 Amazon pipeline 队列",
+    )
+
+
+def test_giga_pull_tasks_expose_live_sku_progress_without_group_closure_during_pull() -> None:
+    giga_openapi = (ROOT / "backend" / "app" / "services" / "giga_openapi.py").read_text(encoding="utf-8")
+    offline_tasks = (ROOT / "backend" / "app" / "services" / "offline_tasks.py").read_text(encoding="utf-8")
+    task_center = (ROOT / "frontend" / "src" / "pages" / "OfflineTaskCenter.tsx").read_text(encoding="utf-8")
+
+    assert_true(
+        "GigaProgressCallback" in giga_openapi
+        and "progress_callback" in giga_openapi
+        and "_extract_total_count" in giga_openapi,
+        "GIGA 拉品必须支持进度回调并提取远端 SKU 总量，不能让任务中心停在 0/0",
+    )
+    assert_true(
+        "fetching_sku_list" in giga_openapi
+        and "fetching_sku_details" in giga_openapi
+        and "fetching_prices" in giga_openapi
+        and "fetching_inventory" in giga_openapi
+        and "writing_sku_snapshot" in giga_openapi
+        and "aggregating_items" in giga_openapi,
+        "GIGA 拉品 live summary 必须覆盖 SKU 列表、详情、价格、库存、写 snapshot 和统一聚合阶段",
+    )
+    assert_true(
+        giga_openapi.index("aggregating_items") < giga_openapi.index("groups = _build_item_groups"),
+        "item/group 聚合必须放在 SKU 同步完成后统一执行，不能在拉列表分页阶段做闭包",
+    )
+    assert_true(
+        "scanned_sku_count" in giga_openapi
+        and "synced_sku_count" in giga_openapi
+        and "detail_count" in giga_openapi
+        and "price_count" in giga_openapi
+        and "inventory_count" in giga_openapi
+        and "image_url_count" in giga_openapi
+        and "skipped_existing_count" in giga_openapi,
+        "GIGA 拉品任务必须暴露 SKU 同步口径统计，不能只显示步骤成功数",
+    )
+    assert_true(
+        "result_json" in offline_tasks
+        and '"live": live' in offline_tasks
+        and "step.updated_at = datetime.now()" in offline_tasks
+        and "task.updated_at = step.updated_at" in offline_tasks,
+        "offline task 执行中必须写 live result 并刷新 step/task updated_at 作为心跳",
+    )
+    assert_true(
+        "isStaleRunning" in task_center
+        and "疑似卡住" in task_center
+        and "总量统计中" in task_center
+        and "liveResult" in task_center
+        and "扫描SKU" in task_center,
+        "任务中心必须展示 GIGA 拉品专属进度、未知总量和疑似卡住状态",
+    )
+
+
+def test_task_runtime_v1_uses_new_tables_and_keeps_old_offline_tasks_compatibility() -> None:
+    models_text = (ROOT / "backend" / "app" / "models" / "models.py").read_text(encoding="utf-8")
+    database_text = (ROOT / "backend" / "app" / "database.py").read_text(encoding="utf-8")
+    spec_text = (ROOT / "docs" / "superpowers" / "specs" / "2026-06-13-task-runtime-giga-pull-design.md").read_text(encoding="utf-8")
+    task_runs_api = (ROOT / "backend" / "app" / "api" / "task_runs.py").read_text(encoding="utf-8")
+    offline_tasks_api = (ROOT / "backend" / "app" / "api" / "offline_tasks.py").read_text(encoding="utf-8")
+    runtime_scheduler = (ROOT / "backend" / "app" / "task_runtime" / "scheduler.py").read_text(encoding="utf-8")
+    giga_workers = (ROOT / "backend" / "app" / "task_runtime" / "giga_pull_workers.py").read_text(encoding="utf-8")
+    giga_planner = (ROOT / "backend" / "app" / "task_planners" / "giga_pull.py").read_text(encoding="utf-8")
+    frontend_api = (ROOT / "frontend" / "src" / "api" / "index.ts").read_text(encoding="utf-8")
+    product_list = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
+    task_run_center_text = (ROOT / "frontend" / "src" / "pages" / "TaskRunCenter.tsx").read_text(encoding="utf-8")
+    main_layout = (ROOT / "frontend" / "src" / "components" / "MainLayout.tsx").read_text(encoding="utf-8")
+    inventory_page = (ROOT / "frontend" / "src" / "pages" / "InventorySyncList.tsx").read_text(encoding="utf-8")
+    task_actions = (ROOT / "backend" / "app" / "task_runtime" / "actions.py").read_text(encoding="utf-8")
+    product_actions = (ROOT / "backend" / "app" / "product_tasks" / "actions.py").read_text(encoding="utf-8")
+    main_text = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+
+    assert_true(
+        'class TaskRun(Base):' in models_text
+        and 'class TaskGroup(Base):' in models_text
+        and 'class TaskStep(Base):' in models_text
+        and 'class TaskStepEvent(Base):' in models_text,
+        "新任务调度框架 V1 必须使用 task_runs/task_groups/task_steps/task_step_events 新模型，不能继续硬扩旧 offline_tasks",
+    )
+    assert_true(
+        "dedupe_key" in models_text
+        and "correlation_key" in models_text
+        and "superseded_by_run_id" in models_text
+        and "cancel_requested_at" in models_text
+        and "_ensure_mysql_task_run_action_columns" in database_text,
+        "task_runs 必须具备 PRD 要求的 dedupe/correlation/superseded/cancel 字段，并通过 MySQL 启动期 schema 补齐",
+    )
+    assert_true(
+        "class TaskAction" in task_actions
+        and "register_action" in task_actions
+        and "TaskRunPlan" in task_actions
+        and "class ProductImageAnalysisAction" in product_actions
+        and "class ProductListingGenerationAction" in product_actions
+        and "Product.status = step" not in task_actions,
+        "商品相关任务必须改成 ProductTaskAction，任务框架层不能硬编码商品状态",
+    )
+    assert_true(
+        "backfill_product_action_task_run_keys" in product_actions
+        and "This is product-domain compatibility" in product_actions
+        and "await backfill_product_action_task_run_keys(db)" in main_text
+        and "superseded_by_run_id = ordered[index + 1].id" in product_actions,
+        "历史 ProductTaskAction task_run 必须由商品域 backfill 补齐 dedupe/correlation/superseded 元数据，不能继续让旧失败任务停在当前页可重试",
+    )
+    assert_true(
+        "display_status" in task_runs_api
+        and "display_status_label" in task_runs_api
+        and "available_actions" in task_runs_api
+        and "superseded_by_run_id" in task_runs_api
+        and "已就绪，等待执行器领取" in task_runs_api
+        and "该任务已被 #" in task_runs_api
+        and '"/{run_id}/wake"' in task_runs_api
+        and '"/{run_id}/cancel"' in task_runs_api
+        and '"/{run_id}/mark-interrupted"' in task_runs_api,
+        "任务中心 API 必须派生 display/action 字段，ready step 显示 queued，并禁止 superseded 历史任务继续重试",
+    )
+    assert_true(
+        'conn.dialect.name not in {"mysql", "mariadb"}' in database_text
+        and "fbm-pipeline now requires MySQL" in database_text
+        and "PRAGMA table_info" not in database_text
+        and "CREATE TABLE IF NOT EXISTS" not in database_text,
+        "数据库初始化必须是 MySQL-only，不能保留本地文件数据库 fallback 或手写建表分支",
+    )
+    assert_true(
+        "ix_task_runs_type_status_id" in database_text
+        and "ix_task_groups_run_order" in database_text
+        and "ix_task_steps_run_group_order" in database_text
+        and "ix_task_steps_ready_claim" in database_text
+        and "ix_task_step_events_run_created" in database_text,
+        "新任务调度框架 V1 必须通过 MySQL ensure index 支持列表、组顺序、ready claim 和 events 查询",
+    )
+    assert_true(
+        "backend/app/services/offline_tasks.py" in spec_text
+        and "其它离线任务" in spec_text
+        and "暂时继续走旧 `offline_tasks` 框架" in spec_text,
+        "旧 offline_tasks 框架必须保留给未迁移任务，GIGA 拉品新框架不能破坏库存/价格/A+/导出/批量推进",
+    )
+    assert_true(
+        "plan\n  -> details chunks\n  -> inventory chunks\n  -> price chunks\n  -> finalize\n  -> aggregate\n  -> materialize" in spec_text
+        and "不做 item/group 闭包聚合" in spec_text
+        and "这里才处理关联 SKU / 变体聚合" in spec_text,
+        "GIGA 拉品 V1 必须保持先 SKU snapshot 后统一聚合，不能在拉取 chunk 阶段做 item/group closure",
+    )
+    assert_true(
+        'APIRouter(prefix="/api/task-runs"' in task_runs_api
+        and '"/giga-pull"' in task_runs_api
+        and "create_giga_pull_runs" in task_runs_api
+        and '"/giga-pull"' not in offline_tasks_api,
+        "GIGA 拉品创建入口必须迁移到 /api/task-runs/giga-pull，不能继续从旧 /api/offline-tasks/giga-pull 创建",
+    )
+    assert_true(
+        "TaskStep.status == STEP_STATUS_READY" in runtime_scheduler
+        and "locked_by=worker_id" in runtime_scheduler
+        and "locked_until=now + timedelta" in runtime_scheduler
+        and "recover_task_runtime" in runtime_scheduler
+        and "retry_step" in runtime_scheduler
+        and "_runner_lock" in runtime_scheduler,
+        "新 runtime 必须使用 DB ready claim、锁/心跳、过期 running 恢复、失败 step 重跑，并保持串行 drain",
+    )
+    assert_true(
+        "giga_pull_plan" in giga_workers
+        and "giga_pull_detail_chunk" in giga_workers
+        and "giga_pull_inventory_chunk" in giga_workers
+        and "giga_pull_price_chunk" in giga_workers
+        and "giga_pull_finalize_snapshot" in giga_workers
+        and "giga_pull_aggregate_items" in giga_workers
+        and "giga_pull_materialize_products" in giga_workers,
+        "GIGA 拉品 V1 workers 必须拆成 plan/details/inventory/prices/finalize/aggregate/materialize",
+    )
+    assert_true(
+        giga_workers.index("async def giga_pull_aggregate_items") < giga_workers.index("groups = _build_item_groups")
+        and "groups = _build_item_groups" not in giga_workers[:giga_workers.index("async def giga_pull_aggregate_items")],
+        "item/group 聚合只能出现在 aggregate step，details/inventory/prices 拉取阶段不能做闭包聚合",
+    )
+    assert_true(
+        "download_giga_product_images" not in giga_workers
+        and "build_pending_giga_product_image_rows" in giga_workers
+        and "download_images" not in giga_planner,
+        "GIGA 拉品 V1 不允许全量下载图片，只能保存图片 URL 候选",
+    )
+    assert_true(
+        "if not sku_codes:" in giga_workers
+        and '"status": "noop"' in giga_workers
+        and '"skipped_existing_count": skipped_existing_count' in giga_workers
+        and '"sku_count": 0' in giga_workers
+        and "group.status = RUN_STATUS_SUCCEEDED" in giga_workers
+        and "batch.status = \"done\"" in giga_workers,
+        "GIGA 拉品 V1 必须显式处理全部 SKU 已存在的 0 chunk/no-op 场景，不能让空 group 永久 pending",
+    )
+    assert_true(
+        "'/task-runs/giga-pull'" in frontend_api
+        and "'/offline-tasks/giga-pull'" not in frontend_api
+        and "navigate('/task-runs')" in product_list
+        and "listTaskRuns({ task_type: 'giga_pull'" in product_list,
+        "商品列表发起 GIGA 拉品必须进入新任务中心，不能再提交旧 offline task",
+    )
+    assert_true(
+        "key: '/offline-tasks'" not in main_layout
+        and "label: '新任务中心'" not in main_layout
+        and "label: '任务中心'" in main_layout
+        and "createGigaInventorySyncTaskRuns" in inventory_page
+        and "createGigaPriceSyncTaskRuns" in inventory_page
+        and "navigate('/offline-tasks')" not in inventory_page,
+        "主导航只能保留一个任务中心，库存/价格同步页面必须创建新 task_runs 并跳转 /task-runs",
+    )
+    assert_true(
+        "displayStatusTag" in task_run_center_text
+        and "record.display_status_label" in task_run_center_text
+        and "record.display_reason" in task_run_center_text
+        and "record.available_actions" in task_run_center_text
+        and "wakeTaskRun" in task_run_center_text
+        and "cancelTaskRun" in task_run_center_text
+        and "markTaskRunInterrupted" in task_run_center_text
+        and "重跑失败" not in task_run_center_text
+        and "等待规划" not in task_run_center_text,
+        "任务中心前端必须消费后端 display_status/available_actions，不得继续用底层 status/summary_json 自行拼主状态和旧文案",
+    )
+    assert_true(
+        "display_status == \"cancel_requested\"" in task_runs_api
+        and "仅在详情诊断中展示" in task_runs_api
+        and "base_total_result = await db.execute(base_count_query)" in task_runs_api
+        and "filtered_total=filtered_total" in task_runs_api
+        and "scan_query" not in task_runs_api
+        and "filtered_responses" not in task_runs_api
+        and "step_key_superseded" not in task_runs_api,
+        "任务中心 list API 的 display_status 筛选必须 SQL 化并保留 base_total/filtered_total；stale_running/waiting_dependency/planned 只能作为详情诊断态，列表必须明确拒绝",
+    )
+    task_runs_list_filter_section = task_runs_api.split("def _superseded_sql_condition", 1)[1].split("def _step_response", 1)[0]
+    assert_true(
+        "exists(" not in task_runs_list_filter_section
+        and "_running_step_exists" not in task_runs_list_filter_section
+        and "_ready_step_exists" not in task_runs_list_filter_section
+        and "_pending_step_exists" not in task_runs_list_filter_section
+        and "_no_steps_exist" not in task_runs_list_filter_section,
+        "任务中心列表筛选必须依赖 task_runs 已落表字段，不能保留 correlated EXISTS/NOT EXISTS 或 step 子查询 helper",
+    )
+    assert_true(
+        "TaskRun.status.in_((RUN_STATUS_SUCCEEDED, RUN_STATUS_CANCELED))" in task_runs_api,
+        "任务中心 history 默认视图必须使用轻量终态/superseded 条件，避免小数据量历史页出现十几秒级延迟",
+    )
+    superseded_sql_section = task_runs_api.split("def _superseded_sql_condition", 1)[1].split("def _apply_condition", 1)[0]
+    assert_true(
+        "superseded_by_run_id.is_not(None)" in superseded_sql_section
+        and "EXISTS" not in superseded_sql_section.upper()
+        and "correlation_key" not in superseded_sql_section,
+        "任务中心列表不能用 correlation_key 自关联实时推断 superseded；必须依赖写入/回填好的 superseded_by_run_id",
+    )
+    terminal_sql_section = task_runs_api.split("def _terminal_base_condition", 1)[1].split("def _canceled_sql_condition", 1)[0]
+    assert_true(
+        "TaskRun.status == status" in terminal_sql_section
+        and "_running_step_exists" not in terminal_sql_section
+        and "_ready_step_exists" not in terminal_sql_section
+        and "_pending_step_exists" not in terminal_sql_section
+        and "_cancel_requested_sql_condition" not in terminal_sql_section,
+        "任务中心 succeeded/failed/interrupted/paused 等终态筛选必须直接读 task_runs.status，不能为了终态列表再查 task_steps",
+    )
+    list_task_runs_section = task_runs_api.split("async def list_task_runs", 1)[1].split('@router.post("/giga-pull"', 1)[0]
+    assert_true(
+        "selectinload(" not in list_task_runs_section
+        and "_load_runs_for_lineage" not in list_task_runs_section,
+        "任务中心主列表必须是 task_runs 单表查询；step/group/event 关联数据只允许详情页读取",
+    )
+    assert_true(
+        "page_size: targetPageSize" in task_run_center_text
+        and "setTotal(data.total)" in task_run_center_text
+        and "useCallback" in task_run_center_text
+        and "detailsRef.current" in task_run_center_text
+        and "initialViewFromParams(searchParams)" in task_run_center_text
+        and "sanitizeDisplayStatusParam(searchParams.get('display_status'))" in task_run_center_text
+        and "searchParams.get('task_type')" in task_run_center_text
+        and "{ value: 'stale_running'" not in task_run_center_text
+        and "showTotal: (value) => `共 ${value} 条`" in task_run_center_text
+        and "pagination={false}" not in task_run_center_text.split("<Table", 1)[1].split("columns={[", 1)[0],
+        "任务中心主表必须接入后端分页和 total，轮询必须使用最新筛选/分页参数；URL 初始化 display_status 必须清理不支持的诊断态，前端不能展示 stale_running 列表筛选",
+    )
+
+
+def test_task_run_display_status_behaviour_for_current_view() -> None:
+    spec = importlib.util.spec_from_file_location(
+        "task_runtime_display",
+        ROOT / "backend" / "app" / "task_runtime" / "display.py",
+    )
+    assert_true(spec is not None and spec.loader is not None, "必须能加载 task_runtime display helper")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    task_run_matches_display_filters = module.task_run_matches_display_filters
+
+    assert_true(
+        task_run_matches_display_filters(display_status="queued", view="current"),
+        "current view 必须保留 queued 当前任务",
+    )
+    assert_true(
+        not task_run_matches_display_filters(display_status="superseded", view="current"),
+        "current view 不能混入 superseded 历史任务",
+    )
+    assert_true(
+        task_run_matches_display_filters(display_status="superseded", view="history"),
+        "history view 必须能看到 superseded 历史任务",
+    )
+    assert_true(
+        not task_run_matches_display_filters(display_status="queued", view="history"),
+        "history view 不能混入 queued 当前任务",
+    )
+    assert_true(
+        task_run_matches_display_filters(display_status="failed", view="current", display_status_filter="failed"),
+        "display_status filter 必须保留匹配状态",
+    )
+    assert_true(
+        not task_run_matches_display_filters(display_status="failed", view="current", display_status_filter="queued"),
+        "display_status filter 必须过滤不匹配状态",
+    )
+
+
+def test_task_run_list_default_views_are_db_pageable() -> None:
+    spec = importlib.util.spec_from_file_location(
+        "task_runtime_display",
+        ROOT / "backend" / "app" / "task_runtime" / "display.py",
+    )
+    assert_true(spec is not None and spec.loader is not None, "必须能加载 task_runtime display helper")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    task_run_list_is_db_pageable = module.task_run_list_is_db_pageable
+
+    assert_true(
+        task_run_list_is_db_pageable(view="current", display_status_filter=None),
+        "task_runs 默认 current 视图必须走 DB 分页快路径，不能全表装饰后分页",
+    )
+    assert_true(
+        task_run_list_is_db_pageable(view="history", display_status_filter=None),
+        "task_runs history 无 display_status 时也应走 DB 分页快路径",
+    )
+    assert_true(
+        task_run_list_is_db_pageable(view="current", display_status_filter="failed"),
+        "failed 等页面常用状态筛选必须走 DB 分页快路径，不能扫描窗口后内存分页",
+    )
+    assert_true(
+        not task_run_list_is_db_pageable(view="current", display_status_filter="stale_running"),
+        "stale_running 本轮只能作为详情诊断态，不能被声明为列表 DB-pageable 筛选",
+    )
+    assert_true(
+        task_run_list_is_db_pageable(view="current", display_status_filter="cancel_requested"),
+        "cancel_requested 必须走 DB 分页，不能进入受控装饰/扫描路径",
+    )
+
+
+def test_task_run_shrink_route_rejects_diagnostic_list_filters() -> None:
+    models_text = (ROOT / "backend" / "app" / "models" / "models.py").read_text(encoding="utf-8")
+    database_text = (ROOT / "backend" / "app" / "database.py").read_text(encoding="utf-8")
+    task_runs_api = (ROOT / "backend" / "app" / "api" / "task_runs.py").read_text(encoding="utf-8")
+    scheduler_text = (ROOT / "backend" / "app" / "task_runtime" / "scheduler.py").read_text(encoding="utf-8")
+    main_text = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+    task_runtime_display = (ROOT / "backend" / "app" / "task_runtime" / "display.py").read_text(encoding="utf-8")
+
+    assert_true(
+        "display_status: Mapped" not in models_text
+        and "available_actions_json" not in models_text
+        and "projection_updated_at" not in models_text,
+        "本轮收缩路线不能继续把未验收 projection 字段挂到 TaskRun ORM；已存在物理列不在本轮 DROP",
+    )
+    assert_true(
+        "idx_task_runs_display_status_id" not in database_text
+        and "(\"display_status\", \"VARCHAR(40) NULL\")" not in database_text
+        and "(\"available_actions_json\", \"LONGTEXT NULL\")" not in database_text,
+        "本轮不能继续通过 schema ensure 扩大 task_runs display projection；也不能新增 display_status 列表筛选索引",
+    )
+    assert_true(
+        "TaskRun.display_status" not in task_runs_api
+        and "task_run_projection_from_fields" not in task_runs_api
+        and "refresh_task_run_projection" not in task_runs_api,
+        "任务中心列表/API 不能依赖未验收 projection route",
+    )
+    assert_true(
+        "refresh_task_run_projection" not in scheduler_text
+        and "backfill_task_run_display_projections" not in main_text
+        and "backfill_task_run_display_projections" not in task_runtime_display,
+        "本轮必须移除 scheduler projection persistence 和 startup projection backfill",
+    )
+
+    code = r'''
+from fastapi import HTTPException
+from app.api.task_runs import _display_status_sql_condition
+
+for value in ("stale_running", "waiting_dependency", "planned"):
+    try:
+        _display_status_sql_condition(value)
+    except HTTPException as exc:
+        assert exc.status_code == 400, (value, exc.status_code)
+        assert "仅在详情诊断" in str(exc.detail), (value, exc.detail)
+    else:
+        raise AssertionError(f"{value} must be rejected for list filtering")
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"诊断态列表筛选拒绝行为验证失败: {result.stderr or result.stdout}")
+
+
+def test_task_run_detail_keeps_stale_running_diagnostic_state() -> None:
+    code = r'''
+from datetime import datetime, timedelta
+from types import SimpleNamespace
+from app.api.task_runs import _run_display
+from app.task_runtime.constants import RUN_STATUS_RUNNING
+from app.task_runtime.constants import STEP_STATUS_RUNNING
+
+step = SimpleNamespace(
+    id=101,
+    sort_order=1,
+    status=STEP_STATUS_RUNNING,
+    step_type="giga_pull_detail_chunk",
+    error_message=None,
+    heartbeat_at=datetime.now() - timedelta(minutes=20),
+    locked_until=datetime.now() - timedelta(minutes=1),
+    progress_total=5,
+    progress_current=2,
+)
+run = SimpleNamespace(
+    id=11,
+    task_type="giga_pull",
+    title="stale detail run",
+    status=RUN_STATUS_RUNNING,
+    summary_json=None,
+    steps=[step],
+    groups=[],
+    dedupe_key=None,
+    correlation_key=None,
+    superseded_by_run_id=None,
+    cancel_requested_at=None,
+    created_at=None,
+)
+display = _run_display(run, superseded_by_run_id=None)
+assert display["display_status"] == "stale_running", display
+assert "wake_runtime" in display["available_actions"], display
+assert "mark_interrupted" in display["available_actions"], display
+assert "cancel" not in display["available_actions"], display
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"详情 stale_running 诊断态行为验证失败: {result.stderr or result.stdout}")
+
+
+def test_runtime_security_startup_p0_boundaries() -> None:
+    start_script = (ROOT / "scripts" / "start.sh").read_text(encoding="utf-8")
+    readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
+    env_example = (ROOT / "backend" / ".env.example").read_text(encoding="utf-8")
+    main_text = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+    config_text = (ROOT / "backend" / "app" / "config.py").read_text(encoding="utf-8")
+    database_text = (ROOT / "backend" / "app" / "database.py").read_text(encoding="utf-8")
+    aplus_upload = (ROOT / "backend" / "app" / "services" / "aplus_upload.py").read_text(encoding="utf-8")
+    step9_image = (ROOT / "backend" / "app" / "pipeline" / "step9_aplus_image.py").read_text(encoding="utf-8")
+    runtime_security_index = (ROOT / "docs" / "domain-index" / "runtime-security.md").read_text(encoding="utf-8")
+
+    assert_true(
+        'BACKEND_HOST="$(read_env BACKEND_HOST 127.0.0.1)"' in start_script
+        and 'FRONTEND_HOST="$(read_env FRONTEND_HOST 127.0.0.1)"' in start_script
+        and "--host 0.0.0.0" not in start_script
+        and "--host 0.0.0.0" not in readme_text,
+        "默认启动命令必须只监听 127.0.0.1，不能继续绑定 0.0.0.0",
+    )
+    assert_true(
+        "API_DEV_TOKEN" in config_text
+        and "def _is_local_client" in main_text
+        and "def _has_valid_dev_token" in main_text
+        and '@app.middleware("http")' in main_text
+        and "request.method.upper() not in SAFE_HTTP_METHODS" in main_text,
+        "mutating API 必须有本机访问或显式 dev token 边界，不能远程匿名写 .env/触发任务/文件操作",
+    )
+    assert_true(
+        "STARTUP_RUN_DB_MAINTENANCE: bool = False" in config_text
+        and "STARTUP_RUN_BACKFILLS: bool = False" in config_text
+        and "STARTUP_RECOVER_TASKS: bool = False" in config_text
+        and "STARTUP_KICK_TASK_RUNTIME: bool = False" in config_text
+        and "if settings.STARTUP_RUN_DB_MAINTENANCE:" in main_text
+        and "if settings.STARTUP_RUN_BACKFILLS:" in main_text
+        and "if settings.STARTUP_RECOVER_TASKS:" in main_text
+        and "if settings.STARTUP_KICK_TASK_RUNTIME:" in main_text
+        and "await conn.run_sync(Base.metadata.create_all)" in database_text,
+        "普通 API startup 不能默认 DDL/backfill/recover/kick；维护动作必须由显式配置开启",
+    )
+    assert_true(
+        "EXTERNAL_HTTP_VERIFY_TLS: bool = True" in config_text
+        and "EXTERNAL_HTTP_CA_BUNDLE" in config_text
+        and "def external_http_verify" in config_text
+        and "verify=False" not in config_text
+        and "verify=False" not in aplus_upload
+        and "verify=not settings.GPT_IMAGE_USE_LLM_API" not in step9_image
+        and "verify=settings.external_http_verify" in aplus_upload
+        and "verify=settings.external_http_verify" in step9_image,
+        "外部 token-bearing HTTP 请求必须默认 TLS verify on，不能默认 verify=False 或按 provider 关闭校验",
+    )
+    assert_true(
+        "IMAGE_PROXY_EXTRA_ROOTS" in config_text
+        and ".relative_to(" in main_text
+        and "Documents" not in main_text.split("_IMAGE_ROOTS", 1)[1].split("IMAGE_EXTENSIONS", 1)[0]
+        and 'Path("/tmp")' not in main_text
+        and "Access denied: path outside allowed roots" not in main_text,
+        "图片代理必须默认只开放业务目录/显式额外目录，结构化校验路径且不泄漏完整本机路径",
+    )
+    assert_true(
+        "API_DEV_TOKEN" in env_example
+        and "STARTUP_RUN_DB_MAINTENANCE=false" in env_example
+        and "EXTERNAL_HTTP_VERIFY_TLS=true" in env_example
+        and "IMAGE_PROXY_EXTRA_ROOTS=" in env_example
+        and "本地服务绑定" in runtime_security_index
+        and "STARTUP_RUN_DB_MAINTENANCE" in runtime_security_index,
+        "P0 安全/启动边界改动必须同步 .env.example 和 runtime-security 索引",
+    )
+
+
+def test_runtime_security_helpers_behaviour() -> None:
+    code = r'''
+from types import SimpleNamespace
+from pathlib import Path
+from app import main
+
+class Client:
+    def __init__(self, host):
+        self.host = host
+
+assert main._is_local_client(Client("127.0.0.1"))
+assert main._is_local_client(Client("::1"))
+assert not main._is_local_client(Client("192.168.1.10"))
+assert main._has_valid_dev_token(SimpleNamespace(headers={"X-FBM-Dev-Token": "secret"}), "secret")
+assert main._has_valid_dev_token(SimpleNamespace(headers={"Authorization": "Bearer secret"}), "secret")
+assert not main._has_valid_dev_token(SimpleNamespace(headers={}), "secret")
+assert not main._has_valid_dev_token(SimpleNamespace(headers={"X-FBM-Dev-Token": "bad"}), "secret")
+
+root = Path("/tmp/fbm-security-root").resolve()
+inside = root / "images" / "a.jpg"
+outside = Path("/tmp/fbm-security-root-evil/a.jpg").resolve()
+assert main._path_is_within_roots(inside, [root])
+assert not main._path_is_within_roots(outside, [root])
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"P0 security helper 行为验证失败: {result.stderr or result.stdout}")
+
+
+def test_failed_task_run_display_precedes_pending_steps() -> None:
+    code = r'''
+from types import SimpleNamespace
+from app.api.task_runs import _run_display
+from app.task_runtime.constants import RUN_STATUS_FAILED, STEP_STATUS_FAILED, STEP_STATUS_PENDING
+
+def step(id, order, status, err=None):
+    return SimpleNamespace(
+        id=id,
+        sort_order=order,
+        status=status,
+        step_type="giga_pull_detail_chunk",
+        error_message=err,
+        heartbeat_at=None,
+        locked_until=None,
+        progress_total=1,
+        progress_current=0,
+    )
+
+run = SimpleNamespace(
+    id=10,
+    task_type="giga_pull",
+    title="failed multi-step",
+    status=RUN_STATUS_FAILED,
+    summary_json=None,
+    steps=[step(1, 1, STEP_STATUS_FAILED, "boom"), step(2, 2, STEP_STATUS_PENDING)],
+    groups=[],
+    dedupe_key=None,
+    correlation_key=None,
+    superseded_by_run_id=None,
+    cancel_requested_at=None,
+    created_at=None,
+)
+display = _run_display(run, superseded_by_run_id=None)
+assert display["display_status"] == "failed", display
+assert "retry_failed_steps" in display["available_actions"], display
+assert "cancel" not in display["available_actions"], display
+assert display["error_summary"] == "boom", display
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"failed run 展示优先级行为验证失败: {result.stderr or result.stdout}")
+
+
+def test_task_run_creation_responses_reload_created_runs() -> None:
+    code = r'''
+import asyncio
+from types import SimpleNamespace
+from app.api import task_runs
+from app.task_runtime.constants import RUN_STATUS_PENDING, STEP_STATUS_READY
+
+def run(id, steps=None):
+    return SimpleNamespace(
+        id=id,
+        task_type="giga_pull",
+        title=f"run {id}",
+        status=RUN_STATUS_PENDING,
+        summary_json=None,
+        steps=steps or [],
+        groups=[],
+        dedupe_key=None,
+        correlation_key=None,
+        superseded_by_run_id=None,
+        cancel_requested_at=None,
+        created_at=None,
+    )
+
+async def main():
+    original_load = task_runs._load_run
+    async def fake_load_run(db, run_id):
+        return run(
+            run_id,
+            [
+                SimpleNamespace(
+                    id=100 + run_id,
+                    sort_order=1,
+                    status=STEP_STATUS_READY,
+                    step_type="giga_pull_plan",
+                    error_message=None,
+                    heartbeat_at=None,
+                    locked_until=None,
+                    progress_total=1,
+                    progress_current=0,
+                )
+            ],
+        )
+    task_runs._load_run = fake_load_run
+    try:
+        loaded = await task_runs._reload_created_runs_for_response(SimpleNamespace(), [run(7)])
+    finally:
+        task_runs._load_run = original_load
+    assert [item.id for item in loaded] == [7]
+    response = task_runs._run_response(loaded[0])
+    assert response.display_status == "queued", response
+    assert response.current_step_label == "规划 SKU", response
+
+asyncio.run(main())
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"创建任务响应 reload 行为验证失败: {result.stderr or result.stdout}")
+
+
+def test_product_action_backfill_updates_only_task_run_metadata() -> None:
+    code = r'''
+import asyncio
+from datetime import datetime, timedelta
+from app.models import TaskRun
+from app.product_tasks.actions import backfill_product_action_task_run_keys
+from app.task_runtime.constants import RUN_STATUS_FAILED, RUN_STATUS_INTERRUPTED, RUN_STATUS_SUCCEEDED
+from app.task_runtime.json_utils import json_dumps
+
+class FakeScalars:
+    def __init__(self, rows):
+        self.rows = rows
+    def all(self):
+        return self.rows
+
+class FakeResult:
+    def __init__(self, rows):
+        self.rows = rows
+    def scalars(self):
+        return FakeScalars(self.rows)
+
+class FakeDb:
+    def __init__(self, rows):
+        self.rows = rows
+        self.execute_count = 0
+        self.commit_count = 0
+        self.rollback_count = 0
+    async def execute(self, statement):
+        text = str(statement)
+        assert "task_runs" in text
+        assert "products" not in text.lower()
+        self.execute_count += 1
+        return FakeResult(self.rows)
+    async def commit(self):
+        self.commit_count += 1
+    async def rollback(self):
+        self.rollback_count += 1
+
+def make_run(id, task_type, product_id, status, *, superseded_by_run_id=None, offset=0):
+    return TaskRun(
+        id=id,
+        task_type=task_type,
+        title=f"run {id}",
+        status=status,
+        payload_json=json_dumps({"product_id": product_id}) if product_id else json_dumps({"note": "no product"}),
+        created_at=datetime(2026, 6, 17) + timedelta(minutes=offset),
+        superseded_by_run_id=superseded_by_run_id,
+    )
+
+async def main():
+    old_failed = make_run(1, "product_image_analysis", 101, RUN_STATUS_FAILED, offset=1)
+    later_failed = make_run(2, "product_image_analysis", 101, RUN_STATUS_FAILED, offset=2)
+    succeeded = make_run(3, "product_listing_generation", 202, RUN_STATUS_SUCCEEDED, offset=3)
+    later_interrupted = make_run(4, "product_listing_generation", 202, RUN_STATUS_INTERRUPTED, offset=4)
+    already_superseded = make_run(5, "product_image_analysis", 303, RUN_STATUS_FAILED, superseded_by_run_id=99, offset=5)
+    current_failed = make_run(6, "product_image_analysis", 303, RUN_STATUS_FAILED, offset=6)
+    no_product = make_run(7, "product_image_analysis", None, RUN_STATUS_FAILED, offset=7)
+    db = FakeDb([old_failed, later_failed, succeeded, later_interrupted, already_superseded, current_failed, no_product])
+
+    changed = await backfill_product_action_task_run_keys(db)
+
+    assert changed >= 8, changed
+    assert db.execute_count == 1
+    assert db.commit_count == 1
+    assert db.rollback_count == 0
+    assert old_failed.dedupe_key == "product_image_analysis:product:101"
+    assert old_failed.correlation_key == "product:101:image_analysis"
+    assert old_failed.superseded_by_run_id == later_failed.id
+    assert old_failed.superseded_at is not None
+    assert later_failed.superseded_by_run_id is None
+    assert succeeded.superseded_by_run_id is None
+    assert already_superseded.superseded_by_run_id == 99
+    assert no_product.dedupe_key is None
+    assert no_product.correlation_key is None
+    assert no_product.superseded_by_run_id is None
+
+asyncio.run(main())
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"ProductTaskAction backfill 行为验证失败: {result.stderr or result.stdout}")
+
+
+def test_product_task_action_reserve_states_are_not_marked_interrupted() -> None:
+    code = r'''
+from types import SimpleNamespace
+from app.api.products import _current_task_status, _workflow_state
+from app.models.status import STEP5_LISTING, STEP6_CURATING
+
+samples = [
+    (STEP6_CURATING, 5, "图片分析已加入任务中心队列", "image_analysis"),
+    (STEP5_LISTING, 6, "Listing 生成已加入任务中心队列", "listing_generation"),
+]
+
+for status, step, message, expected_stage in samples:
+    product = SimpleNamespace(
+        id=999999,
+        status=status,
+        current_step=step,
+        error_message=message,
+        competitor_asin="B000TEST",
+        catalog_item=None,
+    )
+    workflow = _workflow_state(product, catalog_exported=False)
+    assert workflow["stage"] == expected_stage, workflow
+    assert workflow["stage_status"] == "queued", workflow
+    assert workflow["primary_action"] == "open_task_center", workflow
+    assert workflow["primary_action"] != "retry", workflow
+    assert workflow["work_status"] != "interrupted", workflow
+    assert "中断" not in _current_task_status(product)
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"ProductTaskAction reserve workflow 入队态验证失败: {result.stderr or result.stdout}")
+
+
+def test_product_action_worker_does_not_project_failure_for_interrupted() -> None:
+    code = r'''
+import asyncio
+from types import SimpleNamespace
+from app.product_tasks import actions as product_actions
+from app.task_runtime.exceptions import TaskStepInterrupted
+
+class FakeDb:
+    def __init__(self):
+        self.rollback_count = 0
+    async def rollback(self):
+        self.rollback_count += 1
+
+class FakeAction:
+    def __init__(self):
+        self.failure_count = 0
+    async def execute_step(self, db, step, payload):
+        raise TaskStepInterrupted("worker interrupted")
+    async def on_step_success(self, db, step, result):
+        raise AssertionError("interrupted step must not enter success projection")
+    async def on_step_failure(self, db, step, error):
+        self.failure_count += 1
+
+async def main():
+    fake_action = FakeAction()
+    original_action_for = product_actions.action_for
+    product_actions.action_for = lambda _step_type: fake_action
+    db = FakeDb()
+    try:
+        ctx = SimpleNamespace(
+            db=db,
+            run=SimpleNamespace(cancel_requested_at=None),
+            group=SimpleNamespace(),
+            step=SimpleNamespace(step_type="product_image_analysis", payload_json="{}"),
+        )
+        try:
+            await product_actions.product_action_worker(ctx)
+        except TaskStepInterrupted:
+            pass
+        else:
+            raise AssertionError("TaskStepInterrupted must be propagated to scheduler")
+    finally:
+        product_actions.action_for = original_action_for
+    assert fake_action.failure_count == 0
+    assert db.rollback_count == 0
+
+asyncio.run(main())
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"TaskStepInterrupted 行为验证失败: {result.stderr or result.stdout}")
+
+
+def test_product_action_final_progress_failure_is_best_effort() -> None:
+    code = r'''
+import asyncio
+from types import SimpleNamespace
+from app.product_tasks import actions as product_actions
+
+class FakeDb:
+    def __init__(self):
+        self.rollback_count = 0
+    async def rollback(self):
+        self.rollback_count += 1
+
+async def main():
+    original_update = product_actions.update_step_progress
+    async def failing_update(*args, **kwargs):
+        raise RuntimeError("progress event write failed")
+    db = FakeDb()
+    product_actions.update_step_progress = failing_update
+    try:
+        await product_actions._best_effort_update_step_progress(
+            db,
+            SimpleNamespace(id=123),
+            current=1,
+            total=1,
+            message="done",
+            data={"product_id": 1},
+        )
+    finally:
+        product_actions.update_step_progress = original_update
+    assert db.rollback_count == 1
+
+asyncio.run(main())
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"最终 progress best-effort 行为验证失败: {result.stderr or result.stdout}")
+
+
 def main() -> int:
     tests = [
         test_category_conflict_only_overrides_conflict,
         test_template_mapping_changes_must_be_logged,
         test_real_asin_export_guard_is_present,
+        test_amazon_workflow_t1_fields_and_enums_exist,
+        test_product_detail_get_is_readonly_for_material_videos,
         test_inventory_update_template_exports_stock_only_by_sku,
         test_catalog_export_creation_keeps_business_reasons_in_task_report,
         test_asin_sync_uses_lingxing_product_code_for_upc,
@@ -688,9 +1917,25 @@ def main() -> int:
         test_offline_tasks_are_claimed_and_idempotent,
         test_product_pipeline_recovers_interrupted_competitor_capture,
         test_competitor_review_queue_uses_workbench_status_scope,
-        test_product_bulk_advance_runs_in_offline_task_queue,
+        test_product_bulk_advance_runs_in_task_run_queue,
         test_catalog_export_uses_snapshot_and_reuses_orphan_zip,
+        test_export_listing_aplus_new_task_runtime_creation_paths,
         test_amazon_export_binds_upc_after_prechecks_and_rolls_back,
+        test_tiktok_sales_channel_keeps_giga_source_and_uses_warehouse_inventory,
+        test_giga_pull_tasks_expose_live_sku_progress_without_group_closure_during_pull,
+        test_task_runtime_v1_uses_new_tables_and_keeps_old_offline_tasks_compatibility,
+        test_task_run_display_status_behaviour_for_current_view,
+        test_task_run_list_default_views_are_db_pageable,
+        test_task_run_shrink_route_rejects_diagnostic_list_filters,
+        test_task_run_detail_keeps_stale_running_diagnostic_state,
+        test_runtime_security_startup_p0_boundaries,
+        test_runtime_security_helpers_behaviour,
+        test_failed_task_run_display_precedes_pending_steps,
+        test_task_run_creation_responses_reload_created_runs,
+        test_product_action_backfill_updates_only_task_run_metadata,
+        test_product_task_action_reserve_states_are_not_marked_interrupted,
+        test_product_action_worker_does_not_project_failure_for_interrupted,
+        test_product_action_final_progress_failure_is_best_effort,
     ]
     for test in tests:
         test()

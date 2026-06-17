@@ -38,10 +38,25 @@ export interface Product {
   status: string;
   current_step: number;
   current_task_status?: string | null;
+  workflow?: ProductWorkflowState | null;
   error_message: string | null;
   leaf_category?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface ProductWorkflowState {
+  stage: string;
+  stage_status: string;
+  label: string;
+  work_status: string;
+  primary_action?: string | null;
+  primary_action_label?: string | null;
+  allowed_actions: string[];
+  action_reason?: string | null;
+  color: string;
+  related_task_run_id?: number | null;
+  related_correlation_key?: string | null;
 }
 
 export interface CatalogProduct {
@@ -309,6 +324,7 @@ export interface PaginatedCatalogProducts {
 
 export interface CatalogExportFile {
   task_id: number;
+  task_source: 'offline_task' | 'task_run' | string;
   task_status: string;
   title: string | null;
   filename: string | null;
@@ -564,6 +580,7 @@ export interface ProductDataSource {
   id: number;
   name: string;
   platform: string;
+  sales_channel: 'amazon' | 'tiktok' | string;
   site: string;
   country?: string | null;
   fulfillment_mode: string;
@@ -575,6 +592,50 @@ export interface ProductDataSource {
   inventory_mode: string;
   enabled: boolean;
   remark: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface TikTokWarehouseInventory {
+  warehouse_code: string;
+  quantity: number;
+}
+
+export interface TikTokProductSku {
+  sku_code: string;
+  item_code: string | null;
+  title: string | null;
+  main_image_url: string | null;
+  variation_attributes: Record<string, unknown>;
+  purchase_price: number | null;
+  shipping_fee: number;
+  tiktok_price: number | null;
+  warehouse_inventory: TikTokWarehouseInventory[];
+  warehouse_inventory_total: number;
+  missing_fields: string[];
+}
+
+export interface TikTokProductDetail {
+  id: number;
+  item_code: string | null;
+  title: string | null;
+  status: string;
+  source_status: string;
+  source_site: string | null;
+  source_batch_id: string | null;
+  data_source_id: number | null;
+  data_source_name: string | null;
+  sales_channel: string;
+  main_image_url: string | null;
+  gallery_images: Array<string | Record<string, unknown>>;
+  pricing_formula: {
+    shipping_fee: number;
+    buffer: number;
+    multiplier: number;
+    expression: string;
+  };
+  skus: TikTokProductSku[];
+  missing_fields: string[];
   created_at: string | null;
   updated_at: string | null;
 }
@@ -644,6 +705,132 @@ export interface OfflineTaskQueuedResult {
 export interface OfflineTaskBatchQueuedResult {
   tasks: OfflineTask[];
   errors: string[];
+}
+
+export interface TaskStepEvent {
+  id: number;
+  task_run_id: number;
+  task_group_id: number | null;
+  task_step_id: number | null;
+  event_type: string;
+  message: string | null;
+  data_json: string | null;
+  created_at: string | null;
+}
+
+export interface TaskStep {
+  id: number;
+  task_run_id: number;
+  task_group_id: number;
+  step_key: string;
+  step_type: string;
+  status: string;
+  sort_order: number;
+  payload_json: string | null;
+  result_json: string | null;
+  error_message: string | null;
+  progress_current: number;
+  progress_total: number;
+  attempt_count: number;
+  max_attempts: number;
+  locked_by: string | null;
+  locked_until: string | null;
+  heartbeat_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  events?: TaskStepEvent[];
+  step_label?: string | null;
+  display_status?: string | null;
+  display_status_label?: string | null;
+  display_reason?: string | null;
+  error_summary?: string | null;
+  available_actions?: string[];
+}
+
+export interface TaskGroup {
+  id: number;
+  task_run_id: number;
+  group_key: string;
+  title: string;
+  status: string;
+  sort_order: number;
+  depends_on_group_keys_json: string | null;
+  failure_policy: string;
+  retry_policy: string;
+  progress_current: number;
+  progress_total: number;
+  summary_json: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+  steps?: TaskStep[];
+  display_status?: string | null;
+  display_status_label?: string | null;
+  display_reason?: string | null;
+  error_summary?: string | null;
+  available_actions?: string[];
+}
+
+export interface TaskRun {
+  id: number;
+  task_type: string;
+  title: string;
+  status: string;
+  payload_json: string | null;
+  summary_json: string | null;
+  created_by: string | null;
+  task_type_label?: string | null;
+  object_type?: string | null;
+  object_id?: number | null;
+  object_label?: string | null;
+  dedupe_key?: string | null;
+  correlation_key?: string | null;
+  idempotency_key?: string | null;
+  source_ref?: string | null;
+  superseded_by_run_id?: number | null;
+  superseded_at?: string | null;
+  cancel_requested_at?: string | null;
+  cancel_requested_by?: string | null;
+  cancel_reason?: string | null;
+  display_status?: string | null;
+  display_status_label?: string | null;
+  display_reason?: string | null;
+  current_step_label?: string | null;
+  progress_current?: number;
+  progress_total?: number;
+  progress_percent?: number;
+  error_summary?: string | null;
+  latest_event_message?: string | null;
+  last_heartbeat_at?: string | null;
+  current_effective_run_id?: number | null;
+  available_actions?: string[];
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface TaskRunDetail extends TaskRun {
+  groups: TaskGroup[];
+}
+
+export interface PaginatedTaskRuns {
+  items: TaskRun[];
+  total: number;
+  base_total?: number | null;
+  filtered_total?: number | null;
+  is_limited?: boolean;
+  scan_limit?: number | null;
+  page: number;
+  page_size: number;
+}
+
+export interface TaskRunBatchQueuedResult {
+  runs: TaskRun[];
+  errors?: string[];
 }
 
 export interface AmazonStyleSnapCandidate {
@@ -1098,7 +1285,7 @@ export const STATUS_COLORS: Record<string, string> = {
 export const createProduct = (data: { gigab2b_url: string; competitor_asin?: string; upc?: string; brand?: string }) =>
   api.post<Product>('/products', data);
 
-export const listProducts = (params?: { page?: number; page_size?: number; status?: string; item_id?: string; sku_code?: string; data_source_id?: number; competitor_asin?: string; upc?: string; created_from?: string; created_to?: string }) =>
+export const listProducts = (params?: { page?: number; page_size?: number; status?: string; work_status?: string; item_id?: string; sku_code?: string; data_source_id?: number; competitor_asin?: string; upc?: string; created_from?: string; created_to?: string }) =>
   api.get<PaginatedProducts>('/products', { params });
 
 export const listProductImageReviewQueue = (params?: { data_source_id?: number; limit?: number }) =>
@@ -1132,7 +1319,7 @@ export const autoStartReadyGeneration = (params?: { data_source_id?: number; lim
   api.post<BulkStartResult>('/products/auto-start-ready-generation', null, { params, timeout: 120000 });
 
 export const createProductBulkAdvanceTask = (productIds: number[]) =>
-  api.post<OfflineTask>('/products/bulk-advance-task', { product_ids: productIds }, { timeout: 120000 });
+  api.post<TaskRun>('/products/bulk-advance-task', { product_ids: productIds }, { timeout: 120000 });
 
 export const createProductBulkAdvanceTaskByFilter = (params: {
   status?: string;
@@ -1145,7 +1332,7 @@ export const createProductBulkAdvanceTaskByFilter = (params: {
   created_to?: string;
   sku_keyword?: string;
   limit?: number;
-}) => api.post<OfflineTask>('/products/bulk-advance-task/by-filter', params, { timeout: 120000 });
+}) => api.post<TaskRun>('/products/bulk-advance-task/by-filter', params, { timeout: 120000 });
 
 export const getWorkbenchOverview = (params?: { data_source_id?: number }) =>
   api.get<WorkbenchOverview>('/products/overview', { params });
@@ -1206,8 +1393,8 @@ export const deleteCatalogTemplateFile = (fileId: string) =>
 export const downloadCatalogCategoryTemplate = (category: string) =>
   api.get<Blob>('/products/catalog/category-template-download', { params: { category }, responseType: 'blob', timeout: 300000 });
 
-export const createCatalogExportOfflineTasks = (ids: number[]) =>
-  api.post<OfflineTaskBatchQueuedResult>('/offline-tasks/catalog-export', { catalog_product_ids: ids }, { timeout: 30000 });
+export const createCatalogExportTaskRuns = (ids: number[]) =>
+  api.post<TaskRunBatchQueuedResult>('/task-runs/catalog-export', { catalog_product_ids: ids }, { timeout: 30000 });
 
 export const exportCatalogProducts = (ids: number[]) =>
   api.post<Blob>('/products/catalog/export', ids, { responseType: 'blob', timeout: 300000 });
@@ -1249,14 +1436,14 @@ export const syncMissingGigaProducts = (body: { site?: string; data_source_id: n
 export const syncMissingGigaProductsBackground = (body: { site?: string; data_source_id: number; task_id?: string | null; current_category?: string | null; page_size?: number | null; max_pages?: number | null }) =>
   api.post<GigaSyncQueuedResult>('/giga/sync-missing/background', body, { timeout: 30000 });
 
-export const createGigaPullOfflineTask = (body: { data_source_ids: number[]; current_category?: string | null; page_size?: number | null; max_pages?: number | null }) =>
-  api.post<OfflineTaskQueuedResult>('/offline-tasks/giga-pull', body, { timeout: 30000 });
+export const createGigaPullTaskRuns = (body: { data_source_ids: number[]; current_category?: string | null; page_size?: number | null; max_pages?: number | null }) =>
+  api.post<TaskRunBatchQueuedResult>('/task-runs/giga-pull', body, { timeout: 30000 });
 
-export const createGigaInventorySyncOfflineTask = (body: { data_source_ids: number[]; sku_codes?: string[] | null }) =>
-  api.post<OfflineTaskQueuedResult>('/offline-tasks/giga-inventory-sync', body, { timeout: 30000 });
+export const createGigaInventorySyncTaskRuns = (body: { data_source_ids: number[]; sku_codes?: string[] | null }) =>
+  api.post<TaskRunBatchQueuedResult>('/task-runs/giga-inventory-sync', body, { timeout: 30000 });
 
-export const createGigaPriceSyncOfflineTask = (body: { data_source_ids: number[]; sku_codes?: string[] | null }) =>
-  api.post<OfflineTaskQueuedResult>('/offline-tasks/giga-price-sync', body, { timeout: 30000 });
+export const createGigaPriceSyncTaskRuns = (body: { data_source_ids: number[]; sku_codes?: string[] | null }) =>
+  api.post<TaskRunBatchQueuedResult>('/task-runs/giga-price-sync', body, { timeout: 30000 });
 
 export const listOfflineTasks = (params?: { page?: number; page_size?: number; task_type?: string; status?: string; include_progress?: boolean }) =>
   api.get<PaginatedOfflineTasks>('/offline-tasks', { params });
@@ -1276,13 +1463,37 @@ export const resumeOfflineTask = (id: number) =>
 export const downloadOfflineTaskResult = (id: number) =>
   api.get<Blob>(`/offline-tasks/${id}/download`, { responseType: 'blob', timeout: 300000 });
 
+export const downloadTaskRunResult = (id: number) =>
+  api.get<Blob>(`/task-runs/${id}/download`, { responseType: 'blob', timeout: 300000 });
+
+export const listTaskRuns = (params?: { page?: number; page_size?: number; view?: string; display_status?: string; task_type?: string; status?: string; dedupe_key?: string; correlation_key?: string; q?: string }) =>
+  api.get<PaginatedTaskRuns>('/task-runs', { params });
+
+export const getTaskRun = (id: number) =>
+  api.get<TaskRunDetail>(`/task-runs/${id}`);
+
+export const retryFailedTaskRunSteps = (id: number) =>
+  api.post<TaskRunDetail>(`/task-runs/${id}/retry-failed`);
+
+export const retryTaskStep = (id: number) =>
+  api.post<TaskStep>(`/task-runs/steps/${id}/retry`);
+
+export const wakeTaskRun = (id: number) =>
+  api.post<TaskRunDetail>(`/task-runs/${id}/wake`);
+
+export const cancelTaskRun = (id: number, reason?: string) =>
+  api.post<TaskRunDetail>(`/task-runs/${id}/cancel`, { reason });
+
+export const markTaskRunInterrupted = (id: number, reason?: string) =>
+  api.post<TaskRunDetail>(`/task-runs/${id}/mark-interrupted`, { reason });
+
 export const listGigaItems = (params: { batch_id?: string; site?: string; data_source_id?: number; page?: number; page_size?: number; sku_code?: string }) =>
   api.get<PaginatedGigaItems>('/giga/items', { params });
 
 export const listGigaSkus = (params: { batch_id: string; site?: string; data_source_id?: number; item_code?: string; page?: number; page_size?: number }) =>
   api.get<PaginatedGigaSkus>('/giga/skus', { params });
 
-export const listProductDataSources = (params?: { page?: number; page_size?: number; platform?: string; site?: string; enabled?: boolean }) =>
+export const listProductDataSources = (params?: { page?: number; page_size?: number; platform?: string; sales_channel?: string; site?: string; enabled?: boolean }) =>
   api.get<PaginatedProductDataSources>('/product-data-sources', { params });
 
 export const createProductDataSource = (body: Partial<ProductDataSource> & { name: string; site: string; client_secret?: string | null }) =>
@@ -1293,6 +1504,9 @@ export const updateProductDataSource = (id: number, body: Partial<ProductDataSou
 
 export const deleteProductDataSource = (id: number) =>
   api.delete<ProductDataSource>(`/product-data-sources/${id}`);
+
+export const getTikTokProduct = (id: number | string) =>
+  api.get<TikTokProductDetail>(`/tiktok/products/${id}`);
 
 export const listGigaInventory = (params: { site: string; data_source_id?: number; page?: number; page_size?: number; sku_code?: string; availability_status?: string }) =>
   api.get<PaginatedGigaInventory>('/giga/inventory', { params });
@@ -1319,11 +1533,11 @@ export const searchProductCompetitorCandidates = (productId: number, force = fal
     { params: { force }, timeout: 60000 },
   );
 
-export const selectProductCompetitorCandidate = (productId: number, candidateId: number, forceCapture = false) =>
+export const selectProductCompetitorCandidate = (productId: number, candidateId: number, forceCapture = false, autoStartGeneration = true) =>
   api.post<AmazonStyleSnapCandidateGroup>(
     `/amazon-stylesnap/products/${productId}/competitor-candidates/${candidateId}/select`,
     null,
-    { params: { force_capture: forceCapture }, timeout: 180000 },
+    { params: { force_capture: forceCapture, auto_start_generation: autoStartGeneration }, timeout: 180000 },
   );
 
 export const retryProductCompetitorCandidateCapture = (productId: number, candidateId: number, force = true) =>

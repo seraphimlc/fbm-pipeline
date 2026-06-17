@@ -1,5 +1,7 @@
 # Main Flow User Path
 
+状态：历史用户路径/候选背景；当前页面入口和用户路径以 `docs/domain-index/frontend-pages.md`、`docs/domain-index/product-flow.md` 和代码为准。
+
 日期：2026-06-05
 Owner：清秋（agentKey: `qingqiu`）
 

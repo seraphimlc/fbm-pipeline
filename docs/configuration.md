@@ -1,5 +1,7 @@
 # Configuration Policy
 
+状态：候选事实源，待按 `docs/documentation-rewrite-brief.md` 重写；使用前必须对照 `docs/domain-index/runtime-security.md` 和当前代码核实。
+
 This project follows a simple rule: committed files contain safe defaults and examples only; real environment values live outside Git.
 
 ## Sources Of Truth

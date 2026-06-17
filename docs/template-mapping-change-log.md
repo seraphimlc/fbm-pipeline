@@ -9,6 +9,36 @@
 - 每条记录至少包含：日期、改动文件、涉及类目/模板、变更原因、验证命令和结果、后续注意事项。
 - 不要覆盖历史记录；只追加新条目。
 
+## 2026-06-14
+
+### Catalog Export 补齐模板必填 Fabric Type
+
+- 改动文件：
+  - `backend/app/api/products.py`
+  - `backend/app/task_runtime/scheduler.py`
+  - `scripts/test_project_rules.py`
+  - `docs/template-mapping-change-log.md`
+- 涉及类目/模板：
+  - `SHELF_TABLE_CABINET_ANIMAL_CAGE_TEMPORARY_GATE.xlsm`
+  - `Bookcases, Cabinets & Shelves`
+  - 其它在 mapping 或 Template 表头中包含 `fabric_type[...]` 字段的 Amazon 导入模板。
+- 变更原因：
+  - 观止实际打开新任务中心生成的 `catalog_export #9` 文件后，发现模板 `Data Definitions` 标记 Required 的 `fabric_type[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value` 在 `Template` 行为空。
+  - 样本 `W808P432003` 的商品材质事实为 `Particle Board+MDF`，导出不能让 Required 字段空白。
+- 主要行为：
+  - Catalog export 在复制已生成导入表行后，会检查当前模板 mapping 的 `dynamic_fields.fabric_type`；若 mapping 未声明但 Template 表头存在 `fabric_type[...]` 字段，也会按模板列补齐。
+  - 若 Listing 检查结果已有 `amazon_template_fields.fabric_type`，优先使用该值。
+  - 若没有模型语义值，则基于商品材质、Listing 标题/描述、供应商标题/描述生成单个事实型值；`Particle Board+MDF` 样本写为 `100% MDF and Particle Board`。
+  - 新任务 runtime 的 kick 改为短延迟启动 worker，先把创建任务响应返回给页面，降低导出创建 POST 被 Excel 生成拖到超时的概率。
+  - Step 6 Listing 已进入新任务中心队列时，商品状态文案不再误判为旧内存 pipeline 中断。
+- 验证：
+  - `cd backend && .venv/bin/python -m compileall -q app` 通过。
+  - `make test-project-rules` 通过。
+  - `git diff --check` 通过。
+- 后续注意：
+  - 本次未修改 `backend/app/pipeline/template_mappings/*.json`、`backend/app/pipeline/step10_amazon_template.py` 或模板文件。
+  - 仍需观止用页面重新创建一个小样本导出任务，打开实际 xlsm 核对 Required 字段；施工者不自行宣布 PASS。
+
 ## 2026-06-09
 
 ### Amazon 首次导入表 UPC 与下拉值保护
@@ -70,7 +100,7 @@
   - `backend/app/pipeline/step1_collect.py`
   - `README.md`
   - `docs/collaboration/topic-tree.md`
-  - `docs/codex-handoff-2026-06-05-export-rule-layer-and-workflow.md`
+  - 旧 handoff：`docs/codex-handoff-2026-06-05-export-rule-layer-and-workflow.md`（已在 docs cleanup 中删除，仅作历史记录）
   - `docs/collaboration/inbox.md`
   - `docs/template-mapping-change-log.md`
   - `scripts/test_project_rules.py`

@@ -17,6 +17,11 @@ const fulfillmentLabel = (mode: string) => {
   return <Tag>{mode}</Tag>;
 };
 
+const salesChannelLabel = (channel: string) => {
+  if (channel === 'tiktok') return <Tag color="magenta">TikTok</Tag>;
+  return <Tag color="blue">Amazon</Tag>;
+};
+
 const ProductDataSourceList: React.FC = () => {
   const [items, setItems] = useState<ProductDataSource[]>([]);
   const [loading, setLoading] = useState(false);
@@ -43,6 +48,7 @@ const ProductDataSourceList: React.FC = () => {
     setEditing(null);
     form.setFieldsValue({
       platform: 'giga',
+      sales_channel: 'amazon',
       site: 'US',
       fulfillment_mode: 'dropship',
       api_base: 'https://openapi.gigab2b.com',
@@ -115,7 +121,8 @@ const ProductDataSourceList: React.FC = () => {
         pagination={false}
         columns={[
           { title: '名称', dataIndex: 'name', width: 180 },
-          { title: '平台', dataIndex: 'platform', width: 90, render: (value: string) => <Tag>{value.toUpperCase()}</Tag> },
+          { title: '来源平台', dataIndex: 'platform', width: 100, render: (value: string) => <Tag>{value.toUpperCase()}</Tag> },
+          { title: '销售渠道', dataIndex: 'sales_channel', width: 110, render: salesChannelLabel },
           { title: '站点', dataIndex: 'site', width: 90 },
           { title: '履约方式', dataIndex: 'fulfillment_mode', width: 110, render: fulfillmentLabel },
           { title: 'AK', dataIndex: 'client_id', ellipsis: true, render: (value: string | null) => value || '-' },
@@ -141,7 +148,7 @@ const ProductDataSourceList: React.FC = () => {
             ),
           },
         ]}
-        scroll={{ x: 960 }}
+        scroll={{ x: 1040 }}
       />
 
       <Modal
@@ -160,8 +167,16 @@ const ProductDataSourceList: React.FC = () => {
             <Input placeholder="例如：大健美国代发货" />
           </Form.Item>
           <Space style={{ width: '100%' }} size={12}>
-            <Form.Item label="平台" name="platform" style={{ flex: 1 }} rules={[{ required: true }]}>
+            <Form.Item label="来源平台" name="platform" style={{ flex: 1 }} rules={[{ required: true }]}>
               <Select options={[{ value: 'giga', label: 'GIGA 大健云仓' }]} />
+            </Form.Item>
+            <Form.Item label="销售渠道" name="sales_channel" style={{ flex: 1 }} rules={[{ required: true }]}>
+              <Select
+                options={[
+                  { value: 'amazon', label: 'Amazon' },
+                  { value: 'tiktok', label: 'TikTok' },
+                ]}
+              />
             </Form.Item>
             <Form.Item label="站点" name="site" style={{ flex: 1 }} rules={[{ required: true }]}>
               <Select options={[{ value: 'US', label: 'US' }, { value: 'JP', label: 'JP' }]} />

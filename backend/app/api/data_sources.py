@@ -17,6 +17,7 @@ from app.models import GigaSyncBatch, ProductDataSource
 router = APIRouter(prefix="/api/product-data-sources", tags=["product-data-sources"])
 
 VALID_PLATFORMS = {"giga"}
+VALID_SALES_CHANNELS = {"amazon", "tiktok"}
 VALID_FULFILLMENT_MODES = {"self_ship", "dropship"}
 
 
@@ -32,6 +33,13 @@ def _normalize_platform(value: str | None) -> str:
     if platform not in VALID_PLATFORMS:
         raise HTTPException(400, f"暂不支持的店铺平台: {platform}")
     return platform
+
+
+def _normalize_sales_channel(value: str | None) -> str:
+    sales_channel = (value or "amazon").strip().lower()
+    if sales_channel not in VALID_SALES_CHANNELS:
+        raise HTTPException(400, f"暂不支持的销售渠道: {sales_channel}")
+    return sales_channel
 
 
 def _validate_choice(value: str, allowed: set[str], label: str) -> str:
@@ -83,6 +91,7 @@ def _to_response(source: ProductDataSource) -> ProductDataSourceResponse:
         id=source.id,
         name=source.name,
         platform=source.platform or "giga",
+        sales_channel=source.sales_channel or "amazon",
         site=source.site,
         country=source.country or source.site,
         fulfillment_mode=fulfillment_mode,
@@ -104,6 +113,7 @@ async def list_product_data_sources(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=200),
     platform: str | None = None,
+    sales_channel: str | None = None,
     site: str | None = None,
     enabled: bool | None = None,
     db: AsyncSession = Depends(get_db),
@@ -114,6 +124,10 @@ async def list_product_data_sources(
         normalized_platform = _normalize_platform(platform)
         query = query.where(ProductDataSource.platform == normalized_platform)
         count_query = count_query.where(ProductDataSource.platform == normalized_platform)
+    if sales_channel:
+        normalized_sales_channel = _normalize_sales_channel(sales_channel)
+        query = query.where(ProductDataSource.sales_channel == normalized_sales_channel)
+        count_query = count_query.where(ProductDataSource.sales_channel == normalized_sales_channel)
     if site:
         normalized_site = _normalize_site(site)
         query = query.where(ProductDataSource.site == normalized_site)
@@ -141,6 +155,7 @@ async def create_product_data_source(body: ProductDataSourceCreate, db: AsyncSes
         raise HTTPException(400, f"店铺名称已存在: {name}")
 
     platform = _normalize_platform(body.platform)
+    sales_channel = _normalize_sales_channel(body.sales_channel)
     site = _normalize_site(body.site)
     fulfillment_mode = _validate_choice(body.fulfillment_mode, VALID_FULFILLMENT_MODES, "履约方式")
     shipping_cost_mode = _shipping_mode_for_fulfillment(fulfillment_mode)
@@ -160,6 +175,7 @@ async def create_product_data_source(body: ProductDataSourceCreate, db: AsyncSes
     source = ProductDataSource(
         name=name,
         platform=platform,
+        sales_channel=sales_channel,
         site=site,
         country=site,
         fulfillment_mode=fulfillment_mode,
@@ -201,6 +217,8 @@ async def update_product_data_source(
         source.name = name
     if body.platform is not None:
         source.platform = _normalize_platform(body.platform)
+    if body.sales_channel is not None:
+        source.sales_channel = _normalize_sales_channel(body.sales_channel)
     if body.site is not None:
         source.site = _normalize_site(body.site)
     if body.fulfillment_mode is not None:

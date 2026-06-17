@@ -371,7 +371,7 @@ async def _submit_reference_generations(prompt: str, ref_sources: list[str], qua
     last_error = ""
     rate_limit_count = 0
     retries = max(settings.APLUS_IMAGE_API_RETRIES, 1)
-    async with httpx.AsyncClient(timeout=300, verify=not settings.GPT_IMAGE_USE_LLM_API) as http:
+    async with httpx.AsyncClient(timeout=300, verify=settings.external_http_verify) as http:
         for attempt in range(1, retries + 1):
             attempt_started = time.monotonic()
             try:
@@ -431,7 +431,7 @@ async def _submit_reference_edits(prompt: str, ref_sources: list[str], width: in
     last_error = ""
     rate_limit_count = 0
     retries = max(settings.APLUS_IMAGE_API_RETRIES, 1)
-    async with httpx.AsyncClient(timeout=300, verify=not settings.GPT_IMAGE_USE_LLM_API) as http:
+    async with httpx.AsyncClient(timeout=300, verify=settings.external_http_verify) as http:
         for attempt in range(1, retries + 1):
             attempt_started = time.monotonic()
             try:

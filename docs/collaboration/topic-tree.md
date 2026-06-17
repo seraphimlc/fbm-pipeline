@@ -45,7 +45,8 @@ Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
   - 服务重启恢复
   - 后续自动化入口的领取/幂等规则
 - Evidence:
-  - `docs/codex-handoff-2026-06-05-export-rule-layer-and-workflow.md`
+  - `docs/collaboration/archive/inbox-2026-06-16-pre-cleanup.md`
+  - `docs/collaboration/inbox.md`
   - `backend/app/services/offline_tasks.py`
   - 用户已明确同意该原则。
 
@@ -336,8 +337,9 @@ Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
   - 霜弦（agentKey: `shuangxian`）：运营口径复核
   - 观止（agentKey: `guanzhi`）：QA gate 和证据复核
 - Product boundary: 若命（agentKey: `ruoming`）
-- Related handoff:
-  - `docs/codex-handoff-2026-06-05-export-rule-layer-and-workflow.md`
+- Related context:
+  - `docs/collaboration/archive/inbox-2026-06-16-pre-cleanup.md`
+  - `docs/collaboration/inbox.md`
 - Current fact:
   - 之前已经用 5 个商品跑过从商品工作台到导出中心的完整流程。
   - 生成过 Task 9 和 Task 10；其中 4 个商品已导出，1 个当时按旧口径因最新 GIGA 库存 0 跳过；该口径已被 2026-06-06 “库存 0 继续导出 Quantity 0”废弃。
@@ -374,7 +376,7 @@ Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
   - `frontend/src/pages/OfflineTaskCenter.tsx`
   - `frontend/src/pages/CatalogList.tsx`
   - `docs/item-workbench-redesign-plan.md`
-  - `docs/codex-handoff-2026-06-05-export-rule-layer-and-workflow.md`
+  - `docs/collaboration/archive/inbox-2026-06-16-pre-cleanup.md`
 - Current problem:
   - 状态含义分散在 `products.status`、`catalog_products.confirmed_at/exported_at`、`offline_tasks.status`。
   - 用户需要看懂：运行中、中断、挂起、部分失败、待导出、已导出。
@@ -524,7 +526,7 @@ Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
   - 保持冷启动文档、runbook、item workbench 计划、handoff 的说法一致。
 - Responsibility matrix:
   - 若命：`docs/collaboration/topic-tree.md`、`docs/collaboration/inbox.md`、`docs/codex-cold-start.md` 的当前优先级和协作边界。
-  - 听云：`docs/01-架构设计.md`、`docs/04-Pipeline步骤详解.md`、`docs/runbook.md`、`docs/superpowers/specs/2026-06-03-offline-task-center.md` 的工程事实、任务中心、raw -> Product、导出 result 模型。
+  - 听云：`docs/project-index.md`、`docs/domain-index/*.md`、`docs/runbook.md`、`docs/superpowers/specs/2026-06-03-offline-task-center.md` 的工程事实、任务中心、raw -> Product、导出 result 模型。
   - 清秋：`docs/item-workbench-redesign-plan.md`、`docs/runbook.md` 或新增用户路径文档中的页面主路径、状态语言、空/错/等待态。
   - 观止：主链路 QA checklist、验收证据要求、PASS/NEEDS_FIX/BLOCKED 标准。
   - 霜弦：`docs/giga-inventory-sync.md`、`docs/template-mapping-spec.md`、`docs/add-category-template-sop.md`、`docs/runbook.md` 中的 GIGA/Amazon/库存/价格/类目/模板运营口径。

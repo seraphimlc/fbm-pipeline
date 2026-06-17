@@ -8,7 +8,7 @@ import string
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 import httpx
 from sqlalchemy import delete, select
@@ -60,6 +60,9 @@ class GigaOpenApiError(RuntimeError):
     pass
 
 
+GigaProgressCallback = Callable[[dict[str, Any]], Awaitable[None]]
+
+
 @dataclass(frozen=True)
 class GigaSyncOptions:
     batch_id: str
@@ -72,6 +75,7 @@ class GigaSyncOptions:
     skip_existing: bool = False
     download_images: bool = True
     sku_codes: tuple[str, ...] = ()
+    progress_callback: GigaProgressCallback | None = None
 
 
 @dataclass(frozen=True)
@@ -121,6 +125,26 @@ def _chunks(items: list[str], size: int) -> list[list[str]]:
 
 def _normalize_text_list(values: list[str] | tuple[str, ...] | None) -> list[str]:
     return list(dict.fromkeys(_text(value) for value in (values or []) if _text(value)))
+
+
+def _extract_total_count(data: dict[str, Any], *, page_size: int) -> int | None:
+    containers = [data]
+    payload = data.get("data")
+    if isinstance(payload, dict):
+        containers.append(payload)
+    for container in containers:
+        for key in ("total", "totalCount", "total_count", "recordCount", "record_count", "count"):
+            value = container.get(key)
+            parsed = _int(value)
+            if parsed is not None and parsed >= 0:
+                return parsed
+    for container in containers:
+        for key in ("pages", "totalPages", "total_pages", "pageCount", "page_count"):
+            value = container.get(key)
+            parsed = _int(value)
+            if parsed is not None and parsed > 0:
+                return parsed * page_size
+    return None
 
 
 def _require_non_empty(values: list[str], field_name: str) -> list[str]:
@@ -257,6 +281,7 @@ class GigaOpenApiClient:
             raise GigaOpenApiError("店铺缺少 AK/SK")
         if not self.base_url:
             raise GigaOpenApiError("店铺缺少 Open API 地址")
+        self.last_sku_total_count: int | None = None
 
     async def call(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         timestamp = str(int(time.time() * 1000))
@@ -316,9 +341,11 @@ class GigaOpenApiClient:
         query_time_type: int | None = None,
         start_time: str | None = None,
         end_time: str | None = None,
+        progress_callback: GigaProgressCallback | None = None,
     ) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
         page = 1
+        total_count: int | None = None
         while True:
             data = await self.fetch_sku_page(
                 page=page,
@@ -330,10 +357,36 @@ class GigaOpenApiClient:
                 start_time=start_time,
                 end_time=end_time,
             )
+            if total_count is None:
+                total_count = _extract_total_count(data, page_size=page_size)
+                self.last_sku_total_count = total_count
             page_records = data.get("data", {}).get("records", [])
-            if not isinstance(page_records, list) or not page_records:
+            if not isinstance(page_records, list):
+                page_records = []
+            if not page_records:
+                if progress_callback:
+                    await progress_callback({
+                        "current_phase": "fetching_sku_list",
+                        "current_page": page,
+                        "page_size": page_size,
+                        "scanned_sku_count": len(records),
+                        "progress_current": len(records),
+                        "progress_total": total_count or 0,
+                        "current_message": "SKU 列表读取完成" if records else "SKU 列表为空",
+                    })
                 break
             records.extend([item for item in page_records if isinstance(item, dict)])
+            if progress_callback:
+                total_text = str(total_count) if total_count is not None else "未知总量"
+                await progress_callback({
+                    "current_phase": "fetching_sku_list",
+                    "current_page": page,
+                    "page_size": page_size,
+                    "scanned_sku_count": len(records),
+                    "progress_current": len(records),
+                    "progress_total": total_count or 0,
+                    "current_message": f"正在读取 GIGA SKU 列表：第 {page} 页，已扫描 {len(records)} / {total_text}",
+                })
             if max_pages and page >= max_pages:
                 break
             if len(page_records) < page_size:
@@ -342,13 +395,32 @@ class GigaOpenApiClient:
             await _respect_rate_limit(API_LIST)
         return records
 
-    async def fetch_details(self, sku_codes: list[str]) -> list[dict[str, Any]]:
+    async def fetch_details(
+        self,
+        sku_codes: list[str],
+        *,
+        progress_callback: GigaProgressCallback | None = None,
+        progress_base: dict[str, Any] | None = None,
+        current_message: str = "正在查询 SKU 详情",
+    ) -> list[dict[str, Any]]:
         details: list[dict[str, Any]] = []
-        for batch in _chunks(_normalize_text_list(sku_codes), 200):
+        normalized = _normalize_text_list(sku_codes)
+        processed = 0
+        for batch in _chunks(normalized, 200):
             data = await self.call(API_DETAIL, {"skus": batch})
             batch_details = data.get("data", [])
             if isinstance(batch_details, list):
                 details.extend([item for item in batch_details if isinstance(item, dict)])
+            processed += len(batch)
+            if progress_callback:
+                await progress_callback({
+                    **(progress_base or {}),
+                    "current_phase": "fetching_sku_details",
+                    "detail_count": len(details),
+                    "processed_sku_count": processed,
+                    "to_process_sku_count": len(normalized),
+                    "current_message": f"{current_message}：{processed}/{len(normalized)}，已返回详情 {len(details)}",
+                })
             await _respect_rate_limit(API_DETAIL)
         return details
 
@@ -362,23 +434,59 @@ class GigaOpenApiClient:
             await _respect_rate_limit(API_DETAIL)
         return details
 
-    async def fetch_prices(self, sku_codes: list[str]) -> list[dict[str, Any]]:
+    async def fetch_prices(
+        self,
+        sku_codes: list[str],
+        *,
+        progress_callback: GigaProgressCallback | None = None,
+        progress_base: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         prices: list[dict[str, Any]] = []
-        for batch in _chunks(_normalize_text_list(sku_codes), 200):
+        normalized = _normalize_text_list(sku_codes)
+        processed = 0
+        for batch in _chunks(normalized, 200):
             data = await self.call(API_PRICE, {"skus": batch})
             batch_prices = data.get("data", [])
             if isinstance(batch_prices, list):
                 prices.extend([item for item in batch_prices if isinstance(item, dict)])
+            processed += len(batch)
+            if progress_callback:
+                await progress_callback({
+                    **(progress_base or {}),
+                    "current_phase": "fetching_prices",
+                    "price_count": len(prices),
+                    "processed_sku_count": processed,
+                    "to_process_sku_count": len(normalized),
+                    "current_message": f"正在查询价格：{processed}/{len(normalized)}，已返回价格 {len(prices)}",
+                })
             await _respect_rate_limit(API_PRICE)
         return prices
 
-    async def fetch_inventory(self, sku_codes: list[str]) -> list[dict[str, Any]]:
+    async def fetch_inventory(
+        self,
+        sku_codes: list[str],
+        *,
+        progress_callback: GigaProgressCallback | None = None,
+        progress_base: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
         inventory: list[dict[str, Any]] = []
-        for batch in _chunks(_normalize_text_list(sku_codes), 200):
+        normalized = _normalize_text_list(sku_codes)
+        processed = 0
+        for batch in _chunks(normalized, 200):
             data = await self.call(API_INVENTORY, {"skus": batch})
             batch_inventory = data.get("data", [])
             if isinstance(batch_inventory, list):
                 inventory.extend([item for item in batch_inventory if isinstance(item, dict)])
+            processed += len(batch)
+            if progress_callback:
+                await progress_callback({
+                    **(progress_base or {}),
+                    "current_phase": "fetching_inventory",
+                    "inventory_count": len(inventory),
+                    "processed_sku_count": processed,
+                    "to_process_sku_count": len(normalized),
+                    "current_message": f"正在查询库存：{processed}/{len(normalized)}，已返回库存 {len(inventory)}",
+                })
             await _respect_rate_limit(API_INVENTORY)
         return inventory
 
@@ -594,6 +702,7 @@ async def sync_giga_products(db: AsyncSession, options: GigaSyncOptions) -> Giga
         skip_existing=options.skip_existing,
         download_images=options.download_images,
         sku_codes=tuple(_normalize_text_list(list(options.sku_codes))),
+        progress_callback=options.progress_callback,
     )
     if not options.batch_id:
         raise GigaOpenApiError("缺少 batch_id")
@@ -607,6 +716,16 @@ async def sync_giga_products(db: AsyncSession, options: GigaSyncOptions) -> Giga
         await _clear_batch(db, options.batch_id, options.site, options.data_source_id)
     await db.commit()
 
+    async def emit_progress(**updates: Any) -> None:
+        if not options.progress_callback:
+            return
+        await options.progress_callback({
+            "batch_id": options.batch_id,
+            "site": options.site,
+            "data_source_id": options.data_source_id,
+            **updates,
+        })
+
     try:
         client = GigaOpenApiClient(
             api_base=context.api_base,
@@ -616,14 +735,37 @@ async def sync_giga_products(db: AsyncSession, options: GigaSyncOptions) -> Giga
         if options.sku_codes:
             records = []
             listed_sku_codes = list(options.sku_codes)
+            await emit_progress(
+                current_phase="fetching_sku_list",
+                current_page=1,
+                page_size=len(listed_sku_codes),
+                scanned_sku_count=len(listed_sku_codes),
+                progress_current=len(listed_sku_codes),
+                progress_total=len(listed_sku_codes),
+                current_message=f"使用指定 SKU 列表：{len(listed_sku_codes)} 个",
+            )
         else:
-            records = await client.fetch_sku_records(options.page_size, options.max_pages)
+            records = await client.fetch_sku_records(
+                options.page_size,
+                options.max_pages,
+                progress_callback=lambda live: emit_progress(**live),
+            )
             listed_sku_codes = list(dict.fromkeys(_text(item.get("sku")) for item in records if _text(item.get("sku"))))
+        list_progress_total = client.last_sku_total_count or len(listed_sku_codes)
         if not listed_sku_codes:
             raise GigaOpenApiError("GIGA 商品列表返回 0 个 SKU")
 
         skipped_existing_count = 0
         sku_codes = listed_sku_codes
+        await emit_progress(
+            current_phase="filtering_existing",
+            scanned_sku_count=len(listed_sku_codes),
+            synced_sku_count=0,
+            skipped_existing_count=0,
+            progress_current=len(listed_sku_codes),
+            progress_total=list_progress_total,
+            current_message=f"正在过滤已存在 SKU：共 {len(listed_sku_codes)} 个",
+        )
         if options.skip_existing:
             existing_query = select(GigaSku.sku_code).where(GigaSku.site == options.site)
             if options.data_source_id:
@@ -632,6 +774,15 @@ async def sync_giga_products(db: AsyncSession, options: GigaSyncOptions) -> Giga
             existing_skus = {sku for sku in existing_result.scalars().all() if sku}
             sku_codes = [sku for sku in listed_sku_codes if sku not in existing_skus]
             skipped_existing_count = len(listed_sku_codes) - len(sku_codes)
+            await emit_progress(
+                current_phase="filtering_existing",
+                scanned_sku_count=len(listed_sku_codes),
+                synced_sku_count=0,
+                skipped_existing_count=skipped_existing_count,
+                progress_current=len(listed_sku_codes),
+                progress_total=list_progress_total,
+                current_message=f"已过滤历史 SKU：待同步 {len(sku_codes)}，跳过 {skipped_existing_count}",
+            )
             if not sku_codes:
                 batch.raw_sku_count = 0
                 batch.sku_count = 0
@@ -645,6 +796,15 @@ async def sync_giga_products(db: AsyncSession, options: GigaSyncOptions) -> Giga
                 batch.finished_at = datetime.now()
                 batch.updated_at = datetime.now()
                 await db.commit()
+                await emit_progress(
+                    current_phase="done",
+                    scanned_sku_count=len(listed_sku_codes),
+                    synced_sku_count=0,
+                    skipped_existing_count=skipped_existing_count,
+                    progress_current=len(listed_sku_codes),
+                    progress_total=list_progress_total,
+                    current_message="没有需要同步的新 SKU",
+                )
                 return GigaSyncResult(
                     batch_id=options.batch_id,
                     site=options.site,
@@ -660,8 +820,37 @@ async def sync_giga_products(db: AsyncSession, options: GigaSyncOptions) -> Giga
                     skipped_existing_count=skipped_existing_count,
                 )
 
-        details = await client.fetch_details(sku_codes)
+        await emit_progress(
+            current_phase="fetching_sku_details",
+            scanned_sku_count=len(listed_sku_codes),
+            synced_sku_count=0,
+            skipped_existing_count=skipped_existing_count,
+            progress_current=len(listed_sku_codes),
+            progress_total=list_progress_total,
+            current_message=f"正在查询 SKU 详情：{len(sku_codes)} 个",
+        )
+        progress_base = {
+            "scanned_sku_count": len(listed_sku_codes),
+            "skipped_existing_count": skipped_existing_count,
+            "progress_current": len(listed_sku_codes),
+            "progress_total": list_progress_total,
+        }
+        details = await client.fetch_details(
+            sku_codes,
+            progress_callback=lambda live: emit_progress(**live),
+            progress_base=progress_base,
+        )
         details_by_sku = {_text(item.get("sku")): item for item in details if _text(item.get("sku"))}
+        await emit_progress(
+            current_phase="fetching_sku_details",
+            scanned_sku_count=len(listed_sku_codes),
+            synced_sku_count=0,
+            detail_count=len(details_by_sku),
+            skipped_existing_count=skipped_existing_count,
+            progress_current=len(listed_sku_codes),
+            progress_total=list_progress_total,
+            current_message=f"SKU 详情已返回：{len(details_by_sku)} 个",
+        )
         related_sku_codes: list[str] = []
         for detail in details_by_sku.values():
             for related in detail.get("associateProductList") or []:
@@ -670,7 +859,24 @@ async def sync_giga_products(db: AsyncSession, options: GigaSyncOptions) -> Giga
                     related_sku_codes.append(related_sku)
         related_sku_codes = list(dict.fromkeys(related_sku_codes))
         if related_sku_codes:
-            related_details = await client.fetch_details(related_sku_codes)
+            await emit_progress(
+                current_phase="fetching_sku_details",
+                scanned_sku_count=len(listed_sku_codes),
+                detail_count=len(details_by_sku),
+                skipped_existing_count=skipped_existing_count,
+                progress_current=len(listed_sku_codes),
+                progress_total=list_progress_total,
+                current_message=f"正在补查关联 SKU 详情：{len(related_sku_codes)} 个",
+            )
+            related_details = await client.fetch_details(
+                related_sku_codes,
+                progress_callback=lambda live: emit_progress(**live),
+                progress_base={
+                    **progress_base,
+                    "detail_count": len(details_by_sku),
+                },
+                current_message="正在补查关联 SKU 详情",
+            )
             for detail in related_details:
                 sku = _text(detail.get("sku"))
                 if sku:
@@ -678,8 +884,58 @@ async def sync_giga_products(db: AsyncSession, options: GigaSyncOptions) -> Giga
             sku_codes = list(dict.fromkeys([*sku_codes, *related_sku_codes]))
             details = list(details_by_sku.values())
         valid_sku_codes = [sku for sku in sku_codes if _is_valid_detail(details_by_sku.get(sku))]
-        prices = await client.fetch_prices(valid_sku_codes)
-        inventory = await client.fetch_inventory(valid_sku_codes)
+        await emit_progress(
+            current_phase="fetching_prices",
+            scanned_sku_count=len(listed_sku_codes),
+            synced_sku_count=len(valid_sku_codes),
+            detail_count=len(details_by_sku),
+            skipped_existing_count=skipped_existing_count,
+            progress_current=len(listed_sku_codes),
+            progress_total=list_progress_total,
+            current_message=f"正在查询价格：{len(valid_sku_codes)} 个有效 SKU",
+        )
+        prices = await client.fetch_prices(
+            valid_sku_codes,
+            progress_callback=lambda live: emit_progress(**live),
+            progress_base={
+                **progress_base,
+                "synced_sku_count": len(valid_sku_codes),
+                "detail_count": len(details_by_sku),
+            },
+        )
+        await emit_progress(
+            current_phase="fetching_inventory",
+            scanned_sku_count=len(listed_sku_codes),
+            synced_sku_count=len(valid_sku_codes),
+            detail_count=len(details_by_sku),
+            price_count=len(prices),
+            skipped_existing_count=skipped_existing_count,
+            progress_current=len(listed_sku_codes),
+            progress_total=list_progress_total,
+            current_message=f"正在查询库存：{len(valid_sku_codes)} 个有效 SKU",
+        )
+        inventory = await client.fetch_inventory(
+            valid_sku_codes,
+            progress_callback=lambda live: emit_progress(**live),
+            progress_base={
+                **progress_base,
+                "synced_sku_count": len(valid_sku_codes),
+                "detail_count": len(details_by_sku),
+                "price_count": len(prices),
+            },
+        )
+        await emit_progress(
+            current_phase="writing_sku_snapshot",
+            scanned_sku_count=len(listed_sku_codes),
+            synced_sku_count=len(valid_sku_codes),
+            detail_count=len(details_by_sku),
+            price_count=len(prices),
+            inventory_count=len(inventory),
+            skipped_existing_count=skipped_existing_count,
+            progress_current=len(listed_sku_codes),
+            progress_total=list_progress_total,
+            current_message="正在写入 GIGA SKU snapshot",
+        )
 
         if not details:
             raise GigaOpenApiError("GIGA 详情返回 0 条")
@@ -688,6 +944,18 @@ async def sync_giga_products(db: AsyncSession, options: GigaSyncOptions) -> Giga
         if not inventory:
             raise GigaOpenApiError("GIGA 库存返回 0 条")
 
+        await emit_progress(
+            current_phase="aggregating_items",
+            scanned_sku_count=len(listed_sku_codes),
+            synced_sku_count=len(valid_sku_codes),
+            detail_count=len(details_by_sku),
+            price_count=len(prices),
+            inventory_count=len(inventory),
+            skipped_existing_count=skipped_existing_count,
+            progress_current=len(listed_sku_codes),
+            progress_total=list_progress_total,
+            current_message="SKU 全量同步完成，正在统一聚合 item/group",
+        )
         groups = _build_item_groups(details, valid_sku_codes)
         sku_to_item: dict[str, str] = {}
         item_rows: list[GigaItem] = []
@@ -906,6 +1174,21 @@ async def sync_giga_products(db: AsyncSession, options: GigaSyncOptions) -> Giga
         batch.finished_at = datetime.now()
         batch.updated_at = datetime.now()
         await db.commit()
+        await emit_progress(
+            current_phase="done",
+            scanned_sku_count=len(listed_sku_codes),
+            synced_sku_count=len(sku_rows),
+            detail_count=len(raw_rows),
+            price_count=len(price_rows),
+            inventory_count=len(inventory_rows),
+            image_url_count=len(image_rows),
+            skipped_existing_count=skipped_existing_count,
+            item_count=len(item_rows),
+            group_count=batch.group_count,
+            progress_current=len(listed_sku_codes),
+            progress_total=list_progress_total,
+            current_message="GIGA SKU snapshot 已同步完成",
+        )
         return GigaSyncResult(
             batch_id=options.batch_id,
             site=options.site,

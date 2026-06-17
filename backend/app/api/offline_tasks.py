@@ -12,7 +12,6 @@ from app.api.schemas import (
     OfflineTaskCatalogExportRequest,
     OfflineTaskDetailResponse,
     OfflineTaskGigaDynamicSyncRequest,
-    OfflineTaskGigaPullRequest,
     OfflineTaskQueuedResponse,
     OfflineTaskResponse,
     PaginatedOfflineTasks,
@@ -22,14 +21,7 @@ from app.database import get_db
 from app.models import OfflineTask, Product
 from app.models.status import COMPLETED
 from app.services.oss_uploader import download_private_file
-from app.services.offline_tasks import (
-    create_catalog_export_tasks,
-    create_giga_dynamic_sync_task,
-    create_giga_pull_task,
-    pause_offline_task,
-    rerun_offline_task,
-    resume_offline_task,
-)
+from app.services.offline_tasks import pause_offline_task, rerun_offline_task, resume_offline_task
 
 
 router = APIRouter(prefix="/api/offline-tasks", tags=["offline-tasks"])
@@ -182,30 +174,12 @@ async def list_offline_tasks(
     )
 
 
-@router.post("/giga-pull", response_model=OfflineTaskQueuedResponse)
-async def create_giga_pull_offline_task(
-    body: OfflineTaskGigaPullRequest,
-    db: AsyncSession = Depends(get_db),
-):
-    try:
-        task = await create_giga_pull_task(db, body)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    created = await _load_task_with_steps(db, task.id)
-    return OfflineTaskQueuedResponse(task=_task_response(created), steps=created.steps)
-
-
 @router.post("/giga-inventory-sync", response_model=OfflineTaskQueuedResponse)
 async def create_giga_inventory_sync_offline_task(
     body: OfflineTaskGigaDynamicSyncRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    try:
-        task = await create_giga_dynamic_sync_task(db, body, kind="inventory")
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    created = await _load_task_with_steps(db, task.id)
-    return OfflineTaskQueuedResponse(task=_task_response(created), steps=created.steps)
+    raise HTTPException(410, "库存同步创建已迁移到新任务中心，请使用 /api/task-runs/giga-inventory-sync")
 
 
 @router.post("/giga-price-sync", response_model=OfflineTaskQueuedResponse)
@@ -213,12 +187,7 @@ async def create_giga_price_sync_offline_task(
     body: OfflineTaskGigaDynamicSyncRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    try:
-        task = await create_giga_dynamic_sync_task(db, body, kind="price")
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    created = await _load_task_with_steps(db, task.id)
-    return OfflineTaskQueuedResponse(task=_task_response(created), steps=created.steps)
+    raise HTTPException(410, "价格同步创建已迁移到新任务中心，请使用 /api/task-runs/giga-price-sync")
 
 
 @router.post("/catalog-export", response_model=OfflineTaskBatchQueuedResponse)
@@ -226,11 +195,7 @@ async def create_catalog_export_offline_tasks(
     body: OfflineTaskCatalogExportRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    try:
-        tasks, errors = await create_catalog_export_tasks(db, body)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
-    return OfflineTaskBatchQueuedResponse(tasks=[_task_response(task) for task in tasks], errors=errors)
+    raise HTTPException(410, "导出文件创建已迁移到新任务中心，请使用 /api/task-runs/catalog-export")
 
 
 @router.get("/{task_id}", response_model=OfflineTaskDetailResponse)

@@ -1,5 +1,7 @@
 # Item 商品工作台重构规划
 
+状态：历史规划/候选背景；当前事实以 `docs/project-index.md`、`docs/domain-index/product-flow.md` 和代码为准。
+
 日期：2026-06-03
 
 ## 目标

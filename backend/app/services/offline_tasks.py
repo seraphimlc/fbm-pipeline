@@ -15,7 +15,7 @@ from app.api.schemas import OfflineTaskCatalogExportRequest, OfflineTaskGigaDyna
 from app.config import settings
 from app.database import async_session
 from app.models import CatalogProduct, OfflineTask, OfflineTaskStep, Product, ProductAplus, ProductDataSource
-from app.models.status import COMPLETED, FAILED, PAUSED
+from app.models.status import COMPLETED, FAILED, PAUSED, STEP6_CURATING
 from app.pipeline.engine import get_step_status, is_running, run_pipeline_tracked
 from app.pipeline.step7_aplus_plan import run_aplus_plan
 from app.pipeline.step8_aplus_script import run_aplus_script
@@ -26,6 +26,8 @@ from app.services.giga_openapi import GigaSyncOptions, resolve_giga_data_source_
 from app.services.giga_price_sync import GigaPriceSyncOptions, sync_giga_price_snapshot
 from app.services.oss_uploader import upload_private_file
 from app.services.stylesnap_product_tasks import upsert_product_drafts_from_giga_batch
+from app.task_planners.product_image_analysis import create_product_image_analysis_runs
+from app.task_planners.product_listing import create_product_listing_runs
 
 logger = logging.getLogger(__name__)
 
@@ -491,6 +493,28 @@ async def _run_image_step(db: AsyncSession, step: OfflineTaskStep) -> None:
 async def _run_sync_step(db: AsyncSession, step: OfflineTaskStep) -> None:
     await _set_step_status(db, step, "running")
     payload = json.loads(step.payload_json or "{}")
+
+    async def update_progress(live: dict) -> None:
+        await db.refresh(step)
+        task = await db.get(OfflineTask, step.task_id)
+        if task and task.status == "paused":
+            raise asyncio.CancelledError()
+        existing = _json_loads(step.result_json, {})
+        if not isinstance(existing, dict):
+            existing = {}
+        merged = {**existing, **live, "live": live}
+        step.result_json = _json_dumps(merged)
+        step.progress_current = int(live.get("progress_current") or live.get("scanned_sku_count") or step.progress_current or 0)
+        if live.get("progress_total") is not None:
+            step.progress_total = int(live.get("progress_total") or 0)
+        step.error_message = live.get("current_message") or step.error_message
+        step.updated_at = datetime.now()
+        if task:
+            task.result_json = _json_dumps(merged)
+            task.updated_at = step.updated_at
+        await _refresh_task_stats(db, step.task_id)
+        await db.commit()
+
     try:
         result = await sync_giga_products(
             db,
@@ -504,22 +528,59 @@ async def _run_sync_step(db: AsyncSession, step: OfflineTaskStep) -> None:
                 max_pages=payload.get("max_pages"),
                 skip_existing=True,
                 download_images=False,
+                progress_callback=update_progress,
             ),
         )
+        await update_progress({
+            "current_phase": "materializing_product_drafts",
+            "scanned_sku_count": result.raw_sku_count + result.skipped_existing_count,
+            "synced_sku_count": result.sku_count,
+            "detail_count": result.raw_sku_count,
+            "price_count": result.price_count,
+            "inventory_count": result.inventory_count,
+            "skipped_existing_count": result.skipped_existing_count,
+            "item_count": result.item_count,
+            "group_count": result.group_count,
+            "progress_current": result.raw_sku_count + result.skipped_existing_count,
+            "progress_total": result.raw_sku_count + result.skipped_existing_count,
+            "current_message": "GIGA snapshot 已完成，正在生成商品工作台草稿",
+        })
         draft_result = await upsert_product_drafts_from_giga_batch(
             db,
             batch_id=result.batch_id,
             site=result.site,
             data_source_id=result.data_source_id,
         )
+        live_done = {
+            "current_phase": "done",
+            "scanned_sku_count": result.raw_sku_count + result.skipped_existing_count,
+            "synced_sku_count": result.sku_count,
+            "detail_count": result.raw_sku_count,
+            "price_count": result.price_count,
+            "inventory_count": result.inventory_count,
+            "image_url_count": result.sku_count,
+            "skipped_existing_count": result.skipped_existing_count,
+            "item_count": result.item_count,
+            "group_count": result.group_count,
+            "product_draft_created_count": getattr(draft_result, "created_count", 0),
+            "product_draft_updated_count": getattr(draft_result, "updated_count", 0),
+            "progress_current": result.raw_sku_count + result.skipped_existing_count,
+            "progress_total": result.raw_sku_count + result.skipped_existing_count,
+            "current_message": "店铺商品同步完成",
+        }
         await _set_step_status(
             db,
             step,
             "done",
-            result={**result.__dict__, "product_drafts": draft_result.__dict__},
-            progress_current=result.sku_count,
-            progress_total=result.sku_count,
+            result={**result.__dict__, "product_drafts": draft_result.__dict__, **live_done, "live": live_done},
+            progress_current=live_done["progress_current"],
+            progress_total=live_done["progress_total"],
         )
+        task = await db.get(OfflineTask, step.task_id)
+        if task:
+            task.result_json = _json_dumps({**result.__dict__, "product_drafts": draft_result.__dict__, **live_done, "live": live_done})
+            task.updated_at = datetime.now()
+            await db.commit()
     except Exception as exc:
         await db.rollback()
         logger.exception("[OfflineTask] GIGA pull step failed: task=%s step=%s", step.task_id, step.id)
@@ -703,6 +764,121 @@ async def _run_product_bulk_advance_step(db: AsyncSession, step: OfflineTaskStep
         return
 
     try:
+        if start_step <= 5:
+            await _set_step_status(
+                db,
+                step,
+                "running",
+                result={
+                    "product_id": product_id,
+                    "item_code": item_code,
+                    "status": "running",
+                    "reason": "正在提交新任务中心图片分析",
+                },
+                progress_current=0,
+                progress_total=1,
+            )
+            async with async_session() as session:
+                result = await session.execute(
+                    select(Product)
+                    .where(Product.id == product_id)
+                    .options(selectinload(Product.catalog_item))
+                )
+                product = result.scalar_one_or_none()
+                if not product:
+                    await _set_step_status(db, step, "failed", error=f"商品 {product_id} 不存在")
+                    return
+                product.status = STEP6_CURATING
+                product.current_step = 5
+                product.error_message = "图片分析已加入新任务中心队列，请到新任务中心查看进度"
+                product.updated_at = datetime.now()
+                if product.catalog_item:
+                    product.catalog_item.status = product.status
+                    product.catalog_item.updated_at = product.updated_at
+                runs = await create_product_image_analysis_runs(
+                    session,
+                    [product_id],
+                    created_by="product_bulk_advance",
+                )
+            await _ensure_task_not_paused(db, step.task_id)
+            await _set_step_status(
+                db,
+                step,
+                "done",
+                result={
+                    "product_id": product_id,
+                    "item_code": item_code,
+                    "status": "queued",
+                    "reason": "已提交新任务中心图片分析；完成后从 Step 6 继续 Listing",
+                    "latest_status": STEP6_CURATING,
+                    "latest_step": 5,
+                    "latest_result": "image_analysis_queued",
+                    "latest_reason": "图片分析已进入新任务中心",
+                    "task_run_ids": [run.id for run in runs],
+                },
+                progress_current=1,
+                progress_total=1,
+            )
+            return
+
+        if start_step == 6:
+            await _set_step_status(
+                db,
+                step,
+                "running",
+                result={
+                    "product_id": product_id,
+                    "item_code": item_code,
+                    "status": "running",
+                    "reason": "正在提交新任务中心 Listing 生成",
+                },
+                progress_current=0,
+                progress_total=1,
+            )
+            async with async_session() as session:
+                result = await session.execute(
+                    select(Product)
+                    .where(Product.id == product_id)
+                    .options(selectinload(Product.catalog_item))
+                )
+                product = result.scalar_one_or_none()
+                if not product:
+                    await _set_step_status(db, step, "failed", error=f"商品 {product_id} 不存在")
+                    return
+                product.status = get_step_status(6)
+                product.current_step = 6
+                product.error_message = "Listing 生成已加入新任务中心队列，请到新任务中心查看进度"
+                product.updated_at = datetime.now()
+                if product.catalog_item:
+                    product.catalog_item.status = product.status
+                    product.catalog_item.confirmed_at = None
+                    product.catalog_item.updated_at = product.updated_at
+                runs = await create_product_listing_runs(
+                    session,
+                    [product_id],
+                    created_by="product_bulk_advance",
+                )
+            await _ensure_task_not_paused(db, step.task_id)
+            await _set_step_status(
+                db,
+                step,
+                "done",
+                result={
+                    "product_id": product_id,
+                    "item_code": item_code,
+                    "status": "queued",
+                    "reason": "已提交新任务中心 Listing 生成",
+                    "latest_status": get_step_status(6),
+                    "latest_step": 6,
+                    "latest_result": "listing_queued",
+                    "latest_reason": "Listing 已进入新任务中心",
+                    "task_run_ids": [run.id for run in runs],
+                },
+                progress_current=1,
+                progress_total=1,
+            )
+            return
+
         await _set_step_status(
             db,
             step,

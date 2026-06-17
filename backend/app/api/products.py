@@ -1,3 +1,4 @@
+import asyncio
 import subprocess
 import zipfile
 import hashlib
@@ -36,16 +37,17 @@ from app.models import (
     GigaSku,
     GigaSyncBatch,
     OfflineTask,
-    OfflineTaskStep,
     Product,
     ProductData,
     ProductDataSource,
     ProductImage,
     ProductAplus,
     ProductFile,
+    TaskRun,
+    TaskStep,
     UpcPoolItem,
 )
-from app.models.status import COMPLETED, DUPLICATE_SKIPPED, PENDING_REVIEW, SOURCE_UNAVAILABLE, STEP5_LISTING, STEP_LABELS, STEP_STATUS_MAP
+from app.models.status import COMPLETED, DUPLICATE_SKIPPED, PENDING_REVIEW, SOURCE_UNAVAILABLE, STEP5_DONE, STEP5_LISTING, STEP6_CURATING, STEP6_DONE, STEP_LABELS, STEP_STATUS_MAP
 from app.api.schemas import (
     ProductCreate, ProductUpdate, ProductListingImagesUpdate, ProductGigaRefreshRequest, ProductResponse, ProductDetail, ProductImageResponse,
     PaginatedResponse, ProductFileEntry, AplusRegenerateRequest,
@@ -53,7 +55,7 @@ from app.api.schemas import (
     ProductImageReviewDetailResponse, ProductImageReviewQueueResponse,
     AsinSyncBatchDetail, AsinSyncBatchResponse, AsinSyncCreateRequest,
     AplusUploadBatchDetail, AplusUploadBatchResponse, AplusUploadCreateRequest, AplusGenerateRequest,
-    BulkImportResponse, BulkStartRequest, BulkStartResponse, ProductBulkAdvanceFilterRequest, ProductBulkAdvanceRequest, OfflineTaskResponse,
+    BulkImportResponse, BulkStartRequest, BulkStartResponse, ProductBulkAdvanceFilterRequest, ProductBulkAdvanceRequest, OfflineTaskResponse, TaskRunResponse,
     PaginatedAsinSyncBatches, PaginatedCatalogProducts, CatalogProductResponse,
     CatalogExportFileResponse, PaginatedCatalogExportFiles,
     CatalogExportByCategoryRequest, CatalogExportCategoriesResponse, CatalogExportCategorySummary,
@@ -83,14 +85,11 @@ from app.pipeline.step10_amazon_template import (
 )
 from app.services.material_assets import (
     IMAGE_EXTENSIONS,
-    VIDEO_EXTENSIONS,
     aplus_folder_summary,
     aplus_image_folder,
-    folder_summary,
-    organize_video_files,
+    video_folder_summary,
 )
 from app.services.oss_uploader import download_private_file, sign_private_url, upload_private_file
-from app.services.offline_tasks import create_aplus_generate_task, schedule_offline_task
 from app.services.asin_sync import build_sync_item, start_asin_sync_batch
 from app.services.inventory_sync import (
     InventorySyncLoginRequired,
@@ -114,6 +113,10 @@ from app.services.upc_pool import (
 )
 from app.services.giga_openapi import GigaOpenApiError, GigaSyncOptions, sync_giga_products
 from app.services.stylesnap_product_tasks import upsert_product_drafts_from_giga_batch
+from app.task_planners.aplus_generate import create_aplus_generate_runs
+from app.task_planners.product_bulk_advance import create_product_bulk_advance_run
+from app.task_planners.product_image_analysis import create_product_image_analysis_runs
+from app.task_planners.product_listing import create_product_listing_runs
 
 # Step runners indexed by step number
 STEP_RUNNERS = {
@@ -154,14 +157,28 @@ WORKBENCH_STATUS_KEYS = (
     "export_ready",
     "failed",
 )
-PRODUCT_BULK_ADVANCE_MAX_PRODUCTS = 1000
+PRODUCT_LIST_WORK_STATUS_KEYS = set(WORKBENCH_STATUS_KEYS) | {"exported"}
 AUTO_START_READY_GENERATION_LIMIT = 100
 IMAGE_REVIEW_SELECTED_IMAGE_LIMIT = 9
 IMAGE_REVIEW_INITIAL_GALLERY_LIMIT = 36
 IMAGE_REVIEW_MAX_GALLERY_LIMIT = 200
 
 
+def _product_task_action_queued_stage(product: Product) -> str | None:
+    detail = str(product.error_message or "")
+    if "任务中心队列" not in detail:
+        return None
+    step = int(product.current_step or 0)
+    if product.status == STEP6_CURATING and step == 5:
+        return "image_analysis"
+    if product.status == STEP5_LISTING and step == 6:
+        return "listing_generation"
+    return None
+
+
 def _is_stale_running_product(product: Product) -> bool:
+    if _product_task_action_queued_stage(product):
+        return False
     return product.status in RUNNING_STATUSES and not is_running(product.id)
 
 
@@ -333,18 +350,6 @@ async def _require_generation_prerequisites(db: AsyncSession, product: Product, 
 
 
 def _current_task_status(product: Product) -> str:
-    aplus_status = product.aplus.aplus_status if product.aplus else None
-    aplus_status_labels = {
-        "regen_queued": "A+重新生图排队中",
-        "regen_script_running": "A+正在重写脚本",
-        "regen_image_running": "A+正在重新生图",
-        "regen_done": "A+重新生图完成",
-        "regen_failed": "A+重新生图失败",
-        "regen_interrupted": "A+重新生图被中断，可重试",
-    }
-    if aplus_status in aplus_status_labels:
-        return aplus_status_labels[aplus_status]
-
     step_label = STEP_LABELS.get(product.current_step, f"Step {product.current_step}")
     competitor_capture_message = _compact_error_message(product.error_message)
     if (
@@ -355,6 +360,12 @@ def _current_task_status(product: Product) -> str:
         return competitor_capture_message
     if product.status == "competitor_searching":
         return competitor_capture_message or "竞品搜索中：正在用主图搜索 Amazon 同款"
+    if _product_task_action_queued_stage(product):
+        return _compact_error_message(product.error_message) or "已加入新任务中心队列"
+    if product.status == STEP6_DONE and (product.current_step or 0) <= 5:
+        return "图片分析已完成，等待生成 Listing"
+    if product.status == STEP5_DONE and (product.current_step or 0) >= 6:
+        return "Listing 已生成，等待进入待导出"
     if _is_stale_running_product(product):
         return f"运行状态已中断：{step_label} 未在当前服务中运行，可直接重试当前节点"
     if product.status in RUNNING_STATUSES:
@@ -392,6 +403,327 @@ def _current_task_status(product: Product) -> str:
     if product.status == COMPLETED:
         return "待导出"
     return product.status or "-"
+
+
+def _workflow_for_step(step: int | None) -> str:
+    value = int(step or 0)
+    if value <= 0:
+        return "image_review"
+    if value < 5:
+        return "competitor_select"
+    if value == 5:
+        return "image_analysis"
+    if value == 6:
+        return "listing_generation"
+    return "export"
+
+
+def _workflow_state(
+    product: Product,
+    *,
+    catalog_exported: bool | None = None,
+) -> dict:
+    """Single source of truth for the main product workflow shown in the workbench.
+
+    A+ is intentionally excluded. It is a separate workflow and must not override
+    the main product status or primary action.
+    """
+    step = int(product.current_step or 0)
+    detail = _compact_error_message(product.error_message)
+    exported = bool(catalog_exported)
+    if catalog_exported is None:
+        catalog_item = getattr(product, "catalog_item", None)
+        exported = bool(catalog_item and (catalog_item.exported_at or catalog_item.export_task_id))
+
+    def state(
+        stage: str,
+        stage_status: str,
+        label: str,
+        work_status: str,
+        *,
+        primary_action: str | None = None,
+        primary_action_label: str | None = None,
+        allowed_actions: list[str] | None = None,
+        action_reason: str | None = None,
+        color: str = "default",
+    ) -> dict:
+        actions = ["open_detail", *(allowed_actions or [])]
+        if primary_action and primary_action not in actions:
+            actions.append(primary_action)
+        related_correlation_key = None
+        if stage == "image_analysis":
+            related_correlation_key = f"product:{product.id}:image_analysis"
+        elif stage == "listing_generation":
+            related_correlation_key = f"product:{product.id}:listing_generation"
+        return {
+            "stage": stage,
+            "stage_status": stage_status,
+            "label": label,
+            "work_status": work_status,
+            "primary_action": primary_action,
+            "primary_action_label": primary_action_label,
+            "allowed_actions": list(dict.fromkeys(actions)),
+            "action_reason": action_reason or label,
+            "color": color,
+            "related_task_run_id": None,
+            "related_correlation_key": related_correlation_key,
+        }
+
+    if product.status == "paused":
+        return state(
+            _workflow_for_step(step),
+            "paused",
+            "已挂起",
+            "suspended",
+            primary_action="resume",
+            primary_action_label="继续",
+            allowed_actions=["resume", "restart"],
+            action_reason=f"已挂起：{STEP_LABELS.get(step, f'Step {step}')}，不会继续执行后续自动流程",
+        )
+
+    action_queue_stage = _product_task_action_queued_stage(product)
+    if action_queue_stage:
+        stage_label = {
+            "image_analysis": "图片分析",
+            "listing_generation": "Listing 生成",
+        }.get(action_queue_stage, "商品任务")
+        return state(
+            action_queue_stage,
+            "queued",
+            f"{stage_label}排队中",
+            "running",
+            primary_action="open_task_center",
+            primary_action_label="任务中心",
+            allowed_actions=["open_task_center"],
+            action_reason=detail or f"{stage_label}已加入任务中心队列",
+            color="processing",
+        )
+
+    if _is_stale_running_product(product):
+        return state(
+            _workflow_for_step(step),
+            "interrupted",
+            "已中断",
+            "interrupted",
+            primary_action="retry",
+            primary_action_label="重试",
+            allowed_actions=["retry", "restart"],
+            action_reason=f"运行状态已中断：{STEP_LABELS.get(step, f'Step {step}')} 未在当前服务中运行，可直接重试当前节点",
+            color="warning",
+        )
+
+    if product.status == "competitor_searching":
+        queued = "队列" in detail or "排队" in detail
+        return state(
+            "competitor_search",
+            "queued" if queued else "running",
+            "候选竞品搜索中",
+            "competitor_searching",
+            primary_action="open_task_center",
+            primary_action_label="任务中心",
+            allowed_actions=["open_task_center"],
+            action_reason=detail or "正在用主图搜索 Amazon 同款",
+            color="processing",
+        )
+
+    if product.status == STEP5_LISTING and re.search(r"竞品.*抓取中|Listing.*抓取中", product.error_message or "", re.I):
+        queued = "队列" in detail or "排队" in detail
+        return state(
+            "competitor_capture",
+            "queued" if queued else "running",
+            "竞品详情抓取中",
+            "capture_detail",
+            primary_action="open_task_center",
+            primary_action_label="任务中心",
+            allowed_actions=["open_task_center"],
+            action_reason=detail or "正在抓取已选竞品详情",
+            color="processing",
+        )
+
+    if product.status in RUNNING_STATUSES:
+        stage = _workflow_for_step(step)
+        stage_label = {
+            "image_analysis": "图片分析",
+            "listing_generation": "Listing 生成",
+            "competitor_select": "商品处理",
+            "export": "导出准备",
+        }.get(stage, "商品处理")
+        queued = "队列" in detail or "排队" in detail or "新任务" in (product.error_message or "")
+        return state(
+            stage,
+            "queued" if queued else "running",
+            f"{stage_label}{'排队中' if queued else '中'}",
+            "running",
+            primary_action="open_task_center",
+            primary_action_label="任务中心",
+            allowed_actions=["open_task_center"],
+            action_reason=detail or f"{stage_label}{'已进入任务中心队列' if queued else '正在执行'}",
+            color="processing",
+        )
+
+    if product.status == STEP6_DONE and step <= 5:
+        return state(
+            "listing_generation",
+            "queued",
+            "Listing 排队中",
+            "running",
+            primary_action="open_task_center",
+            primary_action_label="任务中心",
+            allowed_actions=["open_task_center"],
+            action_reason="图片分析已完成，等待 Listing 生成任务",
+            color="processing",
+        )
+
+    if product.status == STEP5_DONE and step >= 6:
+        return state(
+            "export",
+            "pending",
+            "待导出",
+            "export_ready",
+            primary_action="open_export_center",
+            primary_action_label="导出",
+            allowed_actions=["open_export_center"],
+            action_reason="Listing 已生成，等待导出",
+            color="success",
+        )
+
+    if product.status == COMPLETED and step >= 6:
+        if exported:
+            return state(
+                "export",
+                "succeeded",
+                "已导出，可重导",
+                "exported",
+                primary_action="open_export_center",
+                primary_action_label="重导",
+                allowed_actions=["open_export_center"],
+                action_reason="已导出，可在导出中心再次导出",
+                color="green",
+            )
+        return state(
+            "export",
+            "pending",
+            "待导出",
+            "export_ready",
+            primary_action="open_export_center",
+            primary_action_label="导出",
+            allowed_actions=["open_export_center"],
+            action_reason="Listing 已生成，等待导出",
+            color="success",
+        )
+
+    if product.status == PENDING_REVIEW:
+        return state(
+            "manual_review",
+            "pending",
+            "待人工处理",
+            "manual_review",
+            primary_action="resume",
+            primary_action_label="继续",
+            allowed_actions=["resume", "restart"],
+            action_reason=detail or "需要人工确认后继续",
+            color="warning",
+        )
+
+    if product.status == "failed":
+        if _is_competitor_search_failed(product):
+            return state(
+                "competitor_search",
+                "failed",
+                "候选搜索失败",
+                "select_competitor",
+                primary_action="open_competitor_review",
+                primary_action_label="处理竞品",
+                allowed_actions=["open_competitor_review", "restart"],
+                action_reason=detail or "候选竞品搜索失败，请重新搜索候选",
+                color="error",
+            )
+        if re.search(r"竞品详情|竞品 Listing|Amazon Listing|选中竞品", product.error_message or "", re.I):
+            return state(
+                "competitor_capture",
+                "failed",
+                "竞品详情抓取失败",
+                "select_competitor",
+                primary_action="open_competitor_review",
+                primary_action_label="重新抓取",
+                allowed_actions=["open_competitor_review", "restart"],
+                action_reason=detail or "竞品详情抓取失败",
+                color="error",
+            )
+        stage = _workflow_for_step(step)
+        return state(
+            stage,
+            "failed",
+            f"{STEP_LABELS.get(step, '当前步骤')}失败",
+            "failed",
+            primary_action="retry" if step > 1 else "open_detail",
+            primary_action_label="重试" if step > 1 else "查看",
+            allowed_actions=(["retry", "restart"] if step > 1 else ["restart"]),
+            action_reason=detail or "当前步骤失败",
+            color="error",
+        )
+
+    if product.status in {SOURCE_UNAVAILABLE, DUPLICATE_SKIPPED, "unavailable"}:
+        label = "原商品不可用" if product.status == SOURCE_UNAVAILABLE else "商品不可用"
+        return state(
+            "stopped",
+            "blocked",
+            label,
+            "failed",
+            primary_action="open_detail",
+            primary_action_label="查看",
+            action_reason=detail or label,
+            color="default",
+        )
+
+    if product.status == "created":
+        if step <= 0:
+            return state(
+                "image_review",
+                "pending",
+                "待确认图片",
+                "select_images",
+                primary_action="open_image_review",
+                primary_action_label="确认图片",
+                allowed_actions=["open_image_review"],
+                action_reason="需要先确认主图和 Listing 图片",
+                color="cyan",
+            )
+        if not product.competitor_asin:
+            return state(
+                "competitor_select",
+                "pending",
+                "待选择竞品",
+                "select_competitor",
+                primary_action="open_competitor_review",
+                primary_action_label="选竞品",
+                allowed_actions=["open_competitor_review", "restart"],
+                action_reason="需要搜索或选择参考竞品",
+                color="purple",
+            )
+        return state(
+            "image_analysis" if step <= 5 else "listing_generation",
+            "queued",
+            "等待自动入队",
+            "ready_to_generate",
+            primary_action="open_task_center",
+            primary_action_label="任务中心",
+            allowed_actions=["open_task_center", "restart"],
+            action_reason="前置条件已满足，等待系统自动进入任务中心",
+            color="warning",
+        )
+
+    return state(
+        _workflow_for_step(step),
+        "running",
+        "处理中",
+        "running",
+        primary_action="open_task_center",
+        primary_action_label="任务中心",
+        allowed_actions=["open_task_center"],
+        action_reason=product.status or "处理中",
+        color="processing",
+    )
 
 
 def _split_category_path(value: str | None) -> list[str]:
@@ -547,12 +879,13 @@ def _count_material_images(material_dir: Path) -> int:
 
 def _build_list_item(product: Product) -> dict:
     catalog_exported = product.catalog_item and (product.catalog_item.exported_at or product.catalog_item.export_task_id)
+    workflow = _workflow_state(product, catalog_exported=bool(catalog_exported))
     current_task_status = (
         f"已导出，可在导出中心再次导出（任务 #{product.catalog_item.export_task_id}）"
         if catalog_exported and product.catalog_item and product.catalog_item.export_task_id
         else "已导出，可在导出中心再次导出"
         if catalog_exported
-        else _current_task_status(product)
+        else workflow["action_reason"]
     )
     return {
         "id": product.id,
@@ -574,11 +907,15 @@ def _build_list_item(product: Product) -> dict:
         "aplus_status": product.aplus.aplus_status if product.aplus else None,
         "upc": product.upc,
         "brand": product.brand,
+        "source_data_source_id": product.source_data_source_id,
+        "source_site": product.source_site,
+        "source_batch_id": product.source_batch_id,
         "catalog_exported_at": product.catalog_item.exported_at if product.catalog_item else None,
         "catalog_export_task_id": product.catalog_item.export_task_id if product.catalog_item else None,
         "status": product.status,
         "current_step": product.current_step,
         "current_task_status": current_task_status,
+        "workflow": workflow,
         "error_message": product.error_message,
         "created_at": product.created_at,
         "updated_at": product.updated_at,
@@ -589,31 +926,13 @@ def _build_list_item(product: Product) -> dict:
 
 
 def _product_workbench_status(product: Product) -> str:
-    if _is_competitor_search_failed(product):
-        return "select_competitor"
-    if product.status == "failed":
-        return "failed"
-    if product.status == "paused":
-        return "suspended"
-    if product.status == "competitor_searching":
-        return "competitor_searching"
-    if product.status == STEP5_LISTING and re.search(r"竞品.*抓取中|Listing.*抓取中", product.error_message or "", re.I):
-        return "capture_detail"
-    if _is_stale_running_product(product):
-        return "interrupted"
-    if product.status in RUNNING_STATUSES:
-        return "running"
-    if product.status == COMPLETED and (product.current_step or 0) >= 6:
-        return "export_ready"
-    if product.status == PENDING_REVIEW:
-        return "manual_review"
-    if product.status == "created" and (product.current_step or 0) <= 0:
-        return "select_images"
-    if product.status == "created" and not product.competitor_asin:
-        return "select_competitor"
-    if product.status == "created":
-        return "ready_to_generate"
-    return "running"
+    return _workflow_state(product, catalog_exported=False)["work_status"]
+
+
+def _product_list_work_status(product: Product) -> str:
+    catalog_item = getattr(product, "catalog_item", None)
+    catalog_exported = bool(catalog_item and (catalog_item.exported_at or catalog_item.export_task_id))
+    return _workflow_state(product, catalog_exported=catalog_exported)["work_status"]
 
 
 def _template_risk_from_data(pd: ProductData | None) -> tuple[str | None, int | None]:
@@ -848,11 +1167,34 @@ async def _ensure_contact_sheet_oss_urls(product: Product, db: AsyncSession) -> 
         await db.refresh(product)
 
 
-def _mark_pipeline_starting(product: Product) -> None:
-    product.status = STEP_STATUS_MAP.get(max(product.current_step or 5, 5), STEP5_LISTING)
-    product.current_step = max(product.current_step or 5, 5)
-    product.error_message = None
-    product.updated_at = datetime.now()
+def _generation_start_step(product: Product) -> int:
+    if (product.current_step or 0) >= 6:
+        return 6
+    if product.images and product.images.image_analysis:
+        return 6
+    return max(product.current_step or 5, 5)
+
+
+async def _queue_product_image_analysis(
+    db: AsyncSession,
+    product: Product,
+    *,
+    created_by: str,
+) -> list[int]:
+    await _require_generation_prerequisites(db, product, 5)
+    runs = await create_product_image_analysis_runs(db, [product.id], created_by=created_by)
+    return [run.id for run in runs]
+
+
+async def _queue_product_listing_generation(
+    db: AsyncSession,
+    product: Product,
+    *,
+    created_by: str,
+) -> list[int]:
+    await _require_generation_prerequisites(db, product, 6)
+    runs = await create_product_listing_runs(db, [product.id], created_by=created_by)
+    return [run.id for run in runs]
 
 
 def _raise_step1_browser_collect_removed() -> None:
@@ -1126,6 +1468,7 @@ def _catalog_export_file_row(task: OfflineTask) -> CatalogExportFileResponse:
     oss_url = str(payload.get("oss_url") or "").strip() or None
     return CatalogExportFileResponse(
         task_id=task.id,
+        task_source="offline_task",
         task_status=str(payload.get("status") or task.status),
         title=task.title,
         filename=filename,
@@ -1149,6 +1492,86 @@ def _catalog_export_file_row(task: OfflineTask) -> CatalogExportFileResponse:
         created_at=task.created_at,
         finished_at=task.finished_at,
         updated_at=task.updated_at,
+    )
+
+
+def _catalog_export_run_payload(run: TaskRun) -> dict:
+    payload = _json_loads(run.summary_json, {})
+    if isinstance(payload, dict) and (
+        payload.get("filename") or payload.get("file_path") or payload.get("oss_object_key") or payload.get("rows")
+    ):
+        return payload
+    for step in sorted(run.steps, key=lambda item: item.id, reverse=True):
+        if step.step_type != "catalog_export_template":
+            continue
+        step_payload = _json_loads(step.result_json, {})
+        if isinstance(step_payload, dict) and (
+            step_payload.get("filename")
+            or step_payload.get("file_path")
+            or step_payload.get("oss_object_key")
+            or step_payload.get("rows")
+        ):
+            return step_payload
+    payload = _json_loads(run.payload_json, {})
+    return payload if isinstance(payload, dict) else {}
+
+
+def _catalog_export_file_row_from_run(run: TaskRun) -> CatalogExportFileResponse:
+    payload = _catalog_export_run_payload(run)
+    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
+    catalog_ids = [
+        int(item_id)
+        for item_id in payload.get("catalog_product_ids") or []
+        if str(item_id).isdigit()
+    ]
+    categories = [
+        str(category).strip()
+        for category in payload.get("categories") or []
+        if str(category).strip()
+    ]
+    if not categories:
+        categories = sorted({
+            str(row.get("category")).strip()
+            for row in rows
+            if isinstance(row, dict) and str(row.get("category") or "").strip()
+        })
+    success_count = int(payload.get("success_count") or payload.get("exported_count") or 0)
+    skipped_count = int(payload.get("skipped_count") or 0)
+    failed_count = int(payload.get("failed_count") or 0)
+    if rows and not (success_count or skipped_count or failed_count):
+        success_count = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "exported")
+        skipped_count = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "skipped")
+        failed_count = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "failed")
+    filename = str(payload.get("filename") or "").strip() or None
+    file_path = str(payload.get("file_path") or "").strip() or None
+    oss_url = str(payload.get("oss_url") or "").strip() or None
+    payload_status = str(payload.get("status") or "").strip()
+    return CatalogExportFileResponse(
+        task_id=run.id,
+        task_source="task_run",
+        task_status=payload_status or run.status,
+        title=run.title,
+        filename=filename,
+        file_path=file_path,
+        oss_url=oss_url,
+        file_size=payload.get("file_size"),
+        exported_at=_catalog_export_datetime(payload.get("created_at")) or run.finished_at or run.updated_at,
+        category=str(payload.get("category") or (categories[0] if categories else "")).strip() or None,
+        categories=categories,
+        category_count=len(categories),
+        template_name=str(payload.get("template_name") or "").strip() or None,
+        catalog_product_ids=catalog_ids,
+        task_product_count=int(payload.get("requested_count") or len(catalog_ids)),
+        file_product_count=success_count,
+        success_count=success_count,
+        exported_count=success_count,
+        skipped_count=skipped_count,
+        failed_count=failed_count,
+        report_count=int(payload.get("report_count") or len(rows)),
+        can_download=bool(filename or file_path or payload.get("oss_object_key")),
+        created_at=run.created_at,
+        finished_at=run.finished_at,
+        updated_at=run.updated_at,
     )
 
 
@@ -1569,6 +1992,39 @@ def _catalog_export_semantic_values(pd: ProductData, key: str) -> list[str]:
     return [str(value).strip() for value in values if str(value or "").strip()][:5]
 
 
+def _catalog_export_fabric_type_values(pd: ProductData) -> list[str]:
+    semantic_values = _catalog_export_semantic_values(pd, "fabric_type")
+    if semantic_values:
+        return semantic_values[:1]
+
+    material = str(pd.material or "").strip()
+    text = " ".join([
+        material,
+        str(pd.listing_title or ""),
+        str(pd.listing_description or ""),
+        str(pd.description or ""),
+        str(pd.title or ""),
+    ]).lower()
+    normalized_material = material.replace("+", " and ").replace("/", " and ").strip()
+    if "mdf" in text and "particle" in text:
+        return ["100% MDF and Particle Board"]
+    if "engineered wood" in text:
+        return ["100% Engineered Wood"]
+    if "wood" in text or "wooden" in text:
+        return ["100% Wood"]
+    if "metal" in text or "steel" in text or "iron" in text:
+        return ["100% Metal"]
+    if "polyester" in text or "fabric" in text or "flannelette" in text:
+        return ["100% Polyester"]
+    if "cotton" in text:
+        return ["100% Cotton"]
+    if "linen" in text:
+        return ["100% Linen"]
+    if normalized_material:
+        return [f"100% {normalized_material}"[:200]]
+    return []
+
+
 def _apply_catalog_export_row_overrides(ws, row_number: int, product: Product, pd: ProductData, mapping: dict) -> None:
     columns = _template_attribute_columns(ws)
     if product.upc:
@@ -1591,6 +2047,14 @@ def _apply_catalog_export_row_overrides(ws, row_number: int, product: Product, p
             ws.cell(row_number, column).value = None
         for column, value in zip(columns_for_key, _catalog_export_semantic_values(pd, key)):
             ws.cell(row_number, column).value = value
+
+    fabric_attrs = _flatten_template_field_values(dynamic_fields.get("fabric_type"))
+    fabric_attrs.extend(attr for attr in columns if str(attr).startswith("fabric_type["))
+    fabric_columns = [columns[attr] for attr in fabric_attrs if attr in columns]
+    for column in fabric_columns:
+        ws.cell(row_number, column).value = None
+    for column, value in zip(fabric_columns, _catalog_export_fabric_type_values(pd)):
+        ws.cell(row_number, column).value = value
 
 
 def _catalog_stock_export_override(ws, mapping: dict, catalog: CatalogProduct | None, stock: int | None = None) -> tuple[int, int] | None:
@@ -1620,6 +2084,12 @@ def _summary_workbook(rows: list[dict]) -> bytes:
         column_letter = column_cells[0].column_letter
         max_length = max(len(str(cell.value or "")) for cell in column_cells[:80])
         ws.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 60)
+    stream = BytesIO()
+    wb.save(stream)
+    return stream.getvalue()
+
+
+def _save_workbook_bytes(wb: Workbook) -> bytes:
     stream = BytesIO()
     wb.save(stream)
     return stream.getvalue()
@@ -2363,6 +2833,7 @@ async def list_products(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     status: str | None = None,
+    work_status: str | None = Query(None),
     item_id: str | None = None,
     sku_code: str | None = None,
     data_source_id: int | None = Query(None, ge=1),
@@ -2373,6 +2844,9 @@ async def list_products(
     db: AsyncSession = Depends(get_db),
 ):
     """商品任务列表（分页）"""
+    if work_status and work_status not in PRODUCT_LIST_WORK_STATUS_KEYS:
+        raise HTTPException(400, f"不支持的工作状态筛选：{work_status}")
+
     query = (
         select(Product)
         .options(
@@ -2454,6 +2928,17 @@ async def list_products(
         query = query.where(Product.created_at <= created_to)
         count_query = count_query.where(Product.created_at <= created_to)
 
+    if work_status:
+        result = await db.execute(query)
+        matched_items = [
+            item for item in result.scalars().unique().all()
+            if _product_list_work_status(item) == work_status
+        ]
+        total = len(matched_items)
+        start = (page - 1) * page_size
+        items = matched_items[start:start + page_size]
+        return PaginatedResponse(items=[_build_list_item(item) for item in items], total=total, page=page, page_size=page_size)
+
     total_result = await db.execute(count_query)
     total = total_result.scalar() or 0
 
@@ -2481,6 +2966,16 @@ async def list_product_image_review_queue(
         Product.status == "created",
         ((Product.current_step.is_(None)) | (Product.current_step <= 0)),
     ]
+    if data_source_id:
+        base_filter.append(_product_data_source_filter(data_source_id))
+
+    total_result = await db.execute(
+        select(func.count(Product.id))
+        .select_from(Product)
+        .where(*base_filter)
+    )
+    total = total_result.scalar() or 0
+
     query = (
         select(
             Product.id,
@@ -2498,8 +2993,6 @@ async def list_product_image_review_queue(
         .order_by(Product.updated_at.is_(None).asc(), Product.updated_at.desc(), Product.created_at.desc())
         .limit(limit)
     )
-    if data_source_id:
-        query = query.where(_product_data_source_filter(data_source_id))
 
     result = await db.execute(query)
     items = [
@@ -2516,7 +3009,7 @@ async def list_product_image_review_queue(
         }
         for row in result.all()
     ]
-    return ProductImageReviewQueueResponse(items=items, total=len(items), limit=limit)
+    return ProductImageReviewQueueResponse(items=items, total=total, limit=limit)
 
 
 @router.get("/image-review-detail/{product_id}", response_model=ProductImageReviewDetailResponse)
@@ -2924,7 +3417,7 @@ async def bulk_start_pipeline(body: BulkStartRequest, db: AsyncSession = Depends
     products = {product.id: product for product in result.scalars().all()}
 
     errors: list[str] = []
-    started_ids: list[int] = []
+    started: list[tuple[int, int]] = []
     for product_id in requested_ids:
         product = products.get(product_id)
         if not product:
@@ -2940,30 +3433,45 @@ async def bulk_start_pipeline(body: BulkStartRequest, db: AsyncSession = Depends
             errors.append(f"任务 {product_id} 尚未完成图片/竞品确认，不能启动生成")
             continue
         try:
-            await _require_generation_prerequisites(db, product, max(product.current_step or 5, 5))
+            await _require_generation_prerequisites(db, product, _generation_start_step(product))
         except HTTPException as exc:
             errors.append(f"任务 {product_id} {exc.detail}")
             continue
-        _mark_pipeline_starting(product)
-        started_ids.append(product.id)
-
-    await db.commit()
+        started.append((product.id, _generation_start_step(product)))
 
     actually_started: list[int] = []
-    for product_id in started_ids:
+    for product_id, start_step in started:
         product = products.get(product_id)
-        start_step = max((product.current_step if product else 5) or 5, 5)
+        if start_step <= 5:
+            try:
+                if product:
+                    await _queue_product_image_analysis(db, product, created_by="bulk_start")
+                else:
+                    await create_product_image_analysis_runs(db, [product_id], created_by="bulk_start")
+                actually_started.append(product_id)
+            except ValueError as exc:
+                errors.append(f"任务 {product_id} {exc}")
+            continue
+        if start_step == 6:
+            try:
+                if product:
+                    await _queue_product_listing_generation(db, product, created_by="bulk_start")
+                else:
+                    await create_product_listing_runs(db, [product_id], created_by="bulk_start")
+                actually_started.append(product_id)
+            except ValueError as exc:
+                errors.append(f"任务 {product_id} {exc}")
+            continue
         if enqueue_pipeline(product_id, start_step=start_step):
             actually_started.append(product_id)
-        else:
-            errors.append(f"任务 {product_id} 后台队列已存在，已跳过")
-            product = products.get(product_id)
-            if product:
-                product.status = "created"
-                product.current_step = 0
-                product.updated_at = datetime.now()
+            continue
+        errors.append(f"任务 {product_id} 后台队列已存在，已跳过")
+        if product:
+            product.status = "created"
+            product.current_step = 0
+            product.updated_at = datetime.now()
 
-    if len(actually_started) != len(started_ids):
+    if len(actually_started) != len(started):
         await db.commit()
 
     return BulkStartResponse(
@@ -3011,22 +3519,37 @@ async def auto_start_ready_generation(
         if is_running(product.id):
             errors.append(f"任务 {product.id} 已在运行中，已跳过")
             continue
-        start_step = max(product.current_step or 5, 5)
+        start_step = _generation_start_step(product)
         try:
             await _require_generation_prerequisites(db, product, start_step)
         except HTTPException as exc:
             errors.append(f"任务 {product.id} {exc.detail}")
             continue
         startable.append((product.id, start_step, product.status, product.current_step or 0, product.error_message))
-        _mark_pipeline_starting(product)
-        _sync_catalog_item(product, db)
-
-    if startable:
-        await db.commit()
 
     started_ids: list[int] = []
     for product_id, start_step, original_status, original_step, original_error in startable:
         product = next((item for item in products if item.id == product_id), None)
+        if start_step <= 5:
+            try:
+                if product:
+                    await _queue_product_image_analysis(db, product, created_by="auto_start_ready_generation")
+                else:
+                    await create_product_image_analysis_runs(db, [product_id], created_by="auto_start_ready_generation")
+                started_ids.append(product_id)
+            except ValueError as exc:
+                errors.append(f"任务 {product_id} {exc}")
+            continue
+        if start_step == 6:
+            try:
+                if product:
+                    await _queue_product_listing_generation(db, product, created_by="auto_start_ready_generation")
+                else:
+                    await create_product_listing_runs(db, [product_id], created_by="auto_start_ready_generation")
+                started_ids.append(product_id)
+            except ValueError as exc:
+                errors.append(f"任务 {product_id} {exc}")
+            continue
         if enqueue_pipeline(product_id, start_step=start_step):
             started_ids.append(product_id)
             continue
@@ -3050,148 +3573,12 @@ async def auto_start_ready_generation(
     )
 
 
-async def _create_product_bulk_advance_task_for_ids(
-    db: AsyncSession,
-    product_ids: list[int],
-    *,
-    payload_extra: dict | None = None,
-    title_suffix: str | None = None,
-    start_step_override: int | None = None,
-) -> OfflineTask:
-    """创建可审计的批量推进任务；满足条件的商品进入任务中心队列，其余写入逐商品阻塞原因。"""
-    requested_ids = list(dict.fromkeys(product_ids))
-    if len(requested_ids) > PRODUCT_BULK_ADVANCE_MAX_PRODUCTS:
-        raise HTTPException(400, f"单次最多批量推进 {PRODUCT_BULK_ADVANCE_MAX_PRODUCTS} 个商品")
-
-    result = await db.execute(
-        select(Product)
-        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
-        .where(Product.id.in_(requested_ids))
-    )
-    products = {product.id: product for product in result.scalars().all()}
-
-    rows: list[dict] = []
-    startable: list[dict] = []
-    now = datetime.now()
-    for product_id in requested_ids:
-        product = products.get(product_id)
-        if not product:
-            rows.append({
-                "product_id": product_id,
-                "item_code": None,
-                "status": "skipped",
-                "reason": "商品不存在",
-                "current_status": None,
-                "current_step": None,
-            })
-            continue
-
-        item_code = product.data.item_code if product.data else product.gigab2b_product_id
-        base_row = {
-            "product_id": product.id,
-            "item_code": item_code,
-            "current_status": product.status,
-            "current_step": product.current_step,
-        }
-        start_step = start_step_override or max(product.current_step or 5, 5)
-        if start_step > 6:
-            start_step = 6
-        if product.status == COMPLETED and (product.current_step or 0) >= 6 and start_step != 6:
-            rows.append({**base_row, "status": "skipped", "reason": "已在待导出状态，无需推进"})
-            continue
-        if product.status in {"source_unavailable", "unavailable"}:
-            rows.append({**base_row, "status": "skipped", "reason": f"当前状态不能推进: {product.status}"})
-            continue
-        if product.status == "paused":
-            rows.append({**base_row, "status": "skipped", "reason": "商品已挂起，请先在页面点击继续"})
-            continue
-        if is_running(product.id):
-            rows.append({**base_row, "status": "skipped", "reason": "商品流程正在运行中"})
-            continue
-        if (product.current_step or 0) < 5:
-            rows.append({**base_row, "status": "skipped", "reason": "尚未完成图片确认、竞品选择和竞品详情抓取，不能批量进入生成"})
-            continue
-        try:
-            await _require_generation_prerequisites(db, product, start_step)
-        except HTTPException as exc:
-            rows.append({**base_row, "status": "skipped", "reason": str(exc.detail)})
-            continue
-
-        row = {
-            **base_row,
-            "status": "queued",
-            "reason": f"已加入任务中心队列，从 Step {start_step} 推进",
-            "start_step": start_step,
-        }
-        rows.append(row)
-        startable.append(row)
-
-    started_count = len(startable)
-    skipped_count = len(rows) - started_count
-    task_status = "pending" if started_count else "partial_failed"
-    result_payload = {
-        "status": task_status,
-        "requested_count": len(requested_ids),
-        "started_count": started_count,
-        "skipped_count": skipped_count,
-        "failed_count": 0,
-        "rows": rows,
-        "created_at": now.isoformat(),
-    }
-    payload = {"product_ids": requested_ids}
-    if payload_extra:
-        payload.update(payload_extra)
-    task = OfflineTask(
-        task_type="product_bulk_advance",
-        title=f"批量推进商品到待导出：{len(requested_ids)} 个商品{title_suffix or ''}",
-        status=task_status,
-        total_steps=started_count,
-        success_steps=0,
-        failed_steps=0,
-        running_steps=0,
-        created_by="web",
-        payload_json=json.dumps(payload, ensure_ascii=False, default=str),
-        result_json=json.dumps(result_payload, ensure_ascii=False, default=str),
-        error_message=None,
-        created_at=now,
-        started_at=None,
-        finished_at=None if started_count else datetime.now(),
-        updated_at=datetime.now(),
-    )
-    db.add(task)
-    await db.flush()
-    for row in startable:
-        db.add(OfflineTaskStep(
-            task_id=task.id,
-            step_type="product_bulk_advance_product",
-            title=f"推进商品：{row.get('item_code') or row['product_id']}",
-            status="pending",
-            progress_current=0,
-            progress_total=2 if int(row["start_step"] or 5) <= 5 else 1,
-            payload_json=json.dumps({
-                "product_id": row["product_id"],
-                "item_code": row.get("item_code"),
-                "start_step": row["start_step"],
-                "current_status": row.get("current_status"),
-                "current_step": row.get("current_step"),
-            }, ensure_ascii=False, default=str),
-            result_json=None,
-            error_message=None,
-            updated_at=now,
-        ))
-    await db.commit()
-    await db.refresh(task)
-    if started_count:
-        schedule_offline_task(task.id)
-    return task
-
-
-@router.post("/bulk-advance-task", response_model=OfflineTaskResponse)
+@router.post("/bulk-advance-task", response_model=TaskRunResponse)
 async def create_product_bulk_advance_task(body: ProductBulkAdvanceRequest, db: AsyncSession = Depends(get_db)):
-    return await _create_product_bulk_advance_task_for_ids(db, body.product_ids)
+    return await create_product_bulk_advance_run(db, body.product_ids)
 
 
-@router.post("/bulk-advance-task/by-filter", response_model=OfflineTaskResponse)
+@router.post("/bulk-advance-task/by-filter", response_model=TaskRunResponse)
 async def create_product_bulk_advance_task_by_filter(body: ProductBulkAdvanceFilterRequest, db: AsyncSession = Depends(get_db)):
     query = (
         select(Product)
@@ -3240,7 +3627,7 @@ async def create_product_bulk_advance_task_by_filter(body: ProductBulkAdvanceFil
     ids = [int(product.id) for product in products]
     if not ids:
         raise HTTPException(400, "当前筛选下没有商品")
-    return await _create_product_bulk_advance_task_for_ids(
+    return await create_product_bulk_advance_run(
         db,
         ids,
         payload_extra={
@@ -3464,14 +3851,24 @@ async def list_catalog_export_files(
     db: AsyncSession = Depends(get_db),
 ):
     """按导出文件/任务维度列出 Amazon 导入表历史记录。"""
-    result = await db.execute(
+    old_result = await db.execute(
         select(OfflineTask)
         .where(OfflineTask.task_type == "catalog_export")
         .where(OfflineTask.status.in_(("done", "partial_failed", "failed")))
         .options(selectinload(OfflineTask.steps))
         .order_by(OfflineTask.id.desc())
     )
-    rows = [_catalog_export_file_row(task) for task in result.scalars().unique().all()]
+    new_result = await db.execute(
+        select(TaskRun)
+        .where(TaskRun.task_type == "catalog_export")
+        .where(TaskRun.status.in_(("succeeded", "failed", "interrupted")))
+        .options(selectinload(TaskRun.steps))
+        .order_by(TaskRun.id.desc())
+    )
+    rows = [
+        *[_catalog_export_file_row_from_run(run) for run in new_result.scalars().unique().all()],
+        *[_catalog_export_file_row(task) for task in old_result.scalars().unique().all()],
+    ]
     normalized_category = str(category or "").strip()
     if normalized_category:
         rows = [
@@ -3479,6 +3876,7 @@ async def list_catalog_export_files(
             for row in rows
             if normalized_category in row.categories or row.category == normalized_category
         ]
+    rows.sort(key=lambda item: item.exported_at or item.updated_at or item.created_at or datetime.min, reverse=True)
     total = len(rows)
     start = (page - 1) * page_size
     return PaginatedCatalogExportFiles(
@@ -3502,6 +3900,15 @@ async def list_catalog_export_categories(db: AsyncSession = Depends(get_db)):
     )
     for task in task_result.scalars().unique().all():
         _collect_export_file_category(exported_groups, _catalog_export_file_row(task))
+    run_result = await db.execute(
+        select(TaskRun)
+        .where(TaskRun.task_type == "catalog_export")
+        .where(TaskRun.status.in_(("succeeded", "failed", "interrupted")))
+        .options(selectinload(TaskRun.steps))
+        .order_by(TaskRun.id.desc())
+    )
+    for run in run_result.scalars().unique().all():
+        _collect_export_file_category(exported_groups, _catalog_export_file_row_from_run(run))
     return CatalogExportCategoriesResponse(
         pending=[],
         exported=_export_category_summaries(exported_groups),
@@ -3831,7 +4238,7 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
             template_stem = _safe_export_name(template_path.stem, "amazon_template")
             for chunk_index in range(0, len(entries), 500):
                 chunk = entries[chunk_index:chunk_index + 500]
-                wb = load_workbook(template_path, keep_vba=True, data_only=False)
+                wb = await asyncio.to_thread(load_workbook, template_path, keep_vba=True, data_only=False)
                 if "Template" not in wb.sheetnames:
                     raise HTTPException(400, f"模板缺少 Template 工作表: {template_path}")
                 ws = wb["Template"]
@@ -3909,11 +4316,11 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                         })
 
                 if exported_in_workbook:
-                    workbook_stream = BytesIO()
-                    wb.save(workbook_stream)
-                    archive.writestr(export_name, workbook_stream.getvalue())
+                    workbook_bytes = await asyncio.to_thread(_save_workbook_bytes, wb)
+                    await asyncio.to_thread(archive.writestr, export_name, workbook_bytes)
 
-        archive.writestr("导出报告.xlsx", _summary_workbook(report_rows))
+        report_bytes = await asyncio.to_thread(_summary_workbook, report_rows)
+        await asyncio.to_thread(archive.writestr, "导出报告.xlsx", report_bytes)
 
     if not any(row.get("状态") == "已导出" for row in report_rows):
         raise CatalogExportBuildError("选中的商品没有成功生成 Amazon 导入表格，请查看商品详情中的导入表格检查。", report_rows)
@@ -4330,10 +4737,11 @@ async def get_asin_sync_batch(batch_id: int, db: AsyncSession = Depends(get_db))
 async def create_aplus_generate_batch(body: AplusGenerateRequest, db: AsyncSession = Depends(get_db)):
     """批量生成 A+。A+ 独立于商品主流程，只允许对待导出/已导出的商品执行。"""
     try:
-        task, errors, started_product_ids = await create_aplus_generate_task(
+        runs, errors, started_product_ids = await create_aplus_generate_runs(
             db,
             body.catalog_product_ids,
             force=body.force,
+            created_by="aplus_generate_batch",
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
@@ -4370,16 +4778,18 @@ async def generate_product_aplus(
     if not product.catalog_item:
         raise HTTPException(400, "只有待导出/已导出的商品可以生成 A+")
     try:
-        task, errors, started_product_ids = await create_aplus_generate_task(
+        runs, errors, started_product_ids = await create_aplus_generate_runs(
             db,
             [product.catalog_item.id],
             force=force,
+            created_by="product_aplus_generate",
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     if not started_product_ids:
         raise HTTPException(400, "；".join(errors) or "A+ 生成任务未创建")
-    return {"status": "queued", "product_id": product.id, "task_id": task.id if task else None}
+    task_run_id = runs[0].id if runs else None
+    return {"status": "queued", "product_id": product.id, "task_id": task_run_id, "task_run_id": task_run_id}
 
 
 @router.post("/catalog/aplus-upload", response_model=AplusUploadBatchResponse)
@@ -4554,7 +4964,13 @@ async def get_product(
     """商品详情（含子表数据）"""
     result = await db.execute(
         select(Product)
-        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.files))
+        .options(
+            selectinload(Product.data),
+            selectinload(Product.images),
+            selectinload(Product.aplus),
+            selectinload(Product.files),
+            selectinload(Product.catalog_item),
+        )
         .where(Product.id == product_id)
     )
     product = result.scalar_one_or_none()
@@ -4563,21 +4979,21 @@ async def get_product(
 
     detail = ProductDetail.model_validate(product)
     await _ensure_product_detail_gallery_order(db, product, detail)
+    catalog_exported = bool(product.catalog_item and (product.catalog_item.exported_at or product.catalog_item.export_task_id))
+    detail.workflow = _workflow_state(product, catalog_exported=catalog_exported)
     if compact:
-        detail.current_task_status = _current_task_status(product)
+        detail.current_task_status = detail.workflow["action_reason"]
         return _compact_product_detail(detail)
 
-    await _ensure_contact_sheet_oss_urls(product, db)
-    detail.current_task_status = _current_task_status(product)
+    detail.current_task_status = detail.workflow["action_reason"]
     detail.amazon_export_preview = _build_amazon_export_preview(product)
     if product.data and product.data.material_dir:
         material_dir = Path(product.data.material_dir).expanduser()
         if material_dir.is_dir():
-            video_dir = organize_video_files(material_dir)
             detail.zip_files = _scan_zip_files(material_dir)
             if detail.data:
                 detail.data.image_count = _count_material_images(material_dir)
-            detail.video_folder = folder_summary(video_dir, VIDEO_EXTENSIONS) if video_dir else None
+            detail.video_folder = video_folder_summary(material_dir)
             detail.aplus_folder = aplus_folder_summary(aplus_image_folder(material_dir))
     detail.generated_files = sorted(product.files or [], key=lambda item: item.created_at or datetime.min, reverse=True)
     return detail
@@ -5008,7 +5424,7 @@ async def refresh_product_from_giga_openapi(
     body = body or ProductGigaRefreshRequest()
     result = await db.execute(
         select(Product)
-        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
+        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
         .where(Product.id == product_id)
     )
     product = result.scalar_one_or_none()
@@ -5097,7 +5513,7 @@ async def retry_step(product_id: int, db: AsyncSession = Depends(get_db)):
     """重试当前失败的步骤"""
     result = await db.execute(
         select(Product)
-        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
+        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
         .where(Product.id == product_id)
     )
     product = result.scalar_one_or_none()
@@ -5111,20 +5527,34 @@ async def retry_step(product_id: int, db: AsyncSession = Depends(get_db)):
         _raise_step1_browser_collect_removed()
     if (step or 0) >= 5:
         await _require_generation_prerequisites(db, product, step)
+        if step == 5:
+            await _queue_product_image_analysis(db, product, created_by="retry_step")
+            refreshed = await db.execute(
+                select(Product)
+                .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
+                .where(Product.id == product_id)
+            )
+            queued_product = refreshed.scalar_one_or_none()
+            if not queued_product:
+                raise HTTPException(404, "Product not found")
+            queued_product.current_task_status = _current_task_status(queued_product)
+            return queued_product
         if step == 6 and product.catalog_item:
             product.catalog_item.confirmed_at = None
             product.catalog_item.updated_at = datetime.now()
-            await db.commit()
-        await _create_product_bulk_advance_task_for_ids(
-            db,
-            [product.id],
-            payload_extra={"source": "retry_step", "start_step": step},
-            title_suffix=f"（商品 #{product.id}）",
-            start_step_override=step,
-        )
+        if step == 6:
+            await _queue_product_listing_generation(db, product, created_by="retry_step")
+        else:
+            await create_product_bulk_advance_run(
+                db,
+                [product.id],
+                payload_extra={"source": "retry_step", "start_step": step},
+                title_suffix=f"（商品 #{product.id}）",
+                start_step_override=step,
+            )
         refreshed = await db.execute(
             select(Product)
-            .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
+            .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
             .where(Product.id == product_id)
         )
         queued_product = refreshed.scalar_one_or_none()
@@ -5152,7 +5582,7 @@ async def run_product_from_step(
     """从指定商品节点启动后续生成流程。用于商品工作台，不依赖旧 StyleSnap 任务入口。"""
     result = await db.execute(
         select(Product)
-        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
+        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
         .where(Product.id == product_id)
     )
     product = result.scalar_one_or_none()
@@ -5162,23 +5592,38 @@ async def run_product_from_step(
         raise HTTPException(400, "商品流程正在运行中")
     if product.status in {"source_unavailable", "unavailable"}:
         raise HTTPException(400, f"当前状态不能启动生成: {product.status}")
+    if start_step == 5 and product.images and product.images.image_analysis:
+        start_step = 6
     if product.status == "completed" and start_step != 6:
         raise HTTPException(400, f"当前状态不能从该节点启动生成: {product.status}")
     if product.status == "paused":
         raise HTTPException(400, "商品已挂起，请先点击继续")
     await _require_generation_prerequisites(db, product, start_step)
 
-    if start_step == 6 and product.catalog_item:
-        product.catalog_item.confirmed_at = None
-        product.catalog_item.updated_at = datetime.now()
-    await db.commit()
-    await _create_product_bulk_advance_task_for_ids(
-        db,
-        [product.id],
-        payload_extra={"source": "run_from_step", "start_step": start_step},
-        title_suffix=f"（商品 #{product.id}）",
-        start_step_override=start_step,
-    )
+    if start_step == 5:
+        await _queue_product_image_analysis(db, product, created_by="run_from_step")
+        refreshed = await db.execute(
+            select(Product)
+            .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
+            .where(Product.id == product_id)
+        )
+        queued_product = refreshed.scalar_one_or_none()
+        if not queued_product:
+            raise HTTPException(404, "Product not found")
+        queued_product.current_task_status = _current_task_status(queued_product)
+        return queued_product
+
+    if start_step == 6:
+        await _queue_product_listing_generation(db, product, created_by="run_from_step")
+    else:
+        await db.commit()
+        await create_product_bulk_advance_run(
+            db,
+            [product.id],
+            payload_extra={"source": "run_from_step", "start_step": start_step},
+            title_suffix=f"（商品 #{product.id}）",
+            start_step_override=start_step,
+        )
     refreshed = await db.execute(
         select(Product)
         .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
@@ -5196,7 +5641,7 @@ async def resume_pipeline(product_id: int, db: AsyncSession = Depends(get_db)):
     """从挂起时记录的当前步骤继续 Pipeline。"""
     result = await db.execute(
         select(Product)
-        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
+        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
         .where(Product.id == product_id)
     )
     product = result.scalar_one_or_none()
@@ -5225,6 +5670,30 @@ async def resume_pipeline(product_id: int, db: AsyncSession = Depends(get_db)):
         return product
     if step >= 5:
         await _require_generation_prerequisites(db, product, step)
+    if step == 5:
+        await _queue_product_image_analysis(db, product, created_by="resume_pipeline")
+        refreshed = await db.execute(
+            select(Product)
+            .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
+            .where(Product.id == product_id)
+        )
+        queued_product = refreshed.scalar_one_or_none()
+        if not queued_product:
+            raise HTTPException(404, "Product not found")
+        queued_product.current_task_status = _current_task_status(queued_product)
+        return queued_product
+    if step == 6:
+        await _queue_product_listing_generation(db, product, created_by="resume_pipeline")
+        refreshed = await db.execute(
+            select(Product)
+            .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
+            .where(Product.id == product_id)
+        )
+        queued_product = refreshed.scalar_one_or_none()
+        if not queued_product:
+            raise HTTPException(404, "Product not found")
+        queued_product.current_task_status = _current_task_status(queued_product)
+        return queued_product
 
     product.status = STEP_STATUS_MAP.get(step, "created")
     product.error_message = None
@@ -5246,7 +5715,7 @@ async def run_single_step(product_id: int, step: int, db: AsyncSession = Depends
 
     result = await db.execute(
         select(Product)
-        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
+        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
         .where(Product.id == product_id)
     )
     product = result.scalar_one_or_none()
@@ -5256,6 +5725,12 @@ async def run_single_step(product_id: int, step: int, db: AsyncSession = Depends
         raise HTTPException(400, "商品流程正在运行中，不能单独执行节点")
     if step >= 5:
         await _require_generation_prerequisites(db, product, step)
+    if step == 5:
+        task_run_ids = await _queue_product_image_analysis(db, product, created_by="single_step")
+        return {"status": "queued", "step": step, "task_run_ids": task_run_ids}
+    if step == 6:
+        task_run_ids = await _queue_product_listing_generation(db, product, created_by="single_step")
+        return {"status": "queued", "step": step, "task_run_ids": task_run_ids}
 
     product.status = STEP_STATUS_MAP.get(step, "created")
     product.current_step = step

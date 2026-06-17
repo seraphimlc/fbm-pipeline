@@ -148,6 +148,9 @@ async def _run_pipeline(product_id: int, start_step: int = 1):
     运行完整 Pipeline（后台任务）
     """
     try:
+        if start_step <= 6:
+            raise RuntimeError("Step5 图片分析和 Step6 Listing 已迁移到新任务中心，请创建 product_image_analysis/product_listing_generation task_run")
+
         if start_step <= 1:
             raise RuntimeError(
                 "Step1 浏览器采集已停用：商品中心应使用商品数据源/OpenAPI拉品，不能再自动访问大健商品页"
@@ -178,16 +181,6 @@ async def _run_pipeline(product_id: int, start_step: int = 1):
             await run_category(product_id)
             await _update_status(product_id, STEP3_4_DONE, 4)
             logger.info(f"[Pipeline] Product {product_id} Step4 类目完成，耗时={time.monotonic() - step_started:.1f}s")
-
-        if start_step <= 5:
-            # === Step 5: 图片分析 ===
-            await _assert_step_prerequisites(product_id, 5)
-            logger.info(f"[Pipeline] Product {product_id} Step5 图片分析开始")
-            step_started = time.monotonic()
-            await _update_status(product_id, STEP6_CURATING, 5)
-            await run_image_analysis(product_id)
-            await _update_status(product_id, STEP6_DONE, 5)
-            logger.info(f"[Pipeline] Product {product_id} Step5 图片分析完成，耗时={time.monotonic() - step_started:.1f}s")
 
         if start_step <= 6:
             # === Step 6: Listing 文案 ===
@@ -335,6 +328,9 @@ def start_pipeline(product_id: int, start_step: int = 1) -> bool:
     Returns:
         bool: 是否成功启动
     """
+    if start_step <= 6:
+        logger.warning("[Pipeline] Step5 图片分析和 Step6 Listing 已迁移到新任务中心，拒绝旧内存启动: product=%s start_step=%s", product_id, start_step)
+        return False
     if product_id in _running_tasks:
         return False
 
@@ -345,6 +341,8 @@ def start_pipeline(product_id: int, start_step: int = 1) -> bool:
 
 async def run_pipeline_tracked(product_id: int, start_step: int = 1) -> None:
     """Run a product pipeline in the current task while exposing it via is_running()."""
+    if start_step <= 6:
+        raise RuntimeError("Step5 图片分析和 Step6 Listing 已迁移到新任务中心，请创建 product_image_analysis/product_listing_generation task_run")
     current_task = asyncio.current_task()
     if current_task is None:
         await _run_pipeline_with_limit(product_id, start_step=start_step)

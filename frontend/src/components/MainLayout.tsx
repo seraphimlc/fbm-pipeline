@@ -33,7 +33,7 @@ const MainLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
         { key: '/products/competitor-review', icon: <AimOutlined />, label: '选竞品' },
       ],
     },
-    { key: '/offline-tasks', icon: <BarsOutlined />, label: '任务中心' },
+    { key: '/task-runs', icon: <BarsOutlined />, label: '任务中心' },
     { key: '/export-center', icon: <ExportOutlined />, label: '导出中心' },
     { key: '/inventory-sync', icon: <CloudSyncOutlined />, label: '库存同步' },
     { key: '/asin-sync', icon: <SyncOutlined />, label: 'ASIN同步' },
@@ -49,6 +49,8 @@ const MainLayout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
         ? '/products/image-review'
         : location.pathname.startsWith('/products/competitor-review')
           ? '/products/competitor-review'
+          : location.pathname.startsWith('/tiktok/products/')
+        ? '/products'
           : location.pathname.startsWith('/products/')
         ? '/products'
         : location.pathname;

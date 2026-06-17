@@ -25,7 +25,8 @@ from app.services.stylesnap_product_tasks import (
     _json_loads,
     _listing_capture_snapshot,
 )
-from app.pipeline.engine import is_running, start_pipeline
+from app.pipeline.engine import is_running
+from app.task_planners.product_image_analysis import create_product_image_analysis_runs
 from app.models.status import CREATED, FAILED, STEP5_LISTING
 
 
@@ -43,9 +44,9 @@ LISTING_PREFETCH_CONCURRENCY = 1
 _listing_prefetch_semaphore = asyncio.Semaphore(LISTING_PREFETCH_CONCURRENCY)
 
 
-def _start_generation_after_competitor(product_id: int) -> None:
+async def _start_generation_after_competitor(db: AsyncSession, product_id: int) -> None:
     if not is_running(product_id):
-        start_pipeline(product_id, start_step=5)
+        await create_product_image_analysis_runs(db, [product_id], created_by="competitor_selection")
 
 
 def _candidate_response(
@@ -722,6 +723,7 @@ async def _capture_and_sync_product_competitor_background(
     candidate_id: int,
     *,
     force_capture: bool = True,
+    auto_start_generation: bool = True,
 ):
     async with async_session() as db:
         product, _snapshot = await _load_product_for_competitor_selection(db, product_id)
@@ -741,7 +743,8 @@ async def _capture_and_sync_product_competitor_background(
                     current_step=5,
                     error_message=None,
                 )
-                _start_generation_after_competitor(product.id)
+                if auto_start_generation:
+                    await _start_generation_after_competitor(db, product.id)
             else:
                 await _sync_product_competitor_snapshot(
                     db,
@@ -863,6 +866,7 @@ async def select_product_competitor_candidate(
     candidate_id: int,
     background_tasks: BackgroundTasks,
     force_capture: bool = Query(False),
+    auto_start_generation: bool = Query(True),
     db: AsyncSession = Depends(get_db),
 ):
     product, snapshot = await _load_product_for_competitor_selection(db, product_id)
@@ -919,7 +923,8 @@ async def select_product_competitor_candidate(
             current_step=5,
             error_message=None,
         )
-        _start_generation_after_competitor(product.id)
+        if auto_start_generation:
+            await _start_generation_after_competitor(db, product.id)
     else:
         await _sync_product_competitor_snapshot(
             db,
@@ -935,6 +940,7 @@ async def select_product_competitor_candidate(
             product.id,
             selected.id,
             force_capture=True,
+            auto_start_generation=auto_start_generation,
         )
     return await _load_group(db, selected.batch_id, selected.site, selected.item_code, selected.sku_code)
 

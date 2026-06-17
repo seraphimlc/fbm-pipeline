@@ -26,6 +26,16 @@ _browser_workflow_semaphore = asyncio.Semaphore(max(1, settings.BROWSER_WORKFLOW
 # 专用标签页标记。所有采集/类目操作都在这个 tab 里执行，不抢用户当前页面。
 FBM_TAB_MARKER = "#fbm-pipeline-worker"
 FBM_TAB_ID_FILE = Path("/tmp/fbm_pipeline_chrome_tab_id")
+_last_chrome_error: str | None = None
+
+
+def _set_last_chrome_error(message: str | None) -> None:
+    global _last_chrome_error
+    _last_chrome_error = message.strip() if message else None
+
+
+def chrome_last_error() -> str | None:
+    return _last_chrome_error
 
 
 def _run_osascript(script: str, timeout: int = 30) -> tuple[str, str]:
@@ -113,14 +123,17 @@ async def chrome_navigate(url: str, wait: float = 3.0) -> bool:
     end tell
 end tell'''
         try:
+            _set_last_chrome_error(None)
             stdout, stderr = _run_osascript(script)
             if stderr and "error" in stderr.lower():
+                _set_last_chrome_error(stderr)
                 logger.error(f"Chrome导航错误: {stderr}")
                 return False
             _write_worker_tab_id(stdout)
             await asyncio.sleep(wait)
             return True
         except Exception as e:
+            _set_last_chrome_error(str(e))
             logger.error(f"Chrome导航失败: {e}")
             return False
 
@@ -187,12 +200,15 @@ async def chrome_execute_js(js_code: str, timeout: int = 30) -> str | None:
     end tell
 end tell'''
         try:
+            _set_last_chrome_error(None)
             stdout, stderr = _run_osascript(script, timeout)
             if stderr and "error" in stderr.lower():
+                _set_last_chrome_error(stderr)
                 logger.error(f"Chrome JS执行错误: {stderr}")
                 return None
             return stdout
         except Exception as e:
+            _set_last_chrome_error(str(e))
             logger.error(f"Chrome JS执行失败: {e}")
             return None
 

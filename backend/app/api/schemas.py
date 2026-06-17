@@ -206,6 +206,140 @@ class OfflineTaskBatchQueuedResponse(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
 
+class TaskStepEventResponse(BaseModel):
+    id: int
+    task_run_id: int
+    task_group_id: int | None = None
+    task_step_id: int | None = None
+    event_type: str
+    message: str | None = None
+    data_json: str | None = None
+    created_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class TaskStepResponse(BaseModel):
+    id: int
+    task_run_id: int
+    task_group_id: int
+    step_key: str
+    step_type: str
+    status: str
+    sort_order: int = 0
+    payload_json: str | None = None
+    result_json: str | None = None
+    error_message: str | None = None
+    progress_current: int = 0
+    progress_total: int = 0
+    attempt_count: int = 0
+    max_attempts: int = 1
+    locked_by: str | None = None
+    locked_until: datetime | None = None
+    heartbeat_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    events: list[TaskStepEventResponse] = Field(default_factory=list)
+    step_label: str | None = None
+    display_status: str | None = None
+    display_status_label: str | None = None
+    display_reason: str | None = None
+    error_summary: str | None = None
+    available_actions: list[str] = Field(default_factory=list)
+
+    model_config = {"from_attributes": True}
+
+
+class TaskGroupResponse(BaseModel):
+    id: int
+    task_run_id: int
+    group_key: str
+    title: str
+    status: str
+    sort_order: int = 0
+    depends_on_group_keys_json: str | None = None
+    failure_policy: str = "require_all_success"
+    retry_policy: str = "failed_steps_only"
+    progress_current: int = 0
+    progress_total: int = 0
+    summary_json: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    steps: list[TaskStepResponse] = Field(default_factory=list)
+    display_status: str | None = None
+    display_status_label: str | None = None
+    display_reason: str | None = None
+    error_summary: str | None = None
+    available_actions: list[str] = Field(default_factory=list)
+
+    model_config = {"from_attributes": True}
+
+
+class TaskRunResponse(BaseModel):
+    id: int
+    task_type: str
+    title: str
+    status: str
+    payload_json: str | None = None
+    summary_json: str | None = None
+    created_by: str | None = None
+    task_type_label: str | None = None
+    object_type: str | None = None
+    object_id: int | None = None
+    object_label: str | None = None
+    dedupe_key: str | None = None
+    correlation_key: str | None = None
+    idempotency_key: str | None = None
+    source_ref: str | None = None
+    superseded_by_run_id: int | None = None
+    superseded_at: datetime | None = None
+    cancel_requested_at: datetime | None = None
+    cancel_requested_by: str | None = None
+    cancel_reason: str | None = None
+    display_status: str | None = None
+    display_status_label: str | None = None
+    display_reason: str | None = None
+    current_step_label: str | None = None
+    progress_current: int = 0
+    progress_total: int = 0
+    progress_percent: int = 0
+    error_summary: str | None = None
+    latest_event_message: str | None = None
+    last_heartbeat_at: datetime | None = None
+    current_effective_run_id: int | None = None
+    available_actions: list[str] = Field(default_factory=list)
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
+class TaskRunDetailResponse(TaskRunResponse):
+    groups: list[TaskGroupResponse] = Field(default_factory=list)
+
+
+class PaginatedTaskRuns(BaseModel):
+    items: list[TaskRunResponse]
+    total: int
+    base_total: int | None = None
+    filtered_total: int | None = None
+    is_limited: bool = False
+    scan_limit: int | None = None
+    page: int
+    page_size: int
+
+
+class TaskRunBatchQueuedResponse(BaseModel):
+    runs: list[TaskRunResponse] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
 class GigaSyncRequest(BaseModel):
     batch_id: str = Field(..., min_length=1, max_length=100)
     site: str = Field(default="US", min_length=1, max_length=20)
@@ -624,6 +758,18 @@ class AplusRegenerateRequest(BaseModel):
     reason: str = Field(..., min_length=1, max_length=2000)
 
 
+class ProductWorkflowState(BaseModel):
+    stage: str
+    stage_status: str
+    label: str
+    work_status: str
+    primary_action: str | None = None
+    primary_action_label: str | None = None
+    allowed_actions: list[str] = Field(default_factory=list)
+    action_reason: str | None = None
+    color: str = "default"
+
+
 class ProductResponse(BaseModel):
     id: int
     source_url: str | None = None
@@ -652,6 +798,7 @@ class ProductResponse(BaseModel):
     status: str
     current_step: int = 0
     current_task_status: str | None = None
+    workflow: ProductWorkflowState | None = None
     error_message: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
@@ -963,6 +1110,7 @@ class PaginatedCatalogProducts(BaseModel):
 
 class CatalogExportFileResponse(BaseModel):
     task_id: int
+    task_source: str = "offline_task"
     task_status: str
     title: str | None = None
     filename: str | None = None

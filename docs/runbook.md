@@ -1,5 +1,7 @@
 # FBM Pipeline 操作与故障手册
 
+状态：候选背景，待按 `docs/documentation-rewrite-brief.md` 重写；启动/安全边界以 `docs/domain-index/runtime-security.md` 和 P0 PRD 为准。
+
 这份手册用于日常运营、排错和后续代码分析。先定位步骤，再看对应处理方式。
 
 ## 快速检查

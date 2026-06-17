@@ -205,7 +205,7 @@ async def _run_item(item_id: int, auth: dict, submit: bool) -> None:
                 raise ValueError("缺少商品Code")
 
         uploaded = []
-        async with httpx.AsyncClient(timeout=120, verify=False) as client:
+        async with httpx.AsyncClient(timeout=120, verify=settings.external_http_verify) as client:
             for index, path in enumerate(image_paths, start=1):
                 uploaded.append(await _upload_image(client, auth, path, alt_texts[index - 1]))
             response = await _save_aplus(client, auth, asin, item_code, product_id, uploaded, submit)

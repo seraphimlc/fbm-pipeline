@@ -94,6 +94,27 @@ def folder_summary(folder: Path, extensions: set[str] | None = None, limit: int 
     }
 
 
+def video_folder_summary(material_dir: Path, limit: int = 20) -> dict | None:
+    """Read-only summary of video files under material_dir."""
+    if not material_dir.is_dir():
+        return None
+
+    files = [
+        path
+        for path in material_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+    ]
+    files.sort(key=lambda item: str(item).lower())
+    if not files:
+        return None
+    return {
+        "path": str(material_dir),
+        "exists": True,
+        "file_count": len(files),
+        "files": [str(path.relative_to(material_dir)) for path in files[:limit]],
+    }
+
+
 def aplus_folder_summary(folder: Path, limit: int = 20) -> dict:
     if not folder.is_dir():
         return {

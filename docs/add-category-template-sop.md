@@ -78,5 +78,5 @@ make test-project-rules
 如果新增了特殊规则、字段兜底、类目 marker 或运营注意事项，同步更新：
 
 - `docs/template-mapping-spec.md`
-- `docs/04-Pipeline步骤详解.md`
+- 当前 pipeline/runbook 文档；重写前按 `docs/documentation-rewrite-brief.md` 确认目标文件
 - 必要时更新 `docs/runbook.md`

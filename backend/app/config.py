@@ -2,7 +2,6 @@ from pydantic_settings import BaseSettings
 from pathlib import Path
 import httpx
 from openai import AsyncOpenAI
-import ssl
 
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -25,11 +24,23 @@ class Settings(BaseSettings):
 
     # 数据库
     DATA_DIR: Path = REPO_ROOT / "data"
-    DATABASE_URL: str = ""  # 动态生成
+    DATABASE_URL: str = ""  # 必须配置 MySQL 连接串
 
     # 服务端口
+    BACKEND_HOST: str = "127.0.0.1"
     BACKEND_PORT: int = 8190
+    FRONTEND_HOST: str = "127.0.0.1"
     FRONTEND_PORT: int = 3190
+
+    # Local runtime security. Defaults are intentionally local-only and no-maintenance.
+    API_DEV_TOKEN: str = ""
+    STARTUP_RUN_DB_MAINTENANCE: bool = False
+    STARTUP_RUN_BACKFILLS: bool = False
+    STARTUP_RECOVER_TASKS: bool = False
+    STARTUP_KICK_TASK_RUNTIME: bool = False
+    EXTERNAL_HTTP_VERIFY_TLS: bool = True
+    EXTERNAL_HTTP_CA_BUNDLE: Path | None = None
+    IMAGE_PROXY_EXTRA_ROOTS: str = ""
 
     # 商品文件存储根目录
     PRODUCT_BASE_DIR: Path = REPO_ROOT / "data" / "products"
@@ -122,18 +133,21 @@ class Settings(BaseSettings):
         self.DATA_DIR = _resolve_local_path(self.DATA_DIR)
         self.PRODUCT_BASE_DIR = _resolve_local_path(self.PRODUCT_BASE_DIR)
         self.PRICE_QUANTITY_TEMPLATE_PATH = _resolve_local_path(self.PRICE_QUANTITY_TEMPLATE_PATH)
+        if self.EXTERNAL_HTTP_CA_BUNDLE:
+            self.EXTERNAL_HTTP_CA_BUNDLE = _resolve_local_path(self.EXTERNAL_HTTP_CA_BUNDLE)
         if not self.DATABASE_URL:
-            self.DATA_DIR.mkdir(parents=True, exist_ok=True)
-            self.DATABASE_URL = f"sqlite+aiosqlite:///{self.DATA_DIR / 'fbm.db'}"
+            raise ValueError("DATABASE_URL is required; configure mysql+asyncmy://... for fbm-pipeline.")
+        if not self.DATABASE_URL.startswith("mysql+asyncmy://"):
+            raise ValueError("DATABASE_URL must be a MySQL asyncmy connection string, e.g. mysql+asyncmy://user:pass@host:3306/fbm_pipeline?charset=utf8mb4.")
 
     model_config = {"env_file": BACKEND_DIR / ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
     def get_llm_client(self) -> AsyncOpenAI:
-        """创建LLM OpenAI客户端（处理SSL问题）"""
+        """创建LLM OpenAI客户端。"""
         return AsyncOpenAI(
             base_url=self.LLM_API_BASE,
             api_key=self.LLM_API_KEY,
-            http_client=httpx.AsyncClient(verify=False),
+            http_client=httpx.AsyncClient(verify=self.external_http_verify),
         )
 
     def get_vlm_client(self) -> AsyncOpenAI:
@@ -161,6 +175,25 @@ class Settings(BaseSettings):
     def gpt_image_api_provider(self) -> str:
         """返回Step9生图通道名称，便于日志和配置页确认。"""
         return "LLM_API" if self.GPT_IMAGE_USE_LLM_API else "GPT_IMAGE_API"
+
+    @property
+    def external_http_verify(self) -> bool | str:
+        """Return httpx verify setting for external token-bearing requests."""
+        if not self.EXTERNAL_HTTP_VERIFY_TLS:
+            return False
+        if self.EXTERNAL_HTTP_CA_BUNDLE:
+            return str(self.EXTERNAL_HTTP_CA_BUNDLE)
+        return True
+
+    @property
+    def image_proxy_roots(self) -> list[Path]:
+        """Default image proxy roots plus explicitly configured extra roots."""
+        roots = [self.PRODUCT_BASE_DIR]
+        for raw in (self.IMAGE_PROXY_EXTRA_ROOTS or "").split(","):
+            value = raw.strip()
+            if value:
+                roots.append(_resolve_local_path(Path(value)))
+        return [root.resolve() for root in roots]
 
 
 settings = Settings()

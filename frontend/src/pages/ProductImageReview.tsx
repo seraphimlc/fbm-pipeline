@@ -14,10 +14,9 @@ import type { ProductDataSource, ProductImageReviewDetail, ProductImageReviewQue
 const { Title, Text } = Typography;
 const PRODUCT_DATA_SOURCE_KEY = 'fbm.productList.dataSourceId';
 const DEFAULT_LISTING_IMAGE_LIMIT = 9;
-const DETAIL_IMAGE_LIMIT = 36;
+const DETAIL_IMAGE_LIMIT = 200;
 const PREFETCH_DETAIL_IMAGE_LIMIT = 12;
-const EXPANDED_DETAIL_IMAGE_LIMIT = 200;
-const INITIAL_UNUSED_IMAGE_LIMIT = 36;
+const REVIEW_QUEUE_LIMIT = 30;
 
 const parseJson = (value: string | null | undefined, fallback: any = null) => {
   if (!value) return fallback;
@@ -80,12 +79,16 @@ const imageSourceLabel = (item: any) => {
   if (type === 'variant_gallery') return '其它 SKU 展示图';
   if (type === 'file') return '素材包';
   if (type === 'brand') return '品牌素材';
-  return '备用素材';
+  return '未使用图片';
 };
 
 const ProductImageReview: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const queryProductId = useMemo(() => {
+    const parsed = Number(searchParams.get('product_id') || '');
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }, [searchParams]);
   const [dataSources, setDataSources] = useState<ProductDataSource[]>([]);
   const [selectedDataSourceId, setSelectedDataSourceId] = useState<number | undefined>(() => {
     const fromQuery = Number(searchParams.get('data_source_id') || '');
@@ -94,6 +97,7 @@ const ProductImageReview: React.FC = () => {
     return Number.isFinite(saved) && saved > 0 ? saved : undefined;
   });
   const [queue, setQueue] = useState<ProductImageReviewQueueItem[]>([]);
+  const [queueTotal, setQueueTotal] = useState(0);
   const [currentId, setCurrentId] = useState<number | null>(null);
   const [detail, setDetail] = useState<ProductImageReviewDetail | null>(null);
   const [detailCache, setDetailCache] = useState<Record<number, ProductImageReviewDetail>>({});
@@ -102,7 +106,6 @@ const ProductImageReview: React.FC = () => {
   const [queueLoading, setQueueLoading] = useState(false);
   const [detailLoading, setDetailLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [showAllUnusedImages, setShowAllUnusedImages] = useState(false);
 
   const currentIndex = queue.findIndex((item) => item.id === currentId);
   const galleryOrder = useMemo(() => parseJson(detail?.images?.gallery_order, []), [detail?.images?.gallery_order]);
@@ -170,30 +173,26 @@ const ProductImageReview: React.FC = () => {
     () => imageResourceItems.filter((item: any) => item?.path && !selectedListingPathSet.has(item.path)),
     [imageResourceItems, selectedListingPathSet],
   );
-  const visibleUnusedImageResourceItems = useMemo(
-    () => showAllUnusedImages ? unusedImageResourceItems : unusedImageResourceItems.slice(0, INITIAL_UNUSED_IMAGE_LIMIT),
-    [showAllUnusedImages, unusedImageResourceItems],
-  );
   const galleryOrderTotal = Number(detail?.images?.gallery_order_total || galleryOrder.length || 0);
-  const galleryOrderLimit = Number(detail?.images?.gallery_order_limit || galleryOrder.length || 0);
-  const hasMoreGalleryOrderImages = galleryOrderTotal > galleryOrder.length && galleryOrderLimit < EXPANDED_DETAIL_IMAGE_LIMIT;
 
   const loadDataSources = async () => {
-    const { data } = await listProductDataSources({ platform: 'giga', enabled: true, page: 1, page_size: 100 });
+    const { data } = await listProductDataSources({ platform: 'giga', sales_channel: 'amazon', enabled: true, page: 1, page_size: 100 });
     setDataSources(data.items);
     setSelectedDataSourceId((current) => current || data.items[0]?.id);
   };
 
   const loadQueue = async (preferredId?: number | null) => {
+    if (preferredId) setCurrentId(preferredId);
     setQueueLoading(true);
     try {
       const { data } = await listProductImageReviewQueue({
         data_source_id: selectedDataSourceId,
-        limit: 100,
+        limit: REVIEW_QUEUE_LIMIT,
       });
       const items = data.items;
       setQueue(items);
-      const nextId = preferredId && items.some((item) => item.id === preferredId) ? preferredId : items[0]?.id || null;
+      setQueueTotal(data.total);
+      const nextId = preferredId || items[0]?.id || null;
       setCurrentId(nextId);
       if (!nextId) setDetail(null);
     } finally {
@@ -204,7 +203,6 @@ const ProductImageReview: React.FC = () => {
   const applyDetail = (data: ProductImageReviewDetail) => {
     setDetail(data);
     setDraftPaths(listingImagePathsFromImages(data.images));
-    setShowAllUnusedImages(false);
   };
 
   const loadDetail = async (productId: number, imageLimit = DETAIL_IMAGE_LIMIT, options: { silent?: boolean } = {}) => {
@@ -239,11 +237,21 @@ const ProductImageReview: React.FC = () => {
   useEffect(() => {
     if (selectedDataSourceId) {
       window.localStorage.setItem(PRODUCT_DATA_SOURCE_KEY, String(selectedDataSourceId));
-      setSearchParams({ data_source_id: String(selectedDataSourceId) });
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.set('data_source_id', String(selectedDataSourceId));
+      setSearchParams(nextParams, { replace: true });
     }
-    loadQueue(null).catch(() => message.error('加载图片确认列表失败'));
+    loadQueue(queryProductId).catch(() => message.error('加载图片确认列表失败'));
   }, [selectedDataSourceId]);
   useEffect(() => { if (currentId) loadDetail(currentId).catch(() => message.error('加载商品详情失败')); }, [currentId]);
+  useEffect(() => {
+    if (!currentId) return;
+    const currentParamId = Number(searchParams.get('product_id') || '');
+    if (currentParamId === currentId) return;
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set('product_id', String(currentId));
+    setSearchParams(nextParams, { replace: true });
+  }, [currentId]);
   useEffect(() => {
     if (!currentId || !queue.length || detailLoading) return;
     const index = queue.findIndex((item) => item.id === currentId);
@@ -251,12 +259,6 @@ const ProductImageReview: React.FC = () => {
     const timer = window.setTimeout(() => prefetchDetail(nextId), 800);
     return () => window.clearTimeout(timer);
   }, [currentId, queue, detailLoading]);
-
-  const loadMoreGalleryOrderImages = async () => {
-    if (!currentId) return;
-    await loadDetail(currentId, EXPANDED_DETAIL_IMAGE_LIMIT);
-    setShowAllUnusedImages(true);
-  };
 
   const setDraftListingImagePaths = (paths: string[]) => {
     setDraftPaths(uniquePaths(paths).slice(0, DEFAULT_LISTING_IMAGE_LIMIT));
@@ -360,6 +362,7 @@ const ProductImageReview: React.FC = () => {
       message.success('商品图片已确认');
       const nextQueue = queue.filter((item) => item.id !== detail.id);
       setQueue(nextQueue);
+      setQueueTotal((previous) => Math.max(previous - 1, 0));
       const nextId = nextQueue[currentIndex >= 0 ? Math.min(currentIndex, nextQueue.length - 1) : 0]?.id || null;
       setCurrentId(nextId);
       if (!nextId) setDetail(null);
@@ -400,10 +403,10 @@ const ProductImageReview: React.FC = () => {
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message={`待确认 ${queue.length} 个${currentId ? `，当前第 ${Math.max(currentIndex + 1, 1)} 个` : ''}`}
+        message={`待确认 ${queueTotal} 个${currentIndex >= 0 ? `，当前第 ${currentIndex + 1} 个` : ''}`}
       />
 
-      <Spin spinning={queueLoading || detailLoading || saving}>
+      <Spin spinning={(!detail && queueLoading) || detailLoading || saving}>
         {!detail ? (
           <Empty description="当前店铺没有待确认图片的商品" />
         ) : (
@@ -506,7 +509,7 @@ const ProductImageReview: React.FC = () => {
                       </div>
                     ) : (
                       <Space direction="vertical" size={4} style={{ width: '100%', alignItems: 'center', justifyContent: 'center', minHeight: 96 }}>
-                        <Text type="secondary">把备用/未选素材拖到这里，或双击素材加入已使用图片</Text>
+                        <Text type="secondary">把未使用图片拖到这里，或双击图片加入已使用图片</Text>
                         <Text type="secondary" style={{ fontSize: 12 }}>至少保留一张主图后才能保存</Text>
                       </Space>
                     )}
@@ -515,8 +518,8 @@ const ProductImageReview: React.FC = () => {
 
                 <div>
                   <Space style={{ justifyContent: 'space-between', width: '100%', marginBottom: 8 }}>
-                    <Text strong>备用/未选素材</Text>
-                    <Text type="secondary" style={{ fontSize: 12 }}>备用文件和品牌图默认停留在这里</Text>
+                    <Text strong>未使用图片</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>未选入使用区的图片默认停留在这里</Text>
                   </Space>
                   <div
                     onDragOver={(event) => {
@@ -534,7 +537,7 @@ const ProductImageReview: React.FC = () => {
                   >
                     {unusedImageResourceItems.length ? (
                       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))', gap: 10, maxHeight: 460, overflow: 'auto', paddingRight: 4 }}>
-                        {visibleUnusedImageResourceItems.map((item: any, index: number) => (
+                        {unusedImageResourceItems.map((item: any, index: number) => (
                           <div
                             key={item.path || index}
                             draggable={!saving}
@@ -574,19 +577,15 @@ const ProductImageReview: React.FC = () => {
                             </Space>
                           </div>
                         ))}
-                        {hasMoreGalleryOrderImages ? (
-                          <Button loading={detailLoading} onClick={loadMoreGalleryOrderImages}>
-                            加载更多备用素材（剩余约 {galleryOrderTotal - galleryOrder.length} 张）
-                          </Button>
-                        ) : !showAllUnusedImages && unusedImageResourceItems.length > visibleUnusedImageResourceItems.length ? (
-                          <Button onClick={() => setShowAllUnusedImages(true)}>
-                            显示剩余 {unusedImageResourceItems.length - visibleUnusedImageResourceItems.length} 张备用素材
-                          </Button>
+                        {galleryOrderTotal > galleryOrder.length ? (
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            已显示前 {galleryOrder.length} 张素材
+                          </Text>
                         ) : null}
                       </div>
                     ) : (
                       <Space direction="vertical" size={4} style={{ width: '100%', alignItems: 'center', justifyContent: 'center', minHeight: 96 }}>
-                        <Text type="secondary">暂无备用/未选素材</Text>
+                        <Text type="secondary">暂无未使用图片</Text>
                         <Text type="secondary" style={{ fontSize: 12 }}>把上方图片拖到这里，或双击已使用图片即可移出使用区</Text>
                       </Space>
                     )}

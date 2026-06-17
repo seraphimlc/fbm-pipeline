@@ -29,6 +29,10 @@ class Product(Base):
     status: Mapped[str] = mapped_column(String(30), default="created")
     current_step: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text)
+    workflow_node: Mapped[str | None] = mapped_column(String(80))
+    workflow_status: Mapped[str | None] = mapped_column(String(40))
+    workflow_error: Mapped[str | None] = mapped_column(Text)
+    workflow_updated_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
@@ -137,6 +141,133 @@ class OfflineTaskStep(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     task: Mapped["OfflineTask"] = relationship("OfflineTask", back_populates="steps")
+
+
+class TaskRun(Base):
+    __tablename__ = "task_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="pending")
+    payload_json: Mapped[str | None] = mapped_column(Text)
+    summary_json: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[str | None] = mapped_column(String(100))
+    dedupe_key: Mapped[str | None] = mapped_column(String(200))
+    correlation_key: Mapped[str | None] = mapped_column(String(200))
+    idempotency_key: Mapped[str | None] = mapped_column(String(200))
+    source_ref: Mapped[str | None] = mapped_column(String(200))
+    superseded_by_run_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("task_runs.id"))
+    superseded_at: Mapped[datetime | None] = mapped_column(DateTime)
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime)
+    cancel_requested_by: Mapped[str | None] = mapped_column(String(100))
+    cancel_reason: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    groups: Mapped[list["TaskGroup"]] = relationship(
+        "TaskGroup",
+        back_populates="task_run",
+        cascade="all, delete-orphan",
+    )
+    steps: Mapped[list["TaskStep"]] = relationship(
+        "TaskStep",
+        back_populates="task_run",
+        cascade="all, delete-orphan",
+    )
+    events: Mapped[list["TaskStepEvent"]] = relationship(
+        "TaskStepEvent",
+        back_populates="task_run",
+        cascade="all, delete-orphan",
+    )
+
+
+class TaskGroup(Base):
+    __tablename__ = "task_groups"
+    __table_args__ = (UniqueConstraint("task_run_id", "group_key", name="uq_task_groups_run_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_run_id: Mapped[int] = mapped_column(Integer, ForeignKey("task_runs.id"), nullable=False)
+    group_key: Mapped[str] = mapped_column(String(80), nullable=False)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="pending")
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    depends_on_group_keys_json: Mapped[str | None] = mapped_column(Text)
+    failure_policy: Mapped[str] = mapped_column(String(50), default="require_all_success")
+    retry_policy: Mapped[str] = mapped_column(String(50), default="failed_steps_only")
+    progress_current: Mapped[int] = mapped_column(Integer, default=0)
+    progress_total: Mapped[int] = mapped_column(Integer, default=0)
+    summary_json: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    task_run: Mapped["TaskRun"] = relationship("TaskRun", back_populates="groups")
+    steps: Mapped[list["TaskStep"]] = relationship(
+        "TaskStep",
+        back_populates="task_group",
+        cascade="all, delete-orphan",
+    )
+    events: Mapped[list["TaskStepEvent"]] = relationship(
+        "TaskStepEvent",
+        back_populates="task_group",
+        cascade="all, delete-orphan",
+    )
+
+
+class TaskStep(Base):
+    __tablename__ = "task_steps"
+    __table_args__ = (UniqueConstraint("task_run_id", "step_key", name="uq_task_steps_run_key"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_run_id: Mapped[int] = mapped_column(Integer, ForeignKey("task_runs.id"), nullable=False)
+    task_group_id: Mapped[int] = mapped_column(Integer, ForeignKey("task_groups.id"), nullable=False)
+    step_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    step_type: Mapped[str] = mapped_column(String(80), nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="pending")
+    sort_order: Mapped[int] = mapped_column(Integer, default=0)
+    payload_json: Mapped[str | None] = mapped_column(Text)
+    result_json: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    progress_current: Mapped[int] = mapped_column(Integer, default=0)
+    progress_total: Mapped[int] = mapped_column(Integer, default=0)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=1)
+    locked_by: Mapped[str | None] = mapped_column(String(100))
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime)
+    heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    task_run: Mapped["TaskRun"] = relationship("TaskRun", back_populates="steps")
+    task_group: Mapped["TaskGroup"] = relationship("TaskGroup", back_populates="steps")
+    events: Mapped[list["TaskStepEvent"]] = relationship(
+        "TaskStepEvent",
+        back_populates="task_step",
+        cascade="all, delete-orphan",
+    )
+
+
+class TaskStepEvent(Base):
+    __tablename__ = "task_step_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_run_id: Mapped[int] = mapped_column(Integer, ForeignKey("task_runs.id"), nullable=False)
+    task_group_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("task_groups.id"))
+    task_step_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("task_steps.id"))
+    event_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    message: Mapped[str | None] = mapped_column(Text)
+    data_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+    task_run: Mapped["TaskRun"] = relationship("TaskRun", back_populates="events")
+    task_group: Mapped["TaskGroup | None"] = relationship("TaskGroup", back_populates="events")
+    task_step: Mapped["TaskStep | None"] = relationship("TaskStep", back_populates="events")
 
 
 class CatalogProduct(Base):

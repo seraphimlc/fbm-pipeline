@@ -14,7 +14,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import AmazonStyleSnapCandidate
-from app.pipeline.chrome_ctrl import chrome_execute_js, chrome_get_page_info, chrome_navigate, chrome_workflow
+from app.pipeline.chrome_ctrl import chrome_execute_js, chrome_get_page_info, chrome_last_error, chrome_navigate, chrome_workflow
 from app.services.seller_sprite_openapi import SellerSpriteOpenApiError, competitor_lookup
 
 
@@ -116,6 +116,22 @@ STYLESNAP_TOKEN_READY_JS = r"""
   return tokenEl && tokenEl.value ? 'ready' : 'missing';
 })()
 """
+
+
+def _chrome_js_disabled_error(error: str | None) -> bool:
+    text = (error or "").lower()
+    return (
+        "javascript" in text
+        and ("apple event" in text or "apple 事件" in text or "applescript" in text)
+        and ("closed" in text or "关闭" in text or "disabled" in text)
+    )
+
+
+def _chrome_js_permission_message() -> str:
+    return (
+        "Chrome 未开启“允许 Apple 事件中的 JavaScript”，无法读取 Amazon StyleSnap token。"
+        "请在 Chrome 菜单：显示 > 开发者 > 允许 Apple 事件中的 JavaScript 勾选后，重新搜索候选竞品。"
+    )
 
 
 def _json_dumps(value: Any) -> str:
@@ -285,6 +301,8 @@ async def _wait_for_stylesnap_token(timeout: int = 20) -> bool:
         result = await chrome_execute_js(STYLESNAP_TOKEN_READY_JS, timeout=10)
         if result == "ready":
             return True
+        if result is None and _chrome_js_disabled_error(chrome_last_error()):
+            raise RuntimeError(_chrome_js_permission_message())
         await asyncio.sleep(1)
     return False
 
@@ -296,8 +314,15 @@ async def _ensure_stylesnap_upload_page() -> bool:
         return True
     ok = await chrome_navigate("https://www.amazon.com/stylesnap#fbm-pipeline-worker", wait=3.0)
     if not ok:
-        return False
-    return await _wait_for_stylesnap_token()
+        error = chrome_last_error()
+        raise RuntimeError(f"Chrome 导航到 Amazon StyleSnap 失败{f': {error}' if error else ''}")
+    if not await _wait_for_stylesnap_token():
+        page = await chrome_get_page_info()
+        raise RuntimeError(
+            "Amazon StyleSnap 页面已打开，但未找到上传 token；"
+            f"当前页面 title={str((page or {}).get('title') or '-')}, url={str((page or {}).get('url') or '-')}"
+        )
+    return True
 
 
 def _extract_direct_candidates(upload_result: dict[str, Any]) -> list[dict[str, Any]]:

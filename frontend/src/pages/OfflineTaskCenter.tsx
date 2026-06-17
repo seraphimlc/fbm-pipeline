@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Button, Progress, Space, Table, Tag, Typography, message } from 'antd';
 import { DownloadOutlined, PauseOutlined, PlayCircleOutlined, ReloadOutlined, RedoOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
@@ -57,12 +57,49 @@ const latestResultLabel = (value?: string | null) => {
 
 const formatTime = (value: string | null) => value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-';
 
+const heartbeatSeconds = (value: string | null) => {
+  if (!value) return null;
+  const seconds = dayjs().diff(dayjs(value), 'second');
+  return Number.isFinite(seconds) ? seconds : null;
+};
+
+const heartbeatText = (value: string | null) => {
+  const seconds = heartbeatSeconds(value);
+  if (seconds === null) return '无心跳';
+  if (seconds < 60) return `${seconds} 秒前`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分钟前`;
+  return `${Math.floor(minutes / 60)} 小时前`;
+};
+
+const isStaleRunning = (record: Pick<OfflineTask | OfflineTaskStep, 'status' | 'updated_at'>) => (
+  record.status === 'running' && (heartbeatSeconds(record.updated_at) ?? 0) >= 300
+);
+
+const phaseLabel = (phase?: string | null) => {
+  const map: Record<string, string> = {
+    fetching_sku_list: '读取 SKU 列表',
+    filtering_existing: '过滤已存在 SKU',
+    fetching_sku_details: '查询 SKU 详情',
+    fetching_prices: '查询价格',
+    fetching_inventory: '查询库存',
+    writing_sku_snapshot: '写入 SKU 快照',
+    aggregating_items: '统一聚合商品',
+    materializing_product_drafts: '生成商品草稿',
+    done: '完成',
+  };
+  return phase ? (map[phase] || phase) : '-';
+};
+
 const progressText = (record: OfflineTaskStep) => {
+  const result = parseResult(record.result_json);
+  if (record.step_type === 'giga_sync') {
+    const scanned = Number((result as any).scanned_sku_count ?? record.progress_current ?? 0);
+    const total = Number(record.progress_total || (result as any).progress_total || 0);
+    return total > 0 ? `扫描 SKU ${scanned}/${total}` : `已扫描 SKU ${scanned}，总量统计中`;
+  }
   if (record.step_type === 'giga_image_download' && record.progress_total > 0) {
     return `已下载 ${record.progress_current}/${record.progress_total}`;
-  }
-  if (record.step_type === 'giga_sync' && record.progress_total > 0) {
-    return `SKU ${record.progress_current}/${record.progress_total}`;
   }
   if (['giga_inventory_sync', 'giga_price_sync'].includes(record.step_type) && record.progress_total > 0) {
     return `SKU ${record.progress_current}/${record.progress_total}`;
@@ -95,8 +132,42 @@ const parseResult = (value: string | null) => {
   }
 };
 
-const resultSummary = (record: OfflineTask) => {
+const liveResult = (record: OfflineTask | OfflineTaskStep) => {
   const result = parseResult(record.result_json);
+  const live = (result as any).live;
+  return live && typeof live === 'object' ? { ...result, ...live } : result;
+};
+
+const resultSummary = (record: OfflineTask) => {
+  const result = liveResult(record);
+  if (record.task_type === 'giga_pull') {
+    const scanned = Number((result as any).scanned_sku_count || 0);
+    const total = Number((result as any).progress_total || 0);
+    const synced = Number((result as any).synced_sku_count || 0);
+    const detail = Number((result as any).detail_count || 0);
+    const price = Number((result as any).price_count || 0);
+    const inventory = Number((result as any).inventory_count || 0);
+    const images = Number((result as any).image_url_count || 0);
+    const skipped = Number((result as any).skipped_existing_count || 0);
+    const failed = Number((result as any).failed_sku_count || 0);
+    const currentMessage = String((result as any).current_message || '').trim();
+    return (
+      <Space size={4} wrap>
+        {isStaleRunning(record) ? <Tag color="warning">疑似卡住</Tag> : record.status === 'running' ? <Tag color="processing">执行中</Tag> : null}
+        <Tag>{phaseLabel((result as any).current_phase)}</Tag>
+        <Tag color="blue">{total > 0 ? `扫描SKU ${scanned}/${total}` : `已扫描SKU ${scanned} · 总量统计中`}</Tag>
+        {synced ? <Tag color="cyan">同步SKU {synced}</Tag> : null}
+        {detail ? <Tag>详情 {detail}</Tag> : null}
+        {price ? <Tag>价格 {price}</Tag> : null}
+        {inventory ? <Tag>库存 {inventory}</Tag> : null}
+        {images ? <Tag>图片URL {images}</Tag> : null}
+        {skipped ? <Tag color="warning">跳过 {skipped}</Tag> : null}
+        {failed ? <Tag color="error">失败 {failed}</Tag> : null}
+        {currentMessage ? <Text type="secondary" ellipsis style={{ maxWidth: 260 }}>{currentMessage}</Text> : null}
+        <Tag>心跳 {heartbeatText(record.updated_at)}</Tag>
+      </Space>
+    );
+  }
   if (record.task_type === 'catalog_export' && Object.keys(result).length) {
     const exported = Number((result as any).exported_count || 0);
     const skipped = Number((result as any).skipped_count || 0);
@@ -132,6 +203,26 @@ const resultSummary = (record: OfflineTask) => {
   return <Text type="secondary">-</Text>;
 };
 
+const taskProgress = (record: OfflineTask) => {
+  if (record.task_type === 'giga_pull') {
+    const result = liveResult(record);
+    const scanned = Number((result as any).scanned_sku_count || 0);
+    const total = Number((result as any).progress_total || 0);
+    if (total > 0) {
+      const percent = Math.min(100, Math.round((scanned / total) * 100));
+      return <Progress percent={percent} size="small" status={record.failed_steps ? 'exception' : undefined} />;
+    }
+    return (
+      <Space direction="vertical" size={0} style={{ width: '100%' }}>
+        <Progress percent={record.status === 'done' ? 100 : 0} size="small" showInfo={false} status="active" />
+        <Text type="secondary">已扫描 {scanned}，总量统计中</Text>
+      </Space>
+    );
+  }
+  const percent = record.total_steps > 0 ? Math.round((record.success_steps / record.total_steps) * 100) : 0;
+  return <Progress percent={percent} size="small" status={record.failed_steps ? 'exception' : undefined} />;
+};
+
 const resultRows = (record: OfflineTask) => {
   const result = parseResult(record.result_json);
   const rows = (result as any).rows;
@@ -146,16 +237,17 @@ const OfflineTaskCenter: React.FC = () => {
   const [pausingId, setPausingId] = useState<number | null>(null);
   const [resumingId, setResumingId] = useState<number | null>(null);
   const [downloadingId, setDownloadingId] = useState<number | null>(null);
+  const hasActiveTask = useMemo(() => items.some((item) => ['pending', 'running'].includes(item.status)), [items]);
 
-  const fetchTasks = async () => {
-    setLoading(true);
+  const fetchTasks = async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const { data } = await listOfflineTasks({ page: 1, page_size: 50 });
       setItems(data.items);
     } catch (error: any) {
       message.error(error?.response?.data?.detail || '加载任务中心失败');
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
@@ -239,11 +331,26 @@ const OfflineTaskCenter: React.FC = () => {
   };
 
   useEffect(() => { fetchTasks(); }, []);
+  useEffect(() => {
+    if (!hasActiveTask) return;
+    const timer = window.setInterval(() => {
+      fetchTasks(true);
+      Object.keys(details).forEach((taskId) => fetchDetail(Number(taskId)));
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveTask, details]);
 
   const stepColumns = [
     { title: '步骤', dataIndex: 'title', width: 220 },
     { title: '类型', dataIndex: 'step_type', width: 110, render: stepTypeLabel },
-    { title: '状态', dataIndex: 'status', width: 100, render: statusLabel },
+    {
+      title: '状态',
+      dataIndex: 'status',
+      width: 110,
+      render: (_: string, record: OfflineTaskStep) => (
+        isStaleRunning(record) ? <Tag color="warning">疑似卡住</Tag> : statusLabel(record.status)
+      ),
+    },
     { title: '店铺', dataIndex: 'data_source_name', width: 180, render: (value: string | null) => value || '-' },
     { title: '站点', dataIndex: 'site', width: 80, render: (value: string | null) => value || '-' },
     { title: 'Batch', dataIndex: 'batch_id', ellipsis: true, render: (value: string | null) => value || '-' },
@@ -253,7 +360,17 @@ const OfflineTaskCenter: React.FC = () => {
       render: (_: unknown, record: OfflineTaskStep) => progressText(record),
     },
     { title: '错误', dataIndex: 'error_message', ellipsis: true, render: (value: string | null) => value || '-' },
-    { title: '更新时间', dataIndex: 'updated_at', width: 170, render: formatTime },
+    {
+      title: '更新时间',
+      dataIndex: 'updated_at',
+      width: 190,
+      render: (value: string | null, record: OfflineTaskStep) => (
+        <Space direction="vertical" size={0}>
+          <span>{formatTime(value)}</span>
+          {record.status === 'running' ? <Text type={isStaleRunning(record) ? 'warning' : 'secondary'}>{heartbeatText(value)}</Text> : null}
+        </Space>
+      ),
+    },
   ];
 
   return (
@@ -263,7 +380,7 @@ const OfflineTaskCenter: React.FC = () => {
           <Title level={4} style={{ margin: 0 }}>任务中心</Title>
           <Text type="secondary">承载店铺商品同步、库存同步、价格同步、A+生成、历史图片下载、导出等离线操作；商品工作台只负责提交和查看商品状态。</Text>
         </div>
-        <Button icon={<ReloadOutlined />} onClick={fetchTasks}>刷新</Button>
+        <Button icon={<ReloadOutlined />} onClick={() => fetchTasks()}>刷新</Button>
       </div>
 
       <Table
@@ -275,14 +392,18 @@ const OfflineTaskCenter: React.FC = () => {
           { title: '任务ID', dataIndex: 'id', width: 90, render: (value: number) => `#${value}` },
           { title: '任务', dataIndex: 'title', ellipsis: true },
           { title: '类型', dataIndex: 'task_type', width: 130, render: taskTypeLabel },
-          { title: '状态', dataIndex: 'status', width: 110, render: statusLabel },
+          {
+            title: '状态',
+            dataIndex: 'status',
+            width: 110,
+            render: (_: string, record: OfflineTask) => (
+              isStaleRunning(record) ? <Tag color="warning">疑似卡住</Tag> : statusLabel(record.status)
+            ),
+          },
           {
             title: '进度',
             width: 180,
-            render: (_: unknown, record: OfflineTask) => {
-              const percent = record.total_steps > 0 ? Math.round((record.success_steps / record.total_steps) * 100) : 0;
-              return <Progress percent={percent} size="small" status={record.failed_steps ? 'exception' : undefined} />;
-            },
+            render: (_: unknown, record: OfflineTask) => taskProgress(record),
           },
           {
             title: '步骤统计',
@@ -295,11 +416,21 @@ const OfflineTaskCenter: React.FC = () => {
           },
           {
             title: '结果',
-            width: 220,
+            width: 360,
             render: (_: unknown, record: OfflineTask) => resultSummary(record),
           },
           { title: '创建时间', dataIndex: 'created_at', width: 170, render: formatTime },
-          { title: '更新时间', dataIndex: 'updated_at', width: 170, render: formatTime },
+          {
+            title: '更新时间',
+            dataIndex: 'updated_at',
+            width: 190,
+            render: (value: string | null, record: OfflineTask) => (
+              <Space direction="vertical" size={0}>
+                <span>{formatTime(value)}</span>
+                {record.status === 'running' ? <Text type={isStaleRunning(record) ? 'warning' : 'secondary'}>{heartbeatText(value)}</Text> : null}
+              </Space>
+            ),
+          },
           {
             title: '操作',
             width: 220,

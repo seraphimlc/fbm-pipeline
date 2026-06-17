@@ -3,9 +3,10 @@ import { useNavigate } from 'react-router-dom';
 import { Button, Empty, message, Modal, Popconfirm, Select, Space, Table, Tabs, Tag, Tooltip, Typography, Upload } from 'antd';
 import { DeleteOutlined, DownloadOutlined, PauseCircleOutlined, PlayCircleOutlined, ReloadOutlined, UploadOutlined } from '@ant-design/icons';
 import {
-  createCatalogExportOfflineTasks,
+  createCatalogExportTaskRuns,
   deleteCatalogTemplateFile,
   downloadOfflineTaskResult,
+  downloadTaskRunResult,
   downloadCatalogTemplateFile,
   listCatalogExportCategories,
   listCatalogExportFiles,
@@ -40,7 +41,7 @@ const CatalogList: React.FC = () => {
   const [templateUploading, setTemplateUploading] = useState(false);
   const [templateDownloadingFileId, setTemplateDownloadingFileId] = useState<string | null>(null);
   const [templateFileMutatingId, setTemplateFileMutatingId] = useState<string | null>(null);
-  const [exportDownloadingTaskId, setExportDownloadingTaskId] = useState<number | null>(null);
+  const [exportDownloadingTaskId, setExportDownloadingTaskId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<React.Key[]>([]);
   const [selectedItemMap, setSelectedItemMap] = useState<Record<number, CatalogProduct>>({});
   const [activeTab, setActiveTab] = useState('export');
@@ -263,33 +264,7 @@ const CatalogList: React.FC = () => {
     }
   };
 
-  const confirmReExport = (params: { count: number; templateCount: number; realAsinCount: number; label: string }) => new Promise<boolean>((resolve) => {
-    Modal.confirm({
-      title: '确认再次导出这些商品？',
-      content: (
-        <Space direction="vertical" size={8}>
-          <Text>{params.label}：{params.count} 个商品。</Text>
-          <Text type="secondary">这会用当前商品、库存/价格、Listing 等最新数据创建新导出任务，并生成新的 zip/Excel；历史文件会保留。</Text>
-          <Text type="secondary">系统会在后台按实际模板拆分，任务报告会写明成功、失败和跳过原因。</Text>
-          <Text type="secondary">下载后仍需打开实际文件逐列核对。</Text>
-          <Text type="secondary">
-            已有真实 ASIN 的商品不会在这里静默放行，导出任务报告会逐商品写明跳过原因。
-          </Text>
-          {params.realAsinCount ? <Text type="warning">当前列表中可见 {params.realAsinCount} 个商品已有真实 ASIN。</Text> : null}
-        </Space>
-      ),
-      okText: '再次导出',
-      cancelText: '取消',
-      onOk: () => resolve(true),
-      onCancel: () => resolve(false),
-    });
-  });
-
-  const createExportTasksByIds = async (
-    ids: number[],
-    label: string,
-    options?: { reExport?: boolean; templateCount?: number; realAsinCount?: number },
-  ) => {
+  const createExportTasksByIds = async (ids: number[], label: string) => {
     if (!ids.length) {
       message.warning('没有可导出的商品');
       return;
@@ -298,21 +273,12 @@ const CatalogList: React.FC = () => {
       message.warning('单次最多导出 1000 个商品，请缩小筛选范围');
       return;
     }
-    if (options?.reExport) {
-      const confirmed = await confirmReExport({
-        count: ids.length,
-        templateCount: options.templateCount || 0,
-        realAsinCount: options.realAsinCount || 0,
-        label,
-      });
-      if (!confirmed) return;
-    }
     setExporting(true);
     const hideLoading = message.loading(`正在为${label}创建导出任务，系统会按模板拆分...`, 0);
     try {
-      const { data } = await createCatalogExportOfflineTasks(ids);
-      if (data.tasks.length) {
-        message.success(`已创建 ${data.tasks.length} 个导出任务，请到任务中心下载结果`);
+      const { data } = await createCatalogExportTaskRuns(ids);
+      if (data.runs.length) {
+        message.success(`已创建 ${data.runs.length} 个新任务中心导出任务，请到新任务中心或已导出列表下载结果`);
         scheduleExportCompletionRefresh();
       } else {
         message.warning('没有创建导出任务，请检查类目模板和商品状态');
@@ -337,11 +303,6 @@ const CatalogList: React.FC = () => {
     await createExportTasksByIds(
       selectedIds.map(Number),
       `选中的 ${selectedIds.length} 个商品`,
-      {
-        reExport: selectedItems.some((item) => isCatalogProductExported(item)),
-          templateCount: 0,
-        realAsinCount: selectedItems.filter((item) => item.amazon_asin).length,
-      },
     );
   };
 
@@ -385,9 +346,15 @@ const CatalogList: React.FC = () => {
       message.warning('当前商品没有关联导出任务');
       return;
     }
-    setExportDownloadingTaskId(record.export_task_id);
+    const downloadKey = `catalog-product:${record.id}:${record.export_task_id}`;
+    setExportDownloadingTaskId(downloadKey);
     try {
-      const response = await downloadOfflineTaskResult(record.export_task_id);
+      let response;
+      try {
+        response = await downloadTaskRunResult(record.export_task_id);
+      } catch {
+        response = await downloadOfflineTaskResult(record.export_task_id);
+      }
       const fallback = record.export_file_path?.split('/').pop() || `catalog_export_${record.export_task_id}.zip`;
       saveBlob(response.data, extractFilename(response.headers['content-disposition'], fallback));
     } catch (error: any) {
@@ -398,9 +365,12 @@ const CatalogList: React.FC = () => {
   };
 
   const downloadExportFileResult = async (record: CatalogExportFile) => {
-    setExportDownloadingTaskId(record.task_id);
+    const downloadKey = `${record.task_source}:${record.task_id}`;
+    setExportDownloadingTaskId(downloadKey);
     try {
-      const response = await downloadOfflineTaskResult(record.task_id);
+      const response = record.task_source === 'task_run'
+        ? await downloadTaskRunResult(record.task_id)
+        : await downloadOfflineTaskResult(record.task_id);
       saveBlob(response.data, extractFilename(response.headers['content-disposition'], record.filename || `catalog_export_${record.task_id}.zip`));
     } catch (error: any) {
       message.error(error?.response?.data?.detail || '下载导出文件失败');
@@ -425,7 +395,7 @@ const CatalogList: React.FC = () => {
       ),
       okText: '再次导出',
       cancelText: '取消',
-      onOk: () => createExportTasksByIds(record.catalog_product_ids, `任务 #${record.task_id} 的 ${record.catalog_product_ids.length} 个商品`, { reExport: false }),
+      onOk: () => createExportTasksByIds(record.catalog_product_ids, `任务 #${record.task_id} 的 ${record.catalog_product_ids.length} 个商品`),
     });
   };
 
@@ -481,10 +451,9 @@ const CatalogList: React.FC = () => {
     borderRadius: 8,
   };
 
-  const selectedItems = selectedIds.map((id) => selectedItemMap[Number(id)]).filter(Boolean) as CatalogProduct[];
   const exportButtonText = selectedIds.length
-    ? `再次导出选中(${selectedIds.length})`
-    : '再次导出选中';
+    ? `导出选中(${selectedIds.length})`
+    : '导出选中';
   const exportDisabled = !selectedIds.length;
 
   const columns = [
@@ -544,7 +513,7 @@ const CatalogList: React.FC = () => {
       title: '导出任务',
       width: 120,
       render: (_: unknown, record: CatalogProduct) => record.export_task_id ? (
-        <Button size="small" type="link" onClick={() => navigate('/offline-tasks')}>
+        <Button size="small" type="link" onClick={() => navigate('/task-runs')}>
           #{record.export_task_id}
         </Button>
       ) : <Text type="secondary">-</Text>,
@@ -571,7 +540,7 @@ const CatalogList: React.FC = () => {
             <Button
               size="small"
               icon={<DownloadOutlined />}
-              loading={exportDownloadingTaskId === record.export_task_id}
+              loading={exportDownloadingTaskId === `catalog-product:${record.id}:${record.export_task_id}`}
               onClick={() => downloadExportTaskResult(record)}
             >
               下载
@@ -587,9 +556,15 @@ const CatalogList: React.FC = () => {
       width: 96,
       render: (_: unknown, record: CatalogExportFile) => (
         <Space direction="vertical" size={4}>
-          <Button size="small" type="link" style={{ padding: 0 }} onClick={() => navigate('/offline-tasks')}>
+          <Button
+            size="small"
+            type="link"
+            style={{ padding: 0 }}
+            onClick={() => navigate(record.task_source === 'task_run' ? '/task-runs' : '/offline-tasks')}
+          >
             #{record.task_id}
           </Button>
+          <Tag color={record.task_source === 'task_run' ? 'blue' : 'default'}>{record.task_source === 'task_run' ? '新任务' : '旧任务'}</Tag>
           {exportTaskStatusTag(record.task_status)}
         </Space>
       ),
@@ -642,7 +617,7 @@ const CatalogList: React.FC = () => {
             size="small"
             icon={<DownloadOutlined />}
             disabled={!record.can_download}
-            loading={exportDownloadingTaskId === record.task_id}
+            loading={exportDownloadingTaskId === `${record.task_source}:${record.task_id}`}
             onClick={() => downloadExportFileResult(record)}
           >
               下载
@@ -815,8 +790,8 @@ const CatalogList: React.FC = () => {
                           activeKey={exportView}
                           onChange={(value) => selectExportView(value as 'products' | 'files')}
                           items={[
-                            { key: 'products', label: '商品再导出' },
-                            { key: 'files', label: '文件历史' },
+                            { key: 'products', label: '商品列表' },
+                            { key: 'files', label: '已导出列表' },
                           ]}
                           style={{ minWidth: 220 }}
                         />
@@ -846,7 +821,7 @@ const CatalogList: React.FC = () => {
                           <Text type="secondary">记录口径</Text>
                           <div style={{ marginTop: 6 }}>
                             <Tag color="processing">商品维度</Tag>
-                            <Tag color="success">可再次导出</Tag>
+                            <Tag color="success">可创建任务</Tag>
                           </div>
                         </div>
                         <div>
@@ -859,7 +834,7 @@ const CatalogList: React.FC = () => {
                         </div>
                         <div style={{ gridColumn: '1 / -1' }}>
                           <Text type="secondary">
-                            当前列表展示已进入导出中心的商品，包含已导出商品；勾选后会按当前数据创建新的导出任务，历史文件保留。
+                            当前列表按商品维度展示；勾选后会按当前数据创建导出任务，历史文件保留。
                           </Text>
                         </div>
                       </div>
@@ -953,7 +928,7 @@ const CatalogList: React.FC = () => {
                     <Table
                       dataSource={exportFiles}
                       columns={exportFileColumns}
-                      rowKey="task_id"
+                      rowKey={(record) => `${record.task_source}:${record.task_id}`}
                       loading={exportFilesLoading}
                       size="middle"
                       tableLayout="fixed"

@@ -22,6 +22,7 @@ import type {
 
 const { Title, Text } = Typography;
 const PRODUCT_DATA_SOURCE_KEY = 'fbm.productList.dataSourceId';
+const REVIEW_QUEUE_LIMIT = 30;
 
 const parseJson = (value: string | null | undefined, fallback: any = null) => {
   if (!value) return fallback;
@@ -31,6 +32,31 @@ const parseJson = (value: string | null | undefined, fallback: any = null) => {
     return fallback;
   }
 };
+
+const normalizeComparableImage = (value: string | null | undefined) => String(value || '').trim();
+
+const competitorSourceImageForDetail = (detail: ProductCompetitorReviewDetail | null | undefined) => {
+  if (!detail) return '';
+  const snapshot = parseJson(detail.data?.gigab2b_raw_snapshot, {});
+  return normalizeComparableImage(
+    detail.images?.main_image_path
+    || snapshot?.selected_stylesnap?.source_image_path
+    || snapshot?.stylesnap_search?.source_image_path
+  );
+};
+
+const competitorGroupMatchesDetail = (
+  detail: ProductCompetitorReviewDetail | null | undefined,
+  group: AmazonStyleSnapCandidateGroup | null | undefined,
+) => {
+  if (!detail || !group) return false;
+  if (group.product_task_id && group.product_task_id !== detail.id) return false;
+  const expectedSource = competitorSourceImageForDetail(detail);
+  const groupSource = normalizeComparableImage(group.source_image_path || group.source_image_url);
+  return !expectedSource || !groupSource || expectedSource === groupSource;
+};
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const imgUrl = (path: string | null | undefined) => {
   if (!path) return '';
@@ -45,6 +71,10 @@ const isCompetitorSearchFailed = (product: { status?: string; error_message?: st
 const ProductCompetitorReview: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const queryProductId = useMemo(() => {
+    const parsed = Number(searchParams.get('product_id') || '');
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }, [searchParams]);
   const [dataSources, setDataSources] = useState<ProductDataSource[]>([]);
   const [selectedDataSourceId, setSelectedDataSourceId] = useState<number | undefined>(() => {
     const fromQuery = Number(searchParams.get('data_source_id') || '');
@@ -70,12 +100,8 @@ const ProductCompetitorReview: React.FC = () => {
 
   const currentIndex = queue.findIndex((item) => item.id === currentId);
   const rawSnapshot = useMemo(() => parseJson(detail?.data?.gigab2b_raw_snapshot, {}), [detail?.data?.gigab2b_raw_snapshot]);
-  const sourceImage = detail?.images?.main_image_path || rawSnapshot?.stylesnap_search?.source_image_path || '';
-  const candidateGroupMatchesCurrent = Boolean(
-    detail
-    && candidateGroup
-    && (!candidateGroup.product_task_id || candidateGroup.product_task_id === detail.id)
-  );
+  const sourceImage = competitorSourceImageForDetail(detail);
+  const candidateGroupMatchesCurrent = competitorGroupMatchesDetail(detail, candidateGroup);
   const candidatesForCurrent = candidateGroupMatchesCurrent && Array.isArray(candidateGroup?.candidates)
     ? candidateGroup.candidates.filter(Boolean)
     : [];
@@ -89,19 +115,22 @@ const ProductCompetitorReview: React.FC = () => {
     candidate.listing_capture_status === 'queued'
     || candidate.listing_capture_status === 'running'
   ));
+  const queuePositionText = currentId && currentIndex >= 0 ? `，当前第 ${currentIndex + 1} 个` : '';
+  const currentProductLabel = detail?.data?.item_code || detail?.source_item_id || (currentId ? `#${currentId}` : '-');
 
   const loadDataSources = async () => {
-    const { data } = await listProductDataSources({ platform: 'giga', enabled: true, page: 1, page_size: 100 });
+    const { data } = await listProductDataSources({ platform: 'giga', sales_channel: 'amazon', enabled: true, page: 1, page_size: 100 });
     setDataSources(data.items);
     setSelectedDataSourceId((current) => current || data.items[0]?.id);
   };
 
   const loadQueue = async (preferredId?: number | null, options: { preserveCurrentWhenMissing?: boolean } = {}) => {
+    if (preferredId) setCurrentId(preferredId);
     setQueueLoading(true);
     try {
       const { data } = await listProductCompetitorReviewQueue({
         data_source_id: selectedDataSourceId,
-        limit: 100,
+        limit: REVIEW_QUEUE_LIMIT,
       });
       const items = data.items;
       setQueue(items);
@@ -133,7 +162,7 @@ const ProductCompetitorReview: React.FC = () => {
       setDetail(null);
     }
     const cachedCandidates = candidateCache[productId];
-    if (cachedCandidates) {
+    if (cachedCandidates && cachedDetail && competitorGroupMatchesDetail(cachedDetail, cachedCandidates)) {
       setCandidateGroup(cachedCandidates);
     } else {
       setCandidateGroup(null);
@@ -153,7 +182,7 @@ const ProductCompetitorReview: React.FC = () => {
       const { data: group } = await listProductCompetitorCandidates(productId, { enrich_images: true });
       if (loadSeqRef.current !== seq) return;
       setCandidateCache((prev) => ({ ...prev, [productId]: group }));
-      setCandidateGroup(group);
+      setCandidateGroup(competitorGroupMatchesDetail(data, group) ? group : null);
     } catch {
       if (loadSeqRef.current === seq) setCandidateGroup(null);
     } finally {
@@ -175,11 +204,21 @@ const ProductCompetitorReview: React.FC = () => {
   useEffect(() => {
     if (selectedDataSourceId) {
       window.localStorage.setItem(PRODUCT_DATA_SOURCE_KEY, String(selectedDataSourceId));
-      setSearchParams({ data_source_id: String(selectedDataSourceId) });
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.set('data_source_id', String(selectedDataSourceId));
+      setSearchParams(nextParams, { replace: true });
     }
-    loadQueue(null).catch(() => message.error('加载竞品选择列表失败'));
+    loadQueue(queryProductId).catch(() => message.error('加载竞品选择列表失败'));
   }, [selectedDataSourceId]);
   useEffect(() => { if (currentId) loadDetailAndCandidates(currentId).catch(() => message.error('加载商品候选失败')); }, [currentId]);
+  useEffect(() => {
+    if (!currentId) return;
+    const currentParamId = Number(searchParams.get('product_id') || '');
+    if (currentParamId === currentId) return;
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.set('product_id', String(currentId));
+    setSearchParams(nextParams, { replace: true });
+  }, [currentId]);
   useEffect(() => {
     if (!currentId || !queue.length) return;
     const index = queue.findIndex((item) => item.id === currentId);
@@ -197,15 +236,60 @@ const ProductCompetitorReview: React.FC = () => {
     await loadDetailAndCandidates(currentId);
   };
 
+  const waitForCandidates = async (productId: number) => {
+    let latestGroup: AmazonStyleSnapCandidateGroup | null = null;
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      if (attempt > 0) await sleep(2000);
+      const { data: nextDetail } = await getProductCompetitorReviewDetail(productId);
+      setDetailCache((prev) => ({ ...prev, [productId]: nextDetail }));
+      if (currentId === productId) setDetail(nextDetail);
+      const snapshot = parseJson(nextDetail.data?.gigab2b_raw_snapshot, {});
+      const searchState = snapshot?.stylesnap_search || {};
+      const failed = searchState?.status === 'failed' || isCompetitorSearchFailed(nextDetail);
+      if (failed) {
+        throw new Error(searchState?.error || nextDetail.error_message || '候选搜索失败');
+      }
+      try {
+        const { data: group } = await listProductCompetitorCandidates(productId, { enrich_images: true });
+        setCandidateCache((prev) => ({ ...prev, [productId]: group }));
+        if (competitorGroupMatchesDetail(nextDetail, group)) {
+          latestGroup = group;
+          if (currentId === productId) setCandidateGroup(group);
+          if (group.candidates?.length || searchState?.status === 'captured') return group;
+        } else if (currentId === productId) {
+          setCandidateGroup(null);
+        }
+      } catch {
+        if (searchState?.status === 'captured') return latestGroup;
+      }
+    }
+    return latestGroup;
+  };
+
   const searchCandidates = async (force = false) => {
     if (!detail) return;
     setSearching(true);
     try {
+      const productId = detail.id;
+      if (force) {
+        setCandidateCache((prev) => {
+          const next = { ...prev };
+          delete next[productId];
+          return next;
+        });
+        setCandidateGroup(null);
+      }
       await searchProductCompetitorCandidates(detail.id, force);
-      message.success(force ? '已重新提交 StyleSnap 搜索' : '已提交候选搜索');
-      await refreshCurrent();
+      message.loading({ content: '已提交 StyleSnap 搜索，正在等待当前主图候选写入', key: 'competitor-review-search', duration: 0 });
+      const group = await waitForCandidates(productId);
+      if (group?.candidates?.length) {
+        message.success({ content: `已找到 ${group.candidates.length} 个候选竞品`, key: 'competitor-review-search' });
+      } else {
+        message.info({ content: '搜索已提交，候选写入较慢，请稍后刷新候选状态', key: 'competitor-review-search' });
+      }
     } catch (error: any) {
-      message.error(error?.response?.data?.detail || '候选搜索失败');
+      message.destroy('competitor-review-search');
+      message.error(error?.response?.data?.detail || error?.message || '候选搜索失败');
     } finally {
       setSearching(false);
     }
@@ -218,8 +302,8 @@ const ProductCompetitorReview: React.FC = () => {
       return;
     }
     const candidate = candidateGroup?.candidates?.find((item) => item.id === candidateId);
-    if (!candidate || candidate.item_code !== detail.data?.item_code) {
-      message.warning('候选竞品与当前商品不一致，请刷新当前商品后再选择');
+    if (!candidate) {
+      message.warning('候选竞品已刷新，请重新选择');
       return;
     }
     const selectionReady = candidate?.title && candidate?.amazon_image_url;
@@ -229,7 +313,7 @@ const ProductCompetitorReview: React.FC = () => {
     }
     setSelectingId(candidateId);
     try {
-      const { data: group } = await selectProductCompetitorCandidate(detail.id, candidateId, false);
+      const { data: group } = await selectProductCompetitorCandidate(detail.id, candidateId, false, false);
       setCandidateCache((prev) => ({ ...prev, [detail.id]: group }));
       setCandidateGroup(group);
       setQueue((prev) => prev.map((item) => (
@@ -324,7 +408,8 @@ const ProductCompetitorReview: React.FC = () => {
         type="info"
         showIcon
         style={{ marginBottom: 16 }}
-        message={`待选竞品 ${queue.length} 个${currentId && currentIndex >= 0 ? `，当前第 ${currentIndex + 1} 个` : ''}`}
+        message={queryProductId ? `当前商品：${currentProductLabel}` : `待处理商品 ${queue.length} 个${queuePositionText}`}
+        description={queryProductId ? `候选竞品 ${candidatesForCurrent.length} 个${candidateLoading ? '，正在刷新候选' : ''}` : '这里统计的是需要选择竞品的商品数量，不是候选竞品数量。'}
       />
       {selectedDone && detail && selectedDone.productId === detail.id ? (
         <Alert
@@ -337,7 +422,7 @@ const ProductCompetitorReview: React.FC = () => {
         />
       ) : null}
 
-      <Spin spinning={queueLoading || detailLoading}>
+      <Spin spinning={(!detail && queueLoading) || detailLoading}>
         {!detail ? (
           <Empty description="当前店铺没有待选择竞品的商品" />
         ) : (
