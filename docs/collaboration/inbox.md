@@ -117,6 +117,46 @@ T1 已通过若命 review，完整记录见 `docs/collaboration/archive/inbox-20
 - 准备新增哪些项目规则或行为测试。
 - 明确复述不会做 T3-T9，不会碰前端和真实数据。
 
+#### ACK / TASK_DEFINITION - 听云（agentKey: `tingyun`）- 2026-06-18
+
+- ACK: 已收到 T2；本轮先写任务定义，等待若命 `PLAN_APPROVED` 后再实现，不在审批前改代码。
+- 目标: 新增 `backend/app/product_tasks/workflow.py`，集中 Amazon 商品 workflow 写入、投影和 node/action 映射；让商品列表、详情、work_status helper 同源调用该 helper。
+- 非目标 / 禁止范围: 不做 T3-T9；不改前端 UI；不实现图片选择 reset；不实现搜索竞品、StyleSnap、Chrome 插件或 token 流程；不创建、取消、重试或推进任何 task run；不修改 ProductTaskAction 生命周期；不改任务中心；不做存量 backfill、迁移、清理或真实商品状态推进；不新增导出相关 workflow node；不继续扩展 `error_message/current_step` 主状态推导。
+- 输入 / 引用: `docs/superpowers/specs/2026-06-18-amazon-product-workflow-prd.md` 第 5-8、14.2、15/T2；`docs/project-index.md`；`docs/domain-index/product-flow.md`；当前 `backend/app/api/products.py` 的 `_workflow_state/_product_workbench_status/_product_list_work_status/_build_list_item` 和详情 response；`backend/app/api/schemas.py` 的 `ProductWorkflowState`；T1 常量在 `backend/app/models/status.py`。
+- 当前事实: `products.py` 现有 `_workflow_state` 仍包含大量基于 `status/current_step/error_message/catalog_exported` 的旧判断，并且列表、详情、work_status 过滤都间接依赖它；T2 需要把核心 workflow 规则迁入新 helper，`products.py` 只保留薄 wrapper 或直接调用。
+- 准备新增/修改文件:
+  - 新增 `backend/app/product_tasks/workflow.py`: 定义 `set_product_workflow()`、`build_product_workflow()`、node/action 映射、空 workflow 投影、必要的轻量返回结构。
+  - 修改 `backend/app/api/products.py`: 导入新 helper；把 `_workflow_state()` 收敛为薄 wrapper；让 `_build_list_item()`、详情 response、`_product_workbench_status()`、`_product_list_work_status()` 同源使用 helper；移除/停用旧的大段状态推导核心。
+  - 视需要修改 `backend/app/api/schemas.py`: 保留现有 `ProductWorkflowState` 字段，若增加 `node_key/node_label/node_type/node_status` 等字段，只做可选字段以保持前端兼容。
+  - 修改 `scripts/test_project_rules.py`: 增加 T2 项目规则/行为测试，锁住 service 存在、set 校验、build 映射、空字段策略、列表详情同源调用、禁止导出 node 和禁止继续扩展旧 `error_message/current_step` 推导。
+  - 视实现是否改变索引入口，更新 `docs/domain-index/product-flow.md`；若仅新增核心 service，需记录 Amazon workflow T2 helper 位置。
+- `set_product_workflow()` 规则:
+  - `node` 必须属于 `AMAZON_WORKFLOW_NODES`，否则抛 `ValueError`。
+  - `status` 必须属于 `AMAZON_WORKFLOW_STATUSES`，否则抛 `ValueError`。
+  - 只写 `product.workflow_node/product.workflow_status/product.workflow_error/product.workflow_updated_at`。
+  - `now` 为空时使用当前时间；传入 `now` 时原样使用，方便测试。
+  - 不 `commit`、不 `flush`、不创建任务、不触发外部请求或任何真实副作用。
+- `build_product_workflow()` 返回结构和空字段策略:
+  - 返回与现有 `ProductWorkflowState` 兼容的 dict，至少包含 `stage/stage_status/label/work_status/primary_action/primary_action_label/allowed_actions/action_reason/color`；可选补充 `node_key/node_label/node_type/node_status`。
+  - 正常路径只基于 `workflow_node/workflow_status/workflow_error` 和必要只读上下文构建投影；`catalog_exported` 只作为兼容显示上下文，不把导出作为主流程 node。
+  - `workflow_node/workflow_status` 为空时返回显式未初始化状态，例如 `stage="workflow_uninitialized"`、`stage_status="pending"`、`work_status="needs_initialization"`、主 action 指向查看详情或重新拉品说明；不再猜旧 `current_step/error_message`。
+  - `flow_done/succeeded` 表示 Amazon 主流程结束，label/action 体现主流程完成；不把 export/catalog/amazon_upload 放进 node/action 映射。
+- node/action 映射计划:
+  - 集中定义每个 node 的 `label/node_type/default work_status/default primary_action/allowed_actions/action_reason/color`。
+  - 覆盖 `pending/processing/succeeded/failed` 的显示差异；不适用状态采用保守只读投影，不主动推进节点。
+  - failed action 按 PRD: `search_competitor` 可重搜；`capture_competitor_detail` 可重抓/换竞品；`image_analysis` 可重试图片分析；`listing_generation` 可重试 Listing；`flow_done/succeeded` 无导出节点含义。
+- `products.py` 收敛方式:
+  - 先保留 `_workflow_state(product, catalog_exported=None)` 函数签名，内部只调用 `build_product_workflow(product, catalog_exported=catalog_exported)`，减少 API 调用点改动。
+  - `_product_workbench_status()`、`_product_list_work_status()` 继续通过 `_workflow_state()` 或直接通过 helper 取 `work_status`，确保列表、详情、筛选同源。
+  - 不在 T2 中改前端消费字段；后续若要去掉旧字段或调整按钮，由后续 T 阶段处理。
+- 测试计划:
+  - 增加 service 行为测试: `set_product_workflow()` 写入四字段、校验非法 node/status、尊重传入 `now`、不要求 DB session。
+  - 增加投影行为测试: 空 workflow 字段返回未初始化；每个合法 node/status 至少覆盖 label/work_status/action 基本映射；failed 节点覆盖 PRD 指定 action；`flow_done/succeeded` 不出现导出 action/node。
+  - 增加结构规则测试: `backend/app/product_tasks/workflow.py` 存在；`products.py` 的 `_workflow_state()` 是薄 wrapper；列表和详情仍使用同一 `_workflow_state/build_product_workflow` 来源；禁止出现 `export/catalog_export/amazon_upload` workflow node；不新增 `workflow_version`。
+- 验证计划: `make backend-compile`; `make test-project-rules`; `git diff --check`。如未改前端，不跑 frontend build。
+- 索引影响: 涉及新增核心 service 和 workflow 投影入口，计划同步更新 `docs/domain-index/product-flow.md`，在 `DONE_CLAIMED` 中列索引更新对账。
+- 完成定义: 若命批准后，按上述 scoped files 实现；自检 diff 不含 T3-T9 和真实副作用；写 `DONE_CLAIMED`，列改动文件、helper 行为、同源调用、空字段策略、node/status 覆盖、验证结果、索引更新和未覆盖项；不自行写 `PASS`。
+
 ## On Hold Decisions
 
 - `MSG-20260617-020`: StyleSnap / 搜索竞品长期方案倾向 Chrome 客户端插件模式，但当前只记录不推进，不给听云建任务。完整记录见 `docs/superpowers/specs/2026-06-17-stylesnap-client-extension-decision.md`。

@@ -16,6 +16,7 @@ agentKey: `tingyun`
 - 修改 scoped files，保护真实数据、已生成产物、凭据、导出文件和模板。
 - 对实现质量负责，但不自行补产品设计。
 - 完成后只能写 `DONE_CLAIMED`，不能自行宣布 `PASS`。
+- 所需 gate 通过后，负责把自己的工程改动及时 `commit + push`；不能在 `DONE_CLAIMED` 后绕过若命/镜花/观止 gate 直接提交。
 
 ## 执行链路
 
@@ -33,7 +34,9 @@ agentKey: `tingyun`
 11. 验证：跑要求的命令和页面/API 小样本；跑不了必须说明原因和残余风险。
 12. 索引收口：新增/修改页面、API、任务类型、状态机、数据表、导出链路、外部集成或主要验证入口时，同步更新 `docs/project-index.md` 或对应 `docs/domain-index/*.md`。
 13. 写 `DONE_CLAIMED`：逐项对账任务拆分，列改动文件、验证命令、页面/API 证据、副作用、风险、未覆盖项、索引更新情况、是否可交 QA。
-14. 复盘：review/QA 打回后，说明偏差来源和新增防回归措施。
+14. 等待 gate：若命 review；如被要求，再等待镜花 code review、观止 QA 或用户确认。
+15. 提交推送：所需 gate 通过后，按 `docs/collaboration.md` 的 commit message 格式提交并 push；提交前确认 `git status --short`、验证命令和 `git diff --check`，排除 `tmp/`、日志、浏览器 profile、本地数据库备份、临时导出文件和凭据。
+16. 复盘：review/QA 打回后，说明偏差来源和新增防回归措施。
 
 ## 任务定义包
 
@@ -100,6 +103,7 @@ agentKey: `tingyun`
 - 用 compile/build 通过替代用户路径验证。
 - 改了页面、API、任务类型、状态机、数据表、导出链路、外部集成或验证入口，却不更新索引，也不说明无需更新的理由。
 - 把未解决的产品问题埋进 `DONE_CLAIMED`。
+- `DONE_CLAIMED` 后未经若命 gate 许可直接 commit/push。
 
 ## 反面案例
 

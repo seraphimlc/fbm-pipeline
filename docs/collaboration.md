@@ -78,6 +78,60 @@
 - 听云、观止、镜花、清秋、霜弦发现自己读取 inbox 时被历史消息干扰，应写 `REQUEST` 提醒若命归档，必要时可只读当前相关消息继续工作。
 - 任何角色新增长证据、长日志、截图说明、审计报告或 QA 记录时，应写到独立文件并在 inbox 留链接，不得把 inbox 当报告正文。
 
+## Review Gate 与提交推送
+
+不要长期积压未提交代码。每个可独立回滚的任务或阶段，在验证和必要 gate 通过后，应及时 `commit` 并 `push`。
+
+闭环顺序：
+
+1. 执行者完成实现，写 `DONE_CLAIMED`，列范围、文件、验证命令、证据、未覆盖项和索引更新对账。
+2. 若命做任务闭环 review：确认是否按 PRD/inbox 执行、是否越界、验证证据是否足够、是否需要镜花或观止出场。
+3. 涉及高风险代码面时，若命派镜花 code review。高风险包括数据表/字段/索引、任务框架、状态机、异步流程、API 契约、查询性能、安全边界、大重构或若命不踏实的实现。
+4. 涉及用户路径、页面行为、导出/生成产物、外部平台或业务验收时，若命派观止 QA。
+5. 所需 gate 全部通过后，由执行工程改动的角色负责 `commit + push`；通常是听云。若命只在文档/协作规则小改、代收口或用户明确要求时提交。
+6. 提交推送完成后，若命把对应 inbox message 标记关闭或归档。
+
+提交许可：
+
+- 低风险任务：`DONE_CLAIMED` + 若命 `REVIEW_PASS` 后可以提交。
+- 高风险任务：再加镜花 `CODE_REVIEW_PASS`。
+- 用户路径任务：再加观止 `QA_PASS` 或用户明确确认。
+- `DONE_CLAIMED` 不是提交许可；执行者不能自己宣布 PASS 后直接提交。
+
+提交边界：
+
+- 一个 commit 对应一个清晰任务或一个可独立回滚的阶段。
+- 不把多个无关主题攒进一个 commit。
+- 不提交未验证内容；跑不了的验证必须先在 `DONE_CLAIMED` 和提交说明中写清楚。
+- 不提交 `tmp/`、日志、浏览器 profile、本地数据库备份、临时导出文件、真实凭据或其它本机产物。
+- 提交前至少执行 `git status --short`、必要验证命令和 `git diff --check`；前端改动需跑项目约定 build。
+
+commit message 格式：
+
+```text
+<type>: <short summary>
+```
+
+常用 type：
+
+- `feat`: 新功能或新业务能力。
+- `fix`: bug 修复。
+- `refactor`: 不改变用户行为的重构。
+- `docs`: 文档、协作规约、索引。
+- `test`: 测试、项目规则、测试夹具。
+- `chore`: 配置、依赖、脚本、维护动作。
+
+示例：
+
+```text
+feat: add task runtime for giga pull
+fix: correct task run pagination totals
+refactor: centralize product workflow projection
+docs: add multi-agent collaboration guide
+test: lock amazon workflow enums
+chore: archive collaboration inbox history
+```
+
 ## 通用工程质量底线
 
 这些底线适用于所有角色的设计、实现、review 和 QA，不是写给某一个角色的。宁可 `REQUEST/BLOCKED`，不能乱做、半实现或用表面证据冒充完成。
@@ -143,3 +197,4 @@
 - 修改过的规则有对应文档或测试。
 - 施工者给出验证结果。
 - 观止或用户能基于证据判断是否通过。
+- 所需 review/QA gate 已闭环；需要提交的改动已 commit/push，或明确说明暂不提交的原因。
