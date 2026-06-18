@@ -58,9 +58,13 @@ from app.models.status import (
     STEP6_DONE,
     STEP_LABELS,
     STEP_STATUS_MAP,
+    WORKFLOW_NODE_GET_STYLESNAP_TOKEN,
     WORKFLOW_NODE_SEARCH_COMPETITOR,
+    WORKFLOW_NODE_SELECT_COMPETITOR,
     WORKFLOW_NODE_SELECT_IMAGES,
+    WORKFLOW_STATUS_FAILED,
     WORKFLOW_STATUS_PENDING,
+    WORKFLOW_STATUS_PROCESSING,
 )
 from app.api.schemas import (
     ProductCreate, ProductUpdate, ProductListingImagesUpdate, ProductGigaRefreshRequest, ProductResponse, ProductDetail, ProductImageResponse,
@@ -316,6 +320,28 @@ def _competitor_search_failed_sql_condition():
         next_condition = Product.error_message.ilike(f"%{keyword}%")
         keyword_condition = next_condition if keyword_condition is None else keyword_condition | next_condition
     return condition & keyword_condition
+
+
+def _competitor_review_workflow_sql_condition():
+    search_review = (
+        (Product.workflow_node == WORKFLOW_NODE_SEARCH_COMPETITOR)
+        & Product.workflow_status.in_(
+            [
+                WORKFLOW_STATUS_PENDING,
+                WORKFLOW_STATUS_PROCESSING,
+                WORKFLOW_STATUS_FAILED,
+            ]
+        )
+    )
+    token_review = (
+        (Product.workflow_node == WORKFLOW_NODE_GET_STYLESNAP_TOKEN)
+        & (Product.workflow_status == WORKFLOW_STATUS_PENDING)
+    )
+    select_review = (
+        (Product.workflow_node == WORKFLOW_NODE_SELECT_COMPETITOR)
+        & (Product.workflow_status == WORKFLOW_STATUS_PENDING)
+    )
+    return Product.competitor_asin.is_(None) & (search_review | token_review | select_review)
 
 
 async def _product_has_captured_competitor(db: AsyncSession, product: Product) -> bool:
@@ -2909,11 +2935,6 @@ async def list_product_competitor_review_queue(
     db: AsyncSession = Depends(get_db),
 ):
     """Lightweight queue for products that need competitor review."""
-    created_needs_competitor = (
-        (Product.status == "created")
-        & (Product.current_step > 0)
-        & (Product.competitor_asin.is_(None))
-    )
     query = (
         select(
             Product.id,
@@ -2922,6 +2943,10 @@ async def list_product_competitor_review_queue(
             Product.status,
             Product.current_step,
             Product.error_message,
+            Product.workflow_node,
+            Product.workflow_status,
+            Product.workflow_error,
+            Product.workflow_updated_at,
             Product.created_at,
             Product.updated_at,
             ProductData.item_code,
@@ -2930,10 +2955,7 @@ async def list_product_competitor_review_queue(
         )
         .select_from(Product)
         .join(ProductData, ProductData.product_id == Product.id, isouter=True)
-        .where(
-            created_needs_competitor
-            | _competitor_search_failed_sql_condition()
-        )
+        .where(_competitor_review_workflow_sql_condition())
         .order_by(Product.updated_at.is_(None).asc(), Product.updated_at.desc(), Product.created_at.desc())
         .limit(limit)
     )
@@ -2952,6 +2974,11 @@ async def list_product_competitor_review_queue(
             current_step=row.current_step or 0,
             error_message=row.error_message,
         )
+        product.workflow_node = row.workflow_node
+        product.workflow_status = row.workflow_status
+        product.workflow_error = row.workflow_error
+        product.workflow_updated_at = row.workflow_updated_at
+        workflow = _workflow_state(product)
         items.append({
             "id": row.id,
             "source_item_id": row.gigab2b_product_id,
@@ -2959,7 +2986,8 @@ async def list_product_competitor_review_queue(
             "competitor_asin": row.competitor_asin,
             "status": row.status,
             "current_step": row.current_step or 0,
-            "current_task_status": _current_task_status(product),
+            "current_task_status": workflow["action_reason"],
+            "workflow": workflow,
             "error_message": row.error_message,
             "item_code": row.item_code,
             "title": row.title,
@@ -2984,6 +3012,10 @@ async def get_product_competitor_review_detail(
             Product.status,
             Product.current_step,
             Product.error_message,
+            Product.workflow_node,
+            Product.workflow_status,
+            Product.workflow_error,
+            Product.workflow_updated_at,
             ProductData.item_code,
             ProductData.title,
             ProductData.leaf_category,
@@ -3010,6 +3042,11 @@ async def get_product_competitor_review_detail(
         current_step=row.current_step or 0,
         error_message=row.error_message,
     )
+    product.workflow_node = row.workflow_node
+    product.workflow_status = row.workflow_status
+    product.workflow_error = row.workflow_error
+    product.workflow_updated_at = row.workflow_updated_at
+    workflow = _workflow_state(product)
     images = None
     if row.image_id or row.main_image_path:
         images = {
@@ -3025,7 +3062,8 @@ async def get_product_competitor_review_detail(
         "competitor_asin": row.competitor_asin,
         "status": row.status,
         "current_step": row.current_step or 0,
-        "current_task_status": _current_task_status(product),
+        "current_task_status": workflow["action_reason"],
+        "workflow": workflow,
         "error_message": row.error_message,
         "leaf_category": row.leaf_category,
         "data": {

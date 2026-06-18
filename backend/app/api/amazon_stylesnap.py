@@ -26,8 +26,19 @@ from app.services.stylesnap_product_tasks import (
     _listing_capture_snapshot,
 )
 from app.pipeline.engine import is_running
+from app.product_tasks.workflow import build_product_workflow, set_product_workflow
 from app.task_planners.product_image_analysis import create_product_image_analysis_runs
-from app.models.status import CREATED, FAILED, STEP5_LISTING
+from app.models.status import (
+    CREATED,
+    FAILED,
+    STEP5_LISTING,
+    WORKFLOW_NODE_GET_STYLESNAP_TOKEN,
+    WORKFLOW_NODE_SEARCH_COMPETITOR,
+    WORKFLOW_NODE_SELECT_COMPETITOR,
+    WORKFLOW_STATUS_FAILED,
+    WORKFLOW_STATUS_PENDING,
+    WORKFLOW_STATUS_PROCESSING,
+)
 
 
 router = APIRouter(prefix="/api/amazon-stylesnap", tags=["amazon-stylesnap"])
@@ -42,6 +53,25 @@ LISTING_CAPTURE_QUEUED_TTL = timedelta(seconds=30)
 LISTING_PREFETCH_LIMIT = 10
 LISTING_PREFETCH_CONCURRENCY = 1
 _listing_prefetch_semaphore = asyncio.Semaphore(LISTING_PREFETCH_CONCURRENCY)
+
+COMPETITOR_SEARCH_ALLOWED_WORKFLOWS = {
+    (WORKFLOW_NODE_SEARCH_COMPETITOR, WORKFLOW_STATUS_PENDING),
+    (WORKFLOW_NODE_SEARCH_COMPETITOR, WORKFLOW_STATUS_FAILED),
+    (WORKFLOW_NODE_GET_STYLESNAP_TOKEN, WORKFLOW_STATUS_PENDING),
+    (WORKFLOW_NODE_SELECT_COMPETITOR, WORKFLOW_STATUS_PENDING),
+}
+STYLESNAP_TOKEN_BROWSER_ERROR_KEYWORDS = (
+    "StyleSnap token not found",
+    "未找到上传 token",
+    "Chrome 导航到 Amazon StyleSnap 失败",
+    "Chrome 未开启",
+    "允许 Apple 事件中的 JavaScript",
+    "Apple Events",
+    "AppleScript",
+    "Amazon StyleSnap 页面已打开，但未找到上传 token",
+    "登录",
+    "token",
+)
 
 
 async def _start_generation_after_competitor(db: AsyncSession, product_id: int) -> None:
@@ -211,7 +241,12 @@ async def _load_product_for_competitor_selection(
 ) -> tuple[Product, dict]:
     result = await db.execute(
         select(Product)
-        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
+        .options(
+            selectinload(Product.data),
+            selectinload(Product.images),
+            selectinload(Product.aplus),
+            selectinload(Product.catalog_item),
+        )
         .where(Product.id == product_id)
     )
     product = result.scalar_one_or_none()
@@ -337,6 +372,128 @@ def _product_competitor_query_values(product: Product, snapshot: dict) -> tuple[
     item_code = product.data.item_code if product.data else None
     representative_sku = snapshot.get("representative_sku") or item_code
     return batch_id, site, item_code, representative_sku
+
+
+def _classify_stylesnap_search_error(exc_or_message: Exception | str) -> tuple[str, str]:
+    raw = str(exc_or_message or "").strip()
+    message = raw or "Amazon 同款搜索失败"
+    for keyword in STYLESNAP_TOKEN_BROWSER_ERROR_KEYWORDS:
+        if keyword and keyword.lower() in message.lower():
+            return WORKFLOW_NODE_GET_STYLESNAP_TOKEN, message
+    if "Chrome" in message or "JS" in message or "StyleSnap 页面" in message:
+        return WORKFLOW_NODE_GET_STYLESNAP_TOKEN, message
+    return WORKFLOW_NODE_SEARCH_COMPETITOR, message
+
+
+def _set_competitor_search_workflow(
+    product: Product,
+    *,
+    node: str,
+    status: str,
+    workflow_error: str | None,
+    legacy_status: str,
+    legacy_current_step: int,
+    legacy_error_message: str | None,
+    now: datetime,
+) -> None:
+    set_product_workflow(
+        product,
+        node=node,
+        status=status,
+        error=workflow_error,
+        now=now,
+    )
+    product.status = legacy_status
+    product.current_step = legacy_current_step
+    product.error_message = legacy_error_message
+    product.updated_at = now
+    if product.catalog_item:
+        product.catalog_item.status = product.status
+        product.catalog_item.updated_at = now
+
+
+def _write_stylesnap_search_snapshot(
+    product: Product,
+    snapshot: dict,
+    *,
+    batch_id: str | None = None,
+    site: str | None = None,
+    representative_sku: str | None = None,
+    stylesnap_search: dict,
+) -> None:
+    if not product.data:
+        return
+    next_snapshot = dict(snapshot)
+    if batch_id:
+        next_snapshot["batch_id"] = batch_id
+    if site:
+        next_snapshot["site"] = site
+    if representative_sku:
+        next_snapshot["representative_sku"] = representative_sku
+    next_snapshot["stylesnap_search"] = stylesnap_search
+    product.data.gigab2b_raw_snapshot = _json_dumps(next_snapshot)
+
+
+def _build_stylesnap_product_response(product: Product) -> dict:
+    catalog_exported = bool(
+        product.catalog_item and (product.catalog_item.exported_at or product.catalog_item.export_task_id)
+    )
+    workflow = build_product_workflow(product, catalog_exported=catalog_exported)
+    return {
+        "id": product.id,
+        "source_url": product.gigab2b_url,
+        "source_item_id": product.gigab2b_product_id,
+        "gigab2b_url": product.gigab2b_url,
+        "gigab2b_product_id": product.gigab2b_product_id,
+        "competitor_asin": product.competitor_asin,
+        "amazon_asin": product.amazon_asin,
+        "asin_sync_status": product.asin_sync_status,
+        "asin_synced_at": product.asin_synced_at,
+        "asin_sync_error": product.asin_sync_error,
+        "amazon_product_status": product.amazon_product_status,
+        "amazon_product_status_synced_at": product.amazon_product_status_synced_at,
+        "amazon_product_status_error": product.amazon_product_status_error,
+        "aplus_upload_status": product.aplus_upload_status,
+        "aplus_uploaded_at": product.aplus_uploaded_at,
+        "aplus_upload_error": product.aplus_upload_error,
+        "aplus_status": product.aplus.aplus_status if product.aplus else None,
+        "upc": product.upc,
+        "brand": product.brand,
+        "source_data_source_id": product.source_data_source_id,
+        "source_site": product.source_site,
+        "source_batch_id": product.source_batch_id,
+        "catalog_exported_at": product.catalog_item.exported_at if product.catalog_item else None,
+        "catalog_export_task_id": product.catalog_item.export_task_id if product.catalog_item else None,
+        "status": product.status,
+        "current_step": product.current_step,
+        "current_task_status": workflow["action_reason"],
+        "workflow": workflow,
+        "error_message": product.error_message,
+        "created_at": product.created_at,
+        "updated_at": product.updated_at,
+    }
+
+
+def _competitor_search_precondition_error(
+    product: Product,
+    *,
+    batch_id: str | None,
+    item_code: str | None,
+) -> str | None:
+    if not product.images or not product.images.main_image_path:
+        return "当前商品还没有确认主图，无法执行 Amazon 同款搜索"
+    if not batch_id or not item_code:
+        return "当前商品缺少批次或 Item 信息，无法执行 Amazon 同款搜索"
+    return None
+
+
+def _ensure_competitor_search_workflow_allowed(product: Product, *, force: bool, has_existing: bool) -> None:
+    current = (product.workflow_node, product.workflow_status)
+    if current in COMPETITOR_SEARCH_ALLOWED_WORKFLOWS:
+        return
+    if has_existing and not force and current == (WORKFLOW_NODE_SELECT_COMPETITOR, WORKFLOW_STATUS_PENDING):
+        return
+    raise HTTPException(409, "当前商品 workflow 不在可搜索竞品节点，不能启动 Amazon 同款搜索")
 
 
 async def _load_product_candidate_group(
@@ -527,10 +684,9 @@ async def _run_product_competitor_search_background(product_id: int):
         batch_id, site, item_code, representative_sku = _product_competitor_query_values(product, snapshot)
         now = datetime.now()
         try:
-            if not batch_id or not item_code:
-                raise RuntimeError("当前商品缺少批次或 Item 信息，无法执行 Amazon 同款搜索")
-            if not product.images or not product.images.main_image_path:
-                raise RuntimeError("当前商品还没有确认主图，无法执行 Amazon 同款搜索")
+            precondition_error = _competitor_search_precondition_error(product, batch_id=batch_id, item_code=item_code)
+            if precondition_error:
+                raise RuntimeError(precondition_error)
             result = await search_and_store_stylesnap_candidates(
                 db,
                 AmazonStyleSnapSearchInput(
@@ -552,70 +708,78 @@ async def _run_product_competitor_search_background(product_id: int):
                 item_code=item_code,
                 sku_code=representative_sku or item_code,
             )
-            product.status = CREATED
-            product.current_step = max(product.current_step or 0, 2)
-            product.error_message = None
-            product.updated_at = now
-            if product.data:
-                product.data.gigab2b_raw_snapshot = _json_dumps({
-                    **snapshot,
-                    "batch_id": batch_id,
-                    "site": site,
-                    "representative_sku": representative_sku or item_code,
-                    "stylesnap_search": {
-                        "status": "captured",
-                        "count": len(all_candidates),
-                        "appended_count": result.count,
-                        "searched_at": now.isoformat(),
-                        "source_image_path": product.images.main_image_path,
-                    },
-                })
-            result_catalog = await db.execute(select(CatalogProduct).where(CatalogProduct.source_product_id == product.id))
-            catalog = result_catalog.scalar_one_or_none()
-            if catalog:
-                catalog.status = product.status
-                catalog.updated_at = now
+            _set_competitor_search_workflow(
+                product,
+                node=WORKFLOW_NODE_SELECT_COMPETITOR,
+                status=WORKFLOW_STATUS_PENDING,
+                workflow_error=None,
+                legacy_status=CREATED,
+                legacy_current_step=max(product.current_step or 0, 2),
+                legacy_error_message=None,
+                now=now,
+            )
+            _write_stylesnap_search_snapshot(
+                product,
+                snapshot,
+                batch_id=batch_id,
+                site=site,
+                representative_sku=representative_sku or item_code,
+                stylesnap_search={
+                    "status": "captured",
+                    "count": len(all_candidates),
+                    "appended_count": result.count,
+                    "searched_at": now.isoformat(),
+                    "source_image_path": product.images.main_image_path,
+                },
+            )
             await db.commit()
         except asyncio.CancelledError:
-            product.status = FAILED
-            product.current_step = 2
-            product.error_message = "Amazon 同款搜索被中断，请重新搜索候选"
-            product.updated_at = datetime.now()
-            if product.data:
-                product.data.gigab2b_raw_snapshot = _json_dumps({
-                    **snapshot,
-                    "stylesnap_search": {
-                        "status": "failed",
-                        "error": product.error_message,
-                        "searched_at": product.updated_at.isoformat(),
-                    },
-                })
-            result_catalog = await db.execute(select(CatalogProduct).where(CatalogProduct.source_product_id == product.id))
-            catalog = result_catalog.scalar_one_or_none()
-            if catalog:
-                catalog.status = product.status
-                catalog.updated_at = product.updated_at
+            now = datetime.now()
+            error_message = "Amazon 同款搜索被中断，请重新搜索候选"
+            _set_competitor_search_workflow(
+                product,
+                node=WORKFLOW_NODE_SEARCH_COMPETITOR,
+                status=WORKFLOW_STATUS_FAILED,
+                workflow_error=error_message,
+                legacy_status=FAILED,
+                legacy_current_step=2,
+                legacy_error_message=error_message,
+                now=now,
+            )
+            _write_stylesnap_search_snapshot(
+                product,
+                snapshot,
+                stylesnap_search={
+                    "status": "failed",
+                    "error": error_message,
+                    "searched_at": now.isoformat(),
+                },
+            )
             await db.commit()
             raise
         except Exception as exc:
-            product.status = FAILED
-            product.current_step = 2
-            product.error_message = f"Amazon 同款搜索失败: {type(exc).__name__}: {exc}"
-            product.updated_at = now
-            if product.data:
-                product.data.gigab2b_raw_snapshot = _json_dumps({
-                    **snapshot,
-                    "stylesnap_search": {
-                        "status": "failed",
-                        "error": product.error_message,
-                        "searched_at": now.isoformat(),
-                    },
-                })
-            result_catalog = await db.execute(select(CatalogProduct).where(CatalogProduct.source_product_id == product.id))
-            catalog = result_catalog.scalar_one_or_none()
-            if catalog:
-                catalog.status = product.status
-                catalog.updated_at = now
+            now = datetime.now()
+            node, reason = _classify_stylesnap_search_error(exc)
+            error_message = f"Amazon 同款搜索失败: {type(exc).__name__}: {reason}"
+            _set_competitor_search_workflow(
+                product,
+                node=node,
+                status=WORKFLOW_STATUS_PENDING if node == WORKFLOW_NODE_GET_STYLESNAP_TOKEN else WORKFLOW_STATUS_FAILED,
+                workflow_error=error_message,
+                legacy_status=FAILED,
+                legacy_current_step=2,
+                legacy_error_message=error_message,
+                now=now,
+            )
+            _write_stylesnap_search_snapshot(
+                product,
+                snapshot,
+                stylesnap_search={
+                    "status": "failed",
+                    "error": error_message,
+                    "searched_at": now.isoformat(),
+                },
+            )
             await db.commit()
 
 
@@ -807,57 +971,103 @@ async def search_product_competitor_candidates(
 ):
     product, snapshot = await _load_product_for_competitor_selection(db, product_id)
     await _ensure_competitor_can_be_changed(db, product, snapshot, action="搜索")
-    if not product.images or not product.images.main_image_path:
-        raise HTTPException(400, "请先在商品详情里确认主图，再用主图搜索 Amazon 同款")
-
     batch_id, site, item_code, representative_sku = _product_competitor_query_values(product, snapshot)
-    if not batch_id or not item_code:
-        raise HTTPException(400, "当前商品缺少批次或 Item 信息，不能搜索竞品")
+    precondition_error = _competitor_search_precondition_error(product, batch_id=batch_id, item_code=item_code)
 
-    existing = await _existing_product_candidates(
-        db,
+    existing: list[AmazonStyleSnapCandidate] = []
+    if batch_id and item_code:
+        existing = await _existing_product_candidates(
+            db,
+            batch_id=batch_id,
+            site=site,
+            item_code=item_code,
+            sku_code=representative_sku or item_code,
+        )
+    _ensure_competitor_search_workflow_allowed(product, force=force, has_existing=bool(existing))
+
+    now = datetime.now()
+    if precondition_error:
+        _set_competitor_search_workflow(
+            product,
+            node=WORKFLOW_NODE_SEARCH_COMPETITOR,
+            status=WORKFLOW_STATUS_FAILED,
+            workflow_error=precondition_error,
+            legacy_status=FAILED,
+            legacy_current_step=2,
+            legacy_error_message=precondition_error,
+            now=now,
+        )
+        _write_stylesnap_search_snapshot(
+            product,
+            snapshot,
+            batch_id=batch_id,
+            site=site,
+            representative_sku=representative_sku or item_code,
+            stylesnap_search={
+                "status": "failed",
+                "error": precondition_error,
+                "searched_at": now.isoformat(),
+            },
+        )
+        await db.commit()
+        return _build_stylesnap_product_response(product)
+
+    if existing and not force:
+        _set_competitor_search_workflow(
+            product,
+            node=WORKFLOW_NODE_SELECT_COMPETITOR,
+            status=WORKFLOW_STATUS_PENDING,
+            workflow_error=None,
+            legacy_status=CREATED,
+            legacy_current_step=max(product.current_step or 0, 2),
+            legacy_error_message=None,
+            now=now,
+        )
+        _write_stylesnap_search_snapshot(
+            product,
+            snapshot,
+            batch_id=batch_id,
+            site=site,
+            representative_sku=representative_sku or item_code,
+            stylesnap_search={
+                "status": "captured",
+                "count": len(existing),
+                "reused": True,
+                "searched_at": now.isoformat(),
+                "source_image_path": product.images.main_image_path if product.images else None,
+            },
+        )
+        await db.commit()
+        return _build_stylesnap_product_response(product)
+
+    running_message = "Amazon 同款搜索中：正在获取 StyleSnap token 并调用图片搜索接口，请等待候选结果"
+    _set_competitor_search_workflow(
+        product,
+        node=WORKFLOW_NODE_SEARCH_COMPETITOR,
+        status=WORKFLOW_STATUS_PROCESSING,
+        workflow_error=None,
+        legacy_status=COMPETITOR_SEARCHING,
+        legacy_current_step=2,
+        legacy_error_message=running_message,
+        now=now,
+    )
+    _write_stylesnap_search_snapshot(
+        product,
+        snapshot,
         batch_id=batch_id,
         site=site,
-        item_code=item_code,
-        sku_code=representative_sku or item_code,
+        representative_sku=representative_sku or item_code,
+        stylesnap_search={
+            "status": "running",
+            "started_at": now.isoformat(),
+            "source_image_path": product.images.main_image_path,
+            "append": True,
+            "previous_count": len(existing),
+        },
     )
-    now = datetime.now()
-    if existing and not force:
-        product.status = CREATED
-        product.current_step = max(product.current_step or 0, 2)
-        product.error_message = None
-        product.updated_at = now
-        await db.commit()
-        await db.refresh(product)
-        return product
-
-    product.status = COMPETITOR_SEARCHING
-    product.current_step = 2
-    product.error_message = "Amazon 同款搜索中：正在获取 StyleSnap token 并调用图片搜索接口，请等待候选结果"
-    product.updated_at = now
-    if product.data:
-        product.data.gigab2b_raw_snapshot = _json_dumps({
-            **snapshot,
-            "batch_id": batch_id,
-            "site": site,
-            "representative_sku": representative_sku or item_code,
-            "stylesnap_search": {
-                "status": "running",
-                "started_at": now.isoformat(),
-                "source_image_path": product.images.main_image_path,
-                "append": True,
-                "previous_count": len(existing),
-            },
-        })
-    result_catalog = await db.execute(select(CatalogProduct).where(CatalogProduct.source_product_id == product.id))
-    catalog = result_catalog.scalar_one_or_none()
-    if catalog:
-        catalog.status = product.status
-        catalog.updated_at = now
     await db.commit()
-    await db.refresh(product)
     background_tasks.add_task(_run_product_competitor_search_background, product.id)
-    return product
+    return _build_stylesnap_product_response(product)
 
 
 @router.post("/products/{product_id}/competitor-candidates/{candidate_id}/select", response_model=AmazonStyleSnapCandidateGroupResponse)

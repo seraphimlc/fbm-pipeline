@@ -50,6 +50,10 @@ export interface ProductWorkflowState {
   stage_status: string;
   label: string;
   work_status: string;
+  node_key?: string | null;
+  node_label?: string | null;
+  node_type?: string | null;
+  node_status?: string | null;
   primary_action?: string | null;
   primary_action_label?: string | null;
   allowed_actions: string[];
@@ -234,6 +238,7 @@ export interface ProductCompetitorReviewQueueItem {
   status: string;
   current_step: number;
   current_task_status: string | null;
+  workflow?: ProductWorkflowState | null;
   error_message: string | null;
   item_code: string | null;
   title: string | null;
@@ -256,6 +261,7 @@ export interface ProductCompetitorReviewDetail {
   status: string;
   current_step: number;
   current_task_status: string | null;
+  workflow?: ProductWorkflowState | null;
   error_message: string | null;
   leaf_category: string | null;
   data: {

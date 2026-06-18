@@ -515,6 +515,142 @@ asyncio.run(main())
     assert_true(result.returncode == 0, f"Amazon workflow T3 图片确认 reset 行为验证失败: {result.stderr or result.stdout}")
 
 
+def test_amazon_workflow_t4_competitor_search_rules() -> None:
+    amazon_stylesnap_text = (ROOT / "backend" / "app" / "api" / "amazon_stylesnap.py").read_text(encoding="utf-8")
+    products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
+    frontend_api_text = (ROOT / "frontend" / "src" / "api" / "index.ts").read_text(encoding="utf-8")
+    competitor_review_text = (ROOT / "frontend" / "src" / "pages" / "ProductCompetitorReview.tsx").read_text(encoding="utf-8")
+    product_flow_index = (ROOT / "docs" / "domain-index" / "product-flow.md").read_text(encoding="utf-8")
+    search_endpoint_section = amazon_stylesnap_text.split('@router.post("/products/{product_id}/competitor-candidates/search"', 1)[1].split('@router.post("/products/{product_id}/competitor-candidates/{candidate_id}/select"', 1)[0]
+    background_section = amazon_stylesnap_text.split("async def _run_product_competitor_search_background", 1)[1].split("async def _queue_listing_capture", 1)[0]
+    queue_section = products_api_text.split('@router.get("/competitor-review-queue"', 1)[1].split('@router.get("/competitor-review-detail/{product_id}"', 1)[0]
+    detail_section = products_api_text.split('@router.get("/competitor-review-detail/{product_id}"', 1)[1].split('@router.post("/bulk/start"', 1)[0]
+
+    assert_true(
+        "set_product_workflow" in amazon_stylesnap_text
+        and "WORKFLOW_NODE_SEARCH_COMPETITOR" in amazon_stylesnap_text
+        and "WORKFLOW_NODE_SELECT_COMPETITOR" in amazon_stylesnap_text
+        and "WORKFLOW_NODE_GET_STYLESNAP_TOKEN" in amazon_stylesnap_text,
+        "T4 搜索竞品入口和后台必须使用 workflow service 写 search/select/token 节点",
+    )
+    assert_true(
+        "WORKFLOW_STATUS_PROCESSING" in search_endpoint_section
+        and "background_tasks.add_task(_run_product_competitor_search_background, product.id)" in search_endpoint_section
+        and "TaskRun" not in amazon_stylesnap_text
+        and "task_runs" not in amazon_stylesnap_text,
+        "T4 搜索入口只能使用一次性 BackgroundTasks，不能写 task_runs 或进入任务中心",
+    )
+    existing_branch = search_endpoint_section.split("if existing and not force:", 1)[1].split("running_message", 1)[0]
+    assert_true(
+        "WORKFLOW_NODE_SELECT_COMPETITOR" in existing_branch
+        and "WORKFLOW_STATUS_PENDING" in existing_branch
+        and "background_tasks.add_task" not in existing_branch,
+        "已有候选且 force=false 时必须直接进入 select_competitor/pending，不能重新启动后台搜索",
+    )
+    assert_true(
+        "WORKFLOW_NODE_SELECT_COMPETITOR" in background_section
+        and "WORKFLOW_NODE_SEARCH_COMPETITOR" in background_section
+        and "WORKFLOW_NODE_GET_STYLESNAP_TOKEN" in background_section
+        and "WORKFLOW_STATUS_FAILED" in background_section,
+        "后台搜索必须覆盖成功、普通失败和 token/browser 失败三类 workflow 落点",
+    )
+    assert_true(
+        "_competitor_review_workflow_sql_condition()" in queue_section
+        and "_competitor_search_failed_sql_condition()" not in queue_section
+        and "Product.workflow_node" in queue_section
+        and "Product.workflow_status" in queue_section
+        and "Product.workflow_error" in queue_section
+        and "Product.workflow_updated_at" in queue_section
+        and '"workflow": workflow' in queue_section
+        and '"workflow": workflow' in detail_section,
+        "竞品队列/详情必须优先读取 workflow 字段，不能继续用 error_message 正则作为主状态来源",
+    )
+    assert_true(
+        "workflow: ProductWorkflowState | None = None" in schemas_text
+        and "workflow?: ProductWorkflowState | null;" in frontend_api_text
+        and "status === 'failed' && /同款搜索|StyleSnap" not in competitor_review_text
+        and "workflowNodeStatus" in competitor_review_text
+        and "isStylesnapTokenPending" in competitor_review_text,
+        "选竞品页面只能做 workflow 字段读取和轻量显示判断，不能继续靠 error_message 正则判断主状态",
+    )
+    assert_true(
+        "Amazon workflow T4" in product_flow_index
+        and "get_stylesnap_token/pending" in product_flow_index
+        and "select_competitor/pending" in product_flow_index,
+        "T4 改变搜索竞品 workflow 后必须同步 product-flow domain index",
+    )
+
+    code = r'''
+import json
+from datetime import datetime
+from types import SimpleNamespace
+from app.api import amazon_stylesnap
+from app.models.status import (
+    WORKFLOW_NODE_GET_STYLESNAP_TOKEN,
+    WORKFLOW_NODE_SEARCH_COMPETITOR,
+    WORKFLOW_STATUS_FAILED,
+)
+
+token_node, token_reason = amazon_stylesnap._classify_stylesnap_search_error(RuntimeError("StyleSnap token not found"))
+assert token_node == WORKFLOW_NODE_GET_STYLESNAP_TOKEN
+assert "StyleSnap token not found" in token_reason
+chrome_node, _ = amazon_stylesnap._classify_stylesnap_search_error("Chrome 导航到 Amazon StyleSnap 失败")
+assert chrome_node == WORKFLOW_NODE_GET_STYLESNAP_TOKEN
+ordinary_node, ordinary_reason = amazon_stylesnap._classify_stylesnap_search_error("StyleSnap 未返回候选竞品")
+assert ordinary_node == WORKFLOW_NODE_SEARCH_COMPETITOR
+assert "未返回候选" in ordinary_reason
+
+catalog = SimpleNamespace(status="completed", updated_at=None)
+product = SimpleNamespace(
+    id=7,
+    status="created",
+    current_step=1,
+    error_message=None,
+    workflow_node=None,
+    workflow_status=None,
+    workflow_error=None,
+    workflow_updated_at=None,
+    updated_at=None,
+    catalog_item=catalog,
+    data=SimpleNamespace(gigab2b_raw_snapshot=None),
+)
+now = datetime(2026, 6, 18, 14, 0, 0)
+amazon_stylesnap._set_competitor_search_workflow(
+    product,
+    node=WORKFLOW_NODE_SEARCH_COMPETITOR,
+    status=WORKFLOW_STATUS_FAILED,
+    workflow_error="普通失败",
+    legacy_status="failed",
+    legacy_current_step=2,
+    legacy_error_message="普通失败",
+    now=now,
+)
+assert product.workflow_node == WORKFLOW_NODE_SEARCH_COMPETITOR
+assert product.workflow_status == WORKFLOW_STATUS_FAILED
+assert product.workflow_error == "普通失败"
+assert product.status == "failed"
+assert product.current_step == 2
+assert catalog.status == "failed"
+amazon_stylesnap._write_stylesnap_search_snapshot(
+    product,
+    {"batch_id": "b1", "site": "US"},
+    representative_sku="S1",
+    stylesnap_search={"status": "failed", "error": "普通失败"},
+)
+snapshot = json.loads(product.data.gigab2b_raw_snapshot)
+assert snapshot["representative_sku"] == "S1"
+assert snapshot["stylesnap_search"]["status"] == "failed"
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"Amazon workflow T4 搜索竞品 helper 行为验证失败: {result.stderr or result.stdout}")
+
+
 def test_product_detail_get_is_readonly_for_material_videos() -> None:
     products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
     material_assets_text = (ROOT / "backend" / "app" / "services" / "material_assets.py").read_text(encoding="utf-8")
@@ -1087,9 +1223,10 @@ def test_competitor_review_queue_uses_workbench_status_scope() -> None:
         "商品工作台和选竞品队列必须共享候选/参考/选择竞品失败关键词，避免数量不一致",
     )
     assert_true(
-        "def _competitor_search_failed_sql_condition" in products_api_text
-        and "| _competitor_search_failed_sql_condition()" in products_api_text,
-        "选竞品队列必须使用与工作台同源的竞品失败 SQL 条件，不能另写一套较窄筛选",
+        "def _competitor_review_workflow_sql_condition" in products_api_text
+        and "_competitor_review_workflow_sql_condition()" in products_api_text
+        and "_competitor_search_failed_sql_condition()" not in products_api_text.split('@router.get("/competitor-review-queue"', 1)[1].split('@router.get("/competitor-review-detail/{product_id}"', 1)[0],
+        "选竞品队列必须使用 workflow 字段筛选待搜索/搜索失败/token 待处理/待选竞品，不能继续用 error_message 正则作为主队列口径",
     )
     assert_true(
         "competitorGroupMatchesProductDetail" in product_detail_text
@@ -2412,6 +2549,7 @@ def main() -> int:
         test_amazon_workflow_t2_service_projection_and_write_rules,
         test_product_overview_handles_uninitialized_workflow_bucket,
         test_amazon_workflow_t3_image_selection_reset_and_initialization_rules,
+        test_amazon_workflow_t4_competitor_search_rules,
         test_product_detail_get_is_readonly_for_material_videos,
         test_inventory_update_template_exports_stock_only_by_sku,
         test_catalog_export_creation_keeps_business_reasons_in_task_report,

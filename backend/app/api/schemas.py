@@ -869,6 +869,7 @@ class ProductCompetitorReviewQueueItem(BaseModel):
     status: str
     current_step: int = 0
     current_task_status: str | None = None
+    workflow: ProductWorkflowState | None = None
     error_message: str | None = None
     item_code: str | None = None
     title: str | None = None
@@ -902,6 +903,7 @@ class ProductCompetitorReviewDetailResponse(BaseModel):
     status: str
     current_step: int = 0
     current_task_status: str | None = None
+    workflow: ProductWorkflowState | None = None
     error_message: str | None = None
     leaf_category: str | None = None
     data: ProductCompetitorReviewDetailData | None = None

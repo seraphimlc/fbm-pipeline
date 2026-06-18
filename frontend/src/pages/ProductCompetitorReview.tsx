@@ -64,8 +64,22 @@ const imgUrl = (path: string | null | undefined) => {
   return `/api/images/${path}`;
 };
 
-const isCompetitorSearchFailed = (product: { status?: string; error_message?: string | null }) => (
-  product.status === 'failed' && /同款搜索|StyleSnap/i.test(product.error_message || '')
+const workflowNodeStatus = (product: { workflow?: { node_status?: string | null; stage_status?: string | null } | null } | null | undefined) => (
+  product?.workflow?.node_status || product?.workflow?.stage_status || null
+);
+
+const isCompetitorSearchFailed = (
+  product: { workflow?: { node_key?: string | null; stage?: string; node_status?: string | null; stage_status?: string | null } | null } | null | undefined,
+) => (
+  (product?.workflow?.node_key || product?.workflow?.stage) === 'search_competitor'
+  && workflowNodeStatus(product) === 'failed'
+);
+
+const isStylesnapTokenPending = (
+  product: { workflow?: { node_key?: string | null; stage?: string; node_status?: string | null; stage_status?: string | null } | null } | null | undefined,
+) => (
+  (product?.workflow?.node_key || product?.workflow?.stage) === 'get_stylesnap_token'
+  && workflowNodeStatus(product) === 'pending'
 );
 
 const ProductCompetitorReview: React.FC = () => {
@@ -245,9 +259,11 @@ const ProductCompetitorReview: React.FC = () => {
       if (currentId === productId) setDetail(nextDetail);
       const snapshot = parseJson(nextDetail.data?.gigab2b_raw_snapshot, {});
       const searchState = snapshot?.stylesnap_search || {};
-      const failed = searchState?.status === 'failed' || isCompetitorSearchFailed(nextDetail);
-      if (failed) {
-        throw new Error(searchState?.error || nextDetail.error_message || '候选搜索失败');
+      if (isCompetitorSearchFailed(nextDetail) || isStylesnapTokenPending(nextDetail)) {
+        throw new Error(nextDetail.workflow?.action_reason || nextDetail.error_message || '候选搜索失败');
+      }
+      if (searchState?.status === 'failed') {
+        throw new Error(searchState?.error || nextDetail.workflow?.action_reason || nextDetail.error_message || '候选搜索失败');
       }
       try {
         const { data: group } = await listProductCompetitorCandidates(productId, { enrich_images: true });
@@ -444,9 +460,10 @@ const ProductCompetitorReview: React.FC = () => {
                   <Text strong>{detail.data?.item_code || detail.source_item_id || `#${detail.id}`}</Text>
                   <Text>{detail.data?.title || detail.title || '-'}</Text>
                   <Space wrap>
-                    <Tag>{detail.current_task_status || detail.status}</Tag>
+                    <Tag>{detail.workflow?.label || detail.current_task_status || detail.status}</Tag>
                     {detail.leaf_category ? <Tag color="blue">{detail.leaf_category}</Tag> : null}
                     {isCompetitorSearchFailed(detail) ? <Tag color="error">候选搜索失败</Tag> : null}
+                    {isStylesnapTokenPending(detail) ? <Tag color="warning">需要处理 StyleSnap token</Tag> : null}
                   </Space>
                 </Space>
               </Space>
