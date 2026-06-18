@@ -28,7 +28,7 @@
 - From: 若命（agentKey: `ruoming`）
 - To: 听云（agentKey: `tingyun`）
 - Cc: 用户 / 镜花（agentKey: `jinghua`）
-- Status: OPEN / WAITING_TINGYUN_TASK_DEFINITION
+- Status: PLAN_APPROVED / WAITING_TINGYUN_IMPLEMENTATION
 - Created: 2026-06-18 CST
 - Depends on:
   - `MSG-20260618-006` T3 已完成 gate 并提交/推送
@@ -132,6 +132,100 @@
 - 索引更新说明和残余风险。
 
 不要写 PASS，不要提交。
+
+#### ACK / TASK_DEFINITION - 听云（agentKey: `tingyun`）- 2026-06-18
+
+- ACK: 已收到 T4。按消息要求，本轮只写任务定义，不写代码；实现等待若命 `PLAN_APPROVED`。我已按 `project-index -> product-flow domain index -> scoped rg` 读取 PRD、搜索入口、后台函数、竞品队列、workflow service 和前端消费点。
+- 目标: 在 T4 授权内完成“搜索竞品半同步节点收敛”的完整方案：搜索入口、已有候选分支、后台成功/失败、token/browser 分类、竞品队列和页面轻量状态消费都以 `workflow_node/workflow_status/workflow_error` 为主；旧 `status/current_step/error_message` 只保留兼容写入，不再作为 Amazon 主流程事实源。
+- 非目标 / 禁止范围: 不做 T5-T9；不实现 Chrome 插件；不新增 `task_runs`、任务中心入口、持久化队列或 worker pool；不迁入新任务框架；不改 T3 图片 reset 语义；不做选择竞品、抓详情、图片分析、Listing、导出或 A+；不触碰真实文件、导出文件、模板输出、Step 10 映射、真实 ASIN 或批量真实商品状态。
+
+1. 准备改哪些文件 / helper 落点:
+   - `backend/app/api/amazon_stylesnap.py`: 修改 `POST /api/amazon-stylesnap/products/{product_id}/competitor-candidates/search` 和 `_run_product_competitor_search_background()`；新增 T4 scoped helper，计划放在该文件现有搜索 helper 附近：`_classify_stylesnap_search_error(...)`、`_set_competitor_search_workflow(...)`、`_write_stylesnap_search_snapshot(...)`、`_build_stylesnap_product_response(...)` 或等价命名。
+   - `backend/app/api/products.py`: 修改 `competitor-review-queue` 和 `competitor-review-detail` 的查询字段、过滤条件和响应构建，优先读取 workflow，不再用 `_competitor_search_failed_sql_condition()` / `error_message` 正则决定主队列或主状态。
+   - `backend/app/api/schemas.py`: 给 `ProductCompetitorReviewQueueItem` / `ProductCompetitorReviewDetailResponse` 增加 `workflow: ProductWorkflowState | None`，与 `ProductResponse` 对齐。
+   - `frontend/src/api/index.ts` 和 `frontend/src/pages/ProductCompetitorReview.tsx`: 只做必要字段兼容和轻量消费，增加 `workflow` 类型，页面主标签/失败判断/等待搜索结果逻辑优先用 workflow；不做 UI 重设计。
+   - `scripts/test_project_rules.py`: 增加 T4 结构/行为规则。
+   - `docs/domain-index/product-flow.md`: 更新 T4 搜索竞品 workflow 口径；当前不新增/移动入口，预计不改 `docs/project-index.md`。
+
+2. 搜索入口前置条件口径:
+   - 可触发搜索的主状态: `search_competitor/pending`、`search_competitor/failed`、`get_stylesnap_token/pending`。如果已有候选且 `force=false`，允许从这些状态或已处于 `select_competitor/pending` 的幂等状态直接收敛到 `select_competitor/pending`。
+   - 如果商品处于其它 workflow 节点且没有“已有候选 + force=false”的幂等收敛理由，返回 `409` 或等价 HTTP 错误，不改 workflow，避免从错误节点跨流程推进。
+   - 缺少主图、batch、item_code、代表 SKU 的一致口径: 对已进入可搜索节点的商品，不返回 400 且保持 pending；而是写入 `search_competitor/failed`、`workflow_error` 为可读原因，并返回包含失败 workflow 的 `ProductResponse`。理由是这类问题属于当前商品/图片/源数据无法执行搜索，若不写 failed 会留下永久 pending。代表 SKU 若为空则沿用现有 `representative_sku or item_code`；只有 `item_code` 也为空时才失败。
+   - 商品不存在、动作不允许、不能变更竞品等权限/业务锁仍使用 HTTP 错误且不改状态。
+
+3. 搜索入口触发时状态写入:
+   - 真正启动搜索前调用 `set_product_workflow(product, node=search_competitor, status=processing, error=None, now=now)`。
+   - 旧兼容字段保留为 `status="competitor_searching"`、`current_step=2`、`error_message="Amazon 同款搜索中..."`，仅服务旧响应/旧页面文案，不作为主流程事实源。
+   - `gigab2b_raw_snapshot.stylesnap_search.running` 可以保留为只读过程快照，记录 started_at、source_image_path、append、previous_count；它不是主状态源，队列/API/前端不得靠它判断主流程。
+   - 搜索入口返回时要构建包含 `workflow` 的 `ProductResponse`，不再让 response_model 默默返回 `workflow=None`。
+
+4. 已有候选且 `force=false`:
+   - 不重新搜索、不启动 `BackgroundTasks`。
+   - 写 `select_competitor/pending`、`workflow_error=None`。
+   - 旧兼容字段写 `created/current_step>=2/error_message=None`。
+   - 可更新 `stylesnap_search` 快照为 captured/reused，记录 count 和 source_image_path；只作展示证据。
+   - 确保 `competitor-review-queue` 用 workflow 把该商品选入队列，页面可直接展示已有候选。
+
+5. 后台执行完成状态:
+   - 成功且候选数大于 0: `select_competitor/pending`，`workflow_error=None`；兼容字段 `created/current_step>=2/error_message=None`；快照 `captured`。
+   - 结果为空、图片解析/API 返回普通失败、商品数据缺失等普通失败: `search_competitor/failed`，`workflow_error` 写可读原因；兼容字段 `failed/current_step=2/error_message=<同源原因>`；快照 `failed`。
+   - token/browser/Chrome 权限/登录态类失败: `get_stylesnap_token/pending`，`workflow_error` 写明确处理原因；兼容字段可保留 `failed/current_step=2/error_message=<同源原因>`，但主流程以 workflow 为准。
+   - `asyncio.CancelledError`: 先写 `search_competitor/failed` 和 “搜索被中断，请重新搜索候选”，提交后再 re-raise，避免永久 `processing`。
+   - 未分类异常: 写 `search_competitor/failed`，原因包含异常类型和简短信息；不留下不可解释的永久 `processing`。
+
+6. token/browser 类错误分类:
+   - 新增 `_classify_stylesnap_search_error(exc_or_message)`，按明确文本和异常内容分类为 `token_browser` 或 `ordinary`，返回目标 workflow node 和用户可读原因。
+   - 至少覆盖:
+     - `StyleSnap token not found` -> `get_stylesnap_token/pending`。
+     - `未找到上传 token`、`Amazon StyleSnap 页面已打开，但未找到上传 token` -> `get_stylesnap_token/pending`。
+     - `Chrome 导航到 Amazon StyleSnap 失败`、Chrome worker/tab 不可用 -> `get_stylesnap_token/pending`。
+     - `Chrome 未开启“允许 Apple 事件中的 JavaScript”`、`Apple Events`、`AppleScript JS`、Chrome JS 权限相关错误 -> `get_stylesnap_token/pending`。
+     - Amazon StyleSnap 页面不可用、登录态/token 缺失、页面 title/url 显示登录/不可用语义 -> `get_stylesnap_token/pending`。
+   - 其它图片文件、数据 URL、接口返回空候选、解析失败、业务字段缺失 -> `search_competitor/failed`。
+
+7. 竞品队列和页面数据读取:
+   - `competitor-review-queue` 过滤条件改为 workflow 优先，选出:
+     - `search_competitor/pending|processing|failed`
+     - `get_stylesnap_token/pending`
+     - `select_competitor/pending`
+     - 且按现有逻辑排除已有 `competitor_asin` 的已完成选择。
+   - 队列和详情 query 增加 `workflow_node/workflow_status/workflow_error/workflow_updated_at`，构造轻量 Product 后调用 `build_product_workflow()`，响应带 `workflow`。
+   - `current_task_status` 改为 workflow 的 `action_reason` 或 `label` 派生；不再用 `error_message` 正则决定“搜索失败/重试/主标签”。
+   - 前端 `ProductCompetitorReview.tsx` 只做最小兼容：`isCompetitorSearchFailed` 改为看 `workflow.node_key === "search_competitor" && workflow.node_status === "failed"`；搜索等待逻辑看 workflow 是否到 `select_competitor/pending`、`search_competitor/failed` 或 `get_stylesnap_token/pending`；标签显示优先用 `workflow.label`。
+
+8. 是否保留 FastAPI `BackgroundTasks`:
+   - 保留。T4 是半同步节点收敛，不是任务系统重构；`BackgroundTasks` 作为一次性后台执行足够符合当前授权。
+   - 不写 `task_runs`，不进任务中心，不新增持久化队列/worker pool。
+   - 风险: 进程中断仍可能导致后台未执行完；本轮只能通过入口 processing、CancelledError/异常失败落点和前端刷新来降低“永久 processing”风险。若要完全解决进程级可靠性，需要另开 REQUEST 讨论插件或持久调度，不在 T4 擅自扩大。
+
+9. 测试 / 项目规则计划:
+   - 结构规则: 搜索入口和后台函数必须导入并调用 `set_product_workflow()`，覆盖 `search_competitor/processing`、`select_competitor/pending`、`search_competitor/failed`、`get_stylesnap_token/pending`。
+   - 行为样本: monkeypatch `search_and_store_stylesnap_candidates()` 和 fake DB，覆盖后台成功进入 `select_competitor/pending`。
+   - 行为样本: `result.count == 0` 或普通 RuntimeError 进入 `search_competitor/failed`。
+   - 行为样本: token/browser 文本进入 `get_stylesnap_token/pending`。
+   - 搜索入口规则: 已有候选且 `force=false` 不调用 `background_tasks.add_task`，直接进入 `select_competitor/pending`。
+   - 搜索入口规则: 新搜索触发写 `search_competitor/processing`，但文件中不出现 `TaskRun` / `task_runs` 创建逻辑。
+   - 队列/API 规则: `competitor-review-queue` 查询包含 `Product.workflow_node/status/error/updated_at`，不再调用 `_competitor_search_failed_sql_condition()` 或用 `error_message.ilike` 正则决定主队列。
+   - 前端规则: `ProductCompetitorReview.tsx` 主失败判断不再用 `status === "failed" && /同款搜索|StyleSnap/`，改用 workflow。
+   - 验证命令最低跑 `make backend-compile`、`make test-project-rules`、`git diff --check`；如前端类型改动较多，再补 `npm`/项目现有前端检查命令（实现前先确认可用脚本）。
+
+10. 索引和文档:
+   - 更新 `docs/domain-index/product-flow.md`：记录 T4 搜索竞品入口状态流、token/browser 分流、队列优先读 workflow、仍不进入任务中心。
+   - `docs/project-index.md` 不预计修改，因为没有新增领域、页面、API 大入口或验证入口；若实现中新增核心 helper 文件或移动入口，再同步更新。
+
+- 完成定义: 若命 `PLAN_APPROVED` 后再实现；实现后写 `DONE_CLAIMED`，列改动文件、五条状态流转、队列/前端 workflow 读取、未写 task_runs/未进任务中心/未做 T5-T9、验证命令、索引更新和残余风险；不写 PASS，不提交。
+
+#### PLAN_APPROVED - 若命（agentKey: `ruoming`）- 2026-06-18
+
+批准听云按上述 T4 `TASK_DEFINITION` 执行。
+
+批准边界补充：
+- 搜索成功的最终主事实按 PRD 写 `workflow_node=select_competitor`、`workflow_status=pending`；不要继续扩大使用 `search_competitor/succeeded` 作为长期主流程事实。如发现 T2 helper 里有旧兼容映射，只能保留兼容或收敛说明，不得形成双口径。
+- `BackgroundTasks` 仅作为本轮一次性半同步执行载体；不得写 `task_runs`、不得进任务中心、不得新增持久化队列、不得迁入任务框架。
+- 前端只允许做 workflow 字段读取、类型补齐和轻量显示/判断改造；不要做页面重设计、交互重排或额外 UX 扩展。
+- 队列/详情必须优先读 `workflow_node/workflow_status/workflow_error`；旧 `status/current_step/error_message` 只能是兼容字段，不得继续正则判断主状态。
+- token/browser 分类必须有可验证规则；如果实现中发现错误来源不可稳定分类，先写 `REQUEST`，不要硬猜。
+- `DONE_CLAIMED` 必须明确列出五条状态流转证据、未写 task_runs/未进任务中心证据、前端最小改动范围和验证命令结果。不要写 PASS，不要提交。
 
 ### MSG-20260618-002 - REQUEST / TASK_DEFINITION / AMAZON_WORKFLOW_T2_SERVICE
 
