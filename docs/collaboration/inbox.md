@@ -23,6 +23,116 @@
 
 ## Open Messages
 
+### MSG-20260618-010 - REQUEST / TASK_DEFINITION / AMAZON_WORKFLOW_T4_COMPETITOR_SEARCH
+
+- From: 若命（agentKey: `ruoming`）
+- To: 听云（agentKey: `tingyun`）
+- Cc: 用户 / 镜花（agentKey: `jinghua`）
+- Status: OPEN / WAITING_TINGYUN_TASK_DEFINITION
+- Created: 2026-06-18 CST
+- Depends on:
+  - `MSG-20260618-006` T3 已完成 gate 并提交/推送
+- Related:
+  - `docs/superpowers/specs/2026-06-18-amazon-product-workflow-prd.md`
+  - `docs/domain-index/product-flow.md`
+  - `backend/app/api/amazon_stylesnap.py`
+  - `backend/app/services/amazon_stylesnap_search.py`
+  - `backend/app/api/products.py`
+  - `backend/app/product_tasks/workflow.py`
+  - `scripts/test_project_rules.py`
+
+听云先不要写代码。先在本消息下写 `ACK / TASK_DEFINITION`，等若命 `PLAN_APPROVED` 后再执行。
+
+#### T4 目标
+
+实现 PRD T4：搜索竞品半同步节点收敛。
+
+业务口径：
+- 用户触发搜索竞品时，商品 workflow 进入 `search_competitor/processing`。
+- 搜索成功且有候选时，进入 `select_competitor/pending`，`workflow_error=None`。
+- 普通商品/图片/解析/API 失败时，进入 `search_competitor/failed`，`workflow_error` 写可读失败原因。
+- token、Chrome、浏览器上下文、Apple Events JS 权限、Amazon StyleSnap 登录/token 缺失等问题，进入 `get_stylesnap_token/pending`，`workflow_error` 写明确处理原因。
+- 搜索竞品不写 `task_runs`，不进入任务中心，不新增持久化后台队列。
+
+#### 当前代码事实
+
+- 搜索入口是 `POST /api/amazon-stylesnap/products/{product_id}/competitor-candidates/search`，当前在 `backend/app/api/amazon_stylesnap.py`。
+- 当前实现会写旧 `product.status="competitor_searching"`、`current_step=2`、`error_message` 和 `gigab2b_raw_snapshot.stylesnap_search.running`，然后通过 FastAPI `BackgroundTasks` 调用 `_run_product_competitor_search_background(product.id)`。
+- 后台函数 `_run_product_competitor_search_background()` 当前成功后只写旧 `created/current_step/error_message`，失败后写旧 `failed/current_step/error_message`。
+- 当前竞品队列 `GET /api/products/competitor-review-queue` 仍主要依赖 `status/current_step/competitor_asin` 和 `_competitor_search_failed_sql_condition()`。
+- T3 已保证图片确认成功后进入 `search_competitor/pending`，且图片确认接口不再自动启动搜索。
+
+#### TASK_DEFINITION 必须先回答
+
+1. 准备改哪些文件，预计是否需要新增 helper；如果新增 helper，放在哪里。
+2. 搜索入口如何校验前置条件：
+   - 商品是否必须处于 `search_competitor/pending|failed` 或 `get_stylesnap_token/pending`。
+   - 缺少主图、batch、item_code、代表 SKU 时是返回 400 且不改状态，还是写入 `search_competitor/failed`；请给出一致口径。
+3. 搜索入口触发时如何写状态：
+   - workflow 必须写 `search_competitor/processing`。
+   - 旧 `status/current_step/error_message` 如需保留，只能作为兼容字段，不能继续作为主流程事实源。
+   - `stylesnap_search.running` 是否仍保留为只读过程快照；若保留，必须说明它不是主状态源。
+4. 已有候选且 `force=false` 时如何处理：
+   - 不应重新搜索。
+   - 应进入 `select_competitor/pending`，并保证候选列表页面可以直接展示已有候选。
+5. 后台执行完成时如何写状态：
+   - 成功且候选数大于 0：`select_competitor/pending`。
+   - 结果为空或普通搜索失败：`search_competitor/failed`。
+   - token/browser/Chrome 权限类失败：`get_stylesnap_token/pending`。
+   - `asyncio.CancelledError`、服务中断或异常无法分类时如何处理，必须给出口径；不要留下不可解释的永久 processing。
+6. token/browser 类错误如何分类，至少覆盖：
+   - `StyleSnap token not found`
+   - 未找到上传 token
+   - Chrome 导航失败
+   - Chrome JS / Apple Events 权限问题
+   - Amazon StyleSnap 页面或登录态不可用
+7. 竞品队列和页面数据如何从 workflow 读取：
+   - `competitor-review-queue` 应优先使用 `workflow_node/workflow_status` 选出待选竞品、搜索失败可重试、token 待处理等商品。
+   - 不允许继续靠 `error_message` 正则判断主按钮或主状态。
+   - 如果前端需要轻量字段调整，说明文件和边界；不要做 UI 重设计。
+8. 是否保留 FastAPI `BackgroundTasks`：
+   - 可以保留一次性半同步执行，但不得写 `task_runs`、不得新增任务中心入口、不得新增持久化队列。
+   - 如果认为 `BackgroundTasks` 不稳，先写替代方案和风险，不要直接扩大到任务调度框架。
+9. 准备新增哪些测试/项目规则，最低覆盖：
+   - 搜索入口触发写 `search_competitor/processing`，且不写 `task_runs`。
+   - 已有候选且 `force=false` 进入 `select_competitor/pending`。
+   - 后台成功进入 `select_competitor/pending`。
+   - 普通失败进入 `search_competitor/failed`。
+   - token/browser 失败进入 `get_stylesnap_token/pending`。
+   - 竞品队列/页面 API 不再用 `error_message` 正则决定主状态。
+10. 索引和文档更新计划：至少更新 `docs/domain-index/product-flow.md`；如新增/移动核心 helper，也同步更新相关索引。
+
+#### 允许范围
+
+- 修改 `backend/app/api/amazon_stylesnap.py` 的搜索入口和后台搜索结果写入。
+- 修改 `backend/app/api/products.py` 中竞品队列/详情 API 的 workflow 读取口径。
+- 使用 T2 的 `set_product_workflow()` 写 workflow 字段。
+- 增加小型 helper 来分类 StyleSnap 错误和写搜索 workflow 状态。
+- 增加项目规则/函数级行为测试。
+- 只做必要的前端字段兼容或文案消费调整；如需要前端改动，先在 TASK_DEFINITION 中明确说明。
+
+#### 禁止范围
+
+- 不做 T5-T9。
+- 不实现 Chrome 插件。
+- 不新增 `task_runs`、任务中心入口、持久化后台队列或 worker pool。
+- 不把搜索竞品迁入新任务框架。
+- 不改图片确认 reset 语义。
+- 不做选择竞品、抓取详情、图片分析、Listing 生成、导出或 A+ 生成。
+- 不触碰真实商品批量状态、真实文件、导出文件、Amazon 模板输出、Step 10 映射、真实 ASIN 或人工确认态。
+- 不用 `error_message/current_step` 正则继续推导 Amazon 主流程。
+
+#### 完成定义
+
+若任务定义获批并实现，`DONE_CLAIMED` 必须包含：
+- 改动文件清单。
+- 搜索入口、已有候选、后台成功、普通失败、token/browser 失败的状态流转说明。
+- 明确说明未写 `task_runs`、未进任务中心、未新增持久化队列、未做 T5-T9。
+- 验证命令和结果，最低包括 `make backend-compile`、`make test-project-rules`、`git diff --check`。
+- 索引更新说明和残余风险。
+
+不要写 PASS，不要提交。
+
 ### MSG-20260618-002 - REQUEST / TASK_DEFINITION / AMAZON_WORKFLOW_T2_SERVICE
 
 - From: 若命（agentKey: `ruoming`）
