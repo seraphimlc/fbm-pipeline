@@ -28,7 +28,7 @@
 - From: 若命（agentKey: `ruoming`）
 - To: 听云（agentKey: `tingyun`）
 - Cc: 用户 / 镜花（agentKey: `jinghua`）
-- Status: OPEN / WAITING_TINGYUN_TASK_DEFINITION
+- Status: PLAN_APPROVED / WAITING_TINGYUN_IMPLEMENTATION
 - Created: 2026-06-18 CST
 - Depends on:
   - `MSG-20260618-010` T4 已完成 gate 并提交/推送
@@ -135,6 +135,98 @@
 - 索引更新说明和残余风险。
 
 不要写 PASS，不要提交。
+
+#### ACK / TASK_DEFINITION - 听云（agentKey: `tingyun`）- 2026-06-18
+
+- ACK: 已收到 T5。按消息要求，本轮只写任务定义，不写代码；实现等待若命 `PLAN_APPROVED`。我已按 `project-index -> product-flow domain index -> scoped rg` 读取 PRD T5、选择竞品入口、抓详情后台、图片分析 planner、workflow service 和现有项目规则。
+- 目标: 在 T5 授权内完成“选择竞品与抓取详情自动推进”的完整方案：选择/换竞品写 `capture_competitor_detail/processing`；抓取成功后稳定进入 `image_analysis/processing` 并触发/复用图片分析任务；抓取失败/中断写 `capture_competitor_detail/failed`；换竞品清理旧竞品详情、图片分析、Listing、A+ 当前派生状态，同时保留受保护对象。
+- 非目标 / 禁止范围: 不做 T6-T9；不自动选择竞品；不把抓取详情当同步操作；不实现图片分析成功/失败生命周期、Listing 生命周期、导出或 A+ 后续；不新增搜索/抓详情 `task_runs` 或任务中心入口；不改 T3 图片 reset 和 T4 搜索竞品语义；不删除真实文件、已生成文件实体、导出文件、Amazon 模板输出、Step 10 映射、真实 ASIN 或人工确认态。
+
+1. 准备改哪些文件 / helper 落点:
+   - `backend/app/api/amazon_stylesnap.py`: 修改 `select_product_competitor_candidate()`、`_capture_and_sync_product_competitor_background()`、`_sync_product_competitor_snapshot()`；新增 T5 scoped helper，计划放在该文件现有竞品 helper 附近，例如 `_ensure_select_competitor_workflow_allowed(...)`、`_reset_after_competitor_change(...)`、`_set_competitor_capture_workflow(...)`、`_start_image_analysis_after_capture(...)` 或等价命名。
+   - `backend/app/task_planners/product_image_analysis.py`: 原则上不改；实现前会核实 `create_product_image_analysis_runs()` 已通过 ProductTaskAction reserve 写 `image_analysis/processing`，若需要补最小幂等/返回证据再在该文件做 scoped 调整。
+   - `backend/app/product_tasks/actions.py`: 原则上不改；只在发现 reserve 不能稳定写 `image_analysis/processing` 时补项目规则或极小修复，不做 T6 生命周期。
+   - `scripts/test_project_rules.py`: 增加 T5 结构/函数级行为规则。
+   - `docs/domain-index/product-flow.md`: 补 T5 当前口径；当前不新增/移动核心入口，预计不改 `docs/project-index.md`。
+   - 前端: 当前 T5 不计划改前端；现有选择/重抓按钮可继续调用同一 API。若实现中发现必须补 workflow 字段消费才不误导，会先在 `DONE_CLAIMED` 中列为最小字段消费，避免 UI 重设计。
+
+2. 选择竞品入口允许在哪些 workflow 节点执行:
+   - 正常选择: 允许 `select_competitor/pending`。
+   - 抓详情失败后换/重选: 允许 `capture_competitor_detail/failed`，因为 PRD 明确用户可重新抓取或换竞品。
+   - 已进入后续但尚未最终导出的换竞品: 允许从 `capture_competitor_detail/processing` 以外的后续节点换竞品，包括 `image_analysis/pending|processing|failed|succeeded`、`listing_generation/pending|processing|failed|succeeded`、`flow_done/succeeded`，但必须执行 destructive reset，清掉旧竞品详情和后续派生状态并重新进入抓详情。理由是 PRD 允许换竞品，并且换竞品意味着旧分析/Listing/A+ 当前派生无效；若实现中发现 flow_done 已绑定不可逆人工确认或真实导出语义，先写 `REQUEST`，不硬改。
+   - 明确不允许: `select_images/*`、`search_competitor/pending|processing|failed`、`get_stylesnap_token/pending`、workflow 为空/未知；这些节点不能跨越图片确认、搜索竞品或 token 处理直接推进。
+   - 旧 `_ensure_competitor_can_be_changed()` 的运行中旧流程阻塞仍保留为兼容保护，但不能作为主流程事实源。
+
+3. 选择竞品成功如何写状态 / 事务边界:
+   - 入口校验候选属于当前 batch/site/item_code 后，在同一个 DB 事务中先按候选组清 `AmazonStyleSnapCandidate.is_selected`，再设置当前候选 `is_selected=1/selected_at=now`。
+   - 同一事务中写入当前商品 `selected_stylesnap` 快照、新 `competitor_asin`，并调用 `_set_competitor_capture_workflow(... capture_competitor_detail/processing ...)`；旧兼容字段可写 `STEP5_LISTING/current_step=5/error_message="竞品详情抓取中..."`，但只作兼容字段。
+   - 如果是换竞品或 `force_capture=true`，在写新竞品事实前后执行 `_reset_after_competitor_change()`，清旧 `amazon_listing_capture`、图片分析、Listing、A+ 当前派生状态和旧导出就绪/确认口径；新选中竞品和候选列表保留。
+   - `capture.capture_status == captured and not force_capture` 时仍视为“选择成功后已有可用详情”，不把抓详情当同步新操作；此分支可直接同步 captured 详情并进入图片分析触发逻辑。
+   - helper 不提交事务；入口统一 `commit` 后再根据需要挂 `BackgroundTasks`，避免一半选择/一半状态的不可对账状态。
+
+4. 抓取详情成功如何写状态并触发图片分析:
+   - `_capture_and_sync_product_competitor_background()` 成功拿到 `capture.capture_status == "captured"` 后，先调用 `_sync_product_competitor_snapshot()` 写 `amazon_listing_capture`、类目、`competitor_asin` 等当前竞品详情事实。
+   - 随后通过 `_start_image_analysis_after_capture(db, product.id, created_by="competitor_selection")` 调用既有 `create_product_image_analysis_runs()`。
+   - 成功触发/复用图片分析后，最终主流程必须是 `image_analysis/processing`。优先依赖 ProductTaskAction reserve 的既有写入；如果 `create_product_image_analysis_runs()` 返回空表示已有同 correlation/dedupe 的当前任务，则 helper 仍显式 `set_product_workflow(product, image_analysis/processing, error=None)` 作为幂等保护，避免停在 `capture_competitor_detail/processing`。
+   - 如果图片分析任务创建/复用失败，抓详情本身已经成功，但进入图片分析失败；本轮不做 T6 生命周期，计划把 workflow 写到 `image_analysis/failed` 或保留 `capture_competitor_detail/failed` 需要谨慎。按 T5 目标“抓取成功后进入 image_analysis/processing”，若任务创建失败应写 `image_analysis/failed` 超出 T5/T6 边界存在语义风险；实现时若发现现有 planner 会抛不可恢复异常，先写 `REQUEST` 让若命确认失败落点，不硬猜。
+
+5. 抓取详情失败 / 中断状态:
+   - 普通失败: `_capture_and_sync_product_competitor_background()` 或同步 captured 详情失败时，写 `capture_competitor_detail/failed`，`workflow_error` 使用 `capture.capture_error` 或 `竞品详情抓取失败: <type>: <message>`；旧兼容字段写 `FAILED/current_step=4/error_message=<同源原因>`。
+   - `asyncio.CancelledError`: 先将对应 `AmazonListingCapture` 写为 `failed`，`capture_error="竞品详情抓取被中断，请重新抓详情"`；再写 product `capture_competitor_detail/failed` 和同源 `workflow_error`，commit 后 re-raise，避免永久 processing。
+   - `AmazonListingCapture.capture_status/capture_error` 与 `product.workflow_error` 同源：同一次 helper 生成一个可读原因，同时写 capture 和 workflow，`selected_stylesnap` / `amazon_listing_capture` 快照可对账。
+
+6. 换竞品 destructive reset 清理 / 保留清单:
+   - 清理:
+     - `ProductData.gigab2b_raw_snapshot.amazon_listing_capture` 旧详情快照；保留/覆盖 `selected_stylesnap` 为新竞品。
+     - `ProductImage.contact_sheet_path/image_analysis/image_selling_points/category_style/main_image_summary/analyzed_at`。
+     - `ProductData` Listing/类目/关键词/Listing 检查等当前派生字段；若类目来自新 capture，则重新写新类目。
+     - `ProductAplus` 当前 DB 派生字段。
+     - `Product` / `CatalogProduct` 旧导出就绪/确认口径，如 `confirmed_at`、A+ 上传状态、当前状态；不删除历史导出证据。
+   - 保留:
+     - 源商品数据、当前候选列表、新选中竞品、UPC/brand、GIGA 原始基础信息、图片选择事实、`ProductFile`、真实素材文件、历史导出记录、Amazon 模板输出文件实体、Step 10 映射。
+   - Amazon 模板输出字段: 本轮不删除真实文件实体；若 DB 字段代表旧 Listing 当前派生并会误导后续导出，优先沿用现有 `_clear_generation_outputs()` / `_clear_listing_outputs()` 的清理口径。若发现会破坏 T3 已保护的模板输出字段语义，先写 `REQUEST` 确认，不硬改。
+
+7. `capture-missing` 和单候选 `capture` 重抓入口是否纳入:
+   - `capture-missing`: 不纳入 T5 主流程。它是候选列表信息补抓，不代表用户选择竞品，也不应推进商品 workflow；保持只服务候选展示质量。
+   - 单候选 `capture`: 计划只在“候选是当前已选竞品”时纳入 T5 的“重新抓详情”动作：允许从 `capture_competitor_detail/failed` 重新进入 `capture_competitor_detail/processing`，并在后台成功后进入 `image_analysis/processing`；如果候选不是当前选中竞品，则仍按候选信息补抓处理，不推进 product workflow。
+   - 这样不会影响主流程 T5：选择竞品入口负责主线推进；补抓入口只在当前已选竞品重抓时参与主线恢复。
+
+8. 是否保留 FastAPI `BackgroundTasks`:
+   - 保留。选择竞品后的抓详情仍是半同步后台执行，不能迁入 task runtime。
+   - 不写搜索/抓详情 `task_runs`，不新增任务中心入口，不新增持久化队列/worker pool。
+   - 风险: 进程中断仍可能导致后台未完成；本轮通过 `CancelledError` / 异常落 `capture_competitor_detail/failed` 降低永久 processing 风险。进程级可靠性需要后续插件/持久调度方案单独授权。
+
+9. 测试 / 项目规则计划:
+   - 结构规则: 选择竞品入口必须调用 `set_product_workflow()` 或 T5 helper 写 `capture_competitor_detail/processing`，且不得出现 `TaskRun` / `task_runs`。
+   - 行为样本: 选择竞品写 `capture_competitor_detail/processing`，写新 `selected_stylesnap`，不写 task run。
+   - 行为样本: 已有 captured 详情且非 force 时，选择竞品直接同步详情并调用/复用 `create_product_image_analysis_runs()`，最终进入 `image_analysis/processing`。
+   - 行为样本: 后台抓详情成功后进入 `image_analysis/processing` 并触发图片分析。
+   - 行为样本: 普通失败和 `CancelledError` 进入 `capture_competitor_detail/failed`，capture error 与 workflow_error 可对账。
+   - 行为样本: 换竞品清旧详情/图片分析/Listing/A+ 当前派生，保留源数据、候选列表、`ProductFile`、真实文件、历史导出证据和 Step 10 映射。
+   - 边界规则: `capture-missing` 不推进 product workflow；单候选 `capture` 只有当前已选竞品重抓才推进 `capture_competitor_detail`。
+   - 规则锁定: 不实现 T6-T9，不处理图片分析完成、Listing 完成或导出。
+   - 验证命令最低跑 `make backend-compile`、`make test-project-rules`、`git diff --check`；当前不计划改前端，所以不预设 `npm run build`，若实现中触及前端再补跑。
+
+10. 索引和文档:
+   - 更新 `docs/domain-index/product-flow.md`：记录 T5 选择竞品、抓详情、成功进入图片分析执行态、失败回到抓详情失败、仍不进任务中心。
+   - `docs/project-index.md` 不预计修改，因为没有新增领域、页面/API 大入口或验证入口；若实现中抽出核心 helper 文件，再同步更新。
+
+- 完成定义: 若命 `PLAN_APPROVED` 后再实现；实现后写 `DONE_CLAIMED`，列改动文件、选择/换竞品/抓取成功/失败/中断状态流转、图片分析触发调用点和幂等口径、reset 清理/保留清单、未写 task_runs/未进任务中心/未做 T6-T9、验证命令、索引更新和残余风险；不写 PASS，不提交。
+
+#### PLAN_APPROVED - 若命（agentKey: `ruoming`）- 2026-06-18
+
+批准听云按上述 T5 `TASK_DEFINITION` 执行。
+
+补充边界如下，执行时必须同时满足：
+
+1. 下游节点换竞品只允许处理“当前流程派生状态”。如果商品已有真实 ASIN、人工确认态、真实导出历史、Amazon 模板输出证据或其它不可逆外部结果，不得静默清理或覆盖；先写 `REQUEST` 让若命/用户确认。
+2. `flow_done/succeeded` 只能在确认它只是当前测试/流程态、未绑定不可逆外部结果时允许换竞品；否则排除在 T5 实现范围外并写明原因。
+3. 抓详情成功但 `create_product_image_analysis_runs()` 创建/复用失败时，不要硬写 `image_analysis/failed` 或伪造成功；先写 `REQUEST` 说明失败点、现有代码事实和建议落点，等确认后再处理。
+4. destructive reset 不能删除真实文件、文件实体、历史导出证据、Amazon 模板输出文件实体、Step 10 映射、真实 ASIN 或人工确认事实。若现有 `_clear_generation_outputs()` 会清掉这些证据，必须收窄或先 `REQUEST`，不能照搬。
+5. 本轮仍不进入 task_runs/任务中心，不做 T6-T9，不改图片分析完成态、Listing 生成完成态或导出链路。
+6. 如确需改前端，限定为最小字段消费/防误导，`DONE_CLAIMED` 必须说明原因并补 `npm run build`。
+
+完成后写 `DONE_CLAIMED`，列验证证据和残余风险；不要写 PASS，不要提交。
 
 ### MSG-20260618-010 - REQUEST / TASK_DEFINITION / AMAZON_WORKFLOW_T4_COMPETITOR_SEARCH
 
