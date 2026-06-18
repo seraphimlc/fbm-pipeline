@@ -19,6 +19,7 @@
 - `data-sources.md`：数据源、GIGA 拉品、库存/价格同步。
 - `frontend-pages.md`：前端路由、页面入口、API client 和页面验证入口。
 - `runtime-security.md`：启动边界、本地访问保护、TLS、文件/图片代理。
+- `collaboration.md`：多 agent 协作规约、角色、inbox、review/QA gate、multi-agent-collaboration skill 维护入口。
 
 ## 固定栏目
 
