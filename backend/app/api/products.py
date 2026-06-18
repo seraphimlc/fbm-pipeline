@@ -66,6 +66,7 @@ from app.api.schemas import (
     UpcPoolImportResponse, UpcPoolSummary,
 )
 from app.pipeline.engine import start_pipeline as enqueue_pipeline, cancel_pipeline, get_step_status, is_running
+from app.product_tasks.workflow import build_product_workflow
 from app.pipeline.step2_pricing import run_pricing
 from app.pipeline.step3_keywords import run_keywords
 from app.pipeline.step4_category import run_category
@@ -145,6 +146,7 @@ RUNNING_STATUSES = {
 APLUS_REGEN_ACTIVE_STATUSES = {"regen_queued", "regen_script_running", "regen_image_running"}
 COMPETITOR_REVIEW_ERROR_KEYWORDS = ("同款搜索", "StyleSnap", "候选竞品", "参考竞品", "选择竞品")
 WORKBENCH_STATUS_KEYS = (
+    "needs_initialization",
     "select_images",
     "competitor_searching",
     "select_competitor",
@@ -157,7 +159,7 @@ WORKBENCH_STATUS_KEYS = (
     "export_ready",
     "failed",
 )
-PRODUCT_LIST_WORK_STATUS_KEYS = set(WORKBENCH_STATUS_KEYS) | {"exported"}
+PRODUCT_LIST_WORK_STATUS_KEYS = set(WORKBENCH_STATUS_KEYS) | {"exported", "needs_initialization"}
 AUTO_START_READY_GENERATION_LIMIT = 100
 IMAGE_REVIEW_SELECTED_IMAGE_LIMIT = 9
 IMAGE_REVIEW_INITIAL_GALLERY_LIMIT = 36
@@ -423,307 +425,11 @@ def _workflow_state(
     *,
     catalog_exported: bool | None = None,
 ) -> dict:
-    """Single source of truth for the main product workflow shown in the workbench.
+    """Thin wrapper around the Product Workflow Service projection.
 
-    A+ is intentionally excluded. It is a separate workflow and must not override
-    the main product status or primary action.
+    A+ is intentionally excluded from the Amazon main workflow projection.
     """
-    step = int(product.current_step or 0)
-    detail = _compact_error_message(product.error_message)
-    exported = bool(catalog_exported)
-    if catalog_exported is None:
-        catalog_item = getattr(product, "catalog_item", None)
-        exported = bool(catalog_item and (catalog_item.exported_at or catalog_item.export_task_id))
-
-    def state(
-        stage: str,
-        stage_status: str,
-        label: str,
-        work_status: str,
-        *,
-        primary_action: str | None = None,
-        primary_action_label: str | None = None,
-        allowed_actions: list[str] | None = None,
-        action_reason: str | None = None,
-        color: str = "default",
-    ) -> dict:
-        actions = ["open_detail", *(allowed_actions or [])]
-        if primary_action and primary_action not in actions:
-            actions.append(primary_action)
-        related_correlation_key = None
-        if stage == "image_analysis":
-            related_correlation_key = f"product:{product.id}:image_analysis"
-        elif stage == "listing_generation":
-            related_correlation_key = f"product:{product.id}:listing_generation"
-        return {
-            "stage": stage,
-            "stage_status": stage_status,
-            "label": label,
-            "work_status": work_status,
-            "primary_action": primary_action,
-            "primary_action_label": primary_action_label,
-            "allowed_actions": list(dict.fromkeys(actions)),
-            "action_reason": action_reason or label,
-            "color": color,
-            "related_task_run_id": None,
-            "related_correlation_key": related_correlation_key,
-        }
-
-    if product.status == "paused":
-        return state(
-            _workflow_for_step(step),
-            "paused",
-            "已挂起",
-            "suspended",
-            primary_action="resume",
-            primary_action_label="继续",
-            allowed_actions=["resume", "restart"],
-            action_reason=f"已挂起：{STEP_LABELS.get(step, f'Step {step}')}，不会继续执行后续自动流程",
-        )
-
-    action_queue_stage = _product_task_action_queued_stage(product)
-    if action_queue_stage:
-        stage_label = {
-            "image_analysis": "图片分析",
-            "listing_generation": "Listing 生成",
-        }.get(action_queue_stage, "商品任务")
-        return state(
-            action_queue_stage,
-            "queued",
-            f"{stage_label}排队中",
-            "running",
-            primary_action="open_task_center",
-            primary_action_label="任务中心",
-            allowed_actions=["open_task_center"],
-            action_reason=detail or f"{stage_label}已加入任务中心队列",
-            color="processing",
-        )
-
-    if _is_stale_running_product(product):
-        return state(
-            _workflow_for_step(step),
-            "interrupted",
-            "已中断",
-            "interrupted",
-            primary_action="retry",
-            primary_action_label="重试",
-            allowed_actions=["retry", "restart"],
-            action_reason=f"运行状态已中断：{STEP_LABELS.get(step, f'Step {step}')} 未在当前服务中运行，可直接重试当前节点",
-            color="warning",
-        )
-
-    if product.status == "competitor_searching":
-        queued = "队列" in detail or "排队" in detail
-        return state(
-            "competitor_search",
-            "queued" if queued else "running",
-            "候选竞品搜索中",
-            "competitor_searching",
-            primary_action="open_task_center",
-            primary_action_label="任务中心",
-            allowed_actions=["open_task_center"],
-            action_reason=detail or "正在用主图搜索 Amazon 同款",
-            color="processing",
-        )
-
-    if product.status == STEP5_LISTING and re.search(r"竞品.*抓取中|Listing.*抓取中", product.error_message or "", re.I):
-        queued = "队列" in detail or "排队" in detail
-        return state(
-            "competitor_capture",
-            "queued" if queued else "running",
-            "竞品详情抓取中",
-            "capture_detail",
-            primary_action="open_task_center",
-            primary_action_label="任务中心",
-            allowed_actions=["open_task_center"],
-            action_reason=detail or "正在抓取已选竞品详情",
-            color="processing",
-        )
-
-    if product.status in RUNNING_STATUSES:
-        stage = _workflow_for_step(step)
-        stage_label = {
-            "image_analysis": "图片分析",
-            "listing_generation": "Listing 生成",
-            "competitor_select": "商品处理",
-            "export": "导出准备",
-        }.get(stage, "商品处理")
-        queued = "队列" in detail or "排队" in detail or "新任务" in (product.error_message or "")
-        return state(
-            stage,
-            "queued" if queued else "running",
-            f"{stage_label}{'排队中' if queued else '中'}",
-            "running",
-            primary_action="open_task_center",
-            primary_action_label="任务中心",
-            allowed_actions=["open_task_center"],
-            action_reason=detail or f"{stage_label}{'已进入任务中心队列' if queued else '正在执行'}",
-            color="processing",
-        )
-
-    if product.status == STEP6_DONE and step <= 5:
-        return state(
-            "listing_generation",
-            "queued",
-            "Listing 排队中",
-            "running",
-            primary_action="open_task_center",
-            primary_action_label="任务中心",
-            allowed_actions=["open_task_center"],
-            action_reason="图片分析已完成，等待 Listing 生成任务",
-            color="processing",
-        )
-
-    if product.status == STEP5_DONE and step >= 6:
-        return state(
-            "export",
-            "pending",
-            "待导出",
-            "export_ready",
-            primary_action="open_export_center",
-            primary_action_label="导出",
-            allowed_actions=["open_export_center"],
-            action_reason="Listing 已生成，等待导出",
-            color="success",
-        )
-
-    if product.status == COMPLETED and step >= 6:
-        if exported:
-            return state(
-                "export",
-                "succeeded",
-                "已导出，可重导",
-                "exported",
-                primary_action="open_export_center",
-                primary_action_label="重导",
-                allowed_actions=["open_export_center"],
-                action_reason="已导出，可在导出中心再次导出",
-                color="green",
-            )
-        return state(
-            "export",
-            "pending",
-            "待导出",
-            "export_ready",
-            primary_action="open_export_center",
-            primary_action_label="导出",
-            allowed_actions=["open_export_center"],
-            action_reason="Listing 已生成，等待导出",
-            color="success",
-        )
-
-    if product.status == PENDING_REVIEW:
-        return state(
-            "manual_review",
-            "pending",
-            "待人工处理",
-            "manual_review",
-            primary_action="resume",
-            primary_action_label="继续",
-            allowed_actions=["resume", "restart"],
-            action_reason=detail or "需要人工确认后继续",
-            color="warning",
-        )
-
-    if product.status == "failed":
-        if _is_competitor_search_failed(product):
-            return state(
-                "competitor_search",
-                "failed",
-                "候选搜索失败",
-                "select_competitor",
-                primary_action="open_competitor_review",
-                primary_action_label="处理竞品",
-                allowed_actions=["open_competitor_review", "restart"],
-                action_reason=detail or "候选竞品搜索失败，请重新搜索候选",
-                color="error",
-            )
-        if re.search(r"竞品详情|竞品 Listing|Amazon Listing|选中竞品", product.error_message or "", re.I):
-            return state(
-                "competitor_capture",
-                "failed",
-                "竞品详情抓取失败",
-                "select_competitor",
-                primary_action="open_competitor_review",
-                primary_action_label="重新抓取",
-                allowed_actions=["open_competitor_review", "restart"],
-                action_reason=detail or "竞品详情抓取失败",
-                color="error",
-            )
-        stage = _workflow_for_step(step)
-        return state(
-            stage,
-            "failed",
-            f"{STEP_LABELS.get(step, '当前步骤')}失败",
-            "failed",
-            primary_action="retry" if step > 1 else "open_detail",
-            primary_action_label="重试" if step > 1 else "查看",
-            allowed_actions=(["retry", "restart"] if step > 1 else ["restart"]),
-            action_reason=detail or "当前步骤失败",
-            color="error",
-        )
-
-    if product.status in {SOURCE_UNAVAILABLE, DUPLICATE_SKIPPED, "unavailable"}:
-        label = "原商品不可用" if product.status == SOURCE_UNAVAILABLE else "商品不可用"
-        return state(
-            "stopped",
-            "blocked",
-            label,
-            "failed",
-            primary_action="open_detail",
-            primary_action_label="查看",
-            action_reason=detail or label,
-            color="default",
-        )
-
-    if product.status == "created":
-        if step <= 0:
-            return state(
-                "image_review",
-                "pending",
-                "待确认图片",
-                "select_images",
-                primary_action="open_image_review",
-                primary_action_label="确认图片",
-                allowed_actions=["open_image_review"],
-                action_reason="需要先确认主图和 Listing 图片",
-                color="cyan",
-            )
-        if not product.competitor_asin:
-            return state(
-                "competitor_select",
-                "pending",
-                "待选择竞品",
-                "select_competitor",
-                primary_action="open_competitor_review",
-                primary_action_label="选竞品",
-                allowed_actions=["open_competitor_review", "restart"],
-                action_reason="需要搜索或选择参考竞品",
-                color="purple",
-            )
-        return state(
-            "image_analysis" if step <= 5 else "listing_generation",
-            "queued",
-            "等待自动入队",
-            "ready_to_generate",
-            primary_action="open_task_center",
-            primary_action_label="任务中心",
-            allowed_actions=["open_task_center", "restart"],
-            action_reason="前置条件已满足，等待系统自动进入任务中心",
-            color="warning",
-        )
-
-    return state(
-        _workflow_for_step(step),
-        "running",
-        "处理中",
-        "running",
-        primary_action="open_task_center",
-        primary_action_label="任务中心",
-        allowed_actions=["open_task_center"],
-        action_reason=product.status or "处理中",
-        color="processing",
-    )
+    return build_product_workflow(product, catalog_exported=catalog_exported)
 
 
 def _split_category_path(value: str | None) -> list[str]:
@@ -2707,6 +2413,10 @@ async def get_workbench_overview(
             Product.current_step,
             Product.competitor_asin,
             Product.error_message,
+            Product.workflow_node,
+            Product.workflow_status,
+            Product.workflow_error,
+            Product.workflow_updated_at,
             Product.source_data_source_id,
         )
     )
@@ -2764,6 +2474,7 @@ async def get_workbench_overview(
     )
     return WorkbenchOverview(
         total_products=len(products),
+        needs_initialization=status_counts["needs_initialization"],
         select_images=status_counts["select_images"],
         competitor_searching=status_counts["competitor_searching"],
         select_competitor=status_counts["select_competitor"],

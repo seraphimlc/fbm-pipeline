@@ -9,10 +9,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models import CatalogProduct, Product, TaskGroup, TaskRun, TaskStep
-from app.models.status import COMPLETED, FAILED, PAUSED, STEP5_LISTING, STEP6_CURATING, STEP6_DONE
+from app.models.status import (
+    COMPLETED,
+    FAILED,
+    PAUSED,
+    STEP5_LISTING,
+    STEP6_CURATING,
+    STEP6_DONE,
+    WORKFLOW_NODE_FLOW_DONE,
+    WORKFLOW_NODE_IMAGE_ANALYSIS,
+    WORKFLOW_NODE_LISTING_GENERATION,
+    WORKFLOW_STATUS_FAILED,
+    WORKFLOW_STATUS_PROCESSING,
+    WORKFLOW_STATUS_SUCCEEDED,
+)
 from app.pipeline.engine import _assert_step_prerequisites
 from app.pipeline.step5_listing import run_listing
 from app.pipeline.step6_image import run_image_analysis
+from app.product_tasks.workflow import set_product_workflow
 from app.task_runtime.actions import TaskAction, TaskGroupPlan, TaskRunPlan, TaskStepPlan, action_for, register_action
 from app.task_runtime.constants import (
     RUN_STATUS_FAILED,
@@ -96,6 +110,10 @@ def _sync_catalog_item(product: Product) -> None:
         product.catalog_item.updated_at = product.updated_at
 
 
+def _workflow_node_for_step(step: int) -> str:
+    return WORKFLOW_NODE_IMAGE_ANALYSIS if step == 5 else WORKFLOW_NODE_LISTING_GENERATION
+
+
 async def _project_product_failure(
     db: AsyncSession,
     *,
@@ -112,6 +130,13 @@ async def _project_product_failure(
     product.status = FAILED
     product.current_step = step
     product.error_message = f"{label}失败: {type(error).__name__}: {error}" if isinstance(error, Exception) else str(error)
+    set_product_workflow(
+        product,
+        node=_workflow_node_for_step(step),
+        status=WORKFLOW_STATUS_FAILED,
+        error=product.error_message,
+        now=now,
+    )
     product.updated_at = now
     _sync_catalog_item(product)
     await db.commit()
@@ -132,6 +157,13 @@ async def _project_product_paused(
     product.status = PAUSED
     product.current_step = step
     product.error_message = message
+    set_product_workflow(
+        product,
+        node=_workflow_node_for_step(step),
+        status=WORKFLOW_STATUS_FAILED,
+        error=message,
+        now=now,
+    )
     product.updated_at = now
     _sync_catalog_item(product)
 
@@ -167,6 +199,13 @@ def _project_listing_completed(product: Product) -> None:
     product.status = COMPLETED
     product.current_step = 6
     product.error_message = None
+    set_product_workflow(
+        product,
+        node=WORKFLOW_NODE_FLOW_DONE,
+        status=WORKFLOW_STATUS_SUCCEEDED,
+        error=None,
+        now=now,
+    )
     product.updated_at = now
 
     pd = product.data
@@ -218,6 +257,13 @@ class ProductImageAnalysisAction:
         product.status = STEP6_CURATING
         product.current_step = 5
         product.error_message = "图片分析已加入任务中心队列"
+        set_product_workflow(
+            product,
+            node=WORKFLOW_NODE_IMAGE_ANALYSIS,
+            status=WORKFLOW_STATUS_PROCESSING,
+            error=product.error_message,
+            now=now,
+        )
         product.updated_at = now
         _sync_catalog_item(product)
 
@@ -271,6 +317,13 @@ class ProductImageAnalysisAction:
         product.status = STEP6_DONE
         product.current_step = 5
         product.error_message = None
+        set_product_workflow(
+            product,
+            node=WORKFLOW_NODE_IMAGE_ANALYSIS,
+            status=WORKFLOW_STATUS_SUCCEEDED,
+            error=None,
+            now=now,
+        )
         product.updated_at = now
         _sync_catalog_item(product)
         listing_runs = await create_product_action_runs(
@@ -353,6 +406,13 @@ class ProductListingGenerationAction:
         product.status = STEP5_LISTING
         product.current_step = 6
         product.error_message = "Listing 生成已加入任务中心队列"
+        set_product_workflow(
+            product,
+            node=WORKFLOW_NODE_LISTING_GENERATION,
+            status=WORKFLOW_STATUS_PROCESSING,
+            error=product.error_message,
+            now=now,
+        )
         product.updated_at = now
         _sync_catalog_item(product)
         if product.catalog_item:

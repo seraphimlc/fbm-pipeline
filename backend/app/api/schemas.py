@@ -763,6 +763,10 @@ class ProductWorkflowState(BaseModel):
     stage_status: str
     label: str
     work_status: str
+    node_key: str | None = None
+    node_label: str | None = None
+    node_type: str | None = None
+    node_status: str | None = None
     primary_action: str | None = None
     primary_action_label: str | None = None
     allowed_actions: list[str] = Field(default_factory=list)
@@ -1390,6 +1394,7 @@ class BulkImportResponse(BaseModel):
 
 class WorkbenchOverview(BaseModel):
     total_products: int = 0
+    needs_initialization: int = 0
     select_images: int = 0
     competitor_searching: int = 0
     select_competitor: int = 0

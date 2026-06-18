@@ -153,6 +153,181 @@ for forbidden in ("export", "catalog_export", "amazon_upload"):
     )
 
 
+def test_amazon_workflow_t2_service_projection_and_write_rules() -> None:
+    workflow_text = (ROOT / "backend" / "app" / "product_tasks" / "workflow.py").read_text(encoding="utf-8")
+    products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
+    product_flow_index = (ROOT / "docs" / "domain-index" / "product-flow.md").read_text(encoding="utf-8")
+
+    assert_true(
+        "def set_product_workflow(" in workflow_text
+        and "def build_product_workflow(" in workflow_text
+        and "WORKFLOW_NODE_VIEWS" in workflow_text
+        and "AMAZON_WORKFLOW_NODES" in workflow_text
+        and "AMAZON_WORKFLOW_STATUSES" in workflow_text,
+        "Amazon workflow T2 必须在 backend/app/product_tasks/workflow.py 集中提供写入、投影和 node/action 映射",
+    )
+    assert_true(
+        "product.workflow_node = node" in workflow_text
+        and "product.workflow_status = status" in workflow_text
+        and "product.workflow_error = error" in workflow_text
+        and "product.workflow_updated_at = now or datetime.utcnow()" in workflow_text
+        and ".commit(" not in workflow_text
+        and ".flush(" not in workflow_text
+        and "create_task" not in workflow_text
+        and "TaskRun" not in workflow_text,
+        "set_product_workflow 只能校验并写入 Product workflow 四字段，不得提交事务、创建任务或触发副作用",
+    )
+    assert_true(
+        "return build_product_workflow(product, catalog_exported=catalog_exported)" in products_api_text
+        and "def _workflow_state(" in products_api_text
+        and "_product_workbench_status(product) == body.work_status" in products_api_text
+        and '"workflow": workflow' in products_api_text
+        and "detail.workflow = _workflow_state(product, catalog_exported=catalog_exported)" in products_api_text,
+        "products.py 必须把 _workflow_state 收敛为 Product Workflow Service 薄 wrapper，并让列表/详情/work_status 同源",
+    )
+    workflow_state_body = products_api_text.split("def _workflow_state(", 1)[1].split("\ndef _split_category_path", 1)[0]
+    assert_true(
+        "current_step" not in workflow_state_body
+        and "error_message" not in workflow_state_body
+        and "re.search" not in workflow_state_body,
+        "_workflow_state 薄 wrapper 不能继续用 current_step/error_message 正则推导 Amazon 主流程节点",
+    )
+    assert_true(
+        "workflow_uninitialized" in workflow_text
+        and "needs_initialization" in workflow_text
+        and "商品 workflow 字段为空" in workflow_text,
+        "空 workflow 字段必须投影为显式未初始化/需初始化状态，不能复杂兼容旧 current_step/error_message",
+    )
+    assert_true(
+        "node_key: str | None = None" in schemas_text
+        and "node_label: str | None = None" in schemas_text
+        and "node_type: str | None = None" in schemas_text
+        and "node_status: str | None = None" in schemas_text,
+        "ProductWorkflowState 新增 node 字段必须保持可选，避免前端本轮必须同步改",
+    )
+    assert_true(
+        '"export"' not in workflow_text
+        and '"catalog_export"' not in workflow_text
+        and "amazon_upload" not in workflow_text
+        and "open_export_center" not in workflow_text,
+        "Amazon workflow T2 node/action 映射不得新增导出、catalog export、Amazon upload 主流程节点或导出动作",
+    )
+    assert_true(
+        "Product Workflow Service" in product_flow_index
+        and "backend/app/product_tasks/workflow.py" in product_flow_index,
+        "新增 Amazon workflow 核心 service 后必须同步 product-flow domain index",
+    )
+
+    code = r'''
+from datetime import datetime
+from types import SimpleNamespace
+from app.api.products import _product_list_work_status
+from app.product_tasks.workflow import build_product_workflow, set_product_workflow
+from app.models.status import (
+    WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
+    WORKFLOW_NODE_FLOW_DONE,
+    WORKFLOW_NODE_IMAGE_ANALYSIS,
+    WORKFLOW_NODE_LISTING_GENERATION,
+    WORKFLOW_NODE_SEARCH_COMPETITOR,
+    WORKFLOW_STATUS_FAILED,
+    WORKFLOW_STATUS_PROCESSING,
+    WORKFLOW_STATUS_SUCCEEDED,
+)
+
+product = SimpleNamespace(id=123, workflow_node=None, workflow_status=None, workflow_error=None, workflow_updated_at=None)
+empty = build_product_workflow(product)
+assert empty["stage"] == "workflow_uninitialized", empty
+assert empty["work_status"] == "needs_initialization", empty
+
+now = datetime(2026, 6, 18, 9, 30, 0)
+set_product_workflow(product, node=WORKFLOW_NODE_SEARCH_COMPETITOR, status=WORKFLOW_STATUS_PROCESSING, now=now)
+assert product.workflow_node == WORKFLOW_NODE_SEARCH_COMPETITOR
+assert product.workflow_status == WORKFLOW_STATUS_PROCESSING
+assert product.workflow_error is None
+assert product.workflow_updated_at == now
+searching = build_product_workflow(product)
+assert searching["stage"] == WORKFLOW_NODE_SEARCH_COMPETITOR, searching
+assert searching["work_status"] == "competitor_searching", searching
+assert searching["node_key"] == WORKFLOW_NODE_SEARCH_COMPETITOR, searching
+assert searching["node_type"] == "semi_sync", searching
+
+for node, action in [
+    (WORKFLOW_NODE_SEARCH_COMPETITOR, "retry_competitor_search"),
+    (WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL, "retry_competitor_capture"),
+    (WORKFLOW_NODE_IMAGE_ANALYSIS, "retry_image_analysis"),
+    (WORKFLOW_NODE_LISTING_GENERATION, "retry_listing_generation"),
+]:
+    item = SimpleNamespace(id=456, workflow_node=node, workflow_status=WORKFLOW_STATUS_FAILED, workflow_error="boom")
+    view = build_product_workflow(item)
+    assert view["primary_action"] == action, view
+    assert action in view["allowed_actions"], view
+    assert view["action_reason"] == "boom", view
+
+done = SimpleNamespace(id=789, workflow_node=WORKFLOW_NODE_FLOW_DONE, workflow_status=WORKFLOW_STATUS_SUCCEEDED, workflow_error=None)
+done_view = build_product_workflow(done)
+assert done_view["stage"] == WORKFLOW_NODE_FLOW_DONE, done_view
+assert done_view["node_type"] == "done", done_view
+assert done_view["primary_action"] == "open_detail", done_view
+assert "export" not in done_view["stage"], done_view
+assert "amazon_upload" not in done_view["allowed_actions"], done_view
+exported_view = build_product_workflow(done, catalog_exported=True)
+assert exported_view["stage"] == WORKFLOW_NODE_FLOW_DONE, exported_view
+assert exported_view["work_status"] == "exported", exported_view
+assert exported_view["node_type"] == "done", exported_view
+assert exported_view["primary_action"] == "open_detail", exported_view
+done.catalog_item = SimpleNamespace(exported_at=datetime(2026, 6, 18), export_task_id=10)
+assert _product_list_work_status(done) == "exported"
+
+try:
+    set_product_workflow(product, node="export", status=WORKFLOW_STATUS_PROCESSING)
+except ValueError:
+    pass
+else:
+    raise AssertionError("invalid workflow node must fail")
+
+try:
+    set_product_workflow(product, node=WORKFLOW_NODE_SEARCH_COMPETITOR, status="queued")
+except ValueError:
+    pass
+else:
+    raise AssertionError("invalid workflow status must fail")
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"Amazon workflow T2 service 行为验证失败: {result.stderr or result.stdout}")
+
+
+def test_product_overview_handles_uninitialized_workflow_bucket() -> None:
+    products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
+    workflow_text = (ROOT / "backend" / "app" / "product_tasks" / "workflow.py").read_text(encoding="utf-8")
+    overview_section = products_api_text.split('@router.get("/overview"', 1)[1].split('@router.get("/{product_id}"', 1)[0]
+
+    assert_true(
+        '"needs_initialization"' in products_api_text.split("WORKBENCH_STATUS_KEYS = (", 1)[1].split(")", 1)[0]
+        and "needs_initialization: int = 0" in schemas_text
+        and 'needs_initialization=status_counts["needs_initialization"]' in overview_section,
+        "overview 必须把空 workflow 投影的 needs_initialization 作为显式状态桶返回，不能 KeyError 或吞错",
+    )
+    assert_true(
+        "Product.workflow_node" in overview_section
+        and "Product.workflow_status" in overview_section
+        and "Product.workflow_error" in overview_section
+        and "Product.workflow_updated_at" in overview_section,
+        "overview load_only 调用 _product_workbench_status 前必须预加载 workflow 字段，避免 SQLAlchemy async lazy-load/MissingGreenlet 风险",
+    )
+    assert_true(
+        "node_type=\"done\"" in workflow_text
+        and "node_type=\"terminal\"" not in workflow_text,
+        "flow_done/succeeded 的 node_type 必须使用 PRD 口径 done，不能引入 terminal 等额外语义",
+    )
+
+
 def test_product_detail_get_is_readonly_for_material_videos() -> None:
     products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
     material_assets_text = (ROOT / "backend" / "app" / "services" / "material_assets.py").read_text(encoding="utf-8")
@@ -1762,31 +1937,78 @@ asyncio.run(main())
 
 def test_product_task_action_reserve_states_are_not_marked_interrupted() -> None:
     code = r'''
+import asyncio
 from types import SimpleNamespace
 from app.api.products import _current_task_status, _workflow_state
-from app.models.status import STEP5_LISTING, STEP6_CURATING
+from app.product_tasks import actions as product_actions
+from app.models.status import (
+    STEP5_LISTING,
+    STEP6_CURATING,
+    WORKFLOW_NODE_IMAGE_ANALYSIS,
+    WORKFLOW_NODE_LISTING_GENERATION,
+    WORKFLOW_STATUS_PROCESSING,
+)
 
 samples = [
-    (STEP6_CURATING, 5, "图片分析已加入任务中心队列", "image_analysis"),
-    (STEP5_LISTING, 6, "Listing 生成已加入任务中心队列", "listing_generation"),
+    (STEP6_CURATING, 5, "图片分析已加入任务中心队列", WORKFLOW_NODE_IMAGE_ANALYSIS),
+    (STEP5_LISTING, 6, "Listing 生成已加入任务中心队列", WORKFLOW_NODE_LISTING_GENERATION),
 ]
 
-for status, step, message, expected_stage in samples:
-    product = SimpleNamespace(
-        id=999999,
-        status=status,
-        current_step=step,
-        error_message=message,
-        competitor_asin="B000TEST",
-        catalog_item=None,
-    )
-    workflow = _workflow_state(product, catalog_exported=False)
-    assert workflow["stage"] == expected_stage, workflow
-    assert workflow["stage_status"] == "queued", workflow
-    assert workflow["primary_action"] == "open_task_center", workflow
-    assert workflow["primary_action"] != "retry", workflow
-    assert workflow["work_status"] != "interrupted", workflow
-    assert "中断" not in _current_task_status(product)
+class ProductResult:
+    def __init__(self, product):
+        self.product = product
+    def scalar_one_or_none(self):
+        return self.product
+
+class FakeDb:
+    def __init__(self, product):
+        self.product = product
+    async def execute(self, statement):
+        return ProductResult(self.product)
+
+async def main():
+    original_load_product = product_actions._load_product
+    async def fake_load_product(_db, _product_id):
+        return fake_load_product.product
+    fake_load_product.product = None
+    try:
+        for action, status, step, message, workflow_node in [
+            (product_actions.ProductImageAnalysisAction(), *samples[0]),
+            (product_actions.ProductListingGenerationAction(), *samples[1]),
+        ]:
+            product = SimpleNamespace(
+                id=999999,
+                status="created",
+                current_step=0,
+                error_message=None,
+                competitor_asin="B000TEST",
+                catalog_item=None,
+                workflow_node=None,
+                workflow_status=None,
+                workflow_error=None,
+                workflow_updated_at=None,
+                updated_at=None,
+            )
+            fake_load_product.product = product
+            product_actions._load_product = fake_load_product
+            await action.reserve(FakeDb(product), {"product_id": product.id}, SimpleNamespace())
+            assert product.status == status, product
+            assert product.current_step == step, product
+            assert product.error_message == message, product
+            assert product.workflow_node == workflow_node, product
+            assert product.workflow_status == WORKFLOW_STATUS_PROCESSING, product
+            assert product.workflow_error == message, product
+            workflow = _workflow_state(product, catalog_exported=False)
+            assert workflow["stage"] == workflow_node, workflow
+            assert workflow["stage_status"] == WORKFLOW_STATUS_PROCESSING, workflow
+            assert workflow["primary_action"] == "open_task_center", workflow
+            assert workflow["primary_action"] != "retry", workflow
+            assert workflow["work_status"] != "interrupted", workflow
+            assert "中断" not in _current_task_status(product)
+    finally:
+        product_actions._load_product = original_load_product
+
+asyncio.run(main())
 '''
     result = subprocess.run(
         [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
@@ -1795,6 +2017,104 @@ for status, step, message, expected_stage in samples:
         capture_output=True,
     )
     assert_true(result.returncode == 0, f"ProductTaskAction reserve workflow 入队态验证失败: {result.stderr or result.stdout}")
+
+
+def test_product_action_lifecycle_writes_workflow_fields() -> None:
+    code = r'''
+import asyncio
+from types import SimpleNamespace
+from app.product_tasks import actions as product_actions
+from app.models.status import (
+    COMPLETED,
+    FAILED,
+    PAUSED,
+    WORKFLOW_NODE_FLOW_DONE,
+    WORKFLOW_NODE_IMAGE_ANALYSIS,
+    WORKFLOW_NODE_LISTING_GENERATION,
+    WORKFLOW_STATUS_FAILED,
+    WORKFLOW_STATUS_SUCCEEDED,
+)
+
+class FakeDb:
+    def __init__(self, product):
+        self.product = product
+        self.commit_count = 0
+    async def commit(self):
+        self.commit_count += 1
+
+def product():
+    return SimpleNamespace(
+        id=1001,
+        status="created",
+        current_step=0,
+        error_message=None,
+        workflow_node=None,
+        workflow_status=None,
+        workflow_error=None,
+        workflow_updated_at=None,
+        updated_at=None,
+        data=None,
+        catalog_item=None,
+        gigab2b_url="https://example.test/item",
+        gigab2b_product_id="G1001",
+        competitor_asin=None,
+        amazon_asin=None,
+        asin_sync_status=None,
+        asin_synced_at=None,
+        asin_sync_error=None,
+        amazon_product_status=None,
+        amazon_product_status_synced_at=None,
+        amazon_product_status_error=None,
+        aplus_upload_status=None,
+        aplus_uploaded_at=None,
+        aplus_upload_error=None,
+        upc=None,
+        brand="Vindhvisk",
+    )
+
+async def main():
+    original_load_product = product_actions._load_product
+    async def fake_load_product(_db, _product_id):
+        return fake_load_product.product
+    fake_load_product.product = None
+    try:
+        failed = product()
+        fake_load_product.product = failed
+        product_actions._load_product = fake_load_product
+        db = FakeDb(failed)
+        await product_actions._project_product_failure(db, product_id=failed.id, step=5, label="图片分析", error="boom")
+        assert failed.status == FAILED
+        assert failed.workflow_node == WORKFLOW_NODE_IMAGE_ANALYSIS
+        assert failed.workflow_status == WORKFLOW_STATUS_FAILED
+        assert failed.workflow_error == "boom"
+        assert db.commit_count == 1
+
+        paused = product()
+        fake_load_product.product = paused
+        await product_actions._project_product_paused(db, product_id=paused.id, step=6, message="Listing 生成任务已取消")
+        assert paused.status == PAUSED
+        assert paused.workflow_node == WORKFLOW_NODE_LISTING_GENERATION
+        assert paused.workflow_status == WORKFLOW_STATUS_FAILED
+        assert paused.workflow_error == "Listing 生成任务已取消"
+
+        done = product()
+        product_actions._project_listing_completed(done)
+        assert done.status == COMPLETED
+        assert done.workflow_node == WORKFLOW_NODE_FLOW_DONE
+        assert done.workflow_status == WORKFLOW_STATUS_SUCCEEDED
+        assert done.workflow_error is None
+    finally:
+        product_actions._load_product = original_load_product
+
+asyncio.run(main())
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"ProductTaskAction lifecycle workflow 写入验证失败: {result.stderr or result.stdout}")
 
 
 def test_product_action_worker_does_not_project_failure_for_interrupted() -> None:
@@ -1902,6 +2222,8 @@ def main() -> int:
         test_template_mapping_changes_must_be_logged,
         test_real_asin_export_guard_is_present,
         test_amazon_workflow_t1_fields_and_enums_exist,
+        test_amazon_workflow_t2_service_projection_and_write_rules,
+        test_product_overview_handles_uninitialized_workflow_bucket,
         test_product_detail_get_is_readonly_for_material_videos,
         test_inventory_update_template_exports_stock_only_by_sku,
         test_catalog_export_creation_keeps_business_reasons_in_task_report,
@@ -1934,6 +2256,7 @@ def main() -> int:
         test_task_run_creation_responses_reload_created_runs,
         test_product_action_backfill_updates_only_task_run_metadata,
         test_product_task_action_reserve_states_are_not_marked_interrupted,
+        test_product_action_lifecycle_writes_workflow_fields,
         test_product_action_worker_does_not_project_failure_for_interrupted,
         test_product_action_final_progress_failure_is_best_effort,
     ]
