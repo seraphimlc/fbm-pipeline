@@ -328,6 +328,193 @@ def test_product_overview_handles_uninitialized_workflow_bucket() -> None:
     )
 
 
+def test_amazon_workflow_t3_image_selection_reset_and_initialization_rules() -> None:
+    products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    stylesnap_tasks_text = (ROOT / "backend" / "app" / "services" / "stylesnap_product_tasks.py").read_text(encoding="utf-8")
+    product_flow_index = (ROOT / "docs" / "domain-index" / "product-flow.md").read_text(encoding="utf-8")
+    listing_images_section = products_api_text.split('@router.put("/{product_id}/listing-images"', 1)[1].split('@router.delete("/{product_id}"', 1)[0]
+
+    assert_true(
+        "_reset_product_after_image_selection" in products_api_text
+        and "WORKFLOW_NODE_SEARCH_COMPETITOR" in products_api_text
+        and "WORKFLOW_NODE_SELECT_IMAGES" in products_api_text,
+        "T3 必须有图片确认 destructive reset helper，并使用 workflow service 写 select_images/search_competitor 节点",
+    )
+    assert_true(
+        "_run_product_competitor_search_background" not in listing_images_section
+        and "background_tasks.add_task" not in listing_images_section
+        and '"competitor_searching"' not in listing_images_section
+        and '"stylesnap_search"' not in listing_images_section,
+        "图片确认接口不能自动启动 StyleSnap 搜索、后台任务或写 running 搜索快照",
+    )
+    assert_true(
+        "ProductFile" not in listing_images_section
+        and "delete(ProductFile" not in products_api_text.split("async def _reset_product_after_image_selection", 1)[1].split("async def _giga_image_candidates_for_source", 1)[0]
+        and "delete(CatalogProduct" not in products_api_text.split("async def _reset_product_after_image_selection", 1)[1].split("async def _giga_image_candidates_for_source", 1)[0],
+        "图片确认 reset 不得删除 ProductFile、CatalogProduct、真实文件或导出历史",
+    )
+    assert_true(
+        "_initialize_product_image_workflow(product, now=now)" in products_api_text
+        and "set_product_workflow(" in stylesnap_tasks_text
+        and "WORKFLOW_NODE_SELECT_IMAGES" in stylesnap_tasks_text,
+        "手动创建、Excel 导入和 GIGA draft 新建路径必须初始化 select_images/pending",
+    )
+    assert_true(
+        "Amazon workflow T3" in product_flow_index
+        and "search_competitor/pending" in product_flow_index,
+        "T3 改变图片确认 workflow 行为后必须同步 product-flow domain index",
+    )
+
+    code = r'''
+import asyncio
+import json
+from datetime import datetime
+from app.api import products
+from app.models import CatalogProduct, Product, ProductAplus, ProductData, ProductFile, ProductImage
+from app.models.status import WORKFLOW_NODE_SEARCH_COMPETITOR, WORKFLOW_STATUS_PENDING
+
+class FakeDb:
+    def __init__(self):
+        self.added = []
+    def add(self, item):
+        self.added.append(item)
+
+async def main():
+    original_delete_competitor_records = products._delete_product_competitor_records
+    calls = []
+    async def fake_delete_competitor_records(db, product):
+        calls.append(product.id)
+    products._delete_product_competitor_records = fake_delete_competitor_records
+    try:
+        product = Product(
+            id=321,
+            gigab2b_url="https://www.gigab2b.com/product-detail/I321",
+            gigab2b_product_id="I321",
+            status="completed",
+            current_step=6,
+            error_message="old listing done",
+            competitor_asin="B0OLD",
+            upc="123456789012",
+            brand="Vindhvisk",
+            aplus_upload_status="submitted",
+            aplus_uploaded_at=datetime(2026, 6, 1),
+            aplus_upload_error="old",
+        )
+        product.data = ProductData(
+            product_id=321,
+            item_code="I321",
+            title="Source title",
+            material="Wood",
+            gigab2b_raw_snapshot=json.dumps({
+                "batch_id": "b1",
+                "site": "US",
+                "representative_sku": "S1",
+                "selected_stylesnap": {"asin": "B0OLD"},
+                "amazon_listing_capture": {"title": "old"},
+                "stylesnap_search": {"status": "done"},
+                "giga_listing_images": [{"path": "/img/source.jpg"}],
+            }),
+            material_dir="/tmp/materials/I321",
+            listing_title="Old Listing",
+            listing_bullets="[]",
+            listing_search_terms="old",
+            categories='["Old"]',
+            leaf_category="Old Leaf",
+            amazon_template_path="/tmp/export/old.xlsx",
+            amazon_template_fill_summary='{"old": true}',
+            amazon_template_generated_at=datetime(2026, 6, 2),
+        )
+        product.images = ProductImage(
+            product_id=321,
+            main_image_path="/old/main.jpg",
+            gallery_images='["/old/1.jpg"]',
+            gallery_order='["/source/1.jpg"]',
+            contact_sheet_path="/old/contact.jpg",
+            image_analysis='{"old": true}',
+            image_selling_points='["old"]',
+            category_style="old",
+            main_image_summary="old summary",
+            analyzed_at=datetime(2026, 6, 3),
+        )
+        product.aplus = ProductAplus(
+            product_id=321,
+            aplus_plan='{"old": true}',
+            aplus_scripts='[]',
+            aplus_images='[]',
+            aplus_status="generated",
+        )
+        product.files = [ProductFile(product_id=321, file_type="amazon_template", label="Old export", path="/tmp/export/old.xlsx")]
+        product.catalog_item = CatalogProduct(
+            source_product_id=321,
+            gigab2b_url=product.gigab2b_url,
+            gigab2b_product_id=product.gigab2b_product_id,
+            competitor_asin="B0OLD",
+            status="completed",
+            confirmed_at=datetime(2026, 6, 4),
+            exported_at=datetime(2026, 6, 5),
+            export_task_id=99,
+            export_file_path="/tmp/export/old.xlsx",
+        )
+
+        now = datetime(2026, 6, 18, 10, 0, 0)
+        await products._reset_product_after_image_selection(
+            FakeDb(),
+            product,
+            main_image_path="/new/main.jpg",
+            gallery_paths=["/new/main.jpg", "/new/2.jpg"],
+            now=now,
+        )
+
+        assert calls == [321], calls
+        assert product.workflow_node == WORKFLOW_NODE_SEARCH_COMPETITOR
+        assert product.workflow_status == WORKFLOW_STATUS_PENDING
+        assert product.workflow_error is None
+        assert product.competitor_asin is None
+        assert product.status == "created"
+        assert product.current_step == 1
+        assert product.error_message is None
+        assert product.images.main_image_path == "/new/main.jpg"
+        assert json.loads(product.images.gallery_images) == ["/new/main.jpg", "/new/2.jpg"]
+        assert product.images.image_analysis is None
+        assert product.images.contact_sheet_path is None
+        assert product.images.gallery_order == '["/source/1.jpg"]'
+        snapshot = json.loads(product.data.gigab2b_raw_snapshot)
+        assert "selected_stylesnap" not in snapshot
+        assert "amazon_listing_capture" not in snapshot
+        assert "stylesnap_search" not in snapshot
+        assert snapshot["giga_listing_images"] == [{"path": "/img/source.jpg"}]
+        assert product.data.title == "Source title"
+        assert product.data.material == "Wood"
+        assert product.data.material_dir == "/tmp/materials/I321"
+        assert product.data.listing_title is None
+        assert product.data.listing_bullets is None
+        assert product.data.leaf_category is None
+        assert product.data.amazon_template_path == "/tmp/export/old.xlsx"
+        assert product.data.amazon_template_fill_summary == '{"old": true}'
+        assert product.upc == "123456789012"
+        assert product.brand == "Vindhvisk"
+        assert len(product.files) == 1 and product.files[0].path == "/tmp/export/old.xlsx"
+        assert product.catalog_item.competitor_asin is None
+        assert product.catalog_item.confirmed_at is None
+        assert product.catalog_item.exported_at == datetime(2026, 6, 5)
+        assert product.catalog_item.export_task_id == 99
+        assert product.catalog_item.export_file_path == "/tmp/export/old.xlsx"
+        assert product.aplus.aplus_plan is None
+        assert product.aplus.aplus_status is None
+    finally:
+        products._delete_product_competitor_records = original_delete_competitor_records
+
+asyncio.run(main())
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"Amazon workflow T3 图片确认 reset 行为验证失败: {result.stderr or result.stdout}")
+
+
 def test_product_detail_get_is_readonly_for_material_videos() -> None:
     products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
     material_assets_text = (ROOT / "backend" / "app" / "services" / "material_assets.py").read_text(encoding="utf-8")
@@ -2224,6 +2411,7 @@ def main() -> int:
         test_amazon_workflow_t1_fields_and_enums_exist,
         test_amazon_workflow_t2_service_projection_and_write_rules,
         test_product_overview_handles_uninitialized_workflow_bucket,
+        test_amazon_workflow_t3_image_selection_reset_and_initialization_rules,
         test_product_detail_get_is_readonly_for_material_videos,
         test_inventory_update_template_exports_stock_only_by_sku,
         test_catalog_export_creation_keeps_business_reasons_in_task_report,

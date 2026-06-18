@@ -28,7 +28,9 @@ from app.models import (
     ProductData,
     ProductImage,
 )
+from app.models.status import WORKFLOW_NODE_SELECT_IMAGES, WORKFLOW_STATUS_PENDING
 from app.pipeline.step2_pricing import calculate_price
+from app.product_tasks.workflow import set_product_workflow
 from app.services.product_duplicates import find_duplicate_by_item_code
 from app.services.upc_pool import ensure_product_upc
 
@@ -530,6 +532,13 @@ async def create_product_draft_from_giga_item(
             created_at=now,
             updated_at=now,
         )
+        set_product_workflow(
+            product,
+            node=WORKFLOW_NODE_SELECT_IMAGES,
+            status=WORKFLOW_STATUS_PENDING,
+            error=None,
+            now=now,
+        )
         db.add(product)
         await db.flush()
         had_data = False
@@ -543,6 +552,14 @@ async def create_product_draft_from_giga_item(
     product.source_batch_id = batch_id
     if product.status == "created" and product.current_step <= 0:
         product.error_message = product.error_message or "待确认商品图片"
+        if not product.workflow_node and not product.workflow_status and not product.competitor_asin:
+            set_product_workflow(
+                product,
+                node=WORKFLOW_NODE_SELECT_IMAGES,
+                status=WORKFLOW_STATUS_PENDING,
+                error=None,
+                now=now,
+            )
     product.updated_at = now
 
     pd = product.data if had_data else ProductData(product_id=product.id)

@@ -47,7 +47,21 @@ from app.models import (
     TaskStep,
     UpcPoolItem,
 )
-from app.models.status import COMPLETED, DUPLICATE_SKIPPED, PENDING_REVIEW, SOURCE_UNAVAILABLE, STEP5_DONE, STEP5_LISTING, STEP6_CURATING, STEP6_DONE, STEP_LABELS, STEP_STATUS_MAP
+from app.models.status import (
+    COMPLETED,
+    DUPLICATE_SKIPPED,
+    PENDING_REVIEW,
+    SOURCE_UNAVAILABLE,
+    STEP5_DONE,
+    STEP5_LISTING,
+    STEP6_CURATING,
+    STEP6_DONE,
+    STEP_LABELS,
+    STEP_STATUS_MAP,
+    WORKFLOW_NODE_SEARCH_COMPETITOR,
+    WORKFLOW_NODE_SELECT_IMAGES,
+    WORKFLOW_STATUS_PENDING,
+)
 from app.api.schemas import (
     ProductCreate, ProductUpdate, ProductListingImagesUpdate, ProductGigaRefreshRequest, ProductResponse, ProductDetail, ProductImageResponse,
     PaginatedResponse, ProductFileEntry, AplusRegenerateRequest,
@@ -66,7 +80,7 @@ from app.api.schemas import (
     UpcPoolImportResponse, UpcPoolSummary,
 )
 from app.pipeline.engine import start_pipeline as enqueue_pipeline, cancel_pipeline, get_step_status, is_running
-from app.product_tasks.workflow import build_product_workflow
+from app.product_tasks.workflow import build_product_workflow, set_product_workflow
 from app.pipeline.step2_pricing import run_pricing
 from app.pipeline.step3_keywords import run_keywords
 from app.pipeline.step4_category import run_category
@@ -1952,9 +1966,34 @@ GENERATED_PRODUCT_IMAGE_FIELDS = {
 }
 
 
+IMAGE_SELECTION_RESET_PROTECTED_PRODUCT_DATA_FIELDS = SOURCE_PRODUCT_DATA_FIELDS | {
+    "amazon_template_path",
+    "amazon_template_warnings",
+    "amazon_template_fill_summary",
+    "amazon_template_generated_at",
+}
+
+
+def _initialize_product_image_workflow(product: Product, *, now: datetime | None = None) -> None:
+    set_product_workflow(
+        product,
+        node=WORKFLOW_NODE_SELECT_IMAGES,
+        status=WORKFLOW_STATUS_PENDING,
+        error=None,
+        now=now,
+    )
+
+
 def _reset_product_data(pd: ProductData) -> None:
     for column in ProductData.__table__.columns:
         if column.name in {"id", "product_id"} or column.name in SOURCE_PRODUCT_DATA_FIELDS:
+            continue
+        setattr(pd, column.name, None)
+
+
+def _reset_product_data_after_image_selection(pd: ProductData) -> None:
+    for column in ProductData.__table__.columns:
+        if column.name in {"id", "product_id"} or column.name in IMAGE_SELECTION_RESET_PROTECTED_PRODUCT_DATA_FIELDS:
             continue
         setattr(pd, column.name, None)
 
@@ -2020,6 +2059,60 @@ async def _delete_product_competitor_records(db: AsyncSession, product: Product)
             delete(AmazonListingCapture).where(AmazonListingCapture.selected_candidate_id.in_(candidate_ids))
         )
         await db.execute(delete(AmazonStyleSnapCandidate).where(AmazonStyleSnapCandidate.id.in_(candidate_ids)))
+
+
+async def _reset_product_after_image_selection(
+    db: AsyncSession,
+    product: Product,
+    *,
+    main_image_path: str,
+    gallery_paths: list[str],
+    now: datetime,
+) -> None:
+    if not product.data:
+        product.data = ProductData(product_id=product.id)
+        db.add(product.data)
+    if not product.images:
+        product.images = ProductImage(product_id=product.id)
+        db.add(product.images)
+
+    await _delete_product_competitor_records(db, product)
+
+    _reset_product_data_after_image_selection(product.data)
+    product.data.gigab2b_raw_snapshot = _strip_competitor_snapshot(product.data.gigab2b_raw_snapshot)
+
+    _reset_product_images(product.images)
+    product.images.main_image_path = main_image_path
+    product.images.main_image_source = "manual_selected"
+    product.images.gallery_images = json.dumps(gallery_paths, ensure_ascii=False)
+
+    if product.aplus:
+        _reset_product_aplus(product.aplus)
+
+    product.competitor_asin = None
+    product.status = "created"
+    product.current_step = 1
+    product.error_message = None
+    product.aplus_upload_status = "not_uploaded"
+    product.aplus_uploaded_at = None
+    product.aplus_upload_error = None
+    set_product_workflow(
+        product,
+        node=WORKFLOW_NODE_SEARCH_COMPETITOR,
+        status=WORKFLOW_STATUS_PENDING,
+        error=None,
+        now=now,
+    )
+    product.updated_at = now
+
+    if product.catalog_item:
+        product.catalog_item.status = product.status
+        product.catalog_item.competitor_asin = None
+        product.catalog_item.aplus_upload_status = product.aplus_upload_status
+        product.catalog_item.aplus_uploaded_at = None
+        product.catalog_item.aplus_upload_error = None
+        product.catalog_item.confirmed_at = None
+        product.catalog_item.updated_at = now
 
 
 async def _giga_image_candidates_for_source(
@@ -2368,12 +2461,19 @@ async def create_product(body: ProductCreate, db: AsyncSession = Depends(get_db)
     """创建新商品任务"""
     await _raise_if_duplicate_gigab2b_url(db, body.gigab2b_url)
     gigab2b_product_id = extract_gigab2b_product_id(body.gigab2b_url)
+    now = datetime.now()
     product = Product(
         gigab2b_url=body.gigab2b_url,
         gigab2b_product_id=gigab2b_product_id,
         competitor_asin=body.competitor_asin,
         brand=body.brand,
+        status="created",
+        current_step=0,
+        error_message="待确认商品图片",
+        created_at=now,
+        updated_at=now,
     )
+    _initialize_product_image_workflow(product, now=now)
     db.add(product)
     await db.flush()
     try:
@@ -3023,12 +3123,19 @@ async def import_products(file: UploadFile = File(...), db: AsyncSession = Depen
         if remaining_upcs <= 0:
             raise HTTPException(400, f"UPC池子可用UPC不足：已可导入 {len(created_ids)} 行，后续第 {row_number} 行没有可用UPC")
 
+        now = datetime.now()
         product = Product(
             gigab2b_url=gigab2b_url,
             gigab2b_product_id=gigab2b_product_id,
             competitor_asin=competitor_asin,
             brand=brand,
+            status="created",
+            current_step=0,
+            error_message="待确认商品图片",
+            created_at=now,
+            updated_at=now,
         )
+        _initialize_product_image_workflow(product, now=now)
         db.add(product)
         await db.flush()
         try:
@@ -4881,13 +4988,17 @@ async def update_product(
 async def update_product_listing_images(
     product_id: int,
     body: ProductListingImagesUpdate,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """保存商品主图/副图选择。"""
     result = await db.execute(
         select(Product)
-        .options(selectinload(Product.images), selectinload(Product.data), selectinload(Product.catalog_item))
+        .options(
+            selectinload(Product.images),
+            selectinload(Product.data),
+            selectinload(Product.aplus),
+            selectinload(Product.catalog_item),
+        )
         .where(Product.id == product_id)
     )
     product = result.scalar_one_or_none()
@@ -4895,82 +5006,16 @@ async def update_product_listing_images(
         raise HTTPException(404, "Product not found")
 
     main_path, gallery_paths = _normalize_listing_image_paths(body.main_image_path, body.gallery_images)
-    old_main_path = product.images.main_image_path if product.images else None
-    main_image_changed = bool(old_main_path and old_main_path != main_path)
-    if not product.images:
-        product.images = ProductImage(product_id=product.id)
-        db.add(product.images)
-
-    if main_image_changed:
-        await _delete_product_competitor_records(db, product)
-        if product.data:
-            product.data.gigab2b_raw_snapshot = _strip_competitor_snapshot(product.data.gigab2b_raw_snapshot)
-        product.competitor_asin = None
-
-    product.images.main_image_path = main_path
-    product.images.main_image_source = "manual_selected"
-    product.images.gallery_images = json.dumps(gallery_paths, ensure_ascii=False)
     now = datetime.now()
-    snapshot = _json_loads(product.data.gigab2b_raw_snapshot, {}) if product.data else {}
-    if not isinstance(snapshot, dict):
-        snapshot = {}
-    batch_id = snapshot.get("batch_id")
-    site = str(snapshot.get("site") or "US").strip().upper()
-    item_code = product.data.item_code if product.data else None
-    representative_sku = snapshot.get("representative_sku") or item_code
-    existing_candidate_count = 0
-    if batch_id and item_code:
-        candidate_count_query = select(func.count(AmazonStyleSnapCandidate.id)).where(
-            AmazonStyleSnapCandidate.batch_id == batch_id,
-            AmazonStyleSnapCandidate.site == site,
-            AmazonStyleSnapCandidate.item_code == item_code,
-        )
-        if representative_sku:
-            candidate_count_query = candidate_count_query.where(AmazonStyleSnapCandidate.sku_code == representative_sku)
-        existing_candidate_count = int((await db.execute(candidate_count_query)).scalar_one() or 0)
-    should_search_candidates = bool(
-        (product.status == "created" or _is_competitor_search_failed(product))
-        and not product.competitor_asin
-        and batch_id
-        and item_code
-        and existing_candidate_count == 0
+    await _reset_product_after_image_selection(
+        db,
+        product,
+        main_image_path=main_path,
+        gallery_paths=gallery_paths,
+        now=now,
     )
-    if should_search_candidates:
-        product.status = "competitor_searching"
-        product.current_step = 2
-        product.error_message = "商品图片已确认：正在用主图自动搜索 Amazon 候选竞品"
-        if product.data:
-            product.data.gigab2b_raw_snapshot = json.dumps(
-                {
-                    **snapshot,
-                    "batch_id": batch_id,
-                    "site": site,
-                    "representative_sku": representative_sku or item_code,
-                    "stylesnap_search": {
-                        "status": "running",
-                        "started_at": now.isoformat(),
-                        "source_image_path": main_path,
-                        "append": False,
-                        "previous_count": 0,
-                        "auto_started": True,
-                    },
-                },
-                ensure_ascii=False,
-            )
-    elif product.status == "created" and product.current_step <= 0:
-        product.current_step = 1
-        product.error_message = None
-    product.updated_at = now
-    if product.catalog_item:
-        product.catalog_item.status = product.status
-        product.catalog_item.competitor_asin = product.competitor_asin
-        product.catalog_item.updated_at = now
     await db.commit()
     await db.refresh(product.images)
-    if should_search_candidates:
-        from app.api.amazon_stylesnap import _run_product_competitor_search_background
-
-        background_tasks.add_task(_run_product_competitor_search_background, product.id)
     return product.images
 
 
