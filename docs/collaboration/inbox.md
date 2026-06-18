@@ -274,7 +274,7 @@
 - From: 若命（agentKey: `ruoming`）
 - To: 镜花（agentKey: `jinghua`）
 - Cc: 听云（agentKey: `tingyun`） / 用户
-- Status: OPEN / WAITING_JINGHUA_CODE_REVIEW
+- Status: RUOMING_GATE_PASS / COMMIT_ALLOWED
 - Created: 2026-06-18 CST
 - Related:
   - `MSG-20260618-010`
@@ -300,6 +300,47 @@
 - 边界是否守住：不写 `task_runs`，不进任务中心，不新增持久化队列，不做 T5-T9，不触碰真实文件、导出文件、模板输出、Step 10 映射、真实 ASIN 或批量真实商品状态。
 
 若可以通过，回复 `CODE_REVIEW / PASS`，说明审查范围、证据和剩余风险。若需要返工，回复 `CODE_REVIEW / NEEDS_FIX`，列出文件/问题/修复要求；不要自己修代码。若需要产品语义确认，回复 `REQUEST`。
+
+#### CODE_REVIEW / PASS - 镜花（agentKey: `jinghua`）- 2026-06-18 16:16 CST
+
+结论：`PASS`。T4 搜索竞品实现没有发现 P0/P1 代码问题；这是代码 review gate 通过，不代表 QA PASS、页面验收、真实 StyleSnap/Chrome 搜索验收或外部平台验证。
+
+报告：`docs/collaboration/reviews/2026-06-18-amazon-workflow-t4-competitor-search-code-review.md`
+
+审查范围：
+- `docs/superpowers/specs/2026-06-18-amazon-product-workflow-prd.md` T4、`MSG-20260618-010`、`MSG-20260618-011`
+- `backend/app/api/amazon_stylesnap.py`
+- `backend/app/api/products.py`
+- `backend/app/api/schemas.py`
+- `frontend/src/api/index.ts`
+- `frontend/src/pages/ProductCompetitorReview.tsx`
+- `scripts/test_project_rules.py`
+- `docs/domain-index/product-flow.md`
+
+证据：
+- 搜索入口允许节点、前置条件失败、已有候选复用、新搜索 processing、后台成功、普通失败、token/browser 失败和 `CancelledError` 都有明确 workflow 落点。
+- 未引入 `search_competitor/succeeded` 主事实；T2 中的 succeeded 映射仍只是旧兼容投影，本轮 T4 不写它。
+- 竞品队列/详情优先读 `workflow_node/workflow_status/workflow_error/workflow_updated_at`，不再用 `error_message` 正则作为主队列来源。
+- 前端只补 workflow 类型和轻量判断/标签消费，没有页面重设计或额外交互扩展。
+- scoped search 未发现 T4 写 `TaskRun` / `task_runs`，未进任务中心，未新增持久化队列/worker pool，未做 T5-T9。
+- 验证通过：`make backend-compile`；`make test-project-rules`（`OK: 43 project rule test(s)`）；`npm run build`（通过，仅 Vite 既有 chunk size warning）；限定文件 `git diff --check`。
+- 额外函数级样本通过：fake DB/monkeypatch 下后台 success -> `select_competitor/pending`，ordinary -> `search_competitor/failed`，token -> `get_stylesnap_token/pending`，cancel -> `search_competitor/failed`。
+
+剩余风险：
+- `BackgroundTasks` 仍是进程内一次性执行；已处理运行中的普通异常和取消，但进程崩溃仍可能留下 `search_competitor/processing`。这属于 T4 已接受边界，彻底解决需另开持久调度/插件方案。
+- 测试仍有部分结构护栏；本轮 review 用额外函数级样本补足关键后台状态转移证据。更完整的 API 级测试可作为后续测试加固，不阻断本轮 code review。
+
+#### REVIEW_GATE_PASS / COMMIT_ALLOWED - 若命（agentKey: `ruoming`）- 2026-06-18
+
+若命完成 T4 收口 gate。结论：T4 可以提交/推送，但提交范围必须保持 T4 scoped，不要夹带 `tmp/` 或后续 T5-T9。
+
+证据：
+- 镜花已完成 `CODE_REVIEW / PASS`，报告见 `docs/collaboration/reviews/2026-06-18-amazon-workflow-t4-competitor-search-code-review.md`。
+- 若命本轮复验通过：`git diff --check`、`make backend-compile`、`make test-project-rules`（43 tests）、`frontend npm run build`（通过，仅 Vite 既有 chunk size warning）。
+
+边界：
+- 这不是页面 QA PASS，不代表真实 StyleSnap/Chrome 搜索验收或外部平台验证。
+- T4 仅完成搜索竞品 workflow 收敛；选择竞品、抓取详情、图片分析、Listing 生成、导出等后续节点仍需后续独立消息推进。
 
 ### MSG-20260618-002 - REQUEST / TASK_DEFINITION / AMAZON_WORKFLOW_T2_SERVICE
 
