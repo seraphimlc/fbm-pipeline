@@ -9,6 +9,7 @@ from typing import Any
 from app.models.status import (
     AMAZON_WORKFLOW_NODES,
     AMAZON_WORKFLOW_STATUSES,
+    WORKFLOW_NODE_AUTO_SELECT_IMAGES,
     WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
     WORKFLOW_NODE_FLOW_DONE,
     WORKFLOW_NODE_GET_STYLESNAP_TOKEN,
@@ -37,6 +38,16 @@ class WorkflowNodeView:
 
 
 WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
+    WORKFLOW_NODE_AUTO_SELECT_IMAGES: WorkflowNodeView(
+        label="自动选图",
+        node_type="async",
+        default_work_status="running",
+        default_primary_action="open_task_center",
+        default_primary_action_label="任务中心",
+        default_allowed_actions=("open_task_center",),
+        default_action_reason="自动选图正在执行或等待执行",
+        default_color="processing",
+    ),
     WORKFLOW_NODE_SELECT_IMAGES: WorkflowNodeView(
         label="选择图片",
         node_type="sync",
@@ -252,7 +263,9 @@ def _state(
 
     related_correlation_key = None
     product_id = getattr(product, "id", None)
-    if product_id and stage == WORKFLOW_NODE_IMAGE_ANALYSIS:
+    if product_id and stage == WORKFLOW_NODE_AUTO_SELECT_IMAGES:
+        related_correlation_key = f"product:{product_id}:auto_image_selection"
+    elif product_id and stage == WORKFLOW_NODE_IMAGE_ANALYSIS:
         related_correlation_key = f"product:{product_id}:image_analysis"
     elif product_id and stage == WORKFLOW_NODE_LISTING_GENERATION:
         related_correlation_key = f"product:{product_id}:listing_generation"
@@ -280,6 +293,18 @@ def _status_overrides(node: str, status: str) -> dict[str, Any]:
     if status == WORKFLOW_STATUS_FAILED:
         return _failed_overrides(node)
 
+    if node == WORKFLOW_NODE_AUTO_SELECT_IMAGES and status == WORKFLOW_STATUS_PENDING:
+        return {
+            "label": "待自动选图",
+            "work_status": "auto_select_images",
+            "primary_action": "open_task_center",
+            "primary_action_label": "任务中心",
+            "allowed_actions": ("open_task_center",),
+            "action_reason": "等待自动选出商品主图和 Listing 图片",
+            "color": "warning",
+        }
+    if node == WORKFLOW_NODE_AUTO_SELECT_IMAGES and status == WORKFLOW_STATUS_SUCCEEDED:
+        return {"label": "自动选图完成", "work_status": "ready_to_search_competitor", "color": "success"}
     if node == WORKFLOW_NODE_SEARCH_COMPETITOR and status == WORKFLOW_STATUS_PROCESSING:
         return {
             "label": "竞品搜索中",
@@ -326,6 +351,16 @@ def _status_overrides(node: str, status: str) -> dict[str, Any]:
 
 
 def _failed_overrides(node: str) -> dict[str, Any]:
+    if node == WORKFLOW_NODE_AUTO_SELECT_IMAGES:
+        return {
+            "label": "自动选图失败",
+            "work_status": "failed",
+            "primary_action": "retry_auto_image_selection",
+            "primary_action_label": "重试自动选图",
+            "allowed_actions": ("retry_auto_image_selection", "manual_adjust_images"),
+            "action_reason": "自动选图失败，可重试或手动调整图片",
+            "color": "error",
+        }
     if node == WORKFLOW_NODE_SEARCH_COMPETITOR:
         return {
             "label": "竞品搜索失败",

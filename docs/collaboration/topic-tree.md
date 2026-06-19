@@ -50,6 +50,25 @@ Owner：若命（agentKey: `ruoming`）主控，所有身份可按事实补充
   - `backend/app/services/offline_tasks.py`
   - 用户已明确同意该原则。
 
+### TT-010 - 横向能力层架构治理
+
+- Status: PARKED
+- Owner: 若命（agentKey: `ruoming`）
+- Future review owner: 镜花（agentKey: `jinghua`）
+- Future implementation owner: 听云（agentKey: `tingyun`）
+- Context:
+  - 用户确认工程分层应按横向能力层设计：底层提供可复用原子能力，一组接口构成一个能力；上层任务编排可以有 Amazon 流程、A+ 流程、TikTok 流程等多条任务流程。
+  - 不希望每个功能模块竖着一列写到底，导致没有公用能力、没有约束、各自复制底层逻辑。
+- Current decision:
+  - 该议题暂不进入 `2026-06-19` 自动选图和自动竞品两个 PRD 的当前 review，不打断听云正在执行的阶段 A。
+  - 后续由若命单独给镜花建代码架构 review / 引导任务，镜花负责和听云把横向能力层、任务编排层、页面/API 层边界梳理清楚。
+- Future task direction:
+  - 镜花先做只读架构审查，识别底层图片/VLM/Contact Sheet/JSON、任务编排、商品业务用例、页面/API 是否存在竖井式重复实现。
+  - 镜花输出整改建议或重构任务边界；若命再给听云建独立实现任务。
+- Related current work:
+  - `docs/superpowers/specs/2026-06-19-amazon-auto-image-selection-prd.md`
+  - `docs/superpowers/specs/2026-06-19-amazon-auto-competitor-selection-prd.md`
+
 ## P0 当前主线
 
 ### TT-090 - 商品拉取到导出主链路闭环

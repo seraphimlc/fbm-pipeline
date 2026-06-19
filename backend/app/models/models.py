@@ -524,6 +524,8 @@ class ProductImage(Base):
     gallery_images: Mapped[str | None] = mapped_column(Text)         # JSON
     gallery_order: Mapped[str | None] = mapped_column(Text)          # JSON
     main_image_summary: Mapped[str | None] = mapped_column(Text)
+    image_selection_analysis: Mapped[str | None] = mapped_column(Text)  # JSON
+    image_selected_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     analyzed_at: Mapped[datetime | None] = mapped_column(DateTime)
     vlm_model: Mapped[str] = mapped_column(String(50), default="gpt-5.5")

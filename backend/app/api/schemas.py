@@ -1026,6 +1026,8 @@ class ProductImageResponse(BaseModel):
     gallery_images: str | None = None
     gallery_order: str | None = None
     main_image_summary: str | None = None
+    image_selection_analysis: str | None = None
+    image_selected_at: datetime | None = None
     analyzed_at: datetime | None = None
     vlm_model: str | None = None
 

@@ -11,13 +11,14 @@
 - 商品列表可以按数据源/店铺过滤。
 - Amazon 与 TikTok 商品详情页应分流；详情页状态、操作、类目和导出链路不能混用。
 - TikTok 有强类目约束；Amazon 当前以模板/导出链路为主。
-- 图片、竞品、类目、ASIN、导出等人工确认节点不能自动推进。
+- 旧主流程中图片、竞品、类目、ASIN、导出等人工确认节点不能自动推进；自动选图/自动竞品选择的新目标流程见 `docs/superpowers/specs/2026-06-19-amazon-auto-image-competitor-selection-prd.md`。执行设计已拆为 `docs/superpowers/specs/2026-06-19-amazon-auto-image-selection-prd.md` 和 `docs/superpowers/specs/2026-06-19-amazon-auto-competitor-selection-prd.md`，将图片选择和竞品选择改为系统自动异步节点，人工页面降级为失败/低置信度/主动纠偏入口。
 - 前端不应重新实现后端业务规则。
 - `GET /api/products/{id}` 商品详情必须是只读接口；素材目录只能扫描汇总，不能移动、创建、删除、重命名或改写用户素材文件。
 - 商品状态只表达业务节点和业务结果，不表达任务执行细节；Amazon 主流程最终 PRD 以 `docs/superpowers/specs/2026-06-18-amazon-product-workflow-prd.md` 为准。
 - Amazon workflow T1 已进入结构层：`products.workflow_node/workflow_status/workflow_error/workflow_updated_at` 和集中枚举常量定义在后端模型/状态常量中；后续投影和写入统一入口仍按 PRD 分阶段推进。
 - Amazon workflow T2 的 Product Workflow Service 位于 `backend/app/product_tasks/workflow.py`：集中提供 `set_product_workflow()`、`build_product_workflow()` 和 node/action 映射；商品列表/详情 workflow 投影应同源调用该 service。
 - Amazon workflow T3：新建 Amazon 商品默认 `select_images/pending`；图片确认接口 `PUT /api/products/{id}/listing-images` 只保存主图/副图并执行 destructive reset，成功后进入 `search_competitor/pending`，不得自动启动 StyleSnap 搜索、后台任务或任务中心 task run。
+- Amazon 自动选图阶段 A：`auto_select_images` 节点、`product_auto_image_selection` ProductTaskAction、候选收集服务和自动选图服务已建立后端闭环；成功写当前图片事实并进入 `search_competitor/pending`，失败/取消/中断/锁超时进入 `auto_select_images/failed`。阶段 A 不切新建商品默认入口、不改默认前端路径、不自动启动竞品搜索。
 - Amazon workflow T4：搜索竞品入口 `POST /api/amazon-stylesnap/products/{id}/competitor-candidates/search` 触发 `search_competitor/processing`，成功或已有候选进入 `select_competitor/pending`，普通失败进入 `search_competitor/failed`，token/browser/Chrome 权限问题进入 `get_stylesnap_token/pending`；竞品队列/详情优先读 workflow，不写 task run、不进入任务中心。
 - Amazon workflow T5：选择竞品入口 `POST /api/amazon-stylesnap/products/{id}/competitor-candidates/{candidate_id}/select` 写 `capture_competitor_detail/processing` 并后台抓详情；详情成功后触发/复用图片分析任务并进入 `image_analysis/processing`，详情失败或中断进入 `capture_competitor_detail/failed`；换竞品只清当前竞品详情、图片分析、Listing、A+ 派生态，遇到真实 ASIN、人工确认、导出历史或 Amazon 模板输出证据必须阻断；抓详情本身不写 task run、不进入任务中心、不实现 T6-T9。
 - StyleSnap / 搜索竞品插件方案是长期合理方向，但当前 on hold；决策记录见 `docs/superpowers/specs/2026-06-17-stylesnap-client-extension-decision.md`。
@@ -34,6 +35,7 @@
 - 前端 API client：`frontend/src/api/index.ts`
 - 商品 API：`backend/app/api/products.py`
 - StyleSnap API：`backend/app/api/amazon_stylesnap.py`
+- 自动选图：`backend/app/services/product_image_candidates.py`, `backend/app/services/product_image_vlm.py`, `backend/app/product_tasks/auto_image_selection.py`, `backend/app/task_planners/product_auto_image_selection.py`
 - TikTok API：`backend/app/api/tiktok.py`
 - pipeline：`backend/app/pipeline/engine.py`, `backend/app/pipeline/step*.py`
 - 模型：`backend/app/models/models.py`
@@ -53,6 +55,9 @@
 - `docs/item-workbench-redesign-plan.md`
 - `docs/documentation-rewrite-brief.md`
 - `docs/superpowers/specs/2026-06-18-amazon-product-workflow-prd.md`
+- `docs/superpowers/specs/2026-06-19-amazon-auto-image-competitor-selection-prd.md`
+- `docs/superpowers/specs/2026-06-19-amazon-auto-image-selection-prd.md`
+- `docs/superpowers/specs/2026-06-19-amazon-auto-competitor-selection-prd.md`
 - `docs/superpowers/specs/2026-06-17-product-workflow-node-state-prd.md`
 - `docs/superpowers/specs/2026-06-17-stylesnap-client-extension-decision.md`
 - `docs/superpowers/specs/2026-06-16-product-task-action-refactor-prd.md`
@@ -70,7 +75,7 @@
 
 - 状态/按钮/统计问题：先看 `backend/app/api/products.py` 返回字段，再看页面消费逻辑。
 - 商品详情打开后素材文件位置变化：先看 `backend/app/api/products.py` 的 GET 详情链路和 `backend/app/services/material_assets.py`，GET 路径不得调用 mutating 素材整理函数。
-- 图片选择问题：先看 `ProductImageReview.tsx` 和 `product_images`。
+- 图片选择问题：默认人工图片确认仍看 `ProductImageReview.tsx` 和 `product_images`；自动选图后端闭环先看 `backend/app/services/product_image_candidates.py`、`backend/app/services/product_image_vlm.py`、`backend/app/product_tasks/auto_image_selection.py` 和 `backend/app/product_tasks/actions.py`。
 - 竞品信息问题：先看 `backend/app/api/amazon_stylesnap.py` 和 `backend/app/services/amazon_stylesnap_search.py`。
 - 数据源分流问题：先看 `frontend/src/App.tsx`、详情页和 `backend/app/api/products.py`。
 

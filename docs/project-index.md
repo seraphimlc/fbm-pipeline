@@ -1,7 +1,7 @@
 # Project Index
 
 状态：当前项目导航索引
-更新：2026-06-17
+更新：2026-06-19
 
 本文只做“找路”，不替代代码事实。每次任务先用本文定位领域，再读取对应 `docs/domain-index/*.md`，最后用 `git status --short`、`rg` 和关键文件片段核实当前实现。
 
@@ -18,7 +18,7 @@
 |---|---|---|
 | 任务中心、新任务框架、任务状态、重试/取消/恢复、异步任务 | `docs/domain-index/task-runtime.md` | `frontend/src/pages/TaskRunCenter.tsx`, `backend/app/api/task_runs.py`, `backend/app/task_runtime/` |
 | 老离线任务、历史任务页面、尚未迁移任务 | `docs/domain-index/task-runtime.md` | `frontend/src/pages/OfflineTaskCenter.tsx`, `backend/app/api/offline_tasks.py`, `backend/app/services/offline_tasks.py` |
-| 商品列表、商品详情、图片选择、竞品选择、商品状态流转 | `docs/domain-index/product-flow.md` | `docs/superpowers/specs/2026-06-18-amazon-product-workflow-prd.md`, `frontend/src/pages/ProductList.tsx`, `frontend/src/pages/ProductDetail.tsx`, `backend/app/api/products.py` |
+| 商品列表、商品详情、图片选择、竞品选择、商品状态流转 | `docs/domain-index/product-flow.md` | `docs/superpowers/specs/2026-06-18-amazon-product-workflow-prd.md`, `docs/superpowers/specs/2026-06-19-amazon-auto-image-competitor-selection-prd.md`, `docs/superpowers/specs/2026-06-19-amazon-auto-image-selection-prd.md`, `docs/superpowers/specs/2026-06-19-amazon-auto-competitor-selection-prd.md`, `frontend/src/pages/ProductList.tsx`, `frontend/src/pages/ProductDetail.tsx`, `backend/app/api/products.py` |
 | TikTok 商品详情/铺货链路 | `docs/domain-index/product-flow.md`, `docs/domain-index/data-sources.md` | `frontend/src/pages/TikTokProductDetail.tsx`, `backend/app/api/tiktok.py` |
 | GIGA 拉品、商品池、库存/价格同步、数据源配置 | `docs/domain-index/data-sources.md` | `backend/app/api/giga.py`, `backend/app/services/giga_openapi.py`, `backend/app/task_planners/giga_pull.py` |
 | Amazon 导出、导出中心、导入模板、类目映射、Step 10 | `docs/domain-index/export-flow.md` | `frontend/src/pages/CatalogList.tsx`, `backend/app/task_planners/catalog_export.py`, `backend/app/pipeline/amazon_export/`, `backend/app/pipeline/step10_amazon_template.py` |

@@ -119,6 +119,7 @@ def test_amazon_workflow_t1_fields_and_enums_exist() -> None:
 from app.models.status import AMAZON_WORKFLOW_NODES, AMAZON_WORKFLOW_STATUSES
 
 assert AMAZON_WORKFLOW_NODES == (
+    "auto_select_images",
     "select_images",
     "get_stylesnap_token",
     "search_competitor",
@@ -225,6 +226,7 @@ from types import SimpleNamespace
 from app.api.products import _product_list_work_status
 from app.product_tasks.workflow import build_product_workflow, set_product_workflow
 from app.models.status import (
+    WORKFLOW_NODE_AUTO_SELECT_IMAGES,
     WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
     WORKFLOW_NODE_FLOW_DONE,
     WORKFLOW_NODE_IMAGE_ANALYSIS,
@@ -253,6 +255,7 @@ assert searching["node_key"] == WORKFLOW_NODE_SEARCH_COMPETITOR, searching
 assert searching["node_type"] == "semi_sync", searching
 
 for node, action in [
+    (WORKFLOW_NODE_AUTO_SELECT_IMAGES, "retry_auto_image_selection"),
     (WORKFLOW_NODE_SEARCH_COMPETITOR, "retry_competitor_search"),
     (WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL, "retry_competitor_capture"),
     (WORKFLOW_NODE_IMAGE_ANALYSIS, "retry_image_analysis"),
@@ -2750,6 +2753,367 @@ asyncio.run(main())
     assert_true(result.returncode == 0, f"最终 progress best-effort 行为验证失败: {result.stderr or result.stdout}")
 
 
+def test_auto_image_selection_phase_a_contract() -> None:
+    status_text = (ROOT / "backend" / "app" / "models" / "status.py").read_text(encoding="utf-8")
+    workflow_text = (ROOT / "backend" / "app" / "product_tasks" / "workflow.py").read_text(encoding="utf-8")
+    actions_text = (ROOT / "backend" / "app" / "product_tasks" / "actions.py").read_text(encoding="utf-8")
+    service_text = (ROOT / "backend" / "app" / "product_tasks" / "auto_image_selection.py").read_text(encoding="utf-8")
+    vlm_service_text = (ROOT / "backend" / "app" / "services" / "product_image_vlm.py").read_text(encoding="utf-8")
+    step6_text = (ROOT / "backend" / "app" / "pipeline" / "step6_image.py").read_text(encoding="utf-8")
+    candidate_text = (ROOT / "backend" / "app" / "services" / "product_image_candidates.py").read_text(encoding="utf-8")
+    planner_text = (ROOT / "backend" / "app" / "task_planners" / "product_auto_image_selection.py").read_text(encoding="utf-8")
+    schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
+    models_text = (ROOT / "backend" / "app" / "models" / "models.py").read_text(encoding="utf-8")
+    database_text = (ROOT / "backend" / "app" / "database.py").read_text(encoding="utf-8")
+
+    assert_true(
+        "WORKFLOW_NODE_AUTO_SELECT_IMAGES" in status_text
+        and '"auto_select_images"' in status_text
+        and "retry_auto_image_selection" in workflow_text
+        and "manual_adjust_images" in workflow_text,
+        "自动选图阶段 A 必须新增 auto_select_images workflow 节点和失败动作",
+    )
+    assert_true(
+        "image_selection_analysis" in models_text
+        and "image_selected_at" in models_text
+        and "image_selection_analysis" in schemas_text
+        and "image_selected_at" in schemas_text
+        and "_ensure_mysql_product_image_selection_columns" in database_text,
+        "自动选图结果字段必须进入 ORM、schema 和 MySQL 兼容补列",
+    )
+    assert_true(
+        "class ProductAutoImageSelectionAction" in actions_text
+        and '"product_auto_image_selection"' in actions_text
+        and "product_auto_image_selection:product:{_product_id(payload)}" in actions_text
+        and "product:{_product_id(payload)}:auto_image_selection" in actions_text
+        and "ProductAutoImageSelectionAction()" in actions_text
+        and "create_product_auto_image_selection_runs" in planner_text,
+        "自动选图必须通过 ProductTaskAction 和任务 planner 落入新任务中心",
+    )
+    assert_true(
+        "collect_product_image_candidates" in candidate_text
+        and "GigaProductImage" in candidate_text
+        and "giga_listing_images" in candidate_text
+        and "gallery_order" in candidate_text
+        and "mainImageUrl" in candidate_text
+        and "variant_main" in candidate_text,
+        "候选收集必须覆盖 GIGA detail、giga_product_images、snapshot 和 gallery_order，并保留变体分层",
+    )
+    assert_true(
+        "run_auto_image_selection" in service_text
+        and "selected_main" in service_text
+        and "selected_gallery" in service_text
+        and "confidence == \"low\"" in service_text
+        and ".image_analysis =" not in service_text
+        and "\"image_analysis\"" not in service_text,
+        "自动选图服务必须输出结构化选择结果，低置信度失败，并和后续 image_analysis 语义隔离",
+    )
+    assert_true(
+        "from app.pipeline.step6_image" not in service_text
+        and "from app.services.product_image_vlm import" in service_text
+        and "from app.services.product_image_vlm import" in step6_text
+        and "def build_contact_sheets" in vlm_service_text
+        and "def analyze_image_url_batch" in vlm_service_text,
+        "自动选图和旧图片分析必须共享 product_image_vlm 底层能力，不能让新逻辑反向依赖 step6_image 私有实现",
+    )
+
+
+def test_auto_image_selection_candidate_priority_behaviour() -> None:
+    code = r'''
+import asyncio
+import json
+from types import SimpleNamespace
+from app.services.product_image_candidates import collect_product_image_candidates
+
+class Result:
+    def __init__(self, rows):
+        self.rows = rows
+    def scalars(self):
+        return self
+    def all(self):
+        return self.rows
+
+class FakeDb:
+    async def execute(self, _statement):
+        return Result([
+            SimpleNamespace(
+                id=1,
+                batch_id="B1",
+                site="US",
+                data_source_id=7,
+                item_code="ITEM",
+                sku_code="REP",
+                image_url="https://img.test/main.jpg",
+                local_path="/tmp/main.jpg",
+                image_type="main",
+                sort_order=1,
+                download_status="done",
+            ),
+            SimpleNamespace(
+                id=2,
+                batch_id="B1",
+                site="US",
+                data_source_id=7,
+                item_code="ITEM",
+                sku_code="OTHER",
+                image_url="https://img.test/other.jpg",
+                local_path=None,
+                image_type="main",
+                sort_order=2,
+                download_status="pending",
+            ),
+        ])
+
+async def main():
+    snapshot = {
+        "batch_id": "B1",
+        "site": "US",
+        "data_source_id": 7,
+        "representative_sku": "REP",
+        "mainImageUrl": "https://img.test/main.jpg",
+        "imageUrls": ["https://img.test/gallery.jpg"],
+        "giga_listing_images": [
+            {"path": "https://img.test/snapshot.jpg", "image_type": "gallery", "sku_code": "REP", "sort_order": 3}
+        ],
+    }
+    product = SimpleNamespace(
+        source_batch_id="B1",
+        source_site="US",
+        source_data_source_id=7,
+        gigab2b_product_id="ITEM",
+        data=SimpleNamespace(item_code="ITEM", gigab2b_raw_snapshot=json.dumps(snapshot)),
+        images=SimpleNamespace(gallery_order=json.dumps([
+            {"path": "https://img.test/brand.jpg", "image_type": "brand", "source": "saved_gallery_order", "sort_order": 9}
+        ])),
+    )
+    candidates = await collect_product_image_candidates(FakeDb(), product)
+    paths = [item["path"] for item in candidates]
+    assert paths[0] == "/tmp/main.jpg", candidates
+    assert candidates[0]["image_type"] == "main", candidates
+    assert candidates[0]["is_representative_sku"] is True, candidates
+    assert any(item["image_type"] == "variant_main" for item in candidates), candidates
+    assert paths.count("/tmp/main.jpg") == 1, candidates
+    assert "https://img.test/brand.jpg" == paths[-1], candidates
+    assert {"path", "image_url", "image_type", "source", "asset_source", "sku_code", "sort_order"}.issubset(candidates[0]), candidates
+
+asyncio.run(main())
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"自动选图候选优先级行为验证失败: {result.stderr or result.stdout}")
+
+
+def test_auto_image_selection_service_and_action_behaviour() -> None:
+    code = r'''
+import asyncio
+from types import SimpleNamespace
+from app.models import ProductImage
+from app.models.status import (
+    FAILED,
+    WORKFLOW_NODE_FLOW_DONE,
+    WORKFLOW_NODE_AUTO_SELECT_IMAGES,
+    WORKFLOW_NODE_SEARCH_COMPETITOR,
+    WORKFLOW_STATUS_FAILED,
+    WORKFLOW_STATUS_PENDING,
+    WORKFLOW_STATUS_PROCESSING,
+    WORKFLOW_STATUS_SUCCEEDED,
+)
+from app.product_tasks import actions as product_actions
+from app.product_tasks.auto_image_selection import AutoImageSelectionError, _merge_batch_results
+
+class EmptyResult:
+    def all(self):
+        return []
+    def scalars(self):
+        return self
+
+class FakeDb:
+    def __init__(self, product):
+        self.product = product
+        self.commit_count = 0
+        self.added = []
+    def add(self, item):
+        self.added.append(item)
+    async def execute(self, _statement):
+        return EmptyResult()
+    async def commit(self):
+        self.commit_count += 1
+    async def rollback(self):
+        pass
+
+def make_product():
+    return SimpleNamespace(
+        id=123,
+        status="created",
+        current_step=0,
+        error_message=None,
+        workflow_node=None,
+        workflow_status=None,
+        workflow_error=None,
+        workflow_updated_at=None,
+        updated_at=None,
+        data=SimpleNamespace(
+            item_code="ITEM",
+            gigab2b_raw_snapshot="{}",
+            categories="old",
+            leaf_category="old",
+            listing_title="old",
+            listing_bullets="old",
+            listing_search_terms="old",
+            listing_title_zh="old",
+            listing_bullets_zh="old",
+            listing_search_terms_zh="old",
+            listing_description="old",
+            listing_description_zh="old",
+            listing_check="old",
+            listing_primary_keyword="old",
+            listing_removed_keywords="old",
+            amazon_template_path=None,
+            amazon_template_generated_at=None,
+            amazon_template_fill_summary=None,
+            amazon_template_warnings=None,
+        ),
+        images=ProductImage(product_id=123),
+        aplus=None,
+        catalog_item=SimpleNamespace(
+            status="created",
+            competitor_asin="B000",
+            confirmed_at=None,
+            amazon_asin=None,
+            exported_at=None,
+            export_task_id=None,
+            export_file_path=None,
+            aplus_upload_status="not_uploaded",
+            aplus_uploaded_at=None,
+            aplus_upload_error=None,
+            updated_at=None,
+        ),
+        competitor_asin="B000",
+        amazon_asin=None,
+        aplus_upload_status="not_uploaded",
+        aplus_uploaded_at=None,
+        aplus_upload_error=None,
+    )
+
+async def main():
+    try:
+        _merge_batch_results([
+            {"selected_main": {"path": "a.jpg", "image_id": "#01", "score": 0.9, "risk_flags": []}, "selected_gallery": [], "rejected": [], "confidence": "low", "warnings": []}
+        ], [], [], "test-model")
+    except AutoImageSelectionError:
+        pass
+    else:
+        raise AssertionError("low confidence must fail")
+
+    original_load_product = product_actions._load_product
+    try:
+        product = make_product()
+        async def fake_load_product(_db, _product_id):
+            return product
+        product_actions._load_product = fake_load_product
+        action = product_actions.ProductAutoImageSelectionAction()
+        db = FakeDb(product)
+
+        protected_real_asin = make_product()
+        protected_real_asin.amazon_asin = "BREAL"
+        protected_real_asin.status = "completed"
+        protected_real_asin.current_step = 6
+        protected_real_asin.workflow_node = WORKFLOW_NODE_FLOW_DONE
+        protected_real_asin.workflow_status = WORKFLOW_STATUS_SUCCEEDED
+        protected_real_asin.workflow_error = None
+        product = protected_real_asin
+        for method_name in ("validate", "reserve"):
+            try:
+                if method_name == "validate":
+                    await action.validate(db, {"product_id": protected_real_asin.id})
+                else:
+                    await action.reserve(db, {"product_id": protected_real_asin.id}, SimpleNamespace())
+            except RuntimeError as exc:
+                assert "不能自动选图" in str(exc), exc
+            else:
+                raise AssertionError(f"protected product must reject {method_name}")
+        assert protected_real_asin.status == "completed"
+        assert protected_real_asin.current_step == 6
+        assert protected_real_asin.workflow_node == WORKFLOW_NODE_FLOW_DONE
+        assert protected_real_asin.workflow_status == WORKFLOW_STATUS_SUCCEEDED
+
+        protected_catalog = make_product()
+        protected_catalog.catalog_item.confirmed_at = "2026-06-20"
+        protected_catalog.catalog_item.exported_at = "2026-06-20"
+        protected_catalog.status = "completed"
+        protected_catalog.current_step = 6
+        protected_catalog.workflow_node = WORKFLOW_NODE_FLOW_DONE
+        protected_catalog.workflow_status = WORKFLOW_STATUS_SUCCEEDED
+        product = protected_catalog
+        try:
+            await action.validate(db, {"product_id": protected_catalog.id})
+        except RuntimeError as exc:
+            assert "不能自动选图" in str(exc), exc
+        else:
+            raise AssertionError("catalog confirmed/exported product must reject validate")
+        assert protected_catalog.status == "completed"
+        assert protected_catalog.current_step == 6
+        assert protected_catalog.workflow_node == WORKFLOW_NODE_FLOW_DONE
+        assert protected_catalog.workflow_status == WORKFLOW_STATUS_SUCCEEDED
+
+        product = make_product()
+        db = FakeDb(product)
+        await action.reserve(db, {"product_id": product.id}, SimpleNamespace())
+        assert product.workflow_node == WORKFLOW_NODE_AUTO_SELECT_IMAGES
+        assert product.workflow_status == WORKFLOW_STATUS_PROCESSING
+
+        step = SimpleNamespace(id=1, task_run_id=10, task_group_id=20, task_run=SimpleNamespace(summary_json=None), payload_json='{"product_id": 123}')
+        result = {
+            "product_id": product.id,
+            "item_code": "ITEM",
+            "auto_image_selection": {
+                "selected_main": {"path": "main.jpg", "image_id": "#01", "score": 0.95, "reason": "clean", "risk_flags": []},
+                "selected_gallery": [{"path": "gallery.jpg", "image_id": "#02", "role": "alternate_angle", "score": 0.8, "reason": "angle", "risk_flags": []}],
+                "rejected": [],
+                "confidence": "high",
+                "warnings": [],
+                "contact_sheets": [],
+                "model": "test-model",
+            },
+        }
+        await action.on_step_success(db, step, result)
+        assert product.images.main_image_path == "main.jpg"
+        assert product.images.main_image_source == "model_selected"
+        assert product.images.image_selection_analysis
+        assert product.images.image_selected_at is not None
+        assert product.images.image_analysis is None
+        assert product.workflow_node == WORKFLOW_NODE_SEARCH_COMPETITOR
+        assert product.workflow_status == WORKFLOW_STATUS_PENDING
+        assert product.competitor_asin is None
+        assert product.data.listing_title is None
+
+        protected = make_product()
+        protected.amazon_asin = "BREAL"
+        product = protected
+        step = SimpleNamespace(payload_json='{"product_id": 123}')
+        await action.on_step_failure(db, step, RuntimeError("boom"))
+        assert protected.status == FAILED
+        assert protected.workflow_node == WORKFLOW_NODE_AUTO_SELECT_IMAGES
+        assert protected.workflow_status == WORKFLOW_STATUS_FAILED
+        assert "自动选图失败" in protected.workflow_error
+    finally:
+        product_actions._load_product = original_load_product
+
+asyncio.run(main())
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"自动选图服务/action 行为验证失败: {result.stderr or result.stdout}")
+
+
 def main() -> int:
     tests = [
         test_category_conflict_only_overrides_conflict,
@@ -2796,6 +3160,9 @@ def main() -> int:
         test_product_action_lifecycle_writes_workflow_fields,
         test_product_action_worker_does_not_project_failure_for_interrupted,
         test_product_action_final_progress_failure_is_best_effort,
+        test_auto_image_selection_phase_a_contract,
+        test_auto_image_selection_candidate_priority_behaviour,
+        test_auto_image_selection_service_and_action_behaviour,
     ]
     for test in tests:
         test()

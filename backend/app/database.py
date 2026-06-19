@@ -32,6 +32,7 @@ async def init_db():
         await _ensure_mysql_product_data_source_columns(conn)
         await _ensure_mysql_product_source_columns_and_indexes(conn)
         await _ensure_mysql_product_workflow_columns(conn)
+        await _ensure_mysql_product_image_selection_columns(conn)
         await _ensure_mysql_catalog_export_columns(conn)
         await _ensure_mysql_stylesnap_candidate_columns(conn)
         await _ensure_mysql_task_run_action_columns(conn)
@@ -175,6 +176,15 @@ async def _ensure_mysql_product_workflow_columns(conn) -> None:
     ):
         if not await _mysql_column_exists(conn, "products", column_name):
             await conn.execute(text(f"ALTER TABLE `products` ADD COLUMN `{column_name}` {column_type}"))
+
+
+async def _ensure_mysql_product_image_selection_columns(conn) -> None:
+    for column_name, column_type in (
+        ("image_selection_analysis", "LONGTEXT NULL"),
+        ("image_selected_at", "DATETIME NULL"),
+    ):
+        if not await _mysql_column_exists(conn, "product_images", column_name):
+            await conn.execute(text(f"ALTER TABLE `product_images` ADD COLUMN `{column_name}` {column_type}"))
 
 
 async def _ensure_mysql_hot_path_indexes(conn) -> None:

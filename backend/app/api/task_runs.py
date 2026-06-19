@@ -56,6 +56,7 @@ STALE_HEARTBEAT_SECONDS = 600
 
 TASK_TYPE_LABELS = {
     "giga_pull": "GIGA 拉品",
+    "product_auto_image_selection": "自动选图",
     "product_image_analysis": "图片分析",
     "product_listing_generation": "Listing 生成",
     "catalog_export": "导出文件",
@@ -73,6 +74,7 @@ STEP_TYPE_LABELS = {
     "giga_pull_finalize_snapshot": "快照校验",
     "giga_pull_aggregate_items": "聚合 Item/Group",
     "giga_pull_materialize_products": "生成商品草稿",
+    "product_auto_image_selection": "自动选图",
     "product_image_analysis": "图片分析",
     "product_listing_generation": "Listing 生成",
     "catalog_export_template": "导出文件",
