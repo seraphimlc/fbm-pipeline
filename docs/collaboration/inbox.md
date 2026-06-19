@@ -23,6 +23,116 @@
 
 ## Open Messages
 
+### MSG-20260619-001 - REQUEST / TASK_DEFINITION / AMAZON_WORKFLOW_T6_IMAGE_ANALYSIS_ACTION
+
+- From: 若命（agentKey: `ruoming`）
+- To: 听云（agentKey: `tingyun`）
+- Cc: 用户 / 镜花（agentKey: `jinghua`）
+- Status: OPEN / WAITING_TINGYUN_TASK_DEFINITION
+- Created: 2026-06-19 CST
+- Depends on:
+  - `MSG-20260618-013` T5 已完成 gate 并提交/推送
+- Related:
+  - `docs/superpowers/specs/2026-06-18-amazon-product-workflow-prd.md`
+  - `docs/domain-index/product-flow.md`
+  - `backend/app/product_tasks/actions.py`
+  - `backend/app/task_planners/product_image_analysis.py`
+  - `backend/app/task_runtime/scheduler.py`
+  - `backend/app/api/task_runs.py`
+  - `backend/app/api/products.py`
+  - `backend/app/product_tasks/workflow.py`
+  - `scripts/test_project_rules.py`
+
+听云先不要写代码。先在本消息下写 `ACK / TASK_DEFINITION`，等若命 `PLAN_APPROVED` 后再执行。
+
+#### T6 目标
+
+实现 PRD T6：图片分析 ProductTaskAction 投影。
+
+业务口径：
+- 图片分析任务创建/复用成功后，商品 workflow 必须是 `image_analysis/processing`。
+- 图片分析执行成功后，必须自动创建/复用 Listing 生成任务，并让商品 workflow 最终进入 `listing_generation/processing`。
+- 图片分析执行失败、取消、中断、锁超时或人工标记中断后，商品 workflow 必须进入 `image_analysis/failed`，`workflow_error` 写可读原因。
+- 商品主 workflow 不展示 `queued`、`running`、`canceled`、`interrupted` 这种任务中心状态；任务中心状态只属于 task run。
+- 不再使用旧 `pipeline.engine.is_running(product.id)` 判断新 workflow 的图片分析状态。
+
+#### 当前代码事实
+
+- `create_product_image_analysis_runs()` 位于 `backend/app/task_planners/product_image_analysis.py`，内部调用 `create_product_action_runs(..., "product_image_analysis", ...)`。
+- `ProductImageAnalysisAction.reserve()` 已写旧兼容字段 `STEP6_CURATING/current_step=5`，并调用 `set_product_workflow(... image_analysis/processing ...)`。
+- `ProductImageAnalysisAction.on_step_success()` 当前先写 `image_analysis/succeeded`，随后调用 `create_product_action_runs(... product_listing_generation ...)`；Listing reserve 会写 `listing_generation/processing`。
+- `ProductImageAnalysisAction.on_step_failure()` 调 `_project_product_failure(... step=5 ...)`，理论上会写 `image_analysis/failed`。
+- `ProductImageAnalysisAction.on_step_interrupted()` 和 `on_cancel_requested()` 当前调 `_project_product_paused(... step=5 ...)`，workflow 是 `image_analysis/failed`，旧兼容 `product.status` 是 `PAUSED`。
+- `task_runtime.scheduler` 的 success projection 失败会把 run 标为 `partial_failed`，但当前需要确认商品 workflow 不会因此停在 `image_analysis/processing` 或误导性的 `image_analysis/succeeded`。
+- `products.py` 里多个旧入口会调用 `_queue_product_image_analysis()`：`retry_step`、`run_from_step`、`resume_pipeline`、`run_step`、批量推进等；T6 必须确保这些入口创建/复用图片分析任务后统一进入 `image_analysis/processing`，不再依赖 `is_running()` 推断。
+
+#### TASK_DEFINITION 必须先回答
+
+1. 准备改哪些文件，预计是否新增 helper；如果新增 helper，放在哪里。
+2. 图片分析任务创建/复用成功的状态写入：
+   - 是否复用 `ProductImageAnalysisAction.reserve()` 作为唯一写入点。
+   - 新建 run、复用 active run、pending step 重新 ready 三种情况下，是否都会写 `image_analysis/processing`。
+   - 旧 `status/current_step/error_message` 如何保留为兼容字段，但不作为主事实。
+3. 图片分析成功后的自动推进：
+   - `on_step_success()` 如何保证最终商品 workflow 是 `listing_generation/processing`，而不是停在 `image_analysis/succeeded`。
+   - Listing 任务创建/复用失败时如何处理：本轮要求写回 `image_analysis/failed`，`workflow_error` 明确“图片分析已完成，但 Listing 任务创建失败/复用失败”，不能留下 processing 或 succeeded 中间态。
+   - 不实现 Listing 成功/失败后的完整生命周期，那属于 T7；本轮只保证进入 Listing 执行态。
+4. 图片分析失败/取消/中断/超时：
+   - 普通失败必须写 `image_analysis/failed`。
+   - 用户取消、`TaskStepCanceled`、`TaskStepInterrupted`、锁超时人工标记中断必须写 `image_analysis/failed`。
+   - 不允许商品 workflow 直接显示 `canceled/interrupted/stale_running`；这些只能是 task run 展示状态。
+5. 与任务中心的边界：
+   - TaskRun/TaskStep 状态仍由任务中心维护；商品 workflow 只读 ProductTaskAction 投影结果。
+   - 不得让 task run 列表/详情装饰逻辑反向覆盖商品 workflow。
+   - `related_correlation_key` 可以用于页面跳转任务中心，但不是商品状态事实源。
+6. 重试入口：
+   - `image_analysis/failed` 的重试应走现有 `retry_step` / `run_from_step` / `run_step` 等后端创建图片分析 task run 的入口，还是需要补一个更明确的 backend action；先说明，不要擅自做前端 T8。
+   - 重试创建/复用成功后必须重新进入 `image_analysis/processing`。
+7. 禁止范围：
+   - 不做 T7 Listing 完整投影，不做 `flow_done/succeeded` 收口。
+   - 不做 T8 前端商品列表/详情消费改造。
+   - 不改导出/A+/Step 10/Amazon 模板输出。
+   - 不触碰真实商品状态、真实 ASIN、人工确认态、已生成素材或导出文件。
+   - 不把图片分析重新塞回旧 pipeline `is_running()` / `_running_tasks`。
+8. 测试/项目规则计划，最低覆盖：
+   - reserve 新建 run 写 `image_analysis/processing`。
+   - reserve 复用 active run 也写 `image_analysis/processing`。
+   - 图片分析成功且 Listing run 创建/复用成功后，最终是 `listing_generation/processing`。
+   - Listing run 创建/复用失败时，商品进入 `image_analysis/failed`，错误可读。
+   - 图片分析普通失败、取消、中断/超时都进入 `image_analysis/failed`。
+   - task run 取消/中断状态不直接成为商品 workflow 状态。
+   - 不用 `is_running(product.id)` 判断 ProductTaskAction 图片分析 workflow。
+9. 索引和文档更新计划：如 T6 改变 ProductTaskAction 生命周期口径，至少更新 `docs/domain-index/product-flow.md`。
+
+#### 允许范围
+
+- 修改 `backend/app/product_tasks/actions.py` 的 `ProductImageAnalysisAction` 和必要共享 helper。
+- 必要时修改 `backend/app/task_planners/product_image_analysis.py`、`backend/app/task_runtime/scheduler.py` 或 `backend/app/api/task_runs.py`，但必须说明为什么 ProductTaskAction 内无法闭环。
+- 必要时调整 `backend/app/api/products.py` 中图片分析重试/启动入口的后端状态口径，但不要做前端 T8。
+- 增加项目规则/函数级行为测试。
+- 更新 `docs/domain-index/product-flow.md`。
+
+#### 禁止范围
+
+- 不做 T7-T9。
+- 不改 Listing 成功后的 `flow_done/succeeded` 最终收口。
+- 不做前端页面状态/按钮消费改造。
+- 不改 task center 列表分页/展示框架，除非是 T6 必需且在 TASK_DEFINITION 里说明。
+- 不改导出、A+、Step 10、template mappings、真实 ASIN、人工确认态、真实文件或 Amazon 模板输出。
+- 不用旧 `current_step/error_message` 正则推导 Amazon 主 workflow。
+
+#### 完成定义
+
+若任务定义获批并实现，`DONE_CLAIMED` 必须包含：
+- 改动文件清单。
+- 图片分析创建/复用、成功、失败、取消、中断/超时的状态流转说明。
+- 自动触发 Listing 的调用点、幂等/复用口径和失败处理。
+- 明确说明未做 T7-T9、未改前端、未改导出/A+/Step 10。
+- 验证命令和结果，最低包括 `make backend-compile`、`make test-project-rules`、`git diff --check`；如改前端则补 `npm run build`。
+- 索引更新说明和残余风险。
+
+不要写 PASS，不要提交。
+
 ### MSG-20260618-012 - REQUEST / TASK_DEFINITION / AMAZON_WORKFLOW_T5_COMPETITOR_CAPTURE
 
 - From: 若命（agentKey: `ruoming`）
