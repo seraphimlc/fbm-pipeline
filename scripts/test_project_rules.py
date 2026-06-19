@@ -651,6 +651,216 @@ assert snapshot["stylesnap_search"]["status"] == "failed"
     assert_true(result.returncode == 0, f"Amazon workflow T4 搜索竞品 helper 行为验证失败: {result.stderr or result.stdout}")
 
 
+def test_amazon_workflow_t5_competitor_capture_rules() -> None:
+    amazon_stylesnap_text = (ROOT / "backend" / "app" / "api" / "amazon_stylesnap.py").read_text(encoding="utf-8")
+    product_flow_index = (ROOT / "docs" / "domain-index" / "product-flow.md").read_text(encoding="utf-8")
+    select_section = amazon_stylesnap_text.split('@router.post("/products/{product_id}/competitor-candidates/{candidate_id}/select"', 1)[1].split('@router.post("/products/{product_id}/competitor-candidates/capture-missing"', 1)[0]
+    capture_missing_section = amazon_stylesnap_text.split('@router.post("/products/{product_id}/competitor-candidates/capture-missing"', 1)[1].split('@router.post("/products/{product_id}/competitor-candidates/{candidate_id}/capture"', 1)[0]
+    retry_capture_section = amazon_stylesnap_text.split('@router.post("/products/{product_id}/competitor-candidates/{candidate_id}/capture"', 1)[1]
+    background_section = amazon_stylesnap_text.split("async def _capture_and_sync_product_competitor_background", 1)[1].split('@router.get("/products/{product_id}/competitor-candidates"', 1)[0]
+    reset_section = amazon_stylesnap_text.split("def _clear_current_competitor_derived_outputs", 1)[1].split("def _product_competitor_query_values", 1)[0]
+
+    assert_true(
+        "WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL" in amazon_stylesnap_text
+        and "WORKFLOW_NODE_IMAGE_ANALYSIS" in amazon_stylesnap_text
+        and "set_product_workflow" in amazon_stylesnap_text
+        and "_start_image_analysis_after_capture" in amazon_stylesnap_text,
+        "T5 选择竞品与抓详情必须使用 workflow service，并接入图片分析执行态",
+    )
+    assert_true(
+        "_ensure_select_competitor_workflow_allowed(product)" in select_section
+        and "_raise_if_protected_competitor_change(product)" in select_section
+        and "_clear_current_competitor_derived_outputs(product)" in select_section
+        and "WORKFLOW_STATUS_PROCESSING" in select_section
+        and "background_tasks.add_task(" in select_section
+        and "_capture_and_sync_product_competitor_background" in select_section,
+        "选择/换竞品入口必须先做 workflow/protected gate，写 capture_competitor_detail/processing，并只用 BackgroundTasks 抓详情",
+    )
+    assert_true(
+        "COMPETITOR_DOWNSTREAM_RESELECT_WORKFLOWS" in amazon_stylesnap_text
+        and "if current in COMPETITOR_DOWNSTREAM_RESELECT_WORKFLOWS:" in amazon_stylesnap_text
+        and "_raise_if_protected_competitor_change(product)" in amazon_stylesnap_text.split("def _ensure_select_competitor_workflow_allowed", 1)[1].split("def _clear_current_competitor_derived_outputs", 1)[0],
+        "同 ASIN downstream 重新选择也必须先检查 protected evidence，不能只在 switching/force 时保护",
+    )
+    assert_true(
+        "WORKFLOW_STATUS_SUCCEEDED" in background_section
+        and "_start_image_analysis_after_capture(db, product.id)" in background_section
+        and "WORKFLOW_STATUS_FAILED" in background_section
+        and "except asyncio.CancelledError" in background_section,
+        "后台抓详情必须覆盖成功触发图片分析、普通失败和取消/中断 failed 三类落点",
+    )
+    assert_true(
+        "set_product_workflow" not in capture_missing_section
+        and "WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL" not in capture_missing_section,
+        "capture-missing 只能补候选信息，不能推进 product workflow",
+    )
+    assert_true(
+        "is_current_selected" in retry_capture_section
+        and "(WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL, WORKFLOW_STATUS_FAILED)" in retry_capture_section
+        and "_capture_and_sync_product_competitor_background" in retry_capture_section,
+        "单候选 capture 只有当前已选竞品的抓详情失败重试才能恢复主 workflow",
+    )
+    assert_true(
+        "amazon_template_path" not in reset_section
+        and "amazon_template_warnings" not in reset_section
+        and "amazon_template_fill_summary" not in reset_section
+        and "amazon_template_generated_at" not in reset_section
+        and "ProductFile" not in reset_section
+        and "delete(" not in reset_section,
+        "T5 destructive reset 只能清当前派生态，不得删除文件实体或清 Amazon 模板输出证据",
+    )
+    assert_true(
+        "Amazon workflow T5" in product_flow_index
+        and "capture_competitor_detail/processing" in product_flow_index
+        and "image_analysis/processing" in product_flow_index
+        and "不写 task run" in product_flow_index,
+        "T5 改变选择竞品/抓详情 workflow 后必须同步 product-flow domain index",
+    )
+
+    code = r'''
+from datetime import datetime
+from types import SimpleNamespace
+from fastapi import HTTPException
+from app.api import amazon_stylesnap
+from app.models.status import (
+    WORKFLOW_NODE_FLOW_DONE,
+    WORKFLOW_NODE_IMAGE_ANALYSIS,
+    WORKFLOW_NODE_LISTING_GENERATION,
+    WORKFLOW_STATUS_PROCESSING,
+    WORKFLOW_STATUS_SUCCEEDED,
+)
+
+def data_with_template(path=None):
+    return SimpleNamespace(
+        gigab2b_raw_snapshot='{"amazon_listing_capture": {"asin": "OLD"}, "selected_stylesnap": {"asin": "OLD"}}',
+        categories='["old"]',
+        leaf_category="Old",
+        listing_title="Old title",
+        listing_bullets="[]",
+        listing_search_terms="old",
+        listing_title_zh="旧标题",
+        listing_bullets_zh="[]",
+        listing_search_terms_zh="旧词",
+        listing_description="Old description",
+        listing_description_zh="旧描述",
+        listing_check="{}",
+        listing_primary_keyword="old",
+        listing_removed_keywords="[]",
+        amazon_template_path=path,
+        amazon_template_warnings='["keep"]' if path else None,
+        amazon_template_fill_summary='{"keep": true}' if path else None,
+        amazon_template_generated_at=datetime(2026, 6, 18) if path else None,
+    )
+
+catalog = SimpleNamespace(
+    amazon_asin=None,
+    asin_sync_status="not_synced",
+    confirmed_at=None,
+    exported_at=None,
+    export_task_id=None,
+    export_file_path=None,
+    aplus_uploaded_at=None,
+    aplus_upload_status="not_uploaded",
+    aplus_upload_error="old",
+)
+product = SimpleNamespace(
+    amazon_asin=None,
+    asin_sync_status="not_synced",
+    aplus_uploaded_at=None,
+    aplus_upload_status="failed",
+    aplus_upload_error="old",
+    data=data_with_template("/tmp/template.xlsx"),
+    images=SimpleNamespace(contact_sheet_path="/tmp/contact.jpg", image_analysis="{}", image_selling_points="[]", category_style="style", main_image_summary="summary", analyzed_at=datetime(2026, 6, 18)),
+    aplus=SimpleNamespace(aplus_plan="{}", aplus_plan_summary="summary", aplus_scripts="[]", aplus_scripts_summary="summary", aplus_images="[]", aplus_image_count=3, aplus_status="generated", planned_at=datetime(2026, 6, 18), scripted_at=datetime(2026, 6, 18), generated_at=datetime(2026, 6, 18)),
+    catalog_item=catalog,
+    workflow_node=WORKFLOW_NODE_FLOW_DONE,
+    workflow_status=WORKFLOW_STATUS_SUCCEEDED,
+)
+try:
+    amazon_stylesnap._raise_if_protected_competitor_change(product)
+except HTTPException as exc:
+    assert exc.status_code == 409
+    assert "Amazon 模板输出证据" in exc.detail
+else:
+    raise AssertionError("protected template evidence must block competitor switch")
+
+product.data = data_with_template("/tmp/template.xlsx")
+amazon_stylesnap._clear_current_competitor_derived_outputs(product)
+assert product.data.amazon_template_path == "/tmp/template.xlsx"
+assert product.data.amazon_template_fill_summary == '{"keep": true}'
+assert product.data.listing_title is None
+assert product.images.image_analysis is None
+assert product.aplus.aplus_images is None
+assert product.aplus_upload_status == "not_uploaded"
+assert catalog.aplus_upload_status == "not_uploaded"
+
+running_product = SimpleNamespace(
+    workflow_node=WORKFLOW_NODE_IMAGE_ANALYSIS,
+    workflow_status=WORKFLOW_STATUS_PROCESSING,
+    amazon_asin=None,
+    asin_sync_status="not_synced",
+    aplus_uploaded_at=None,
+    aplus_upload_status="not_uploaded",
+    catalog_item=None,
+    data=None,
+)
+try:
+    amazon_stylesnap._ensure_select_competitor_workflow_allowed(running_product)
+except HTTPException as exc:
+    assert exc.status_code == 409
+    assert "正在执行" in exc.detail
+else:
+    raise AssertionError("processing downstream workflow must block competitor switch")
+
+same_asin_downstream_product = SimpleNamespace(
+    competitor_asin="B0SAMEASIN",
+    amazon_asin=None,
+    asin_sync_status="not_synced",
+    aplus_uploaded_at=None,
+    aplus_upload_status="not_uploaded",
+    aplus_upload_error=None,
+    data=data_with_template("/tmp/protected-template.xlsx"),
+    images=None,
+    aplus=None,
+    catalog_item=SimpleNamespace(
+        amazon_asin=None,
+        asin_sync_status="not_synced",
+        confirmed_at=datetime(2026, 6, 18),
+        exported_at=datetime(2026, 6, 18),
+        export_task_id=88,
+        export_file_path="/tmp/export.zip",
+        aplus_uploaded_at=None,
+        aplus_upload_status="not_uploaded",
+        aplus_upload_error=None,
+    ),
+    workflow_node=WORKFLOW_NODE_LISTING_GENERATION,
+    workflow_status=WORKFLOW_STATUS_SUCCEEDED,
+    workflow_error=None,
+)
+before_workflow = (same_asin_downstream_product.workflow_node, same_asin_downstream_product.workflow_status)
+before_snapshot = same_asin_downstream_product.data.gigab2b_raw_snapshot
+try:
+    amazon_stylesnap._ensure_select_competitor_workflow_allowed(same_asin_downstream_product)
+except HTTPException as exc:
+    assert exc.status_code == 409
+    assert "不可逆外部结果" in exc.detail
+    assert "Amazon 模板输出证据" in exc.detail
+    assert "已人工确认" in exc.detail
+    assert "真实导出历史" in exc.detail
+else:
+    raise AssertionError("same-ASIN downstream reselection with protected evidence must be blocked before writes")
+assert (same_asin_downstream_product.workflow_node, same_asin_downstream_product.workflow_status) == before_workflow
+assert same_asin_downstream_product.data.gigab2b_raw_snapshot == before_snapshot
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"Amazon workflow T5 选择竞品/抓详情 helper 行为验证失败: {result.stderr or result.stdout}")
+
+
 def test_product_detail_get_is_readonly_for_material_videos() -> None:
     products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
     material_assets_text = (ROOT / "backend" / "app" / "services" / "material_assets.py").read_text(encoding="utf-8")
@@ -2550,6 +2760,7 @@ def main() -> int:
         test_product_overview_handles_uninitialized_workflow_bucket,
         test_amazon_workflow_t3_image_selection_reset_and_initialization_rules,
         test_amazon_workflow_t4_competitor_search_rules,
+        test_amazon_workflow_t5_competitor_capture_rules,
         test_product_detail_get_is_readonly_for_material_videos,
         test_inventory_update_template_exports_stock_only_by_sku,
         test_catalog_export_creation_keeps_business_reasons_in_task_report,

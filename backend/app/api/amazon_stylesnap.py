@@ -32,12 +32,18 @@ from app.models.status import (
     CREATED,
     FAILED,
     STEP5_LISTING,
+    STEP6_CURATING,
+    WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
+    WORKFLOW_NODE_FLOW_DONE,
     WORKFLOW_NODE_GET_STYLESNAP_TOKEN,
+    WORKFLOW_NODE_IMAGE_ANALYSIS,
+    WORKFLOW_NODE_LISTING_GENERATION,
     WORKFLOW_NODE_SEARCH_COMPETITOR,
     WORKFLOW_NODE_SELECT_COMPETITOR,
     WORKFLOW_STATUS_FAILED,
     WORKFLOW_STATUS_PENDING,
     WORKFLOW_STATUS_PROCESSING,
+    WORKFLOW_STATUS_SUCCEEDED,
 )
 
 
@@ -46,7 +52,7 @@ COMPETITOR_SEARCHING = "competitor_searching"
 COMPETITOR_SWITCH_BLOCKING_STATUSES = {
     COMPETITOR_SEARCHING,
     STEP5_LISTING,
-    "step6_curating",
+    STEP6_CURATING,
 }
 LISTING_CAPTURE_ACTIVE_TTL = timedelta(minutes=5)
 LISTING_CAPTURE_QUEUED_TTL = timedelta(seconds=30)
@@ -60,6 +66,33 @@ COMPETITOR_SEARCH_ALLOWED_WORKFLOWS = {
     (WORKFLOW_NODE_GET_STYLESNAP_TOKEN, WORKFLOW_STATUS_PENDING),
     (WORKFLOW_NODE_SELECT_COMPETITOR, WORKFLOW_STATUS_PENDING),
 }
+COMPETITOR_SELECT_ALLOWED_WORKFLOWS = {
+    (WORKFLOW_NODE_SELECT_COMPETITOR, WORKFLOW_STATUS_PENDING),
+    (WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL, WORKFLOW_STATUS_FAILED),
+    (WORKFLOW_NODE_IMAGE_ANALYSIS, WORKFLOW_STATUS_PENDING),
+    (WORKFLOW_NODE_IMAGE_ANALYSIS, WORKFLOW_STATUS_FAILED),
+    (WORKFLOW_NODE_IMAGE_ANALYSIS, WORKFLOW_STATUS_SUCCEEDED),
+    (WORKFLOW_NODE_LISTING_GENERATION, WORKFLOW_STATUS_PENDING),
+    (WORKFLOW_NODE_LISTING_GENERATION, WORKFLOW_STATUS_FAILED),
+    (WORKFLOW_NODE_LISTING_GENERATION, WORKFLOW_STATUS_SUCCEEDED),
+    (WORKFLOW_NODE_FLOW_DONE, WORKFLOW_STATUS_SUCCEEDED),
+}
+COMPETITOR_SELECT_RUNNING_WORKFLOWS = {
+    (WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL, WORKFLOW_STATUS_PROCESSING),
+    (WORKFLOW_NODE_IMAGE_ANALYSIS, WORKFLOW_STATUS_PROCESSING),
+    (WORKFLOW_NODE_LISTING_GENERATION, WORKFLOW_STATUS_PROCESSING),
+}
+COMPETITOR_DOWNSTREAM_RESELECT_WORKFLOWS = {
+    (WORKFLOW_NODE_IMAGE_ANALYSIS, WORKFLOW_STATUS_PENDING),
+    (WORKFLOW_NODE_IMAGE_ANALYSIS, WORKFLOW_STATUS_FAILED),
+    (WORKFLOW_NODE_IMAGE_ANALYSIS, WORKFLOW_STATUS_SUCCEEDED),
+    (WORKFLOW_NODE_LISTING_GENERATION, WORKFLOW_STATUS_PENDING),
+    (WORKFLOW_NODE_LISTING_GENERATION, WORKFLOW_STATUS_FAILED),
+    (WORKFLOW_NODE_LISTING_GENERATION, WORKFLOW_STATUS_SUCCEEDED),
+    (WORKFLOW_NODE_FLOW_DONE, WORKFLOW_STATUS_SUCCEEDED),
+}
+SAFE_APLUS_UPLOAD_STATUSES = {None, "", "not_uploaded", "failed"}
+SAFE_ASIN_SYNC_STATUSES = {None, "", "not_synced", "failed"}
 STYLESNAP_TOKEN_BROWSER_ERROR_KEYWORDS = (
     "StyleSnap token not found",
     "未找到上传 token",
@@ -74,9 +107,8 @@ STYLESNAP_TOKEN_BROWSER_ERROR_KEYWORDS = (
 )
 
 
-async def _start_generation_after_competitor(db: AsyncSession, product_id: int) -> None:
-    if not is_running(product_id):
-        await create_product_image_analysis_runs(db, [product_id], created_by="competitor_selection")
+async def _start_image_analysis_after_capture(db: AsyncSession, product_id: int) -> None:
+    await create_product_image_analysis_runs(db, [product_id], created_by="competitor_selection")
 
 
 def _candidate_response(
@@ -366,6 +398,103 @@ def _clear_generation_outputs(product: Product) -> None:
         product.aplus.generated_at = None
 
 
+def _protected_competitor_change_reasons(product: Product) -> list[str]:
+    reasons: list[str] = []
+    catalog = product.catalog_item
+    data = product.data
+    if product.amazon_asin:
+        reasons.append("商品已有真实 Amazon ASIN")
+    if product.asin_sync_status not in SAFE_ASIN_SYNC_STATUSES:
+        reasons.append(f"商品 ASIN 同步状态不可静默重置: {product.asin_sync_status}")
+    if product.aplus_uploaded_at or product.aplus_upload_status not in SAFE_APLUS_UPLOAD_STATUSES:
+        reasons.append("商品已有 A+ 上传记录或上传中状态")
+    if catalog:
+        if catalog.amazon_asin:
+            reasons.append("Catalog 已有真实 Amazon ASIN")
+        if catalog.asin_sync_status not in SAFE_ASIN_SYNC_STATUSES:
+            reasons.append(f"Catalog ASIN 同步状态不可静默重置: {catalog.asin_sync_status}")
+        if catalog.confirmed_at:
+            reasons.append("Catalog 已人工确认")
+        if catalog.exported_at or catalog.export_task_id or catalog.export_file_path:
+            reasons.append("Catalog 已有真实导出历史")
+        if catalog.aplus_uploaded_at or catalog.aplus_upload_status not in SAFE_APLUS_UPLOAD_STATUSES:
+            reasons.append("Catalog 已有 A+ 上传记录或上传中状态")
+    if data and (
+        data.amazon_template_path
+        or data.amazon_template_generated_at
+        or data.amazon_template_fill_summary
+        or data.amazon_template_warnings
+    ):
+        reasons.append("商品已有 Amazon 模板输出证据")
+    return reasons
+
+
+def _raise_if_protected_competitor_change(product: Product) -> None:
+    reasons = _protected_competitor_change_reasons(product)
+    if reasons:
+        raise HTTPException(409, "当前商品已有不可逆外部结果，不能静默换竞品：" + "；".join(reasons))
+
+
+def _ensure_select_competitor_workflow_allowed(product: Product) -> None:
+    current = (product.workflow_node, product.workflow_status)
+    if current in COMPETITOR_SELECT_RUNNING_WORKFLOWS:
+        raise HTTPException(409, "当前商品已有下游流程正在执行，不能切换竞品；请等待任务结束后再操作")
+    if current in COMPETITOR_SELECT_ALLOWED_WORKFLOWS:
+        if current in COMPETITOR_DOWNSTREAM_RESELECT_WORKFLOWS:
+            _raise_if_protected_competitor_change(product)
+        return
+    raise HTTPException(409, "当前商品 workflow 不在可选择或切换竞品节点")
+
+
+def _clear_current_competitor_derived_outputs(product: Product) -> None:
+    if product.data:
+        snapshot = _json_loads(product.data.gigab2b_raw_snapshot, {})
+        if isinstance(snapshot, dict):
+            snapshot.pop("amazon_listing_capture", None)
+            product.data.gigab2b_raw_snapshot = _json_dumps(snapshot)
+        for field in (
+            "categories",
+            "leaf_category",
+            "listing_title",
+            "listing_bullets",
+            "listing_search_terms",
+            "listing_title_zh",
+            "listing_bullets_zh",
+            "listing_search_terms_zh",
+            "listing_description",
+            "listing_description_zh",
+            "listing_check",
+            "listing_primary_keyword",
+            "listing_removed_keywords",
+        ):
+            setattr(product.data, field, None)
+    if product.images:
+        product.images.contact_sheet_path = None
+        product.images.image_analysis = None
+        product.images.image_selling_points = None
+        product.images.category_style = None
+        product.images.main_image_summary = None
+        product.images.analyzed_at = None
+    if product.aplus:
+        product.aplus.aplus_plan = None
+        product.aplus.aplus_plan_summary = None
+        product.aplus.aplus_scripts = None
+        product.aplus.aplus_scripts_summary = None
+        product.aplus.aplus_images = None
+        product.aplus.aplus_image_count = None
+        product.aplus.aplus_status = None
+        product.aplus.planned_at = None
+        product.aplus.scripted_at = None
+        product.aplus.generated_at = None
+    product.aplus_upload_status = "not_uploaded"
+    product.aplus_uploaded_at = None
+    product.aplus_upload_error = None
+    if product.catalog_item:
+        product.catalog_item.aplus_upload_status = "not_uploaded"
+        product.catalog_item.aplus_uploaded_at = None
+        product.catalog_item.aplus_upload_error = None
+
+
 def _product_competitor_query_values(product: Product, snapshot: dict) -> tuple[str | None, str, str | None, str | None]:
     batch_id = snapshot.get("batch_id")
     site = str(snapshot.get("site") or "US").strip().upper()
@@ -386,6 +515,33 @@ def _classify_stylesnap_search_error(exc_or_message: Exception | str) -> tuple[s
 
 
 def _set_competitor_search_workflow(
+    product: Product,
+    *,
+    node: str,
+    status: str,
+    workflow_error: str | None,
+    legacy_status: str,
+    legacy_current_step: int,
+    legacy_error_message: str | None,
+    now: datetime,
+) -> None:
+    set_product_workflow(
+        product,
+        node=node,
+        status=status,
+        error=workflow_error,
+        now=now,
+    )
+    product.status = legacy_status
+    product.current_step = legacy_current_step
+    product.error_message = legacy_error_message
+    product.updated_at = now
+    if product.catalog_item:
+        product.catalog_item.status = product.status
+        product.catalog_item.updated_at = now
+
+
+def _set_competitor_capture_workflow(
     product: Product,
     *,
     node: str,
@@ -629,6 +785,9 @@ async def _sync_product_competitor_snapshot(
     status: str | None = None,
     current_step: int | None = None,
     error_message: str | None = None,
+    workflow_node: str | None = None,
+    workflow_status: str | None = None,
+    workflow_error: str | None = None,
 ):
     if not product.data:
         raise HTTPException(404, "Product data not found")
@@ -654,12 +813,24 @@ async def _sync_product_competitor_snapshot(
         categories, leaf_category = _category_path_from_candidate(candidate)
 
     product.competitor_asin = candidate.asin
-    if status is not None:
-        product.status = status
-    if current_step is not None:
-        product.current_step = current_step
-    product.error_message = error_message
-    product.updated_at = now
+    if workflow_node and workflow_status:
+        _set_competitor_capture_workflow(
+            product,
+            node=workflow_node,
+            status=workflow_status,
+            workflow_error=workflow_error,
+            legacy_status=status if status is not None else product.status,
+            legacy_current_step=current_step if current_step is not None else product.current_step,
+            legacy_error_message=error_message,
+            now=now,
+        )
+    else:
+        if status is not None:
+            product.status = status
+        if current_step is not None:
+            product.current_step = current_step
+        product.error_message = error_message
+        product.updated_at = now
     product.data.gigab2b_raw_snapshot = _json_dumps(snapshot)
     if categories:
         product.data.categories = _json_dumps(categories)
@@ -897,28 +1068,6 @@ async def _capture_and_sync_product_competitor_background(
             return
         try:
             capture = await capture_listing_for_candidate(db, candidate, force=force_capture)
-            if capture.capture_status == "captured":
-                await _sync_product_competitor_snapshot(
-                    db,
-                    product,
-                    candidate,
-                    capture,
-                    status=CREATED,
-                    current_step=5,
-                    error_message=None,
-                )
-                if auto_start_generation:
-                    await _start_generation_after_competitor(db, product.id)
-            else:
-                await _sync_product_competitor_snapshot(
-                    db,
-                    product,
-                    candidate,
-                    capture,
-                    status=FAILED,
-                    current_step=4,
-                    error_message=capture.capture_error or "竞品详情抓取失败",
-                )
         except asyncio.CancelledError:
             capture = await _queue_listing_capture(db, candidate, force=True)
             capture.capture_status = "failed"
@@ -933,6 +1082,9 @@ async def _capture_and_sync_product_competitor_background(
                 status=FAILED,
                 current_step=4,
                 error_message=capture.capture_error,
+                workflow_node=WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
+                workflow_status=WORKFLOW_STATUS_FAILED,
+                workflow_error=capture.capture_error,
             )
             raise
         except Exception as exc:
@@ -949,7 +1101,42 @@ async def _capture_and_sync_product_competitor_background(
                 status=FAILED,
                 current_step=4,
                 error_message=capture.capture_error,
+                workflow_node=WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
+                workflow_status=WORKFLOW_STATUS_FAILED,
+                workflow_error=capture.capture_error,
             )
+            return
+
+        if capture.capture_status == "captured":
+            await _sync_product_competitor_snapshot(
+                db,
+                product,
+                candidate,
+                capture,
+                status=CREATED,
+                current_step=5,
+                error_message=None,
+                workflow_node=WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
+                workflow_status=WORKFLOW_STATUS_SUCCEEDED,
+                workflow_error=None,
+            )
+            if auto_start_generation:
+                await _start_image_analysis_after_capture(db, product.id)
+            return
+
+        error_message = capture.capture_error or "竞品详情抓取失败"
+        await _sync_product_competitor_snapshot(
+            db,
+            product,
+            candidate,
+            capture,
+            status=FAILED,
+            current_step=4,
+            error_message=error_message,
+            workflow_node=WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
+            workflow_status=WORKFLOW_STATUS_FAILED,
+            workflow_error=error_message,
+        )
 
 
 @router.get("/products/{product_id}/competitor-candidates", response_model=AmazonStyleSnapCandidateGroupResponse)
@@ -1080,7 +1267,9 @@ async def select_product_competitor_candidate(
     db: AsyncSession = Depends(get_db),
 ):
     product, snapshot = await _load_product_for_competitor_selection(db, product_id)
-    await _ensure_competitor_can_be_changed(db, product, snapshot, action="选择/切换")
+    if is_running(product.id):
+        raise HTTPException(400, "商品旧流程正在运行中，不能选择/切换竞品")
+    _ensure_select_competitor_workflow_allowed(product)
 
     batch_id, site, item_code, _representative_sku = _product_competitor_query_values(product, snapshot)
     search_state = snapshot.get("stylesnap_search") if isinstance(snapshot.get("stylesnap_search"), dict) else {}
@@ -1105,7 +1294,8 @@ async def select_product_competitor_candidate(
     now = datetime.now()
     switching = bool(product.competitor_asin and product.competitor_asin != selected.asin)
     if switching or force_capture:
-        _clear_generation_outputs(product)
+        _raise_if_protected_competitor_change(product)
+        _clear_current_competitor_derived_outputs(product)
     await db.execute(
         update(AmazonStyleSnapCandidate)
         .where(
@@ -1119,8 +1309,18 @@ async def select_product_competitor_candidate(
     selected.is_selected = 1
     selected.selected_at = now
     selected.updated_at = now
-    await db.commit()
-    await db.refresh(selected)
+    await _sync_product_competitor_snapshot(
+        db,
+        product,
+        selected,
+        None,
+        status=STEP5_LISTING,
+        current_step=5,
+        error_message="竞品详情抓取中：正在打开选中 ASIN 的 Amazon 页面，请等待后台完成",
+        workflow_node=WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
+        workflow_status=WORKFLOW_STATUS_PROCESSING,
+        workflow_error=None,
+    )
 
     capture = await _queue_listing_capture(db, selected, force=force_capture)
     if capture.capture_status == "captured" and not force_capture:
@@ -1132,9 +1332,12 @@ async def select_product_competitor_candidate(
             status=CREATED,
             current_step=5,
             error_message=None,
+            workflow_node=WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
+            workflow_status=WORKFLOW_STATUS_SUCCEEDED,
+            workflow_error=None,
         )
         if auto_start_generation:
-            await _start_generation_after_competitor(db, product.id)
+            await _start_image_analysis_after_capture(db, product.id)
     else:
         await _sync_product_competitor_snapshot(
             db,
@@ -1144,6 +1347,9 @@ async def select_product_competitor_candidate(
             status=STEP5_LISTING,
             current_step=5,
             error_message="竞品详情抓取中：正在打开选中 ASIN 的 Amazon 页面，请等待后台完成",
+            workflow_node=WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
+            workflow_status=WORKFLOW_STATUS_PROCESSING,
+            workflow_error=None,
         )
         background_tasks.add_task(
             _capture_and_sync_product_competitor_background,
@@ -1197,6 +1403,42 @@ async def retry_product_competitor_candidate_capture(
         raise HTTPException(400, "候选竞品批次与当前商品不一致")
     if candidate.site != site or candidate.item_code != item_code:
         raise HTTPException(400, "候选竞品不属于当前商品")
+
+    selected_snapshot = snapshot.get("selected_stylesnap") if isinstance(snapshot.get("selected_stylesnap"), dict) else {}
+    is_current_selected = (
+        bool(candidate.is_selected)
+        or selected_snapshot.get("candidate_id") == candidate.id
+        or (bool(product.competitor_asin) and product.competitor_asin == candidate.asin)
+    )
+    if is_current_selected and (
+        product.workflow_node,
+        product.workflow_status,
+    ) == (WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL, WORKFLOW_STATUS_FAILED):
+        if is_running(product.id):
+            raise HTTPException(400, "商品旧流程正在运行中，不能重新抓取竞品详情")
+        _raise_if_protected_competitor_change(product)
+        _clear_current_competitor_derived_outputs(product)
+        capture = await _queue_listing_capture(db, candidate, force=force)
+        await _sync_product_competitor_snapshot(
+            db,
+            product,
+            candidate,
+            capture,
+            status=STEP5_LISTING,
+            current_step=5,
+            error_message="竞品详情抓取中：正在重新打开选中 ASIN 的 Amazon 页面，请等待后台完成",
+            workflow_node=WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
+            workflow_status=WORKFLOW_STATUS_PROCESSING,
+            workflow_error=None,
+        )
+        background_tasks.add_task(
+            _capture_and_sync_product_competitor_background,
+            product.id,
+            candidate.id,
+            force_capture=True,
+            auto_start_generation=True,
+        )
+        return await _load_product_candidate_group(db, product, snapshot, enrich_images=False)
 
     queued_candidate_ids = await _queue_listing_prefetches(db, [candidate], force=force)
     if queued_candidate_ids:

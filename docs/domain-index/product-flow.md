@@ -19,6 +19,7 @@
 - Amazon workflow T2 的 Product Workflow Service 位于 `backend/app/product_tasks/workflow.py`：集中提供 `set_product_workflow()`、`build_product_workflow()` 和 node/action 映射；商品列表/详情 workflow 投影应同源调用该 service。
 - Amazon workflow T3：新建 Amazon 商品默认 `select_images/pending`；图片确认接口 `PUT /api/products/{id}/listing-images` 只保存主图/副图并执行 destructive reset，成功后进入 `search_competitor/pending`，不得自动启动 StyleSnap 搜索、后台任务或任务中心 task run。
 - Amazon workflow T4：搜索竞品入口 `POST /api/amazon-stylesnap/products/{id}/competitor-candidates/search` 触发 `search_competitor/processing`，成功或已有候选进入 `select_competitor/pending`，普通失败进入 `search_competitor/failed`，token/browser/Chrome 权限问题进入 `get_stylesnap_token/pending`；竞品队列/详情优先读 workflow，不写 task run、不进入任务中心。
+- Amazon workflow T5：选择竞品入口 `POST /api/amazon-stylesnap/products/{id}/competitor-candidates/{candidate_id}/select` 写 `capture_competitor_detail/processing` 并后台抓详情；详情成功后触发/复用图片分析任务并进入 `image_analysis/processing`，详情失败或中断进入 `capture_competitor_detail/failed`；换竞品只清当前竞品详情、图片分析、Listing、A+ 派生态，遇到真实 ASIN、人工确认、导出历史或 Amazon 模板输出证据必须阻断；抓详情本身不写 task run、不进入任务中心、不实现 T6-T9。
 - StyleSnap / 搜索竞品插件方案是长期合理方向，但当前 on hold；决策记录见 `docs/superpowers/specs/2026-06-17-stylesnap-client-extension-decision.md`。
 - 已修 P0：ProductTaskAction reserve 后的图片分析/Listing 入队态不能再被旧 pipeline `is_running(product.id)` 误判为中断。后续结构治理应把商品主状态从 task queued/running 语义收敛为业务节点四态。
 
