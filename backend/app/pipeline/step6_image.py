@@ -3,7 +3,7 @@
 
 流程：
 1. 从已确认的主图/副图读取商品图片
-2. 生成 Contact Sheet（缩略图拼接）
+2. 直接把图片 URL 传给 VLM 分析
 3. VLM 分析每张图片的卖点
 4. 输出图片卖点、证据缺口和 A+ 参考素材
 """
@@ -20,14 +20,9 @@ from app.config import settings
 from app.database import async_session
 from app.models import Product, ProductData, ProductImage
 from app.services.product_image_vlm import (
-    analyze_contact_sheet as _analyze_contact_sheet,
     analyze_image_url_batch as _analyze_image_url_batch,
-    build_contact_sheets as _build_contact_sheets,
     build_image_url_batches as _build_image_url_batches,
-    download_image_records as _download_image_records,
-    is_data_inspection_error as _is_data_inspection_error,
     is_remote_url as _is_remote_url,
-    is_transient_vlm_error as _is_transient_vlm_error,
 )
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -1358,7 +1353,7 @@ def _select_gallery(reviews: list[dict], strategy: dict) -> tuple[dict | None, l
 
 def _write_image_analysis_files(
     material_dir: Path,
-    sheets: list[dict],
+    image_batches: list[dict],
     reviews: list[dict],
     gallery: list[dict],
     diagnostics: dict | None = None,
@@ -1367,7 +1362,7 @@ def _write_image_analysis_files(
     out_dir = material_dir / "image analysis"
     out_dir.mkdir(parents=True, exist_ok=True)
     payload = {
-        "contact_sheets": sheets,
+        "image_batches": image_batches,
         "image_reviews": reviews,
         "gallery_selection": gallery,
         "selection_diagnostics": diagnostics or {},
@@ -1378,9 +1373,9 @@ def _write_image_analysis_files(
         encoding="utf-8",
     )
 
-    lines = ["# 图片分析", "", "## Contact Sheets"]
-    for sheet in sheets:
-        lines.append(f"- Page {sheet['sheet_page']}: {sheet['sheet_path']}")
+    lines = ["# 图片分析", "", "## 图片分析批次"]
+    for batch in image_batches:
+        lines.append(f"- Page {batch['sheet_page']}: {batch['sheet_path']}")
     lines.extend(["", "## 主图/副图选择"])
     if diagnostics and diagnostics.get("main_image_warnings"):
         lines.extend(["", "## 主图替代提醒"])
@@ -1444,7 +1439,7 @@ def _restore_cached_image_analysis(
     source_count = len(source_images) or len(images)
     reviews = cached.get("image_reviews") or cached.get("images") or []
     previous_diagnostics = cached.get("selection_diagnostics") or {}
-    contact_sheets = cached.get("contact_sheets") or []
+    image_batches = cached.get("image_batches") or cached.get("contact_sheets") or []
     sheet_payloads = cached.get("sheet_payloads") or []
     strategy_name = strategy.get("name") or cached.get("gallery_strategy") or "cached"
 
@@ -1482,16 +1477,16 @@ def _restore_cached_image_analysis(
 
     _write_image_analysis_files(
         material_dir,
-        contact_sheets,
+        image_batches,
         reviews,
         gallery_selection,
         diagnostics,
         source_images=source_images,
     )
 
-    pi.contact_sheet_path = str(contact_sheets[0].get("sheet_path")) if contact_sheets else pi.contact_sheet_path
+    pi.contact_sheet_path = None
     pi.image_analysis = json.dumps({
-        "contact_sheets": contact_sheets,
+        "image_batches": image_batches,
         "sheet_payloads": sheet_payloads,
         "images": reviews,
         "gallery_selection": gallery_selection,
@@ -1517,7 +1512,7 @@ def _restore_cached_image_analysis(
     pi.vlm_model = image_analysis_model
 
     return {
-        "contact_sheets": contact_sheets,
+        "image_batches": image_batches,
         "sheet_payloads": sheet_payloads,
         "images": reviews,
         "gallery_selection": gallery_selection,
@@ -1554,7 +1549,7 @@ async def reselect_image_gallery_from_cache(product_id: int) -> dict:
             reviews = payload.get("images") if isinstance(payload, dict) else None
             if isinstance(reviews, list) and reviews:
                 cached = {
-                    "contact_sheets": payload.get("contact_sheets") or [],
+                    "image_batches": payload.get("image_batches") or payload.get("contact_sheets") or [],
                     "sheet_payloads": payload.get("sheet_payloads") or [],
                     "image_reviews": reviews,
                     "gallery_selection": payload.get("gallery_selection") or [],
@@ -1586,7 +1581,7 @@ async def run_image_analysis(product_id: int) -> dict:
     执行图片分析
     
     1. 准备已确认的主图/副图
-    2. 生成 Contact Sheet
+    2. URL 直传 VLM
     3. VLM 分析
     4. 输出图片卖点和证据缺口
     """
@@ -1601,7 +1596,7 @@ async def run_image_analysis(product_id: int) -> dict:
             raise ValueError(f"Product {product_id} not found or no data")
 
         pd = product.data
-        # 准备已确认图片；远程 URL 默认直接传给 VLM，只有兜底路径才按需下载。
+        # 准备已确认图片；远程 URL 默认直接传给 VLM，本地文件只用于无 URL 的历史/人工素材。
         pi = product.images
         if not pi or not pi.main_image_path:
             raise ValueError("请先确认商品主图和 Listing 图片")
@@ -1638,7 +1633,6 @@ async def run_image_analysis(product_id: int) -> dict:
         contact_sheet_dir = analysis_dir / "contact_sheets"
         if contact_sheet_dir.exists():
             shutil.rmtree(contact_sheet_dir)
-        product_key = pd.item_code or product.gigab2b_product_id or str(product.id)
 
         # 调用 VLM 分析
         client = settings.get_image_analysis_client()
@@ -1647,7 +1641,7 @@ async def run_image_analysis(product_id: int) -> dict:
         gallery_strategy = _gallery_strategy_prompt(strategy)
         all_reviews: list[dict] = []
         sheet_payloads: list[dict] = []
-        analysis_contact_sheets: list[dict] = []
+        analysis_image_batches: list[dict] = []
         analysis_warnings: list[str] = []
         prompt = VLM_ANALYSIS_PROMPT.format(
             title=pd.title or "Unknown",
@@ -1658,7 +1652,6 @@ async def run_image_analysis(product_id: int) -> dict:
         )
 
         direct_batches = _build_image_url_batches(image_records)
-        direct_error: Exception | None = None
         try:
             for sheet in direct_batches:
                 batch_records = [record for record in image_records if record["image_id"] in set(sheet["image_ids"])]
@@ -1678,136 +1671,15 @@ async def run_image_analysis(product_id: int) -> dict:
                     "reviews": reviews,
                     "mode": "direct_image_url",
                 })
-            analysis_contact_sheets = list(direct_batches)
-            pi.contact_sheet_path = str(direct_batches[0]["sheet_path"]) if direct_batches else pi.contact_sheet_path
+            analysis_image_batches = list(direct_batches)
+            pi.contact_sheet_path = None
         except Exception as exc:
-            direct_error = exc
-            all_reviews = []
-            sheet_payloads = []
-            analysis_contact_sheets = []
             warning = (
-                f"图片URL直传VLM失败，已按需下载图片并切换到Contact Sheet兜底: "
+                f"图片URL直传VLM失败，未下载图片或切换 Contact Sheet 兜底: "
                 f"{type(exc).__name__}: {exc}"
             )
             logger.warning(f"[Step6] {warning}")
-            analysis_warnings.append(warning)
-
-        if direct_error is not None:
-            local_image_records = await _download_image_records(image_records, material_dir)
-            if not local_image_records:
-                raise RuntimeError("图片URL直传失败，且已确认图片未能下载到本地，无法继续图片分析") from direct_error
-            missing_downloads = len(image_records) - len(local_image_records)
-            if missing_downloads > 0:
-                analysis_warnings.append(f"{missing_downloads} 张图片下载失败，已用可下载图片继续分析。")
-            contact_sheets = _build_contact_sheets(local_image_records, contact_sheet_dir, product_key)
-            if not contact_sheets:
-                raise RuntimeError("Contact Sheet 生成失败")
-            pi.contact_sheet_path = str(contact_sheets[0]["sheet_path"])
-            analysis_contact_sheets = list(contact_sheets)
-
-            for sheet in contact_sheets:
-                batch_records = [record for record in local_image_records if record["image_id"] in set(sheet["image_ids"])]
-                try:
-                    sheet_analysis, reviews = await _analyze_contact_sheet(
-                        client,
-                        image_analysis_model,
-                        sheet,
-                        batch_records,
-                        prompt,
-                        system_prompt=VLM_SYSTEM_PROMPT,
-                        log_prefix="Step6",
-                    )
-                except Exception as exc:
-                    is_data_inspection = _is_data_inspection_error(exc)
-                    is_transient = _is_transient_vlm_error(exc)
-                    if not (is_data_inspection or is_transient):
-                        raise
-
-                    if is_data_inspection:
-                        warning = (
-                            f"Contact Sheet {sheet['sheet_page']} 被VLM内容安全检查拦截，"
-                            "已改为逐张图片重试分析。"
-                        )
-                        fallback_status = "data_inspection_failed"
-                    else:
-                        warning = (
-                            f"Contact Sheet {sheet['sheet_page']} 多图请求连接异常，"
-                            "已跳过逐张重试；本轮如无其它真实分析结果将停在图片分析节点等待重跑。"
-                        )
-                        fallback_status = "transient_connection_failed"
-                    logger.warning(f"[Step6] {warning} error={exc}")
-                    analysis_warnings.append(warning)
-                    sheet_payloads.append({
-                        **sheet,
-                        "analysis": {"images": []},
-                        "reviews": [],
-                        "status": fallback_status,
-                        "error": str(exc),
-                    })
-                    if is_transient and not is_data_inspection:
-                        continue
-
-                    for record in batch_records:
-                        fallback_dir = contact_sheet_dir / f"fallback_sheet_{sheet['sheet_page']:02d}"
-                        fallback_key = f"{product_key}_sheet_{sheet['sheet_page']:02d}_{record['image_id'].lstrip('#')}"
-                        fallback_sheets = _build_contact_sheets([record], fallback_dir, fallback_key)
-                        if not fallback_sheets:
-                            continue
-                        fallback_sheet = fallback_sheets[0]
-                        analysis_contact_sheets.append(fallback_sheet)
-                        try:
-                            single_analysis, single_reviews = await _analyze_contact_sheet(
-                                client,
-                                image_analysis_model,
-                                fallback_sheet,
-                                [record],
-                                prompt,
-                                system_prompt=VLM_SYSTEM_PROMPT,
-                                log_prefix="Step6",
-                            )
-                        except Exception as single_exc:
-                            single_data_inspection = _is_data_inspection_error(single_exc)
-                            single_transient = _is_transient_vlm_error(single_exc)
-                            if not (single_data_inspection or single_transient):
-                                raise
-                            if single_data_inspection:
-                                image_warning = (
-                                    f"图片 {record['image_id']} {record['filename']} 被VLM内容安全检查拦截，"
-                                    "已跳过该图继续流程。"
-                                )
-                                single_status = "data_inspection_failed"
-                            else:
-                                image_warning = (
-                                    f"图片 {record['image_id']} {record['filename']} VLM连接异常，"
-                                    "已跳过该图继续流程。"
-                                )
-                                single_status = "transient_connection_failed"
-                            logger.warning(f"[Step6] {image_warning} error={single_exc}")
-                            analysis_warnings.append(image_warning)
-                            sheet_payloads.append({
-                                **fallback_sheet,
-                                "analysis": {"images": []},
-                                "reviews": [],
-                                "status": single_status,
-                                "error": str(single_exc),
-                            })
-                            continue
-                        all_reviews.extend(single_reviews)
-                        sheet_payloads.append({
-                            **fallback_sheet,
-                            "analysis": single_analysis,
-                            "reviews": single_reviews,
-                            "fallback_from_sheet_page": sheet["sheet_page"],
-                        })
-                    continue
-
-                all_reviews.extend(reviews)
-                sheet_payloads.append({
-                    **sheet,
-                    "analysis": sheet_analysis,
-                    "reviews": reviews,
-                    "mode": "contact_sheet_fallback",
-                })
+            raise RuntimeError(warning) from exc
 
         if not all_reviews:
             warning = "VLM 未返回任何真实图片分析结果，不能使用保守兜底继续流程，请重跑图片分析。"
@@ -1848,7 +1720,7 @@ async def run_image_analysis(product_id: int) -> dict:
 
         _write_image_analysis_files(
             material_dir,
-            analysis_contact_sheets,
+            analysis_image_batches,
             all_reviews,
             gallery_selection,
             selection_diagnostics,
@@ -1857,7 +1729,7 @@ async def run_image_analysis(product_id: int) -> dict:
 
         # 保存到数据库
         pi.image_analysis = json.dumps({
-            "contact_sheets": analysis_contact_sheets,
+            "image_batches": analysis_image_batches,
             "sheet_payloads": sheet_payloads,
             "images": all_reviews,
             "gallery_selection": gallery_selection,
@@ -1869,7 +1741,7 @@ async def run_image_analysis(product_id: int) -> dict:
         pi.category_style = f"multi_sheet:{strategy.get('name')}"
         pi.main_image_summary = (
             f"分析 {len(all_reviews)}/{len(image_records)} 张图片，"
-            f"{'URL直传' if direct_error is None else 'Contact Sheet兜底'} {len(analysis_contact_sheets)} 组，"
+            f"URL直传 {len(analysis_image_batches)} 组，"
             f"生成 {len(gallery_selection)} 张图片分析建议，不覆盖人工确认的图片顺序。"
             + f" 图片健康等级: {selection_diagnostics.get('image_health', {}).get('label', '未知')}。"
             + (
@@ -1893,11 +1765,11 @@ async def run_image_analysis(product_id: int) -> dict:
         await db.commit()
 
         logger.info(
-            f"[Step6] 图片分析完成: {len(all_reviews)}/{len(image_records)} 张图, groups={len(analysis_contact_sheets)}, "
+            f"[Step6] 图片分析完成: {len(all_reviews)}/{len(image_records)} 张图, groups={len(analysis_image_batches)}, "
             f"主图={main_image_path}, 副图={len(gallery_paths)} 张"
         )
         return {
-            "contact_sheets": analysis_contact_sheets,
+            "image_batches": analysis_image_batches,
             "sheet_payloads": sheet_payloads,
             "images": all_reviews,
             "gallery_selection": gallery_selection,

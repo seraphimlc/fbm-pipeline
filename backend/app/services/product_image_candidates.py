@@ -26,7 +26,7 @@ def normalize_image_path(item: Any) -> str:
     if isinstance(item, str):
         return item.strip()
     if isinstance(item, dict):
-        return str(item.get("path") or item.get("local_path") or item.get("image_url") or "").strip()
+        return str(item.get("image_url") or item.get("path") or item.get("local_path") or "").strip()
     return ""
 
 
@@ -83,15 +83,16 @@ def _candidate_rank(candidate: dict[str, Any]) -> tuple[int, int, int, str]:
         tier = 4
     else:
         tier = 5
-    local_bonus = 0 if candidate.get("local_path") else 1
-    return tier, local_bonus, sort_value, normalize_image_path(candidate)
+    url_bonus = 0 if candidate.get("image_url") else 1
+    return tier, url_bonus, sort_value, normalize_image_path(candidate)
 
 
 def _dedupe_key(candidate: dict[str, Any]) -> str:
-    path = _text(candidate.get("local_path") or candidate.get("path"))
-    if path:
-        return f"path:{path}"
-    return f"url:{_text(candidate.get('image_url'))}"
+    image_url = _text(candidate.get("image_url"))
+    if image_url:
+        return f"url:{image_url}"
+    path = _text(candidate.get("path") or candidate.get("local_path"))
+    return f"path:{path}"
 
 
 def _add_candidate(candidates: list[dict[str, Any]], seen: dict[str, dict[str, Any]], candidate: dict[str, Any]) -> None:
@@ -100,7 +101,7 @@ def _add_candidate(candidates: list[dict[str, Any]], seen: dict[str, dict[str, A
     if not path and not image_url:
         return
     candidate = {
-        "path": path or image_url,
+        "path": image_url or path,
         "image_url": image_url or None,
         "local_path": _text(candidate.get("local_path")) or None,
         "image_type": _classify_candidate_type(candidate.get("image_type"), candidate.get("sku_code"), candidate.get("representative_sku")),
@@ -170,7 +171,7 @@ async def collect_product_image_candidates(db: AsyncSession, product: Product) -
         )
         for row in result.scalars().all():
             _add_candidate(candidates, seen, {
-                "path": row.local_path or row.image_url,
+                "path": row.image_url or row.local_path,
                 "image_url": row.image_url,
                 "local_path": row.local_path,
                 "image_type": row.image_type or "unknown",
@@ -210,7 +211,7 @@ async def collect_product_image_candidates(db: AsyncSession, product: Product) -
             sku_code = item.get("sku_code")
             raw_type = item.get("image_type") or item.get("source") or ("main" if index == 1 else "gallery")
             _add_candidate(candidates, seen, {
-                "path": item.get("path") or item.get("local_path") or item.get("image_url"),
+                "path": item.get("image_url") or item.get("path") or item.get("local_path"),
                 "image_url": item.get("image_url"),
                 "local_path": item.get("local_path"),
                 "image_type": raw_type,

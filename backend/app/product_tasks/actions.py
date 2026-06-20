@@ -95,6 +95,12 @@ def _payload_for_run(run: TaskRun) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _selected_listing_image_ref(item: dict[str, Any] | None) -> str:
+    if not isinstance(item, dict):
+        return ""
+    return str(item.get("image_url") or item.get("path") or item.get("local_path") or "").strip()
+
+
 def _legacy_dedupe_key(task_type: str, product_id: int) -> str | None:
     if task_type == "product_auto_image_selection":
         return f"product_auto_image_selection:product:{product_id}"
@@ -504,7 +510,7 @@ class ProductAutoImageSelectionAction:
             raise RuntimeError(message)
         selected_main = selection.get("selected_main") if isinstance(selection.get("selected_main"), dict) else None
         selected_gallery = selection.get("selected_gallery") if isinstance(selection.get("selected_gallery"), list) else []
-        main_path = str((selected_main or {}).get("path") or (selected_main or {}).get("image_url") or "").strip()
+        main_path = _selected_listing_image_ref(selected_main)
         if not main_path:
             message = "自动选图结果缺少主图"
             await _project_auto_image_selection_failed(db, product_id=product_id, message=message)
@@ -521,7 +527,7 @@ class ProductAutoImageSelectionAction:
         for item in selected_gallery[:8]:
             if not isinstance(item, dict):
                 continue
-            path = str(item.get("path") or item.get("image_url") or "").strip()
+            path = _selected_listing_image_ref(item)
             if path and path != main_path and path not in gallery_paths:
                 gallery_paths.append(path)
         gallery_order = [

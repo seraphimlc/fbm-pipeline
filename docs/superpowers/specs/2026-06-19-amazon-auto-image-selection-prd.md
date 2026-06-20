@@ -137,11 +137,11 @@ async def run_auto_image_selection(product_id: int) -> dict:
 
 分析方式：
 
-- 优先 URL 直传 VLM。
-- URL 直传失败后按需下载并生成 Contact Sheet。
-- Contact Sheet 批大小由模型网关限制决定，不强制恢复历史 9 张。
-- 可以复用当前 `step6_image.py` 的图片读取、Contact Sheet、VLM 调用、结果规范化能力，但要拆出不依赖 `main_image_path` 的候选分析入口。
-- 最终选出最多 9 张 Listing 图片，而不是要求每张 Contact Sheet 必须 9 张。
+- 默认使用图片 URL direct image input 调 VLM。
+- 候选同时有 URL 和本地路径时，自动选图必须优先传 URL；本地文件只允许用于没有 URL 的历史/人工素材候选。
+- URL 直传失败后不下载候选图、不生成 Contact Sheet、不做拼接兜底；任务失败到 `auto_select_images/failed`，等待重试或人工纠偏。
+- 可以复用当前 `step6_image.py` 的图片 URL 批处理、VLM 调用、结果规范化能力，但要拆出不依赖 `main_image_path` 的候选分析入口。
+- 最终选出最多 9 张 Listing 图片，不再以 Contact Sheet 页为选择单位。
 
 模型必须判断：
 
@@ -184,7 +184,7 @@ async def run_auto_image_selection(product_id: int) -> dict:
   ],
   "confidence": "high|medium|low",
   "warnings": [],
-  "contact_sheets": [],
+  "image_batches": [],
   "model": ""
 }
 ```
@@ -439,7 +439,7 @@ git diff --check
 - `backend/app/services/product_image_candidates.py`
   - 商品图片候选收集服务，合并 GIGA 表、detail/snapshot 和已有 `gallery_order`，负责优先级和去重。
 - `backend/app/services/product_image_vlm.py`
-  - 商品图片 VLM 底层能力：URL 直传、远程图片下载、Contact Sheet 生成、VLM 调用、JSON 清洗和可重试错误判断。该层不承载“自动选图”或“图片分析”的业务语义。
+  - 商品图片 VLM 底层能力：URL 直传、VLM 调用、JSON 清洗和可重试错误判断。底层保留的历史下载/Contact Sheet helper 不属于自动选图或 Step6 当前主路径。
 - `backend/app/product_tasks/auto_image_selection.py`
   - VLM 自动选图服务。只返回结构化选择结果，不写商品事实。
 - `backend/app/product_tasks/actions.py`
@@ -510,7 +510,7 @@ product_images.image_selected_at DATETIME NULL
   "rejected": [],
   "confidence": "high|medium",
   "warnings": [],
-  "contact_sheets": [],
+  "image_batches": [],
   "model": "",
   "candidate_count": 0,
   "analyzed_count": 0
@@ -548,19 +548,21 @@ batch_id, site, item_code, representative_sku, is_representative_sku, download_s
 
 去重策略：
 
-- 优先以 `local_path/path` 去重。
-- 没有本地路径时以 `image_url` 去重。
+- 优先以 `image_url` 去重。
+- 没有 URL 时才以 `path/local_path` 去重。
 - 被合并来源保留到 `merged_sources`，不丢事实。
 
 不可用候选处理：
 
 - 本地文件不存在会被跳过并记录 warning。
-- URL 候选先直传 VLM；直传失败后尝试下载并生成 Contact Sheet。
+- URL 候选直接传 VLM；直传失败后不下载、不拼接，任务失败到 `auto_select_images/failed`。
 - 全部候选不可用则失败到 `auto_select_images/failed`。
 
-### 18.5 VLM 和 Contact Sheet 边界
+### 18.5 VLM 和本地图片边界
 
-- 自动选图服务和旧 `step6_image.py` 共同复用 `backend/app/services/product_image_vlm.py` 的 URL 直传、远程下载、Contact Sheet 生成和 VLM 调用能力。
+- 自动选图服务和旧 `step6_image.py` 当前主路径共同复用 `backend/app/services/product_image_vlm.py` 的 URL 直传和 VLM 调用能力。
+- 当前主路径不做 Contact Sheet fallback；直传失败必须显式失败，不允许静默下载、拼图后继续。
+- 本地文件只用于没有可用 URL 的历史/人工素材；不能在已有 URL 的候选上优先写入或传递本地路径。
 - 自动选图使用独立 prompt 和输出结构。
 - 旧图片分析继续使用自己的 `VLM_SYSTEM_PROMPT` 和图片分析输出结构；自动选图使用 `AUTO_IMAGE_SELECTION_SYSTEM_PROMPT` 和选图输出结构。
 - 服务不要求 `product_images.main_image_path` 已存在。

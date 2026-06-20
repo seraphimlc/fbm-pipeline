@@ -2314,6 +2314,7 @@ def test_auto_image_selection_phase_a_contract() -> None:
     schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
     models_text = (ROOT / "backend" / "app" / "models" / "models.py").read_text(encoding="utf-8")
     database_text = (ROOT / "backend" / "app" / "database.py").read_text(encoding="utf-8")
+    product_detail_text = (ROOT / "frontend" / "src" / "pages" / "ProductDetail.tsx").read_text(encoding="utf-8")
 
     assert_true(
         "WORKFLOW_NODE_AUTO_SELECT_IMAGES" in status_text
@@ -2361,9 +2362,41 @@ def test_auto_image_selection_phase_a_contract() -> None:
         "from app.pipeline.step6_image" not in service_text
         and "from app.services.product_image_vlm import" in service_text
         and "from app.services.product_image_vlm import" in step6_text
-        and "def build_contact_sheets" in vlm_service_text
         and "def analyze_image_url_batch" in vlm_service_text,
-        "自动选图和旧图片分析必须共享 product_image_vlm 底层能力，不能让新逻辑反向依赖 step6_image 私有实现",
+        "自动选图和旧图片分析必须共享 product_image_vlm 的 direct image URL 底层能力，不能让新逻辑反向依赖 step6_image 私有实现",
+    )
+    for forbidden in (
+        "analyze_contact_sheet",
+        "build_contact_sheets",
+        "download_image_records",
+        "Contact Sheet",
+        "contact_sheets",
+    ):
+        assert_true(forbidden not in service_text, f"自动选图默认路径不得保留下载/Contact Sheet 兜底: {forbidden}")
+    assert_true(
+        "image_batches" in service_text
+        and "build_image_url_batches(records)" in service_text
+        and "AutoImageSelectionError(f\"自动选图 direct image URL VLM 失败" in service_text,
+        "自动选图必须只走 direct image URL 批量分析，失败后显式失败等待重试/人工纠偏",
+    )
+    step6_run_section = step6_text.split("async def run_image_analysis", 1)[1]
+    assert_true(
+        "_analyze_image_url_batch" in step6_run_section
+        and "_download_image_records" not in step6_run_section
+        and "_build_contact_sheets" not in step6_run_section
+        and "_analyze_contact_sheet" not in step6_run_section
+        and '"image_batches": analysis_image_batches' in step6_run_section
+        and "pi.contact_sheet_path = None" in step6_run_section
+        and "未下载图片或切换 Contact Sheet 兜底" in step6_run_section
+        and "contact_sheet_fallback" not in step6_run_section,
+        "Step6 图片分析不得在 URL 直传失败后下载图片或切换 Contact Sheet 兜底，新结果必须写 image_batches 并清空旧 contact_sheet_path",
+    )
+    assert_true(
+        "const imageAnalysisBatches = imageAnalysisPayload?.image_batches || legacyContactSheets" in product_detail_text
+        and "isVirtualImageBatch" in product_detail_text
+        and "Contact Sheet 与分析" not in product_detail_text
+        and "未生成 Contact Sheet 分析" not in product_detail_text,
+        "商品详情必须消费 Step6 image_batches，不能把 direct URL 批次当 Contact Sheet 图片展示",
     )
 
 
@@ -2437,11 +2470,11 @@ async def main():
     )
     candidates = await collect_product_image_candidates(FakeDb(), product)
     paths = [item["path"] for item in candidates]
-    assert paths[0] == "/tmp/main.jpg", candidates
+    assert paths[0] == "https://img.test/main.jpg", candidates
     assert candidates[0]["image_type"] == "main", candidates
     assert candidates[0]["is_representative_sku"] is True, candidates
     assert any(item["image_type"] == "variant_main" for item in candidates), candidates
-    assert paths.count("/tmp/main.jpg") == 1, candidates
+    assert paths.count("https://img.test/main.jpg") == 1, candidates
     assert "https://img.test/brand.jpg" == paths[-1], candidates
     assert {"path", "image_url", "image_type", "source", "asset_source", "sku_code", "sort_order"}.issubset(candidates[0]), candidates
 
@@ -2620,17 +2653,18 @@ async def main():
             "product_id": product.id,
             "item_code": "ITEM",
             "auto_image_selection": {
-                "selected_main": {"path": "main.jpg", "image_id": "#01", "score": 0.95, "reason": "clean", "risk_flags": []},
-                "selected_gallery": [{"path": "gallery.jpg", "image_id": "#02", "role": "alternate_angle", "score": 0.8, "reason": "angle", "risk_flags": []}],
+                "selected_main": {"path": "/tmp/main.jpg", "image_url": "https://img.test/main.jpg", "image_id": "#01", "score": 0.95, "reason": "clean", "risk_flags": []},
+                "selected_gallery": [{"path": "/tmp/gallery.jpg", "image_url": "https://img.test/gallery.jpg", "image_id": "#02", "role": "alternate_angle", "score": 0.8, "reason": "angle", "risk_flags": []}],
                 "rejected": [],
                 "confidence": "high",
                 "warnings": [],
-                "contact_sheets": [],
+                "image_batches": [],
                 "model": "test-model",
             },
         }
         await action.on_step_success(db, step, result)
-        assert product.images.main_image_path == "main.jpg"
+        assert product.images.main_image_path == "https://img.test/main.jpg"
+        assert product.images.gallery_images == '["https://img.test/gallery.jpg"]'
         assert product.images.main_image_source == "model_selected"
         assert product.images.image_selection_analysis
         assert product.images.image_selected_at is not None

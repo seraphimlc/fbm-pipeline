@@ -376,18 +376,24 @@ const ProductDetail: React.FC = () => {
   const listingImageAlignment = imageSelectionDiagnostics?.listing_image_alignment || {};
   const missingImageEvidence = listingImageAlignment?.missing_evidence || [];
   const supportedImageClaims = listingImageAlignment?.supported_claims || [];
-  const contactSheets = imageAnalysisPayload?.contact_sheets || (
+  const legacyContactSheets = imageAnalysisPayload?.contact_sheets || (
     images?.contact_sheet_path ? [{ sheet_page: 1, sheet_path: images.contact_sheet_path, image_ids: imageReviews.map((item) => item.image_id || `#${item.index}`) }] : []
   );
-  const contactSheetDisplayUrl = (sheet: any) => (
-    sheet?.display_url
-    || sheet?.oss_url
-    || sheet?.url
-    || imgUrl(sheet?.sheet_path)
+  const imageAnalysisBatches = imageAnalysisPayload?.image_batches || legacyContactSheets;
+  const isVirtualImageBatch = (batch: any) => String(batch?.sheet_path || '').startsWith('url_batch:');
+  const analysisBatchDisplayUrl = (batch: any) => (
+    isVirtualImageBatch(batch)
+      ? ''
+      : (
+        batch?.display_url
+        || batch?.oss_url
+        || batch?.url
+        || imgUrl(batch?.sheet_path)
+      )
   );
-  const reviewsBySheet = contactSheets.map((sheet) => ({
-    ...sheet,
-    reviews: imageReviews.filter((review) => review?.contact_sheet_evidence?.sheet_path === sheet.sheet_path || sheet.image_ids?.includes(review.image_id)),
+  const reviewsByImageBatch = imageAnalysisBatches.map((batch) => ({
+    ...batch,
+    reviews: imageReviews.filter((review) => review?.contact_sheet_evidence?.sheet_path === batch.sheet_path || batch.image_ids?.includes(review.image_id)),
   }));
   const galleryImagePaths = parseJson(images?.gallery_images, []);
   const galleryOrderPaths = parseJson((images as any)?.gallery_order, []);
@@ -558,12 +564,12 @@ const ProductDetail: React.FC = () => {
         meta: typeof item === 'string' ? 'gallery image' : (item?.role || item?.label || 'gallery image'),
       };
     }),
-    ...contactSheets.map((sheet, index) => sheet?.sheet_path && {
-      key: `contact-sheet-${index}-${sheet.sheet_path}`,
+    ...legacyContactSheets.map((sheet, index) => sheet?.sheet_path && !isVirtualImageBatch(sheet) && {
+      key: `analysis-sheet-${index}-${sheet.sheet_path}`,
       kind: '分析图',
-      label: `Contact Sheet ${sheet.sheet_page || index + 1}`,
+      label: `分析图 ${sheet.sheet_page || index + 1}`,
       path: sheet.sheet_path,
-      url: contactSheetDisplayUrl(sheet),
+      url: analysisBatchDisplayUrl(sheet),
       oss_url: sheet.oss_url,
       localPath: sheet.sheet_path,
       previewable: true,
@@ -1101,7 +1107,7 @@ const ProductDetail: React.FC = () => {
   const hasImageAnalysis = Boolean(
     images?.image_analysis
     || images?.image_selling_points
-    || contactSheets.length
+    || imageAnalysisBatches.length
     || product.current_step > 5
     || isReadyToExport
   );
@@ -2018,21 +2024,23 @@ const ProductDetail: React.FC = () => {
               </Space>
             </Spin>
           </Card>
-          <Card title="Contact Sheet 与分析" size="small" style={{ marginTop: 12 }}>
-            {reviewsBySheet.length ? (
+          <Card title="图片分析批次" size="small" style={{ marginTop: 12 }}>
+            {reviewsByImageBatch.length ? (
               <Space direction="vertical" style={{ width: '100%' }} size={16}>
-                {reviewsBySheet.map((sheet) => (
+                {reviewsByImageBatch.map((batch) => (
                   <Card
-                    key={sheet.sheet_path}
+                    key={batch.sheet_path}
                     size="small"
-                    title={`Contact Sheet ${sheet.sheet_page || ''}`}
-                    extra={<Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(sheet.sheet_path)}>打开</Button>}
+                    title={`分析批次 ${batch.sheet_page || ''}`}
+                    extra={!isVirtualImageBatch(batch) ? <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(batch.sheet_path)}>打开</Button> : null}
                   >
-                    <Image src={contactSheetDisplayUrl(sheet)} width={360} alt={`Contact Sheet ${sheet.sheet_page || ''}`} style={{ marginBottom: 12 }} />
+                    {!isVirtualImageBatch(batch) && analysisBatchDisplayUrl(batch) ? (
+                      <Image src={analysisBatchDisplayUrl(batch)} width={360} alt={`分析图 ${batch.sheet_page || ''}`} style={{ marginBottom: 12 }} />
+                    ) : null}
                     <Table
                       size="small"
                       rowKey={(record) => record.image_id || record.filename}
-                      dataSource={sheet.reviews || []}
+                      dataSource={batch.reviews || []}
                       pagination={false}
                       columns={[
                         { title: '编号', dataIndex: 'image_id', width: 70, render: (v, r) => v || r.index || '-' },
@@ -2047,7 +2055,7 @@ const ProductDetail: React.FC = () => {
                   </Card>
                 ))}
               </Space>
-            ) : <Text type="secondary">（未生成 Contact Sheet 分析）</Text>}
+            ) : <Text type="secondary">（暂无图片分析批次）</Text>}
           </Card>
         </div>
       ),

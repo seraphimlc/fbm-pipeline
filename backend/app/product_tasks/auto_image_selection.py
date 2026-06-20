@@ -15,11 +15,8 @@ from app.database import async_session
 from app.models import Product
 from app.services.product_image_candidates import collect_product_image_candidates, normalize_image_path
 from app.services.product_image_vlm import (
-    analyze_contact_sheet,
     analyze_image_url_batch,
-    build_contact_sheets,
     build_image_url_batches,
-    download_image_records,
     is_remote_url,
 )
 
@@ -127,7 +124,7 @@ def _candidate_prompt_lines(records: list[dict[str, Any]]) -> str:
     for record in records:
         candidate = record["candidate"]
         lines.append(
-            f"{record['image_id']} path={candidate.get('path') or ''} "
+            f"{record['image_id']} image_url={candidate.get('image_url') or ''} path={candidate.get('path') or ''} "
             f"type={candidate.get('image_type') or ''} source={candidate.get('source') or ''} "
             f"asset_source={candidate.get('asset_source') or ''} sku={candidate.get('sku_code') or ''} "
             f"sort_order={candidate.get('sort_order') or ''}"
@@ -172,7 +169,7 @@ def _entry_for_selection(item: dict[str, Any], records_by_id: dict[str, dict[str
         return None
     candidate = record["candidate"]
     return {
-        "path": candidate.get("path") or record["path"],
+        "path": candidate.get("image_url") or candidate.get("path") or record["path"],
         "image_url": candidate.get("image_url"),
         "image_id": record["image_id"],
         "score": _score(item.get("score")),
@@ -218,7 +215,7 @@ def _normalize_batch_result(raw: dict[str, Any], batch_records: list[dict[str, A
     }
 
 
-def _merge_batch_results(batch_results: list[dict[str, Any]], contact_sheets: list[dict[str, Any]], warnings: list[str], model: str) -> dict[str, Any]:
+def _merge_batch_results(batch_results: list[dict[str, Any]], image_batches: list[dict[str, Any]], warnings: list[str], model: str) -> dict[str, Any]:
     main_candidates = [item["selected_main"] for item in batch_results if item.get("selected_main")]
     if not main_candidates:
         raise AutoImageSelectionError("VLM 未返回可用主图")
@@ -259,7 +256,7 @@ def _merge_batch_results(batch_results: list[dict[str, Any]], contact_sheets: li
         "rejected": rejected,
         "confidence": confidence,
         "warnings": [*warnings, *[warning for result in batch_results for warning in result.get("warnings") or []]],
-        "contact_sheets": contact_sheets,
+        "image_batches": image_batches,
         "model": model,
     }
 
@@ -287,11 +284,6 @@ async def _run_with_db(db: AsyncSession, product_id: int) -> dict[str, Any]:
         raise AutoImageSelectionError("候选图片均不可访问")
 
     data = product.data
-    material_dir = Path(data.material_dir or settings.PRODUCT_BASE_DIR / "PRODUCT" / str(product.id)).expanduser() if data else settings.PRODUCT_BASE_DIR / "PRODUCT" / str(product.id)
-    material_dir.mkdir(parents=True, exist_ok=True)
-    selection_dir = material_dir / "auto image selection"
-    selection_dir.mkdir(parents=True, exist_ok=True)
-
     model = settings.VLM_MODEL
     client = settings.get_image_analysis_client()
     prompt = AUTO_IMAGE_SELECTION_PROMPT.format(
@@ -302,11 +294,11 @@ async def _run_with_db(db: AsyncSession, product_id: int) -> dict[str, Any]:
         candidates=_candidate_prompt_lines(records),
     )
 
-    contact_sheets: list[dict[str, Any]] = []
+    image_batches: list[dict[str, Any]] = []
     batch_results: list[dict[str, Any]] = []
     try:
         batches = build_image_url_batches(records)
-        contact_sheets = list(batches)
+        image_batches = list(batches)
         for batch in batches:
             batch_records = [record for record in records if record["image_id"] in set(batch["image_ids"])]
             raw, _reviews = await analyze_image_url_batch(
@@ -319,27 +311,11 @@ async def _run_with_db(db: AsyncSession, product_id: int) -> dict[str, Any]:
                 log_prefix="AutoImageSelection",
             )
             batch_results.append(_normalize_batch_result(raw, batch_records))
-    except Exception as direct_error:
-        logger.warning("自动选图 URL 直传失败，切换 Contact Sheet: product_id=%s error=%s", product_id, direct_error)
-        downloaded_records = await download_image_records(records, selection_dir)
-        if not downloaded_records:
-            raise AutoImageSelectionError(f"候选图片无法访问: {direct_error}") from direct_error
-        contact_sheets = build_contact_sheets(downloaded_records, selection_dir / "contact_sheets", f"product_{product_id}_auto_selection")
-        batch_results = []
-        for sheet in contact_sheets:
-            batch_records = [record for record in downloaded_records if record["image_id"] in set(sheet["image_ids"])]
-            raw, _reviews = await analyze_contact_sheet(
-                client,
-                model,
-                sheet,
-                batch_records,
-                prompt,
-                system_prompt=AUTO_IMAGE_SELECTION_SYSTEM_PROMPT,
-                log_prefix="AutoImageSelection",
-            )
-            batch_results.append(_normalize_batch_result(raw, batch_records))
+    except Exception as exc:
+        logger.warning("自动选图 direct image URL VLM 失败: product_id=%s error=%s", product_id, exc)
+        raise AutoImageSelectionError(f"自动选图 direct image URL VLM 失败: {type(exc).__name__}: {exc}") from exc
 
-    result = _merge_batch_results(batch_results, contact_sheets, warnings, model)
+    result = _merge_batch_results(batch_results, image_batches, warnings, model)
     result["candidate_count"] = len(candidates)
     result["analyzed_count"] = len(records)
     return result
