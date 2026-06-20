@@ -92,7 +92,7 @@ async def create_product_bulk_advance_run(
             rows.append({**base_row, "status": "skipped", "reason": "商品流程正在运行中"})
             continue
         if (product.current_step or 0) < 5:
-            rows.append({**base_row, "status": "skipped", "reason": "尚未完成图片确认、竞品选择和竞品详情抓取，不能批量进入生成"})
+            rows.append({**base_row, "status": "skipped", "reason": "尚未完成图片确认和竞品选择，不能批量进入生成"})
             continue
         prerequisite_error = await _prerequisite_error(product.id, start_step)
         if prerequisite_error:

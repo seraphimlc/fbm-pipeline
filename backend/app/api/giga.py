@@ -42,7 +42,7 @@ from app.services.giga_inventory_sync import (
 from app.services.giga_openapi import GigaOpenApiError, GigaSyncOptions, sync_giga_products
 from app.services.giga_price_sync import GigaPriceSyncOptions, sync_giga_price_snapshot
 from app.services.giga_sync_tasks import enqueue_giga_sync
-from app.services.stylesnap_product_tasks import upsert_product_drafts_from_giga_batch
+from app.services.giga_product_drafts import upsert_product_drafts_from_giga_batch
 
 
 router = APIRouter(prefix="/api/giga", tags=["giga"])

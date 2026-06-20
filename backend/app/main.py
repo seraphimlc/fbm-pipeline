@@ -15,7 +15,6 @@ from app.api.data_sources import router as data_sources_router
 from app.api.giga import router as giga_router
 from app.api.tiktok import router as tiktok_router
 from app.api.task_runs import router as task_runs_router
-from app.api.amazon_stylesnap import router as amazon_stylesnap_router
 from app.api.offline_tasks import router as offline_tasks_router
 from app.config import settings
 from app.pipeline.engine import cancel_all_pipelines, recover_interrupted_pipelines
@@ -130,7 +129,6 @@ app.include_router(data_sources_router)
 app.include_router(giga_router)
 app.include_router(tiktok_router)
 app.include_router(task_runs_router)
-app.include_router(amazon_stylesnap_router)
 app.include_router(offline_tasks_router)
 
 

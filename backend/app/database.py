@@ -34,7 +34,6 @@ async def init_db():
         await _ensure_mysql_product_workflow_columns(conn)
         await _ensure_mysql_product_image_selection_columns(conn)
         await _ensure_mysql_catalog_export_columns(conn)
-        await _ensure_mysql_stylesnap_candidate_columns(conn)
         await _ensure_mysql_task_run_action_columns(conn)
         await _ensure_mysql_longtext_columns(conn)
         await _ensure_mysql_giga_relation_columns(conn)
@@ -114,14 +113,6 @@ async def _ensure_mysql_product_data_source_columns(conn) -> None:
         UPDATE `product_data_sources`
         SET `sales_channel` = COALESCE(`sales_channel`, 'amazon')
     """))
-
-
-async def _ensure_mysql_stylesnap_candidate_columns(conn) -> None:
-    for column_name, column_type in (
-        ("title", "LONGTEXT NULL"),
-    ):
-        if not await _mysql_column_exists(conn, "amazon_stylesnap_candidates", column_name):
-            await conn.execute(text(f"ALTER TABLE `amazon_stylesnap_candidates` ADD COLUMN `{column_name}` {column_type}"))
 
 
 async def _ensure_mysql_task_run_action_columns(conn) -> None:
@@ -207,6 +198,11 @@ async def _ensure_mysql_hot_path_indexes(conn) -> None:
         ("task_steps", "ix_task_steps_ready_claim", ("status", "locked_until", "sort_order", "id")),
         ("task_step_events", "ix_task_step_events_run_created", ("task_run_id", "created_at", "id")),
         ("task_step_events", "ix_task_step_events_step_created", ("task_step_id", "created_at", "id")),
+        ("amazon_competitor_search_candidates", "ix_amz_comp_search_product_rank", ("product_id", "search_rank", "id")),
+        ("amazon_competitor_search_candidates", "ix_amz_comp_search_product_query", ("product_id", "search_query")),
+        ("amazon_competitor_search_candidates", "ix_amz_comp_search_product_excluded", ("product_id", "is_excluded", "id")),
+        ("amazon_competitor_search_candidates", "ix_amz_comp_search_asin", ("asin",)),
+        ("amazon_competitor_search_candidates", "ix_amz_comp_search_task_run", ("task_run_id", "id")),
     )
     for table_name, index_name, columns in indexes:
         if await _mysql_index_exists(conn, table_name, index_name):

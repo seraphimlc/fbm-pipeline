@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { Table, Button, Tag, Space, Typography, message, Popconfirm, Input, Modal, DatePicker, Image, Select, Tooltip } from 'antd';
-import { ReloadOutlined, PlayCircleOutlined, RedoOutlined, DeleteOutlined, CloudDownloadOutlined, PauseOutlined } from '@ant-design/icons';
+import { EditOutlined, ReloadOutlined, PlayCircleOutlined, RedoOutlined, DeleteOutlined, CloudDownloadOutlined, PauseOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import {
   createGigaPullTaskRuns,
@@ -16,6 +16,8 @@ import {
   listProducts,
   pausePipeline,
   restartPipeline,
+  retryProductAutoImageSelection,
+  retryProductCompetitorSearch,
   resumePipeline,
   retryStep,
   STEP_LABELS,
@@ -37,6 +39,7 @@ const RUNNING_STATUSES = [
 ];
 
 type WorkStatus =
+  | 'auto_select_images'
   | 'select_images'
   | 'competitor_searching'
   | 'select_competitor'
@@ -62,6 +65,7 @@ type SkuState = {
 };
 
 const WORK_STATUS_META: Record<WorkStatus, { label: string; shortLabel: string; color: string; action: string }> = {
+  auto_select_images: { label: '自动选图中', shortLabel: '自动选图', color: 'processing', action: '任务中心' },
   select_images: { label: '待确认商品图片', shortLabel: '确认图片', color: 'cyan', action: '去确认图片' },
   competitor_searching: { label: '搜索候选竞品中', shortLabel: '搜索中', color: 'processing', action: '等待搜索' },
   select_competitor: { label: '待搜索/选择竞品', shortLabel: '选竞品', color: 'purple', action: '去选竞品' },
@@ -78,6 +82,7 @@ const WORK_STATUS_META: Record<WorkStatus, { label: string; shortLabel: string; 
 
 const WORK_STATUS_FILTERS: Array<'all' | WorkStatus> = [
   'all',
+  'auto_select_images',
   'select_images',
   'select_competitor',
   'competitor_searching',
@@ -93,6 +98,7 @@ const WORK_STATUS_FILTERS: Array<'all' | WorkStatus> = [
 ];
 
 const PRIMARY_WORK_STATUS: WorkStatus[] = [
+  'auto_select_images',
   'select_images',
   'select_competitor',
   'ready_to_generate',
@@ -240,7 +246,6 @@ const ProductList: React.FC = () => {
   const productWorkStatus = (product: Product): WorkStatus => {
     const workflowStatus = product.workflow?.work_status;
     if (workflowStatus && WORK_STATUS_FILTERS.includes(workflowStatus as WorkStatus)) return workflowStatus as WorkStatus;
-    if (product.status === 'failed' && /同款搜索|StyleSnap|候选竞品|参考竞品|选择竞品/i.test(product.error_message || '')) return 'select_competitor';
     if (product.status === 'failed') return 'failed';
     if (product.status === 'paused') return 'suspended';
     if (product.status === 'competitor_searching') return 'competitor_searching';
@@ -296,6 +301,32 @@ const ProductList: React.FC = () => {
 
   const openReviewPage = (path: string, productId?: number) => {
     window.open(reviewPath(path, productId), '_blank', 'noopener,noreferrer');
+  };
+
+  const retryAutoImageSelection = async (productId: number) => {
+    setRerunningId(productId);
+    try {
+      await retryProductAutoImageSelection(productId);
+      await refreshWorkbenchRows();
+      message.success('已创建或复用自动选图任务');
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '重试自动选图失败');
+    } finally {
+      setRerunningId(null);
+    }
+  };
+
+  const retryCompetitorSearch = async (productId: number) => {
+    setRerunningId(productId);
+    try {
+      await retryProductCompetitorSearch(productId);
+      await refreshWorkbenchRows();
+      message.success('已创建或复用自动竞品搜索任务');
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '启动自动竞品搜索失败');
+    } finally {
+      setRerunningId(null);
+    }
   };
 
   const handleWorkStatusClick = (value: 'all' | WorkStatus) => {
@@ -705,13 +736,39 @@ const ProductList: React.FC = () => {
       if (workflowAction === 'open_image_review') {
         return <Button size="small" type="primary" onClick={() => openReviewPage('/products/image-review', product.id)}>{label}</Button>;
       }
-      if (workflowAction === 'open_competitor_review') {
-        return <Button size="small" type="primary" onClick={() => openReviewPage('/products/competitor-review', product.id)}>{label}</Button>;
-      }
       if (workflowAction === 'open_task_center') {
         const correlationKey = product.workflow?.related_correlation_key;
         const target = correlationKey ? `/task-runs?correlation_key=${encodeURIComponent(correlationKey)}` : '/task-runs';
         return <Button size="small" onClick={() => navigate(target)}>{label}</Button>;
+      }
+      if (workflowAction === 'retry_auto_image_selection') {
+        return (
+          <Button
+            size="small"
+            type="primary"
+            icon={<RedoOutlined />}
+            loading={rerunningId === product.id}
+            onClick={() => retryAutoImageSelection(product.id)}
+          >
+            {label}
+          </Button>
+        );
+      }
+      if (workflowAction === 'start_competitor_search' || workflowAction === 'retry_competitor_search') {
+        return (
+          <Button
+            size="small"
+            type="primary"
+            icon={<RedoOutlined />}
+            loading={rerunningId === product.id}
+            onClick={() => retryCompetitorSearch(product.id)}
+          >
+            {label}
+          </Button>
+        );
+      }
+      if (workflowAction === 'manual_adjust_images') {
+        return <Button size="small" onClick={() => openReviewPage('/products/image-review', product.id)}>{label}</Button>;
       }
       if (workflowAction === 'open_export_center') {
         return <Button size="small" type="primary" onClick={() => navigate('/export-center')}>{label}</Button>;
@@ -747,8 +804,8 @@ const ProductList: React.FC = () => {
     }
     if (row.workStatus === 'select_competitor') {
       return (
-        <Button size="small" type="primary" onClick={() => openReviewPage('/products/competitor-review', product.id)}>
-          选竞品
+        <Button size="small" type="primary" onClick={() => openProductDetail(product.id)}>
+          查看
         </Button>
       );
     }
@@ -846,7 +903,7 @@ const ProductList: React.FC = () => {
     },
     {
       title: '操作',
-      width: 280,
+      width: 340,
       fixed: 'right' as const,
       render: (_: unknown, row: ProductRow) => {
         const product = row.product;
@@ -862,10 +919,18 @@ const ProductList: React.FC = () => {
             || (row.workStatus === 'suspended' && product.status !== 'paused')
           );
         const primaryIsDetail = !isTikTokSource && product.workflow?.primary_action === 'open_detail';
+        const canManualAdjustImages = hasWorkflow
+          && workflowAllowedActions.includes('manual_adjust_images')
+          && product.workflow?.primary_action !== 'manual_adjust_images';
         const primaryAction = renderPrimaryRowAction(row);
         return (
           <Space size="small">
             {primaryAction}
+            {canManualAdjustImages ? (
+              <Button size="small" icon={<EditOutlined />} onClick={() => openReviewPage('/products/image-review', product.id)}>
+                手动调图
+              </Button>
+            ) : null}
             {!primaryIsDetail ? <Button size="small" onClick={() => openProductDetail(product.id)}>详情</Button> : null}
             {canSuspendProduct ? (
               <Popconfirm
@@ -955,7 +1020,7 @@ const ProductList: React.FC = () => {
           {!isTikTokSource && (
             <>
               <Button onClick={() => openReviewPage('/products/image-review')}>图片确认</Button>
-              <Button onClick={() => openReviewPage('/products/competitor-review')}>选竞品</Button>
+              <Button onClick={() => navigate('/task-runs')}>任务中心</Button>
               <Button onClick={() => navigate('/export-center')}>导出中心</Button>
             </>
           )}

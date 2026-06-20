@@ -13,7 +13,7 @@ from app.services.giga_openapi import (
     resolve_giga_data_source_context,
     sync_giga_products,
 )
-from app.services.stylesnap_product_tasks import upsert_product_drafts_from_giga_batch
+from app.services.giga_product_drafts import upsert_product_drafts_from_giga_batch
 
 logger = logging.getLogger(__name__)
 

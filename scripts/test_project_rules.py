@@ -121,8 +121,8 @@ from app.models.status import AMAZON_WORKFLOW_NODES, AMAZON_WORKFLOW_STATUSES
 assert AMAZON_WORKFLOW_NODES == (
     "auto_select_images",
     "select_images",
-    "get_stylesnap_token",
     "search_competitor",
+    "visual_match_competitors",
     "select_competitor",
     "capture_competitor_detail",
     "image_analysis",
@@ -232,7 +232,9 @@ from app.models.status import (
     WORKFLOW_NODE_IMAGE_ANALYSIS,
     WORKFLOW_NODE_LISTING_GENERATION,
     WORKFLOW_NODE_SEARCH_COMPETITOR,
+    WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS,
     WORKFLOW_STATUS_FAILED,
+    WORKFLOW_STATUS_PENDING,
     WORKFLOW_STATUS_PROCESSING,
     WORKFLOW_STATUS_SUCCEEDED,
 )
@@ -248,15 +250,27 @@ assert product.workflow_node == WORKFLOW_NODE_SEARCH_COMPETITOR
 assert product.workflow_status == WORKFLOW_STATUS_PROCESSING
 assert product.workflow_error is None
 assert product.workflow_updated_at == now
+legacy_searching = build_product_workflow(product)
+assert legacy_searching["primary_action"] == "open_detail", legacy_searching
+assert legacy_searching["related_correlation_key"] is None, legacy_searching
+product.error_message = "自动竞品搜索已加入任务中心队列"
 searching = build_product_workflow(product)
 assert searching["stage"] == WORKFLOW_NODE_SEARCH_COMPETITOR, searching
 assert searching["work_status"] == "competitor_searching", searching
 assert searching["node_key"] == WORKFLOW_NODE_SEARCH_COMPETITOR, searching
-assert searching["node_type"] == "semi_sync", searching
+assert searching["node_type"] == "async", searching
+assert searching["primary_action"] == "open_task_center", searching
+assert searching["related_correlation_key"] == "product:123:competitor_search", searching
+
+set_product_workflow(product, node=WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS, status=WORKFLOW_STATUS_PENDING, now=now)
+visual_pending = build_product_workflow(product)
+assert visual_pending["stage"] == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS, visual_pending
+assert visual_pending["work_status"] == "select_competitor", visual_pending
+assert visual_pending["primary_action"] == "open_detail", visual_pending
+assert "等待后续视觉初筛任务" in visual_pending["action_reason"], visual_pending
 
 for node, action in [
     (WORKFLOW_NODE_AUTO_SELECT_IMAGES, "retry_auto_image_selection"),
-    (WORKFLOW_NODE_SEARCH_COMPETITOR, "retry_competitor_search"),
     (WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL, "retry_competitor_capture"),
     (WORKFLOW_NODE_IMAGE_ANALYSIS, "retry_image_analysis"),
     (WORKFLOW_NODE_LISTING_GENERATION, "retry_listing_generation"),
@@ -266,6 +280,28 @@ for node, action in [
     assert view["primary_action"] == action, view
     assert action in view["allowed_actions"], view
     assert view["action_reason"] == "boom", view
+
+legacy_failed_search = SimpleNamespace(
+    id=457,
+    workflow_node=WORKFLOW_NODE_SEARCH_COMPETITOR,
+    workflow_status=WORKFLOW_STATUS_FAILED,
+    workflow_error="旧竞品搜索失败",
+    error_message="旧竞品搜索失败",
+)
+legacy_failed_view = build_product_workflow(legacy_failed_search)
+assert legacy_failed_view["primary_action"] == "open_detail", legacy_failed_view
+assert "retry_competitor_search" not in legacy_failed_view["allowed_actions"], legacy_failed_view
+
+auto_failed_search = SimpleNamespace(
+    id=458,
+    workflow_node=WORKFLOW_NODE_SEARCH_COMPETITOR,
+    workflow_status=WORKFLOW_STATUS_FAILED,
+    workflow_error="自动竞品搜索失败: captcha",
+    error_message="自动竞品搜索失败: captcha",
+)
+auto_failed_view = build_product_workflow(auto_failed_search)
+assert auto_failed_view["primary_action"] == "retry_competitor_search", auto_failed_view
+assert "retry_competitor_search" in auto_failed_view["allowed_actions"], auto_failed_view
 
 done = SimpleNamespace(id=789, workflow_node=WORKFLOW_NODE_FLOW_DONE, workflow_status=WORKFLOW_STATUS_SUCCEEDED, workflow_error=None)
 done_view = build_product_workflow(done)
@@ -333,7 +369,7 @@ def test_product_overview_handles_uninitialized_workflow_bucket() -> None:
 
 def test_amazon_workflow_t3_image_selection_reset_and_initialization_rules() -> None:
     products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
-    stylesnap_tasks_text = (ROOT / "backend" / "app" / "services" / "stylesnap_product_tasks.py").read_text(encoding="utf-8")
+    giga_product_drafts_text = (ROOT / "backend" / "app" / "services" / "giga_product_drafts.py").read_text(encoding="utf-8")
     product_flow_index = (ROOT / "docs" / "domain-index" / "product-flow.md").read_text(encoding="utf-8")
     listing_images_section = products_api_text.split('@router.put("/{product_id}/listing-images"', 1)[1].split('@router.delete("/{product_id}"', 1)[0]
 
@@ -358,8 +394,8 @@ def test_amazon_workflow_t3_image_selection_reset_and_initialization_rules() -> 
     )
     assert_true(
         "_initialize_product_image_workflow(product, now=now)" in products_api_text
-        and "set_product_workflow(" in stylesnap_tasks_text
-        and "WORKFLOW_NODE_SELECT_IMAGES" in stylesnap_tasks_text,
+        and "set_product_workflow(" in giga_product_drafts_text
+        and "WORKFLOW_NODE_SELECT_IMAGES" in giga_product_drafts_text,
         "手动创建、Excel 导入和 GIGA draft 新建路径必须初始化 select_images/pending",
     )
     assert_true(
@@ -383,129 +419,114 @@ class FakeDb:
         self.added.append(item)
 
 async def main():
-    original_delete_competitor_records = products._delete_product_competitor_records
-    calls = []
-    async def fake_delete_competitor_records(db, product):
-        calls.append(product.id)
-    products._delete_product_competitor_records = fake_delete_competitor_records
-    try:
-        product = Product(
-            id=321,
-            gigab2b_url="https://www.gigab2b.com/product-detail/I321",
-            gigab2b_product_id="I321",
-            status="completed",
-            current_step=6,
-            error_message="old listing done",
-            competitor_asin="B0OLD",
-            upc="123456789012",
-            brand="Vindhvisk",
-            aplus_upload_status="submitted",
-            aplus_uploaded_at=datetime(2026, 6, 1),
-            aplus_upload_error="old",
-        )
-        product.data = ProductData(
-            product_id=321,
-            item_code="I321",
-            title="Source title",
-            material="Wood",
-            gigab2b_raw_snapshot=json.dumps({
-                "batch_id": "b1",
-                "site": "US",
-                "representative_sku": "S1",
-                "selected_stylesnap": {"asin": "B0OLD"},
-                "amazon_listing_capture": {"title": "old"},
-                "stylesnap_search": {"status": "done"},
-                "giga_listing_images": [{"path": "/img/source.jpg"}],
-            }),
-            material_dir="/tmp/materials/I321",
-            listing_title="Old Listing",
-            listing_bullets="[]",
-            listing_search_terms="old",
-            categories='["Old"]',
-            leaf_category="Old Leaf",
-            amazon_template_path="/tmp/export/old.xlsx",
-            amazon_template_fill_summary='{"old": true}',
-            amazon_template_generated_at=datetime(2026, 6, 2),
-        )
-        product.images = ProductImage(
-            product_id=321,
-            main_image_path="/old/main.jpg",
-            gallery_images='["/old/1.jpg"]',
-            gallery_order='["/source/1.jpg"]',
-            contact_sheet_path="/old/contact.jpg",
-            image_analysis='{"old": true}',
-            image_selling_points='["old"]',
-            category_style="old",
-            main_image_summary="old summary",
-            analyzed_at=datetime(2026, 6, 3),
-        )
-        product.aplus = ProductAplus(
-            product_id=321,
-            aplus_plan='{"old": true}',
-            aplus_scripts='[]',
-            aplus_images='[]',
-            aplus_status="generated",
-        )
-        product.files = [ProductFile(product_id=321, file_type="amazon_template", label="Old export", path="/tmp/export/old.xlsx")]
-        product.catalog_item = CatalogProduct(
-            source_product_id=321,
-            gigab2b_url=product.gigab2b_url,
-            gigab2b_product_id=product.gigab2b_product_id,
-            competitor_asin="B0OLD",
-            status="completed",
-            confirmed_at=datetime(2026, 6, 4),
-            exported_at=datetime(2026, 6, 5),
-            export_task_id=99,
-            export_file_path="/tmp/export/old.xlsx",
-        )
+    product = Product(
+        id=321,
+        gigab2b_url="https://www.gigab2b.com/product-detail/I321",
+        gigab2b_product_id="I321",
+        status="completed",
+        current_step=6,
+        error_message="old listing done",
+        competitor_asin="B0OLD",
+        upc="123456789012",
+        brand="Vindhvisk",
+        aplus_upload_status="not_uploaded",
+        aplus_uploaded_at=None,
+        aplus_upload_error=None,
+    )
+    product.data = ProductData(
+        product_id=321,
+        item_code="I321",
+        title="Source title",
+        material="Wood",
+        gigab2b_raw_snapshot=json.dumps({
+            "batch_id": "b1",
+            "site": "US",
+            "representative_sku": "S1",
+            "giga_listing_images": [{"path": "/img/source.jpg"}],
+        }),
+        material_dir="/tmp/materials/I321",
+        listing_title="Old Listing",
+        listing_bullets="[]",
+        listing_search_terms="old",
+        categories='["Old"]',
+        leaf_category="Old Leaf",
+        amazon_template_path=None,
+        amazon_template_fill_summary=None,
+        amazon_template_generated_at=None,
+    )
+    product.images = ProductImage(
+        product_id=321,
+        main_image_path="/old/main.jpg",
+        gallery_images='["/old/1.jpg"]',
+        gallery_order='["/source/1.jpg"]',
+        contact_sheet_path="/old/contact.jpg",
+        image_analysis='{"old": true}',
+        image_selling_points='["old"]',
+        category_style="old",
+        main_image_summary="old summary",
+        analyzed_at=datetime(2026, 6, 3),
+    )
+    product.aplus = ProductAplus(
+        product_id=321,
+        aplus_plan='{"old": true}',
+        aplus_scripts='[]',
+        aplus_images='[]',
+        aplus_status="generated",
+    )
+    product.files = [ProductFile(product_id=321, file_type="listing_output", label="Old export", path="/tmp/export/old.xlsx")]
+    product.catalog_item = CatalogProduct(
+        source_product_id=321,
+        gigab2b_url=product.gigab2b_url,
+        gigab2b_product_id=product.gigab2b_product_id,
+        competitor_asin="B0OLD",
+        status="completed",
+        confirmed_at=None,
+        exported_at=None,
+        export_task_id=None,
+        export_file_path=None,
+    )
 
-        now = datetime(2026, 6, 18, 10, 0, 0)
-        await products._reset_product_after_image_selection(
-            FakeDb(),
-            product,
-            main_image_path="/new/main.jpg",
-            gallery_paths=["/new/main.jpg", "/new/2.jpg"],
-            now=now,
-        )
+    now = datetime(2026, 6, 18, 10, 0, 0)
+    await products._reset_product_after_image_selection(
+        FakeDb(),
+        product,
+        main_image_path="/new/main.jpg",
+        gallery_paths=["/new/main.jpg", "/new/2.jpg"],
+        now=now,
+    )
 
-        assert calls == [321], calls
-        assert product.workflow_node == WORKFLOW_NODE_SEARCH_COMPETITOR
-        assert product.workflow_status == WORKFLOW_STATUS_PENDING
-        assert product.workflow_error is None
-        assert product.competitor_asin is None
-        assert product.status == "created"
-        assert product.current_step == 1
-        assert product.error_message is None
-        assert product.images.main_image_path == "/new/main.jpg"
-        assert json.loads(product.images.gallery_images) == ["/new/main.jpg", "/new/2.jpg"]
-        assert product.images.image_analysis is None
-        assert product.images.contact_sheet_path is None
-        assert product.images.gallery_order == '["/source/1.jpg"]'
-        snapshot = json.loads(product.data.gigab2b_raw_snapshot)
-        assert "selected_stylesnap" not in snapshot
-        assert "amazon_listing_capture" not in snapshot
-        assert "stylesnap_search" not in snapshot
-        assert snapshot["giga_listing_images"] == [{"path": "/img/source.jpg"}]
-        assert product.data.title == "Source title"
-        assert product.data.material == "Wood"
-        assert product.data.material_dir == "/tmp/materials/I321"
-        assert product.data.listing_title is None
-        assert product.data.listing_bullets is None
-        assert product.data.leaf_category is None
-        assert product.data.amazon_template_path == "/tmp/export/old.xlsx"
-        assert product.data.amazon_template_fill_summary == '{"old": true}'
-        assert product.upc == "123456789012"
-        assert product.brand == "Vindhvisk"
-        assert len(product.files) == 1 and product.files[0].path == "/tmp/export/old.xlsx"
-        assert product.catalog_item.competitor_asin is None
-        assert product.catalog_item.confirmed_at is None
-        assert product.catalog_item.exported_at == datetime(2026, 6, 5)
-        assert product.catalog_item.export_task_id == 99
-        assert product.catalog_item.export_file_path == "/tmp/export/old.xlsx"
-        assert product.aplus.aplus_plan is None
-        assert product.aplus.aplus_status is None
-    finally:
-        products._delete_product_competitor_records = original_delete_competitor_records
+    assert product.workflow_node == WORKFLOW_NODE_SEARCH_COMPETITOR
+    assert product.workflow_status == WORKFLOW_STATUS_PENDING
+    assert product.workflow_error is None
+    assert product.competitor_asin is None
+    assert product.status == "created"
+    assert product.current_step == 1
+    assert product.error_message is None
+    assert product.images.main_image_path == "/new/main.jpg"
+    assert json.loads(product.images.gallery_images) == ["/new/main.jpg", "/new/2.jpg"]
+    assert product.images.image_analysis is None
+    assert product.images.contact_sheet_path is None
+    assert product.images.gallery_order == '["/source/1.jpg"]'
+    snapshot = json.loads(product.data.gigab2b_raw_snapshot)
+    assert snapshot["giga_listing_images"] == [{"path": "/img/source.jpg"}]
+    assert product.data.title == "Source title"
+    assert product.data.material == "Wood"
+    assert product.data.material_dir == "/tmp/materials/I321"
+    assert product.data.listing_title is None
+    assert product.data.listing_bullets is None
+    assert product.data.leaf_category is None
+    assert product.data.amazon_template_path is None
+    assert product.data.amazon_template_fill_summary is None
+    assert product.upc == "123456789012"
+    assert product.brand == "Vindhvisk"
+    assert len(product.files) == 1 and product.files[0].path == "/tmp/export/old.xlsx"
+    assert product.catalog_item.competitor_asin is None
+    assert product.catalog_item.confirmed_at is None
+    assert product.catalog_item.exported_at is None
+    assert product.catalog_item.export_task_id is None
+    assert product.catalog_item.export_file_path is None
+    assert product.aplus.aplus_plan is None
+    assert product.aplus.aplus_status is None
 
 asyncio.run(main())
 '''
@@ -519,350 +540,63 @@ asyncio.run(main())
 
 
 def test_amazon_workflow_t4_competitor_search_rules() -> None:
-    amazon_stylesnap_text = (ROOT / "backend" / "app" / "api" / "amazon_stylesnap.py").read_text(encoding="utf-8")
+    main_text = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
     products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
     schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
+    frontend_app_text = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
     frontend_api_text = (ROOT / "frontend" / "src" / "api" / "index.ts").read_text(encoding="utf-8")
-    competitor_review_text = (ROOT / "frontend" / "src" / "pages" / "ProductCompetitorReview.tsx").read_text(encoding="utf-8")
+    product_list_text = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
+    product_detail_text = (ROOT / "frontend" / "src" / "pages" / "ProductDetail.tsx").read_text(encoding="utf-8")
     product_flow_index = (ROOT / "docs" / "domain-index" / "product-flow.md").read_text(encoding="utf-8")
-    search_endpoint_section = amazon_stylesnap_text.split('@router.post("/products/{product_id}/competitor-candidates/search"', 1)[1].split('@router.post("/products/{product_id}/competitor-candidates/{candidate_id}/select"', 1)[0]
-    background_section = amazon_stylesnap_text.split("async def _run_product_competitor_search_background", 1)[1].split("async def _queue_listing_capture", 1)[0]
-    queue_section = products_api_text.split('@router.get("/competitor-review-queue"', 1)[1].split('@router.get("/competitor-review-detail/{product_id}"', 1)[0]
-    detail_section = products_api_text.split('@router.get("/competitor-review-detail/{product_id}"', 1)[1].split('@router.post("/bulk/start"', 1)[0]
-
+    style_retirement_line = next((line for line in product_flow_index.splitlines() if line.startswith("- 旧 StyleSnap")), "")
+    models_text = (ROOT / "backend" / "app" / "models" / "models.py").read_text(encoding="utf-8")
+    database_text = (ROOT / "backend" / "app" / "database.py").read_text(encoding="utf-8")
+    step10_text = (ROOT / "backend" / "app" / "pipeline" / "step10_amazon_template.py").read_text(encoding="utf-8")
+    export_writer_text = (ROOT / "backend" / "app" / "pipeline" / "amazon_export" / "writer.py").read_text(encoding="utf-8")
+    retired_files = [
+        ROOT / "backend" / "app" / "api" / "amazon_stylesnap.py",
+        ROOT / "backend" / "app" / "services" / "amazon_stylesnap_search.py",
+        ROOT / "backend" / "app" / "services" / "amazon_listing_capture.py",
+        ROOT / "frontend" / "src" / "pages" / "ProductCompetitorReview.tsx",
+    ]
+    assert_true(all(not path.exists() for path in retired_files), "旧 StyleSnap API/service 和前端竞品确认页必须删除")
+    assert_true("amazon_stylesnap_router" not in main_text and "include_router(amazon_stylesnap" not in main_text, "后端不得注册旧 StyleSnap router")
+    assert_true("/amazon-stylesnap" not in frontend_app_text and "ProductCompetitorReview" not in frontend_app_text, "前端不得保留旧 StyleSnap 路由/页面 import")
+    assert_true('path="/products/competitor-review" element={<Navigate to="/products" replace />}' in frontend_app_text, "旧竞品确认页 URL 必须重定向到商品列表")
+    assert_true('"/competitor-review-queue"' not in products_api_text and '"/competitor-review-detail/{product_id}"' not in products_api_text, "products API 不得继续暴露旧竞品确认队列/detail")
+    assert_true("ProductCompetitorReview" not in schemas_text, "schemas 不得继续定义旧竞品确认页响应模型")
+    assert_true("/amazon-stylesnap" not in frontend_api_text and "AmazonStyleSnapCandidate" not in frontend_api_text, "前端 API client 不得保留旧 StyleSnap 候选方法")
+    assert_true("open_competitor_review" not in product_list_text and "searchCompetitorCandidates" not in product_detail_text, "商品列表/详情不得保留旧竞品确认或旧搜索入口")
     assert_true(
-        "set_product_workflow" in amazon_stylesnap_text
-        and "WORKFLOW_NODE_SEARCH_COMPETITOR" in amazon_stylesnap_text
-        and "WORKFLOW_NODE_SELECT_COMPETITOR" in amazon_stylesnap_text
-        and "WORKFLOW_NODE_GET_STYLESNAP_TOKEN" in amazon_stylesnap_text,
-        "T4 搜索竞品入口和后台必须使用 workflow service 写 search/select/token 节点",
-    )
-    assert_true(
-        "WORKFLOW_STATUS_PROCESSING" in search_endpoint_section
-        and "background_tasks.add_task(_run_product_competitor_search_background, product.id)" in search_endpoint_section
-        and "TaskRun" not in amazon_stylesnap_text
-        and "task_runs" not in amazon_stylesnap_text,
-        "T4 搜索入口只能使用一次性 BackgroundTasks，不能写 task_runs 或进入任务中心",
-    )
-    existing_branch = search_endpoint_section.split("if existing and not force:", 1)[1].split("running_message", 1)[0]
-    assert_true(
-        "WORKFLOW_NODE_SELECT_COMPETITOR" in existing_branch
-        and "WORKFLOW_STATUS_PENDING" in existing_branch
-        and "background_tasks.add_task" not in existing_branch,
-        "已有候选且 force=false 时必须直接进入 select_competitor/pending，不能重新启动后台搜索",
-    )
-    assert_true(
-        "WORKFLOW_NODE_SELECT_COMPETITOR" in background_section
-        and "WORKFLOW_NODE_SEARCH_COMPETITOR" in background_section
-        and "WORKFLOW_NODE_GET_STYLESNAP_TOKEN" in background_section
-        and "WORKFLOW_STATUS_FAILED" in background_section,
-        "后台搜索必须覆盖成功、普通失败和 token/browser 失败三类 workflow 落点",
-    )
-    assert_true(
-        "_competitor_review_workflow_sql_condition()" in queue_section
-        and "_competitor_search_failed_sql_condition()" not in queue_section
-        and "Product.workflow_node" in queue_section
-        and "Product.workflow_status" in queue_section
-        and "Product.workflow_error" in queue_section
-        and "Product.workflow_updated_at" in queue_section
-        and '"workflow": workflow' in queue_section
-        and '"workflow": workflow' in detail_section,
-        "竞品队列/详情必须优先读取 workflow 字段，不能继续用 error_message 正则作为主状态来源",
+        "AmazonStyleSnapCandidate" not in models_text
+        and "AmazonListingCapture" not in models_text
+        and "amazon_stylesnap_candidates" not in database_text
+        and "selected_stylesnap" not in products_api_text
+        and "amazon_listing_capture" not in products_api_text
+        and "stylesnap_search" not in products_api_text
+        and "selected_stylesnap" not in product_detail_text
+        and "amazon_listing_capture" not in product_detail_text
+        and "stylesnap_search" not in product_detail_text
+        and "selected_stylesnap" not in step10_text
+        and "amazon_listing_capture" not in step10_text
+        and "stylesnap_summary" not in export_writer_text,
+        "旧 StyleSnap 历史兼容代码也必须退役：模型、startup、商品 API、详情页和 Step10/export 都不得继续读取旧表或旧 snapshot key",
     )
     assert_true(
-        "workflow: ProductWorkflowState | None = None" in schemas_text
-        and "workflow?: ProductWorkflowState | null;" in frontend_api_text
-        and "status === 'failed' && /同款搜索|StyleSnap" not in competitor_review_text
-        and "workflowNodeStatus" in competitor_review_text
-        and "isStylesnapTokenPending" in competitor_review_text,
-        "选竞品页面只能做 workflow 字段读取和轻量显示判断，不能继续靠 error_message 正则判断主状态",
+        "api/amazon_stylesnap.py" not in product_flow_index
+        and "ProductCompetitorReview.tsx" not in product_flow_index
+        and "历史" not in style_retirement_line,
+        "product-flow index 必须同步 StyleSnap 全量退役口径",
     )
-    assert_true(
-        "Amazon workflow T4" in product_flow_index
-        and "get_stylesnap_token/pending" in product_flow_index
-        and "select_competitor/pending" in product_flow_index,
-        "T4 改变搜索竞品 workflow 后必须同步 product-flow domain index",
-    )
-
-    code = r'''
-import json
-from datetime import datetime
-from types import SimpleNamespace
-from app.api import amazon_stylesnap
-from app.models.status import (
-    WORKFLOW_NODE_GET_STYLESNAP_TOKEN,
-    WORKFLOW_NODE_SEARCH_COMPETITOR,
-    WORKFLOW_STATUS_FAILED,
-)
-
-token_node, token_reason = amazon_stylesnap._classify_stylesnap_search_error(RuntimeError("StyleSnap token not found"))
-assert token_node == WORKFLOW_NODE_GET_STYLESNAP_TOKEN
-assert "StyleSnap token not found" in token_reason
-chrome_node, _ = amazon_stylesnap._classify_stylesnap_search_error("Chrome 导航到 Amazon StyleSnap 失败")
-assert chrome_node == WORKFLOW_NODE_GET_STYLESNAP_TOKEN
-ordinary_node, ordinary_reason = amazon_stylesnap._classify_stylesnap_search_error("StyleSnap 未返回候选竞品")
-assert ordinary_node == WORKFLOW_NODE_SEARCH_COMPETITOR
-assert "未返回候选" in ordinary_reason
-
-catalog = SimpleNamespace(status="completed", updated_at=None)
-product = SimpleNamespace(
-    id=7,
-    status="created",
-    current_step=1,
-    error_message=None,
-    workflow_node=None,
-    workflow_status=None,
-    workflow_error=None,
-    workflow_updated_at=None,
-    updated_at=None,
-    catalog_item=catalog,
-    data=SimpleNamespace(gigab2b_raw_snapshot=None),
-)
-now = datetime(2026, 6, 18, 14, 0, 0)
-amazon_stylesnap._set_competitor_search_workflow(
-    product,
-    node=WORKFLOW_NODE_SEARCH_COMPETITOR,
-    status=WORKFLOW_STATUS_FAILED,
-    workflow_error="普通失败",
-    legacy_status="failed",
-    legacy_current_step=2,
-    legacy_error_message="普通失败",
-    now=now,
-)
-assert product.workflow_node == WORKFLOW_NODE_SEARCH_COMPETITOR
-assert product.workflow_status == WORKFLOW_STATUS_FAILED
-assert product.workflow_error == "普通失败"
-assert product.status == "failed"
-assert product.current_step == 2
-assert catalog.status == "failed"
-amazon_stylesnap._write_stylesnap_search_snapshot(
-    product,
-    {"batch_id": "b1", "site": "US"},
-    representative_sku="S1",
-    stylesnap_search={"status": "failed", "error": "普通失败"},
-)
-snapshot = json.loads(product.data.gigab2b_raw_snapshot)
-assert snapshot["representative_sku"] == "S1"
-assert snapshot["stylesnap_search"]["status"] == "failed"
-'''
-    result = subprocess.run(
-        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
-        cwd=ROOT / "backend",
-        text=True,
-        capture_output=True,
-    )
-    assert_true(result.returncode == 0, f"Amazon workflow T4 搜索竞品 helper 行为验证失败: {result.stderr or result.stdout}")
-
+    return
 
 def test_amazon_workflow_t5_competitor_capture_rules() -> None:
-    amazon_stylesnap_text = (ROOT / "backend" / "app" / "api" / "amazon_stylesnap.py").read_text(encoding="utf-8")
-    product_flow_index = (ROOT / "docs" / "domain-index" / "product-flow.md").read_text(encoding="utf-8")
-    select_section = amazon_stylesnap_text.split('@router.post("/products/{product_id}/competitor-candidates/{candidate_id}/select"', 1)[1].split('@router.post("/products/{product_id}/competitor-candidates/capture-missing"', 1)[0]
-    capture_missing_section = amazon_stylesnap_text.split('@router.post("/products/{product_id}/competitor-candidates/capture-missing"', 1)[1].split('@router.post("/products/{product_id}/competitor-candidates/{candidate_id}/capture"', 1)[0]
-    retry_capture_section = amazon_stylesnap_text.split('@router.post("/products/{product_id}/competitor-candidates/{candidate_id}/capture"', 1)[1]
-    background_section = amazon_stylesnap_text.split("async def _capture_and_sync_product_competitor_background", 1)[1].split('@router.get("/products/{product_id}/competitor-candidates"', 1)[0]
-    reset_section = amazon_stylesnap_text.split("def _clear_current_competitor_derived_outputs", 1)[1].split("def _product_competitor_query_values", 1)[0]
-
     assert_true(
-        "WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL" in amazon_stylesnap_text
-        and "WORKFLOW_NODE_IMAGE_ANALYSIS" in amazon_stylesnap_text
-        and "set_product_workflow" in amazon_stylesnap_text
-        and "_start_image_analysis_after_capture" in amazon_stylesnap_text,
-        "T5 选择竞品与抓详情必须使用 workflow service，并接入图片分析执行态",
+        not (ROOT / "backend" / "app" / "api" / "amazon_stylesnap.py").exists()
+        and not (ROOT / "backend" / "app" / "services" / "amazon_listing_capture.py").exists(),
+        "旧 StyleSnap 选择竞品/抓详情入口已退役，不得继续保留 T5 运行路径",
     )
-    assert_true(
-        "_ensure_select_competitor_workflow_allowed(product)" in select_section
-        and "_raise_if_protected_competitor_change(product)" in select_section
-        and "_clear_current_competitor_derived_outputs(product)" in select_section
-        and "WORKFLOW_STATUS_PROCESSING" in select_section
-        and "background_tasks.add_task(" in select_section
-        and "_capture_and_sync_product_competitor_background" in select_section,
-        "选择/换竞品入口必须先做 workflow/protected gate，写 capture_competitor_detail/processing，并只用 BackgroundTasks 抓详情",
-    )
-    assert_true(
-        "COMPETITOR_DOWNSTREAM_RESELECT_WORKFLOWS" in amazon_stylesnap_text
-        and "if current in COMPETITOR_DOWNSTREAM_RESELECT_WORKFLOWS:" in amazon_stylesnap_text
-        and "_raise_if_protected_competitor_change(product)" in amazon_stylesnap_text.split("def _ensure_select_competitor_workflow_allowed", 1)[1].split("def _clear_current_competitor_derived_outputs", 1)[0],
-        "同 ASIN downstream 重新选择也必须先检查 protected evidence，不能只在 switching/force 时保护",
-    )
-    assert_true(
-        "WORKFLOW_STATUS_SUCCEEDED" in background_section
-        and "_start_image_analysis_after_capture(db, product.id)" in background_section
-        and "WORKFLOW_STATUS_FAILED" in background_section
-        and "except asyncio.CancelledError" in background_section,
-        "后台抓详情必须覆盖成功触发图片分析、普通失败和取消/中断 failed 三类落点",
-    )
-    assert_true(
-        "set_product_workflow" not in capture_missing_section
-        and "WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL" not in capture_missing_section,
-        "capture-missing 只能补候选信息，不能推进 product workflow",
-    )
-    assert_true(
-        "is_current_selected" in retry_capture_section
-        and "(WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL, WORKFLOW_STATUS_FAILED)" in retry_capture_section
-        and "_capture_and_sync_product_competitor_background" in retry_capture_section,
-        "单候选 capture 只有当前已选竞品的抓详情失败重试才能恢复主 workflow",
-    )
-    assert_true(
-        "amazon_template_path" not in reset_section
-        and "amazon_template_warnings" not in reset_section
-        and "amazon_template_fill_summary" not in reset_section
-        and "amazon_template_generated_at" not in reset_section
-        and "ProductFile" not in reset_section
-        and "delete(" not in reset_section,
-        "T5 destructive reset 只能清当前派生态，不得删除文件实体或清 Amazon 模板输出证据",
-    )
-    assert_true(
-        "Amazon workflow T5" in product_flow_index
-        and "capture_competitor_detail/processing" in product_flow_index
-        and "image_analysis/processing" in product_flow_index
-        and "不写 task run" in product_flow_index,
-        "T5 改变选择竞品/抓详情 workflow 后必须同步 product-flow domain index",
-    )
-
-    code = r'''
-from datetime import datetime
-from types import SimpleNamespace
-from fastapi import HTTPException
-from app.api import amazon_stylesnap
-from app.models.status import (
-    WORKFLOW_NODE_FLOW_DONE,
-    WORKFLOW_NODE_IMAGE_ANALYSIS,
-    WORKFLOW_NODE_LISTING_GENERATION,
-    WORKFLOW_STATUS_PROCESSING,
-    WORKFLOW_STATUS_SUCCEEDED,
-)
-
-def data_with_template(path=None):
-    return SimpleNamespace(
-        gigab2b_raw_snapshot='{"amazon_listing_capture": {"asin": "OLD"}, "selected_stylesnap": {"asin": "OLD"}}',
-        categories='["old"]',
-        leaf_category="Old",
-        listing_title="Old title",
-        listing_bullets="[]",
-        listing_search_terms="old",
-        listing_title_zh="旧标题",
-        listing_bullets_zh="[]",
-        listing_search_terms_zh="旧词",
-        listing_description="Old description",
-        listing_description_zh="旧描述",
-        listing_check="{}",
-        listing_primary_keyword="old",
-        listing_removed_keywords="[]",
-        amazon_template_path=path,
-        amazon_template_warnings='["keep"]' if path else None,
-        amazon_template_fill_summary='{"keep": true}' if path else None,
-        amazon_template_generated_at=datetime(2026, 6, 18) if path else None,
-    )
-
-catalog = SimpleNamespace(
-    amazon_asin=None,
-    asin_sync_status="not_synced",
-    confirmed_at=None,
-    exported_at=None,
-    export_task_id=None,
-    export_file_path=None,
-    aplus_uploaded_at=None,
-    aplus_upload_status="not_uploaded",
-    aplus_upload_error="old",
-)
-product = SimpleNamespace(
-    amazon_asin=None,
-    asin_sync_status="not_synced",
-    aplus_uploaded_at=None,
-    aplus_upload_status="failed",
-    aplus_upload_error="old",
-    data=data_with_template("/tmp/template.xlsx"),
-    images=SimpleNamespace(contact_sheet_path="/tmp/contact.jpg", image_analysis="{}", image_selling_points="[]", category_style="style", main_image_summary="summary", analyzed_at=datetime(2026, 6, 18)),
-    aplus=SimpleNamespace(aplus_plan="{}", aplus_plan_summary="summary", aplus_scripts="[]", aplus_scripts_summary="summary", aplus_images="[]", aplus_image_count=3, aplus_status="generated", planned_at=datetime(2026, 6, 18), scripted_at=datetime(2026, 6, 18), generated_at=datetime(2026, 6, 18)),
-    catalog_item=catalog,
-    workflow_node=WORKFLOW_NODE_FLOW_DONE,
-    workflow_status=WORKFLOW_STATUS_SUCCEEDED,
-)
-try:
-    amazon_stylesnap._raise_if_protected_competitor_change(product)
-except HTTPException as exc:
-    assert exc.status_code == 409
-    assert "Amazon 模板输出证据" in exc.detail
-else:
-    raise AssertionError("protected template evidence must block competitor switch")
-
-product.data = data_with_template("/tmp/template.xlsx")
-amazon_stylesnap._clear_current_competitor_derived_outputs(product)
-assert product.data.amazon_template_path == "/tmp/template.xlsx"
-assert product.data.amazon_template_fill_summary == '{"keep": true}'
-assert product.data.listing_title is None
-assert product.images.image_analysis is None
-assert product.aplus.aplus_images is None
-assert product.aplus_upload_status == "not_uploaded"
-assert catalog.aplus_upload_status == "not_uploaded"
-
-running_product = SimpleNamespace(
-    workflow_node=WORKFLOW_NODE_IMAGE_ANALYSIS,
-    workflow_status=WORKFLOW_STATUS_PROCESSING,
-    amazon_asin=None,
-    asin_sync_status="not_synced",
-    aplus_uploaded_at=None,
-    aplus_upload_status="not_uploaded",
-    catalog_item=None,
-    data=None,
-)
-try:
-    amazon_stylesnap._ensure_select_competitor_workflow_allowed(running_product)
-except HTTPException as exc:
-    assert exc.status_code == 409
-    assert "正在执行" in exc.detail
-else:
-    raise AssertionError("processing downstream workflow must block competitor switch")
-
-same_asin_downstream_product = SimpleNamespace(
-    competitor_asin="B0SAMEASIN",
-    amazon_asin=None,
-    asin_sync_status="not_synced",
-    aplus_uploaded_at=None,
-    aplus_upload_status="not_uploaded",
-    aplus_upload_error=None,
-    data=data_with_template("/tmp/protected-template.xlsx"),
-    images=None,
-    aplus=None,
-    catalog_item=SimpleNamespace(
-        amazon_asin=None,
-        asin_sync_status="not_synced",
-        confirmed_at=datetime(2026, 6, 18),
-        exported_at=datetime(2026, 6, 18),
-        export_task_id=88,
-        export_file_path="/tmp/export.zip",
-        aplus_uploaded_at=None,
-        aplus_upload_status="not_uploaded",
-        aplus_upload_error=None,
-    ),
-    workflow_node=WORKFLOW_NODE_LISTING_GENERATION,
-    workflow_status=WORKFLOW_STATUS_SUCCEEDED,
-    workflow_error=None,
-)
-before_workflow = (same_asin_downstream_product.workflow_node, same_asin_downstream_product.workflow_status)
-before_snapshot = same_asin_downstream_product.data.gigab2b_raw_snapshot
-try:
-    amazon_stylesnap._ensure_select_competitor_workflow_allowed(same_asin_downstream_product)
-except HTTPException as exc:
-    assert exc.status_code == 409
-    assert "不可逆外部结果" in exc.detail
-    assert "Amazon 模板输出证据" in exc.detail
-    assert "已人工确认" in exc.detail
-    assert "真实导出历史" in exc.detail
-else:
-    raise AssertionError("same-ASIN downstream reselection with protected evidence must be blocked before writes")
-assert (same_asin_downstream_product.workflow_node, same_asin_downstream_product.workflow_status) == before_workflow
-assert same_asin_downstream_product.data.gigab2b_raw_snapshot == before_snapshot
-'''
-    result = subprocess.run(
-        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
-        cwd=ROOT / "backend",
-        text=True,
-        capture_output=True,
-    )
-    assert_true(result.returncode == 0, f"Amazon workflow T5 选择竞品/抓详情 helper 行为验证失败: {result.stderr or result.stdout}")
-
+    return
 
 def test_product_detail_get_is_readonly_for_material_videos() -> None:
     products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
@@ -1281,7 +1015,7 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
         and "PRODUCT_BULK_ADVANCE_MAX_PRODUCTS = 1000" in product_bulk_planner_text
         and 'task_type="product_bulk_advance"' in product_bulk_planner_text
         and '"rows": rows' in product_bulk_planner_text
-        and "尚未完成图片确认、竞品选择和竞品详情抓取" in product_bulk_planner_text,
+        and "尚未完成图片确认和竞品选择" in product_bulk_planner_text,
         "批量推进必须走可审计任务中心 rows/report，不能直接把未就绪商品改成待导出",
     )
     assert_true(
@@ -1355,10 +1089,6 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
         and "gigaMainImagePathFromOrder" in product_detail_text
         and "galleryPaths.slice(-(DEFAULT_LISTING_IMAGE_LIMIT - 1))" in product_detail_text
         and "nextPaths.length >= DEFAULT_LISTING_IMAGE_LIMIT" in product_detail_text
-        and "isCompetitorSearchFailed &&" in product_detail_text
-        and "重新搜索候选" in product_detail_text
-        and "同款搜索|StyleSnap" in product_page_text
-        and "候选竞品搜索失败" in products_api_text
         and "大健详情页 Gallery" in product_detail_text
         and "其它 SKU 详情页 Gallery" in product_detail_text
         and "素材包/附件素材" in product_detail_text
@@ -1377,21 +1107,9 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
         and "待确认 ${queue.length} 个" not in image_review_text,
         "图片确认页统计必须使用同筛选条件的真实总数，不能把本次 limit 加载条数当待确认总数",
     )
-    stylesnap_text = (ROOT / "backend" / "app" / "services" / "amazon_stylesnap_search.py").read_text(encoding="utf-8")
     assert_true(
-        "chrome_get_page_info" in stylesnap_text
-        and "_ensure_stylesnap_upload_page" in stylesnap_text
-        and '"amazon.com/stylesnap" in url' in stylesnap_text
-        and "timeout=3" in stylesnap_text,
-        "StyleSnap 搜索在同一个 Chrome worker tab 中应优先复用已有页面/token，失效时再导航重新获取",
-    )
-    chrome_ctrl_text = (ROOT / "backend" / "app" / "pipeline" / "chrome_ctrl.py").read_text(encoding="utf-8")
-    assert_true(
-        "chrome_last_error" in chrome_ctrl_text
-        and "_chrome_js_permission_message" in stylesnap_text
-        and "允许 Apple 事件中的 JavaScript" in stylesnap_text
-        and "_chrome_js_disabled_error(chrome_last_error())" in stylesnap_text,
-        "StyleSnap 搜索必须区分 Chrome 导航失败和 Chrome 禁止 AppleScript JS；JS 权限关闭时要给用户准确操作提示",
+        not (ROOT / "backend" / "app" / "services" / "amazon_stylesnap_search.py").exists(),
+        "旧 StyleSnap Chrome 搜索 service 已退役，图片确认测试不得继续要求该 service 存在",
     )
 
 
@@ -1401,18 +1119,18 @@ def test_product_pipeline_recovers_interrupted_competitor_capture() -> None:
     assert_true(
         "recover_interrupted_pipelines" in engine_text
         and "_is_competitor_listing_capture_state(product)" in engine_text,
-        "商品 pipeline 启动恢复必须识别竞品详情抓取中的特殊状态，不能当作 Listing 生成续跑",
+        "商品 pipeline 启动恢复必须识别旧竞品详情抓取中的特殊状态，不能当作 Listing 生成续跑",
     )
     assert_true(
-        'product.error_message = "竞品详情抓取被中断，请重新抓详情"' in engine_text
+        'product.error_message = "旧竞品详情抓取入口已停用，请重新进入当前自动竞品搜索节点"' in engine_text
         and "product.status = FAILED" in engine_text
         and "product.current_step = 4" in engine_text,
-        "竞品详情抓取中断后必须落到可重试失败态，不能重启后继续显示后台抓取中",
+        "旧竞品详情抓取中断后必须落到失败态，不能重启后继续显示后台抓取中或提示恢复旧抓详情路径",
     )
     assert_true(
-        'capture.capture_status = "failed"' in engine_text
-        and "capture.capture_error = product.error_message" in engine_text,
-        "竞品详情抓取中断恢复必须同步 AmazonListingCapture 记录，前端才能显示重新抓详情入口",
+        "AmazonListingCapture" not in engine_text
+        and 'snapshot["stylesnap_search"]' not in engine_text,
+        "旧 StyleSnap 抓详情/搜索 runtime 已退役，pipeline 恢复不得再写旧抓详情表或 stylesnap_search",
     )
     assert_true(
         "start_pipeline(product_id, start_step=step)" in engine_text,
@@ -1424,236 +1142,81 @@ def test_competitor_review_queue_uses_workbench_status_scope() -> None:
     products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
     schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
     product_detail_text = (ROOT / "frontend" / "src" / "pages" / "ProductDetail.tsx").read_text(encoding="utf-8")
-    competitor_review_text = (ROOT / "frontend" / "src" / "pages" / "ProductCompetitorReview.tsx").read_text(encoding="utf-8")
     product_list_text = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
     frontend_api_text = (ROOT / "frontend" / "src" / "api" / "index.ts").read_text(encoding="utf-8")
-
     assert_true(
-        "COMPETITOR_REVIEW_ERROR_KEYWORDS" in products_api_text
-        and '"候选竞品"' in products_api_text
-        and '"参考竞品"' in products_api_text
-        and '"选择竞品"' in products_api_text,
-        "商品工作台和选竞品队列必须共享候选/参考/选择竞品失败关键词，避免数量不一致",
+        '"/competitor-review-queue"' not in products_api_text
+        and '"/competitor-review-detail/{product_id}"' not in products_api_text
+        and "ProductCompetitorReview" not in schemas_text
+        and not (ROOT / "frontend" / "src" / "pages" / "ProductCompetitorReview.tsx").exists(),
+        "旧竞品确认队列/detail API 和页面必须退役",
     )
     assert_true(
-        "def _competitor_review_workflow_sql_condition" in products_api_text
-        and "_competitor_review_workflow_sql_condition()" in products_api_text
-        and "_competitor_search_failed_sql_condition()" not in products_api_text.split('@router.get("/competitor-review-queue"', 1)[1].split('@router.get("/competitor-review-detail/{product_id}"', 1)[0],
-        "选竞品队列必须使用 workflow 字段筛选待搜索/搜索失败/token 待处理/待选竞品，不能继续用 error_message 正则作为主队列口径",
+        "searchCompetitorCandidates" not in product_detail_text
+        and "open_competitor_review" not in product_list_text
+        and "/amazon-stylesnap" not in frontend_api_text,
+        "商品工作台不能保留旧竞品确认页、旧候选搜索或 StyleSnap API client",
     )
-    assert_true(
-        "competitorGroupMatchesProductDetail" in product_detail_text
-        and "competitorSourceImageForDetail" in product_detail_text
-        and "group.source_image_path || group.source_image_url" in product_detail_text
-        and "stylesnapSearchSourceMatchesCurrent" in product_detail_text
-        and "waitForCompetitorCandidateGroup" in product_detail_text
-        and "正在等待当前主图的候选写入" in product_detail_text
-        and "competitorGroupMatchesDetail" in competitor_review_text
-        and "competitorSourceImageForDetail" in competitor_review_text
-        and "waitForCandidates" in competitor_review_text,
-        "详情页和选竞品页重新搜索后必须按当前主图 source image 等候候选写入，不能只按 product id 复用旧候选缓存",
-    )
-    assert_true(
-        "class ProductWorkflowState" in schemas_text
-        and "workflow: ProductWorkflowState | None = None" in schemas_text
-        and "def _workflow_state(" in products_api_text
-        and "A+ is intentionally excluded" in products_api_text
-        and '"workflow": workflow' in products_api_text
-        and "export interface ProductWorkflowState" in frontend_api_text
-        and "workflowStatusTag" in product_list_text
-        and "workflowAction = product.workflow?.primary_action" in product_list_text
-        and "if (product.workflow) return null" in product_list_text
-        and "workflowAllowedActions.includes('restart')" in product_list_text
-        and "workflowAllowedActions.includes('pause')" in product_list_text
-        and "系统状态" not in product_list_text
-        and "title: '系统状态'" not in product_list_text,
-        "商品列表主流程状态必须由后端 workflow 唯一提供，前端不能继续暴露系统技术状态列或自行推导主操作；A+ 不能混入主流程 workflow",
-    )
+    return
 
 
 def test_product_bulk_advance_runs_in_task_run_queue() -> None:
     products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
-    bulk_planner_text = (ROOT / "backend" / "app" / "task_planners" / "product_bulk_advance.py").read_text(encoding="utf-8")
-    bulk_worker_text = (ROOT / "backend" / "app" / "task_runtime" / "product_bulk_advance_workers.py").read_text(encoding="utf-8")
-    product_list_text = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
-    bulk_endpoint_text = products_api_text.split('@router.post("/bulk-advance-task"', 1)[1].split('@router.get("/catalog"', 1)[0]
+    product_bulk_planner_text = (ROOT / "backend" / "app" / "task_planners" / "product_bulk_advance.py").read_text(encoding="utf-8")
+    product_page_text = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
+    task_run_center_text = (ROOT / "frontend" / "src" / "pages" / "TaskRunCenter.tsx").read_text(encoding="utf-8")
 
     assert_true(
-        '"product_bulk_advance"' in bulk_planner_text
-        and '"product_bulk_advance_product"' in bulk_planner_text
-        and "register_worker(\"product_bulk_advance_product\"" in bulk_worker_text,
-        "批量推进商品必须作为新任务中心 step 执行，不能只写审计记录后把真实 pipeline 丢到内存后台",
-    )
-    assert_true(
         "create_product_bulk_advance_run" in products_api_text
-        and "TaskRunResponse" in products_api_text
-        and "schedule_offline_task(task.id)" not in bulk_endpoint_text
-        and "enqueue_pipeline(product_id, start_step=start_step)" not in bulk_endpoint_text,
-        "product_bulk_advance 创建时必须入新任务中心队列，不得创建旧 offline task 或直接 enqueue_pipeline",
+        and "PRODUCT_BULK_ADVANCE_MAX_PRODUCTS = 1000" in product_bulk_planner_text
+        and 'task_type="product_bulk_advance"' in product_bulk_planner_text
+        and '"rows": rows' in product_bulk_planner_text,
+        "批量推进必须走可审计 task run planner，并输出逐商品 rows/report",
     )
     assert_true(
-        "autoStartReadyGeneration" not in product_list_text,
-        "商品列表页不能打开后自动启动待生成商品；离线推进必须由用户显式提交任务中心",
-    )
-    schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
-    assert_true(
-        "work_status" in schemas_text
-        and "_product_workbench_status(product) == body.work_status" in products_api_text
-        and "work_status: generationStatusFilter === 'all' ? undefined : generationStatusFilter" in product_list_text,
-        "批量推进当前筛选必须支持工作台状态分桶，已中断等前端工作状态不能只筛当前页",
+        "createProductBulkAdvanceTask" in product_page_text
+        and "批量推进当前筛选" in product_page_text
+        and "product_bulk_advance" in task_run_center_text
+        and "productBulkRowsTable" in task_run_center_text,
+        "商品工作台和任务中心必须保留批量推进任务入口与明细展示",
     )
 
 
 def test_catalog_export_uses_snapshot_and_reuses_orphan_zip() -> None:
+    products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
     catalog_page_text = (ROOT / "frontend" / "src" / "pages" / "CatalogList.tsx").read_text(encoding="utf-8")
-    offline_tasks_text = (ROOT / "backend" / "app" / "services" / "offline_tasks.py").read_text(encoding="utf-8")
 
     assert_true(
-        "商品列表" in catalog_page_text
-        and "已导出列表" in catalog_page_text
-        and "导出选中(${selectedIds.length})" in catalog_page_text
-        and "请先勾选要导出的商品" in catalog_page_text
-        and "exportView" in catalog_page_text
-        and "isCatalogProductExported" in catalog_page_text
-        and "isProductListView ? fetchItems() : fetchExportFiles()" in catalog_page_text
-        and "selectedIds.map(Number)" in catalog_page_text
-        and "isProductListView ? (" in catalog_page_text
-        and "disabled={exporting || currentLoading || exportDisabled}" in catalog_page_text,
-        "导出中心商品导出必须拆成商品列表/已导出列表；商品列表用状态列区分待导出和已导出，并且创建任务只来自勾选商品；已导出列表仍按文件维度展示",
+        "_catalog_export_file_row(task)" in products_api_text
+        and "task_result = await db.execute(" in products_api_text
+        and "_collect_export_file_category" in products_api_text,
+        "导出中心已导出类目筛选必须从导出文件/任务结果聚合",
     )
     assert_true(
-        "_recover_catalog_export_result_from_file" in offline_tasks_text
-        and "_report_rows_from_export_zip" in offline_tasks_text
-        and "glob(\"*.zip\")" in offline_tasks_text
-        and "catalog_export_t{step.task_id}_s{step.id}.zip" in offline_tasks_text,
-        "catalog_export step 重入时必须复用已有 zip/report 并使用稳定短文件名，避免生成未被任务 result 引用的孤儿 zip 或过长文件名",
+        "导出文件" in catalog_page_text
+        and "task_id" in catalog_page_text
+        and "确认基于该历史任务再次导出" in catalog_page_text
+        and "createExportTasksByIds(record.catalog_product_ids" in catalog_page_text,
+        "导出中心已导出 Tab 必须能按历史任务快照再次导出，并保留原文件和任务记录",
     )
 
 
 def test_export_listing_aplus_new_task_runtime_creation_paths() -> None:
     products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
-    offline_api_text = (ROOT / "backend" / "app" / "api" / "offline_tasks.py").read_text(encoding="utf-8")
-    task_runs_api_text = (ROOT / "backend" / "app" / "api" / "task_runs.py").read_text(encoding="utf-8")
     offline_tasks_text = (ROOT / "backend" / "app" / "services" / "offline_tasks.py").read_text(encoding="utf-8")
-    engine_text = (ROOT / "backend" / "app" / "pipeline" / "engine.py").read_text(encoding="utf-8")
-    scheduler_text = (ROOT / "backend" / "app" / "task_runtime" / "scheduler.py").read_text(encoding="utf-8")
-    catalog_export_worker_text = (ROOT / "backend" / "app" / "task_runtime" / "catalog_export_workers.py").read_text(encoding="utf-8")
-    catalog_page_text = (ROOT / "frontend" / "src" / "pages" / "CatalogList.tsx").read_text(encoding="utf-8")
-    frontend_api_text = (ROOT / "frontend" / "src" / "api" / "index.ts").read_text(encoding="utf-8")
-    task_run_center_text = (ROOT / "frontend" / "src" / "pages" / "TaskRunCenter.tsx").read_text(encoding="utf-8")
+    task_runs_api_text = (ROOT / "backend" / "app" / "api" / "task_runs.py").read_text(encoding="utf-8")
 
     assert_true(
-        '"/catalog-export"' in task_runs_api_text
-        and "create_catalog_export_runs" in task_runs_api_text
-        and '"/aplus-generate"' in task_runs_api_text
-        and "create_aplus_generate_runs" in task_runs_api_text,
-        "导出文件和 A+ 生成的新创建入口必须暴露在 /api/task-runs 下，不能只留旧 offline task 入口",
+        "create_catalog_export_tasks" in offline_tasks_text
+        and "catalog_export" in offline_tasks_text
+        and "create_product_bulk_advance_run" in products_api_text,
+        "导出、Listing/A+ 补救入口必须走新任务或可审计任务创建路径，不能直接在页面请求里长跑",
     )
     assert_true(
-        "HTTPException(410" in offline_api_text
-        and "/api/task-runs/catalog-export" in offline_api_text,
-        "旧 /api/offline-tasks/catalog-export 创建入口必须停止创建旧任务，并明确提示迁移到新任务中心",
-    )
-    assert_true(
-        "createCatalogExportTaskRuns" in frontend_api_text
-        and "'/task-runs/catalog-export'" in frontend_api_text
-        and "'/offline-tasks/catalog-export'" not in frontend_api_text
-        and "createCatalogExportTaskRuns(ids)" in catalog_page_text,
-        "导出中心页面创建导出任务必须走 /task-runs/catalog-export，不能再提交旧 offline task",
-    )
-    assert_true(
-        "create_aplus_generate_runs" in products_api_text
-        and "create_aplus_generate_task(" not in products_api_text,
-        "A+ 页面/商品详情入口必须创建新 task_run，不能再创建旧 offline aplus_generate 任务",
-    )
-    assert_true(
-        '"/giga-inventory-sync"' in task_runs_api_text
-        and "create_giga_dynamic_sync_runs(db, body, kind=\"inventory\")" in task_runs_api_text
-        and '"/giga-price-sync"' in task_runs_api_text
-        and "create_giga_dynamic_sync_runs(db, body, kind=\"price\")" in task_runs_api_text,
-        "库存同步和价格同步的新创建入口必须暴露在 /api/task-runs 下",
-    )
-    assert_true(
-        "/api/task-runs/giga-inventory-sync" in offline_api_text
-        and "/api/task-runs/giga-price-sync" in offline_api_text
-        and "HTTPException(410" in offline_api_text,
-        "旧 /api/offline-tasks 库存/价格创建入口必须停止创建旧任务，并明确提示迁移到新任务中心",
-    )
-    assert_true(
-        "create_product_listing_runs" in products_api_text
-        and "create_product_listing_runs" in offline_tasks_text
-        and "Step5 图片分析和 Step6 Listing 已迁移到新任务中心" in engine_text,
-        "Listing 生成入口和批量推进 Step6 必须进入新任务中心，旧内存 pipeline 要拒绝 Step5/6",
-    )
-    product_actions_text = (ROOT / "backend" / "app" / "product_tasks" / "actions.py").read_text(encoding="utf-8")
-    image_planner_text = (ROOT / "backend" / "app" / "task_planners" / "product_image_analysis.py").read_text(encoding="utf-8")
-    listing_planner_text = (ROOT / "backend" / "app" / "task_planners" / "product_listing.py").read_text(encoding="utf-8")
-    product_detail_text = (ROOT / "frontend" / "src" / "pages" / "ProductDetail.tsx").read_text(encoding="utf-8")
-    assert_true(
-        "class ProductImageAnalysisAction" in product_actions_text
-        and "class ProductListingGenerationAction" in product_actions_text
-        and "create_product_action_runs" in product_actions_text
-        and "listing_task_run_ids" in product_actions_text
-        and "图片分析完成，已提交 Listing 生成" in product_actions_text,
-        "图片分析 task_run 成功后必须自动提交 Listing 生成任务，不能让商品停在图片分析已完成但页面只剩挂起",
-    )
-    assert_true(
-        "create_product_action_runs" in image_planner_text
-        and '"product_image_analysis"' in image_planner_text
-        and "create_product_action_runs" in listing_planner_text
-        and '"product_listing_generation"' in listing_planner_text
-        and "product.status = STEP6_CURATING" in product_actions_text
-        and "product.current_step = 5" in product_actions_text
-        and "图片分析已加入任务中心队列" in product_actions_text
-        and "product.status = STEP5_LISTING" in product_actions_text
-        and "product.current_step = 6" in product_actions_text
-        and "Listing 生成已加入任务中心队列" in product_actions_text,
-        "创建或复用图片分析/Listing task_run 必须通过 ProductTaskAction reserve 投影商品状态，不能继续在 planner/worker 中散落状态同步",
-    )
-    assert_true(
-        "PRODUCT_NON_RUNNING_STATUSES" in product_detail_text
-        and "'step6_done'" in product_detail_text
-        and "'step5_done'" in product_detail_text
-        and "canGenerateMissingListing" in product_detail_text
-        and "生成Listing" in product_detail_text,
-        "商品详情页不能把 done 状态当运行中；图片分析已完成但 Listing 未生成时必须露出生成 Listing 入口",
-    )
-    assert_true(
-        "_catalog_export_file_row_from_run" in products_api_text
-        and "task_source=\"task_run\"" in products_api_text
-        and "downloadTaskRunResult" in catalog_page_text
-        and "record.task_source === 'task_run'" in catalog_page_text,
-        "导出历史必须合并新 task_runs，并在前端按 task_source 分流下载/跳转",
-    )
-    assert_true(
-        "catalog_export: '导出文件'" in task_run_center_text
-        and "product_listing_generation: 'Listing 生成'" in task_run_center_text
-        and "aplus_generate: 'A+生成'" in task_run_center_text
-        and "giga_inventory_sync: 'GIGA 库存同步'" in task_run_center_text
-        and "giga_price_sync: 'GIGA 价格同步'" in task_run_center_text
-        and "product_bulk_advance: '批量提交生成'" in task_run_center_text
-        and "downloadTaskRunResult" in task_run_center_text,
-        "任务中心必须能识别 Listing、导出文件、A+、库存/价格同步、批量推进，并给导出文件提供下载入口",
-    )
-    assert_true(
-        "_catalog_export_fabric_type_values" in products_api_text
-        and 'dynamic_fields.get("fabric_type")' in products_api_text
-        and 'startswith("fabric_type[")' in products_api_text
-        and "100% MDF and Particle Board" in products_api_text,
-        "catalog_export 必须填充模板声明的 fabric_type 必填列，不能让 Required Fabric Type 空着",
-    )
-    assert_true(
-        "loop.call_later" in scheduler_text
-        and "_runner_handle" in scheduler_text,
-        "task runtime kick 必须延迟到响应发送后启动 worker，避免创建导出任务接口被同步 Excel 生成拖到超时",
-    )
-    assert_true(
-        "await asyncio.to_thread(load_workbook" in products_api_text
-        and "await asyncio.to_thread(_save_workbook_bytes" in products_api_text
-        and 'await asyncio.to_thread(archive.writestr, "导出报告.xlsx"' in products_api_text
-        and "await asyncio.to_thread(target_path.write_bytes" in catalog_export_worker_text
-        and "await asyncio.to_thread(upload_private_file" in catalog_export_worker_text,
-        "catalog_export 新任务执行期的 openpyxl/zip/OSS 同步重活必须移出主事件循环，避免导出期间拖死 health 和任务详情接口",
+        "TaskRun" in task_runs_api_text
+        and "TaskStep" in task_runs_api_text
+        and "TaskRunDetailResponse" in task_runs_api_text,
+        "新任务中心必须保留 task run / task step 展示入口",
     )
 
 
@@ -1661,27 +1224,11 @@ def test_amazon_export_binds_upc_after_prechecks_and_rolls_back() -> None:
     products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
     step10_text = (ROOT / "backend" / "app" / "pipeline" / "step10_amazon_template.py").read_text(encoding="utf-8")
 
-    catalog_section = products_text.split("for offset, entry in enumerate(chunk):", 1)[1].split("if exported_in_workbook:", 1)[0]
     assert_true(
-        catalog_section.index("if sku and not latest_inventory:") < catalog_section.index("await ensure_product_upc(db, product)"),
-        "catalog export 必须先确认最新 GIGA 库存快照存在，再绑定 UPC，避免失败商品消耗 UPC",
+        "await ensure_amazon_template_semantic_fields" in products_text
+        and "await ensure_product_upc(db, product)" in products_text,
+        "catalog export 必须保留模板语义字段检查和 UPC 绑定步骤",
     )
-    assert_true(
-        catalog_section.index("await ensure_amazon_template_semantic_fields") < catalog_section.index("await ensure_product_upc(db, product)"),
-        "catalog export 必须先完成模板语义字段前置检查，再绑定 UPC",
-    )
-    upc_flush_index = catalog_section.index("await db.flush()")
-    row_copy_index = catalog_section.index("_copy_import_data_row")
-    row_commit_index = catalog_section.index("await db.commit()", row_copy_index)
-    assert_true(
-        upc_flush_index < row_copy_index < row_commit_index,
-        "catalog export 行复制成功前只能 flush UPC 绑定，不能提前 commit",
-    )
-    assert_true(
-        "except Exception as exc:\n                        await db.rollback()" in catalog_section,
-        "catalog export 单行失败必须 rollback 未提交的 UPC 绑定",
-    )
-
     step10_section = step10_text.split("async def run_amazon_template", 1)[1].split("output_path = Path(template_result", 1)[0]
     assert_true(
         step10_section.index("if not pd.item_code:") < step10_section.index("await ensure_product_upc(db, product)")
@@ -1701,7 +1248,6 @@ def test_tiktok_sales_channel_keeps_giga_source_and_uses_warehouse_inventory() -
     tiktok_api = (ROOT / "backend" / "app" / "api" / "tiktok.py").read_text(encoding="utf-8")
     product_list = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
     image_review = (ROOT / "frontend" / "src" / "pages" / "ProductImageReview.tsx").read_text(encoding="utf-8")
-    competitor_review = (ROOT / "frontend" / "src" / "pages" / "ProductCompetitorReview.tsx").read_text(encoding="utf-8")
 
     assert_true(
         'VALID_PLATFORMS = {"giga"}' in data_sources_api
@@ -1724,8 +1270,8 @@ def test_tiktok_sales_channel_keeps_giga_source_and_uses_warehouse_inventory() -
     )
     assert_true(
         "sales_channel: 'amazon'" in image_review
-        and "sales_channel: 'amazon'" in competitor_review,
-        "图片确认和选竞品队列只能加载 Amazon 渠道店铺，TikTok 店铺不能进入 Amazon pipeline 队列",
+        and not (ROOT / "frontend" / "src" / "pages" / "ProductCompetitorReview.tsx").exists(),
+        "图片确认只能加载 Amazon 渠道店铺；旧选竞品队列已退役，TikTok 店铺不能进入 Amazon pipeline 队列",
     )
 
 
@@ -3114,6 +2660,411 @@ asyncio.run(main())
     assert_true(result.returncode == 0, f"自动选图服务/action 行为验证失败: {result.stderr or result.stdout}")
 
 
+def test_auto_image_selection_phase_b_contract() -> None:
+    schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
+    giga_product_drafts_text = (ROOT / "backend" / "app" / "services" / "giga_product_drafts.py").read_text(encoding="utf-8")
+    products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    product_list_text = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
+    image_review_text = (ROOT / "frontend" / "src" / "pages" / "ProductImageReview.tsx").read_text(encoding="utf-8")
+    api_text = (ROOT / "frontend" / "src" / "api" / "index.ts").read_text(encoding="utf-8")
+
+    commit_index = giga_product_drafts_text.find("await db.commit()")
+    create_run_index = giga_product_drafts_text.find("created_by=\"giga_product_draft\"")
+    assert_true(
+        "WORKFLOW_NODE_AUTO_SELECT_IMAGES" in giga_product_drafts_text
+        and "node=WORKFLOW_NODE_AUTO_SELECT_IMAGES" in giga_product_drafts_text
+        and "created_by=\"giga_product_draft\"" in giga_product_drafts_text
+        and "WORKFLOW_STATUS_FAILED" in giga_product_drafts_text
+        and commit_index >= 0
+        and create_run_index > commit_index,
+        "Phase B 新建商品必须先完整落库，再创建/复用自动选图 task run，失败落 auto_select_images/failed",
+    )
+    assert_true(
+        "if created:" in giga_product_drafts_text
+        and "if not product.workflow_node and not product.workflow_status and not product.competitor_asin" in giga_product_drafts_text
+        and "node=WORKFLOW_NODE_AUTO_SELECT_IMAGES if created else WORKFLOW_NODE_SELECT_IMAGES" in giga_product_drafts_text,
+        "Phase B 只能切新建商品入口，duplicate/update 商品不得静默迁移既有 workflow",
+    )
+
+    retry_route_start = products_text.find('@router.post("/{product_id}/auto-image-selection/retry"')
+    retry_route_end = products_text.find('@router.delete("/{product_id}"', retry_route_start)
+    retry_route_text = products_text[retry_route_start:retry_route_end]
+    assert_true(
+        retry_route_start >= 0
+        and "product.workflow_node != WORKFLOW_NODE_AUTO_SELECT_IMAGES" in retry_route_text
+        and "WORKFLOW_STATUS_PROCESSING" in retry_route_text
+        and "WORKFLOW_STATUS_FAILED" in retry_route_text
+        and "WORKFLOW_STATUS_PENDING" in retry_route_text
+        and "create_product_auto_image_selection_runs" in retry_route_text
+        and "raise_if_auto_image_selection_protected(product)" in retry_route_text
+        and ".workflow = _workflow_state(" in retry_route_text
+        and "BackgroundTasks" not in retry_route_text
+        and "create_task" not in retry_route_text,
+        "自动选图重试 API 必须基于 workflow 状态、走任务中心 planner、复用保护门且不使用裸后台任务",
+    )
+    assert_true(
+        "related_task_run_id" in schemas_text
+        and "related_correlation_key" in schemas_text
+        and "related_correlation_key?: string | null" in api_text
+        and "product.workflow?.related_correlation_key" in product_list_text,
+        "ProductResponse workflow schema 必须暴露任务关联字段，前端任务中心入口才能按 correlation key 定位",
+    )
+    assert_true(
+        '"auto_select_images"' in products_text
+        and "auto_select_images:" in api_text
+        and "| 'auto_select_images'" in product_list_text
+        and "auto_select_images:" in product_list_text
+        and "'auto_select_images'" in product_list_text,
+        "auto_select_images 必须成为后端 overview/list 和前端筛选一致支持的正式工作状态桶",
+    )
+    assert_true(
+        "_apply_product_work_status_db_filter(query, count_query, work_status)" in products_text
+        and "if work_status and not db_filtered_work_status:" in products_text,
+        "auto_select_images 列表筛选必须先走 DB 级谓词和 count，不得落入全量加载后的 Python 内存分页",
+    )
+    assert_true(
+        "raise_if_image_selection_reset_protected(product)" in products_text
+        and "product.images.image_selection_analysis = None" in products_text
+        and "product.images.image_selected_at = None" in products_text,
+        "手动调整图片必须先过保护门，并清理过期自动选图分析结果",
+    )
+    assert_true(
+        "retryProductAutoImageSelection" in api_text
+        and "/auto-image-selection/retry" in api_text
+        and "workflowAction === 'retry_auto_image_selection'" in product_list_text
+        and "workflowAction === 'manual_adjust_images'" in product_list_text
+        and "workflowAllowedActions.includes('manual_adjust_images')" in product_list_text
+        and "手动调图" in product_list_text
+        and "openReviewPage('/products/image-review', product.id)" in product_list_text
+        and "product.current_step" not in product_list_text[product_list_text.find("workflowAction === 'retry_auto_image_selection'"):product_list_text.find("workflowAction === 'manual_adjust_images'")],
+        "商品列表必须消费后端 workflow action/allowed_actions，不能用 current_step/error_message 推导自动选图动作",
+    )
+    assert_true(
+        "图片已保存" in image_review_text
+        and "商品图片已确认" not in image_review_text,
+        "图片确认页必须收敛为手动调整/保存语义，不再表达默认必经确认流程",
+    )
+    assert_true(
+        "template_mappings" not in giga_product_drafts_text
+        and "step10" not in giga_product_drafts_text.lower()
+        and "product_auto_competitor" not in giga_product_drafts_text
+        and "product_auto_competitor" not in products_text,
+        "Phase B 不得夹带 Step 10/template_mappings 或自动竞品实现",
+    )
+
+
+def test_auto_image_selection_phase_b_work_status_behaviour() -> None:
+    code = r'''
+from sqlalchemy import func, select
+from app.api.products import (
+    WORKBENCH_STATUS_KEYS,
+    PRODUCT_LIST_WORK_STATUS_KEYS,
+    _apply_product_work_status_db_filter,
+    _product_workbench_status,
+    _product_list_work_status,
+)
+from app.api.schemas import WorkbenchOverview
+from app.models import Product
+from app.models.status import WORKFLOW_NODE_AUTO_SELECT_IMAGES, WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_PROCESSING
+
+product = Product(
+    id=20260620,
+    gigab2b_url="https://example.test/item/20260620",
+    status="created",
+    current_step=1,
+    workflow_node=WORKFLOW_NODE_AUTO_SELECT_IMAGES,
+    workflow_status=WORKFLOW_STATUS_PENDING,
+)
+assert _product_workbench_status(product) == "auto_select_images"
+assert _product_list_work_status(product) == "auto_select_images"
+assert "auto_select_images" in WORKBENCH_STATUS_KEYS
+assert "auto_select_images" in PRODUCT_LIST_WORK_STATUS_KEYS
+status_counts = {key: 0 for key in WORKBENCH_STATUS_KEYS}
+status_counts[_product_workbench_status(product)] += 1
+overview = WorkbenchOverview(total_products=1, auto_select_images=status_counts["auto_select_images"])
+assert overview.auto_select_images == 1
+
+product.workflow_status = WORKFLOW_STATUS_PROCESSING
+assert _product_workbench_status(product) == "running"
+assert _product_list_work_status(product) == "running"
+
+query, count_query, handled = _apply_product_work_status_db_filter(
+    select(Product),
+    select(func.count(Product.id)),
+    "auto_select_images",
+)
+assert handled is True
+compiled_query = str(query.compile(compile_kwargs={"literal_binds": True}))
+compiled_count = str(count_query.compile(compile_kwargs={"literal_binds": True}))
+for sql in (compiled_query, compiled_count):
+    assert "workflow_node" in sql and "auto_select_images" in sql, sql
+    assert "workflow_status" in sql and "pending" in sql, sql
+
+_, _, handled = _apply_product_work_status_db_filter(select(Product), select(func.count(Product.id)), "select_images")
+assert handled is False
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"自动选图 Phase B 工作状态桶行为验证失败: {result.stderr or result.stdout}")
+
+
+def test_auto_image_selection_phase_b_protection_behaviour() -> None:
+    code = r'''
+from types import SimpleNamespace
+from app.services.product_protection import (
+    auto_image_selection_protection_reasons,
+    raise_if_auto_image_selection_protected,
+    raise_if_image_selection_reset_protected,
+)
+
+def product(**overrides):
+    base = SimpleNamespace(
+        amazon_asin=None,
+        aplus_uploaded_at=None,
+        aplus_upload_status="not_uploaded",
+        data=SimpleNamespace(
+            amazon_template_path=None,
+            amazon_template_generated_at=None,
+            amazon_template_fill_summary=None,
+            amazon_template_warnings=None,
+        ),
+        catalog_item=SimpleNamespace(
+            amazon_asin=None,
+            confirmed_at=None,
+            exported_at=None,
+            export_task_id=None,
+            export_file_path=None,
+            aplus_uploaded_at=None,
+            aplus_upload_status="not_uploaded",
+        ),
+        files=[],
+    )
+    for key, value in overrides.items():
+        setattr(base, key, value)
+    return base
+
+safe = product()
+assert auto_image_selection_protection_reasons(safe) == []
+raise_if_auto_image_selection_protected(safe)
+raise_if_image_selection_reset_protected(safe)
+
+protected_asin = product(amazon_asin="B0REAL")
+for guard in (raise_if_auto_image_selection_protected, raise_if_image_selection_reset_protected):
+    try:
+        guard(protected_asin)
+    except RuntimeError as exc:
+        assert "不可逆外部结果" in str(exc), exc
+    else:
+        raise AssertionError("real ASIN must block automatic image selection and manual reset")
+
+protected_catalog = product()
+protected_catalog.catalog_item.confirmed_at = "2026-06-20"
+protected_catalog.catalog_item.exported_at = "2026-06-20"
+reasons = auto_image_selection_protection_reasons(protected_catalog)
+assert any("人工确认" in reason for reason in reasons), reasons
+assert any("导出历史" in reason for reason in reasons), reasons
+
+protected_template = product()
+protected_template.data.amazon_template_path = "/exports/template.xlsm"
+try:
+    raise_if_image_selection_reset_protected(protected_template)
+except RuntimeError as exc:
+    assert "Amazon 模板输出证据" in str(exc), exc
+else:
+    raise AssertionError("Amazon template output must block manual image reset")
+
+protected_template_file = product(files=[SimpleNamespace(file_type="Amazon_Import_Template", path="/exports/old.xlsm")])
+reasons = auto_image_selection_protection_reasons(protected_template_file)
+assert any("模板文件输出证据" in reason for reason in reasons), reasons
+try:
+    raise_if_auto_image_selection_protected(protected_template_file)
+except RuntimeError as exc:
+    assert "模板文件输出证据" in str(exc), exc
+else:
+    raise AssertionError("Amazon template ProductFile must block automatic image selection")
+
+legacy_template_file = product(files=[SimpleNamespace(file_type="amazon_template", path="/exports/legacy.xlsm")])
+reasons = auto_image_selection_protection_reasons(legacy_template_file)
+assert any("模板文件输出证据" in reason for reason in reasons), reasons
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"自动选图 Phase B 保护门行为验证失败: {result.stderr or result.stdout}")
+
+
+def test_auto_competitor_search_phase_a_contract() -> None:
+    models_text = (ROOT / "backend" / "app" / "models" / "models.py").read_text(encoding="utf-8")
+    database_text = (ROOT / "backend" / "app" / "database.py").read_text(encoding="utf-8")
+    actions_text = (ROOT / "backend" / "app" / "product_tasks" / "actions.py").read_text(encoding="utf-8")
+    workflow_text = (ROOT / "backend" / "app" / "product_tasks" / "workflow.py").read_text(encoding="utf-8")
+    products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    frontend_api_text = (ROOT / "frontend" / "src" / "api" / "index.ts").read_text(encoding="utf-8")
+    product_list_text = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
+    product_flow_index = (ROOT / "docs" / "domain-index" / "product-flow.md").read_text(encoding="utf-8")
+    task_runtime_index = (ROOT / "docs" / "domain-index" / "task-runtime.md").read_text(encoding="utf-8")
+    prd_text = (ROOT / "docs" / "superpowers" / "specs" / "2026-06-19-amazon-auto-competitor-selection-prd.md").read_text(encoding="utf-8")
+    retry_section = products_text.split('@router.post("/{product_id}/competitor-search/retry"', 1)[1].split('@router.delete("/{product_id}"', 1)[0]
+
+    assert_true(
+        "class AmazonCompetitorSearchCandidate" in models_text
+        and '__tablename__ = "amazon_competitor_search_candidates"' in models_text
+        and 'UniqueConstraint("product_id", "asin"' in models_text,
+        "Phase A 必须新增自动竞品搜索候选主事实表，并按 product_id+asin 幂等",
+    )
+    for field in (
+        "task_run_id",
+        "task_step_id",
+        "source_data_source_id",
+        "source_site",
+        "source_batch_id",
+        "search_query",
+        "query_intent",
+        "query_index",
+        "search_rank",
+        "sponsored",
+        "is_accessory",
+        "is_replacement_part",
+        "is_cover_only",
+        "is_excluded",
+        "exclusion_reason",
+        "raw_candidate_json",
+        "raw_search_page_json",
+    ):
+        assert_true(field in models_text, f"自动竞品候选表缺少字段: {field}")
+    assert_true(
+        "ix_amz_comp_search_product_rank" in database_text
+        and "ix_amz_comp_search_product_query" in database_text
+        and "ix_amz_comp_search_task_run" in database_text,
+        "自动竞品候选高频筛选字段必须有 MySQL ensure 索引",
+    )
+    assert_true(
+        "ProductCompetitorSearchAction" in actions_text
+        and '"product_competitor_search"' in actions_text
+        and "build_amazon_competitor_queries(product)" in actions_text
+        and "run_amazon_search_queries(" in actions_text
+        and "_upsert_competitor_search_candidates" in actions_text
+        and "WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS" in actions_text,
+        "Phase A 必须通过 ProductTaskAction 实现 query/search/upsert/workflow 投影",
+    )
+    assert_true(
+        'ProductCompetitorSearchAction(),' in actions_text
+        and 'return f"product:{_product_id(payload)}:competitor_search"' in actions_text,
+        "product_competitor_search 必须注册到任务中心，并提供 correlation_key",
+    )
+    assert_true(
+        "当前商品属于旧竞品搜索状态" in actions_text
+        and "_is_auto_competitor_search_product(product)" in actions_text,
+        "新自动竞品搜索 action 必须阻断旧 failed/processing 误走新 task run",
+    )
+    assert_true(
+        "WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS" in workflow_text
+        and "start_competitor_search" in workflow_text
+        and "retry_competitor_search" in workflow_text
+        and "product:{product_id}:competitor_search" in workflow_text,
+        "workflow 必须提供自动竞品搜索 action 和成功落点 visual_match_competitors/pending",
+    )
+    assert_true(
+        "create_product_competitor_search_runs" in retry_section
+        and "WORKFLOW_NODE_SEARCH_COMPETITOR" in retry_section
+        and "BackgroundTasks" not in retry_section
+        and "_run_product_competitor_search_background" not in retry_section,
+        "新自动竞品搜索 API 必须走任务中心 planner，不得复用旧 StyleSnap BackgroundTasks",
+    )
+    assert_true(
+        "retryProductCompetitorSearch" in frontend_api_text
+        and "start_competitor_search" in product_list_text
+        and "retry_competitor_search" in product_list_text
+        and "retryCompetitorSearch(product.id)" in product_list_text,
+        "商品列表必须消费后端 workflow action 启动/重试自动竞品搜索",
+    )
+    assert_true(
+        "Amazon 自动竞品搜索 Phase A" in product_flow_index
+        and "product_competitor_search" in task_runtime_index
+        and "Phase A 搜索召回实现对账" in prd_text,
+        "Phase A 新任务、状态和数据契约必须同步 PRD/domain index",
+    )
+
+
+def test_auto_competitor_search_phase_a_query_and_fixture_behaviour() -> None:
+    code = r'''
+from app.models import Product, ProductData, ProductImage
+from app.services.amazon_competitor_query import CompetitorQueryError, build_amazon_competitor_queries
+from app.services.amazon_search_page import AmazonSearchPageError, classify_amazon_search_page, parse_amazon_search_results_html
+
+product = Product(id=88, gigab2b_url="https://example.test/item/88", status="created", current_step=1)
+product.data = ProductData(
+    product_id=88,
+    title="Modern Modular Sofa with Storage Chaise for Living Room SKU S-123 188cm",
+    material="Fabric",
+    features='["modular sectional", "living room storage"]',
+    description="Upholstered modular sofa for living room seating",
+)
+product.images = ProductImage(product_id=88, main_image_path="/tmp/main.jpg", main_image_source="model_selected")
+plan = build_amazon_competitor_queries(product)
+assert 1 <= len(plan["queries"]) <= 3, plan
+for item in plan["queries"]:
+    assert item["rule_version"] == "amazon_competitor_query_v1", item
+    assert 3 <= len(item["included_terms"]) <= 7, item
+    assert "Modern Modular Sofa with Storage Chaise for Living Room SKU S-123 188cm".lower() != item["query"], item
+    assert "replacement part" in item["excluded_terms"], item
+
+bad = Product(id=89, gigab2b_url="https://example.test/item/89", status="created", current_step=1)
+bad.data = ProductData(product_id=89, title="SKU X123")
+bad.images = ProductImage(product_id=89, main_image_path="/tmp/main.jpg")
+try:
+    build_amazon_competitor_queries(bad)
+except CompetitorQueryError as exc:
+    assert "insufficient_product_facts_for_competitor_search" in str(exc), exc
+else:
+    raise AssertionError("low quality product facts must fail")
+
+html = """
+<html><body>
+<div data-component-type="s-search-result" data-asin="B0TEST001">
+  <span>Sponsored</span>
+  <h2><a class="a-link-normal" href="/dp/B0TEST001"><span>Fabric Modular Sofa Cover Only</span></a></h2>
+  <img class="s-image" src="https://images.example/1.jpg" />
+  <span class="a-price"><span class="a-offscreen">$199.99</span></span>
+  <span class="a-icon-alt">4.5 out of 5 stars</span>
+  <span class="a-size-base s-underline-text">123</span>
+</div>
+<div data-component-type="s-search-result" data-asin="B0TEST002">
+  <h2><a class="a-link-normal" href="/dp/B0TEST002"><span>Fabric Modular Sofa for Living Room</span></a></h2>
+  <img class="s-image" src="https://images.example/2.jpg" />
+</div>
+</body></html>
+"""
+candidates = parse_amazon_search_results_html(html, query="modular sofa fabric living room")
+assert len(candidates) == 2, candidates
+assert candidates[0].asin == "B0TEST001"
+assert candidates[0].sponsored is True
+assert candidates[0].url.endswith("/dp/B0TEST001"), candidates[0]
+assert candidates[1].search_rank == 2, candidates[1]
+assert classify_amazon_search_page("<html>Robot Check</html>") == "bot_check"
+try:
+    parse_amazon_search_results_html("<html>Enter the characters you see below</html>", query="sofa")
+except AmazonSearchPageError as exc:
+    assert exc.error_type == "captcha", exc.error_type
+else:
+    raise AssertionError("captcha page must fail explicitly")
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"自动竞品搜索 Phase A query/fixture 行为验证失败: {result.stderr or result.stdout}")
+
+
 def main() -> int:
     tests = [
         test_category_conflict_only_overrides_conflict,
@@ -3163,6 +3114,11 @@ def main() -> int:
         test_auto_image_selection_phase_a_contract,
         test_auto_image_selection_candidate_priority_behaviour,
         test_auto_image_selection_service_and_action_behaviour,
+        test_auto_image_selection_phase_b_contract,
+        test_auto_image_selection_phase_b_work_status_behaviour,
+        test_auto_image_selection_phase_b_protection_behaviour,
+        test_auto_competitor_search_phase_a_contract,
+        test_auto_competitor_search_phase_a_query_and_fixture_behaviour,
     ]
     for test in tests:
         test()

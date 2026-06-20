@@ -25,7 +25,7 @@ from app.services.giga_image_download_tasks import download_giga_batch_images
 from app.services.giga_openapi import GigaSyncOptions, resolve_giga_data_source_context, sync_giga_products
 from app.services.giga_price_sync import GigaPriceSyncOptions, sync_giga_price_snapshot
 from app.services.oss_uploader import upload_private_file
-from app.services.stylesnap_product_tasks import upsert_product_drafts_from_giga_batch
+from app.services.giga_product_drafts import upsert_product_drafts_from_giga_batch
 from app.task_planners.product_image_analysis import create_product_image_analysis_runs
 from app.task_planners.product_listing import create_product_listing_runs
 

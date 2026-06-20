@@ -37,7 +37,7 @@ from app.services.giga_openapi import (
     _variation_attributes_by_sku,
     resolve_giga_data_source_context,
 )
-from app.services.stylesnap_product_tasks import upsert_product_drafts_from_giga_batch
+from app.services.giga_product_drafts import upsert_product_drafts_from_giga_batch
 from app.task_runtime.events import update_step_progress
 from app.task_runtime.constants import RUN_STATUS_SUCCEEDED
 from app.task_runtime.json_utils import json_dumps, json_loads

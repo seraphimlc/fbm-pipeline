@@ -14,7 +14,7 @@
 - 2026-06-17 产品口径：任务中心是异步执行事实中心，商品流程是业务状态和操作中心；任务中心不能替代商品流程页面，也不能用任务状态反推商品状态。
 - 当前 `MSG-20260617-010/012` 收敛方向：本轮走收缩路线，列表/API/total 不支持 `stale_running/waiting_dependency/planned` 筛选；这些状态仅保留为详情诊断展示。
 - 长耗时任务必须可追踪、可恢复、可重试，不塞进临时后台任务。
-- 商品域 ProductTaskAction 当前包含 `product_auto_image_selection`、`product_image_analysis`、`product_listing_generation`；自动选图阶段 A 通过 `backend/app/task_planners/product_auto_image_selection.py` 创建/复用 task run，不用裸后台任务承载主流程。
+- 商品域 ProductTaskAction 当前包含 `product_auto_image_selection`、`product_competitor_search`、`product_image_analysis`、`product_listing_generation`；自动选图阶段 B 在新建 Amazon 商品完整落库后通过 `backend/app/task_planners/product_auto_image_selection.py` 创建/复用 task run，失败重试 API 也走同一 planner，不用裸后台任务承载主流程；自动竞品搜索 Phase A 通过 `backend/app/task_planners/product_competitor_search.py` 创建/复用 task run，成功后仅投影到 `visual_match_competitors/pending`，不启动后续视觉初筛。
 - 高频列表接口不允许内存分页、假 total、重复 count 或复杂查询临时拼状态。
 - 本轮不启用 run-level projection route；列表接口不得用 projection 存储、step JOIN、`EXISTS`、子查询或内存分页补回 `stale_running/waiting_dependency/planned` 筛选。
 
@@ -27,6 +27,7 @@
 - planners：`backend/app/task_planners/`
 - 商品动作适配：`backend/app/product_tasks/actions.py`
 - 自动选图 planner：`backend/app/task_planners/product_auto_image_selection.py`
+- 自动竞品搜索 planner：`backend/app/task_planners/product_competitor_search.py`
 - 模型：`backend/app/models/models.py`
 - 后端注册：`backend/app/main.py`
 - 表：`task_runs`, `task_groups`, `task_steps`, `task_step_events`, `offline_tasks`, `offline_task_steps`
@@ -63,7 +64,8 @@
 - 统计/分页不对：先看 `backend/app/api/task_runs.py` 的 DB 级过滤、排序和 count。
 - 任务不执行：先看 `task_steps` 状态、`task_step_events`、`task_runs` 状态字段和 runtime scheduler。
 - GIGA 拉品任务：先看 `backend/app/task_planners/giga_pull.py` 和 `backend/app/task_runtime/giga_pull_workers.py`。
-- 商品自动选图任务：先看 `backend/app/task_planners/product_auto_image_selection.py`、`backend/app/product_tasks/actions.py` 的 `ProductAutoImageSelectionAction`，再看 `backend/app/product_tasks/auto_image_selection.py`。
+- 商品自动选图任务：先看 `backend/app/task_planners/product_auto_image_selection.py`、`backend/app/product_tasks/actions.py` 的 `ProductAutoImageSelectionAction`，再看 `backend/app/product_tasks/auto_image_selection.py`；商品侧重试入口看 `POST /api/products/{id}/auto-image-selection/retry`。
+- 商品自动竞品搜索任务：先看 `backend/app/task_planners/product_competitor_search.py`、`backend/app/product_tasks/actions.py` 的 `ProductCompetitorSearchAction`，再看 `backend/app/services/amazon_competitor_query.py` 和 `backend/app/services/amazon_search_page.py`；商品侧启动/重试入口看 `POST /api/products/{id}/competitor-search/retry`。
 
 ## 维护规则
 

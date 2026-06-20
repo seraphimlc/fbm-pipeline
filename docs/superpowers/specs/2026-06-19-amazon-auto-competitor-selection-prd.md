@@ -425,13 +425,12 @@ final_score =
 products.competitor_asin
 amazon 搜索候选记录 selected 标记
 product_data.gigab2b_raw_snapshot.selected_competitor
-product_data.gigab2b_raw_snapshot.amazon_listing_capture
 product_data.gigab2b_raw_snapshot.auto_competitor_selection
 product_data.categories / leaf_category
 catalog_products.competitor_asin
 ```
 
-兼容期如继续复用 `amazon_stylesnap_candidates` 表或 `selected_stylesnap` snapshot key 保存候选，必须明确 `source = amazon_search_page`，并在代码和返回字段中用中性命名展示为 selected competitor。
+自动搜索候选不得复用旧 `amazon_stylesnap_candidates` 表或旧 StyleSnap snapshot key；新候选只写 `amazon_competitor_search_candidates`。旧 StyleSnap 运行入口和代码层历史兼容已退役。
 
 ### 10.5 成功推进
 
@@ -552,3 +551,51 @@ git diff --check
 - 不把低置信度结果伪装成成功。
 - 不改 Step 10 模板映射或 Amazon 导入模板。
 - 不覆盖真实 ASIN、导出历史或人工确认事实。
+
+## 16. Phase A 搜索召回实现对账
+
+状态：2026-06-20 已按 `MSG-20260620-006` 执行 Phase A 搜索召回。
+
+本阶段只启用“搜索召回”，不启用视觉初筛、候选详情抓取、自动评分/选择、图片分析、Listing、A+、导出、Amazon 上传或 Step 10。
+
+数据契约：
+
+- 新自动竞品主事实表：`amazon_competitor_search_candidates`。
+- 主归属字段：`product_id`、`source_data_source_id`、`source_site`、`source_batch_id`、`item_code`、`sku_code`。
+- 运行证据字段：`task_run_id`、`task_step_id`。
+- 搜索证据字段：`search_query`、`query_intent`、`query_index`、`search_rank`、`source="amazon_search_page"`、`captured_at`。
+- 候选字段：`asin`、`url`、`title`、`image_url`、`price`、`rating`、`review_count`、`sponsored`。
+- 标记字段：`is_accessory`、`is_replacement_part`、`is_cover_only`、`is_excluded`、`exclusion_reason`。
+- 原始证据：`raw_candidate_json`、`raw_search_page_json`。
+- 幂等口径：`product_id + asin` 唯一；没有 ASIN 的结果不进入主候选表。
+
+Query 生成：
+
+- 服务：`backend/app/services/amazon_competitor_query.py`。
+- V1 使用确定性规则，`rule_version=amazon_competitor_query_v1`。
+- 输入来自 `ProductData.title/description/features/material/dimensions/packages/variants` 和 `ProductImage.main_image_path/main_image_source/image_selection_analysis`。
+- 每个商品生成 1-3 组 query，每组 3-7 个 included terms；事实不足时失败为 `insufficient_product_facts_for_competitor_search`。
+- 不直接使用大健标题整句。
+
+搜索 adapter：
+
+- 服务：`backend/app/services/amazon_search_page.py`。
+- adapter 负责页面访问、结果解析和异常分类；ProductTaskAction 负责 workflow、候选落库和任务生命周期。
+- 已有 fixture HTML 解析和异常分类：`captcha`、`region_page`、`login_required`、`bot_check`、`unsupported_page_structure`、`navigation_timeout`、`empty_results`。
+- 默认未配置真实浏览器 adapter 时明确失败，不伪造空成功；真实 Amazon 小样本搜索需单独授权。
+
+任务中心：
+
+- task type：`product_competitor_search`。
+- planner：`backend/app/task_planners/product_competitor_search.py`。
+- action：`ProductCompetitorSearchAction`，注册到 `register_product_task_actions()`。
+- correlation key：`product:{product_id}:competitor_search`。
+- reserve：`search_competitor/processing`。
+- success：候选 upsert 与 workflow 投影在 `on_step_success()` 同事务完成，成功后进入 `visual_match_competitors/pending`。
+- failure/cancel/interrupted：进入 `search_competitor/failed`，写可读 `workflow_error`。
+
+API / 前端：
+
+- 后端入口：`POST /api/products/{product_id}/competitor-search/retry`。
+- 商品列表消费后端 workflow action：`start_competitor_search`、`retry_competitor_search`、`open_task_center`、`open_detail`。
+- 旧 StyleSnap API / service / 前端竞品确认页已退役；代码层不再保留旧 `amazon_stylesnap_candidates` / `amazon_listing_captures` ORM 模型、旧 snapshot key 读取或导出兼容，新自动搜索入口不复用 `BackgroundTasks`。

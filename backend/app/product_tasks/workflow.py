@@ -12,12 +12,12 @@ from app.models.status import (
     WORKFLOW_NODE_AUTO_SELECT_IMAGES,
     WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
     WORKFLOW_NODE_FLOW_DONE,
-    WORKFLOW_NODE_GET_STYLESNAP_TOKEN,
     WORKFLOW_NODE_IMAGE_ANALYSIS,
     WORKFLOW_NODE_LISTING_GENERATION,
     WORKFLOW_NODE_SEARCH_COMPETITOR,
     WORKFLOW_NODE_SELECT_COMPETITOR,
     WORKFLOW_NODE_SELECT_IMAGES,
+    WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS,
     WORKFLOW_STATUS_FAILED,
     WORKFLOW_STATUS_PENDING,
     WORKFLOW_STATUS_PROCESSING,
@@ -58,43 +58,43 @@ WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
         default_action_reason="需要先确认主图和 Listing 图片",
         default_color="cyan",
     ),
-    WORKFLOW_NODE_GET_STYLESNAP_TOKEN: WorkflowNodeView(
-        label="获取 StyleSnap token",
-        node_type="sync",
-        default_work_status="select_competitor",
-        default_primary_action="open_competitor_review",
-        default_primary_action_label="处理 token",
-        default_allowed_actions=("open_competitor_review",),
-        default_action_reason="需要先处理 StyleSnap token 或浏览器上下文",
-        default_color="warning",
-    ),
     WORKFLOW_NODE_SEARCH_COMPETITOR: WorkflowNodeView(
         label="搜索竞品",
-        node_type="semi_sync",
+        node_type="async",
         default_work_status="select_competitor",
-        default_primary_action="open_competitor_review",
-        default_primary_action_label="搜索竞品",
-        default_allowed_actions=("open_competitor_review",),
-        default_action_reason="需要搜索 Amazon 参考竞品",
+        default_primary_action="start_competitor_search",
+        default_primary_action_label="开始搜索",
+        default_allowed_actions=("start_competitor_search", "open_detail"),
+        default_action_reason="等待自动搜索 Amazon 参考竞品",
         default_color="purple",
+    ),
+    WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS: WorkflowNodeView(
+        label="视觉初筛竞品",
+        node_type="async",
+        default_work_status="select_competitor",
+        default_primary_action="open_detail",
+        default_primary_action_label="查看",
+        default_allowed_actions=("open_detail",),
+        default_action_reason="竞品搜索已完成，等待后续视觉初筛任务",
+        default_color="warning",
     ),
     WORKFLOW_NODE_SELECT_COMPETITOR: WorkflowNodeView(
         label="选择竞品",
         node_type="sync",
         default_work_status="select_competitor",
-        default_primary_action="open_competitor_review",
-        default_primary_action_label="选竞品",
-        default_allowed_actions=("open_competitor_review",),
-        default_action_reason="需要选择参考竞品",
+        default_primary_action="open_detail",
+        default_primary_action_label="查看",
+        default_allowed_actions=("open_detail",),
+        default_action_reason="旧人工选择竞品入口已停用，等待自动竞品链路处理",
         default_color="purple",
     ),
     WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL: WorkflowNodeView(
         label="抓取竞品详情",
         node_type="async",
         default_work_status="capture_detail",
-        default_primary_action="open_competitor_review",
-        default_primary_action_label="查看竞品",
-        default_allowed_actions=("open_competitor_review",),
+        default_primary_action="open_detail",
+        default_primary_action_label="查看",
+        default_allowed_actions=("open_detail",),
         default_action_reason="正在抓取已选竞品详情",
         default_color="processing",
     ),
@@ -210,7 +210,7 @@ def build_product_workflow(product: Any, *, catalog_exported: bool | None = None
         )
 
     view = WORKFLOW_NODE_VIEWS[node]
-    overrides = _status_overrides(node, status)
+    overrides = _status_overrides(product, node, status)
     if catalog_exported and node == WORKFLOW_NODE_FLOW_DONE and status == WORKFLOW_STATUS_SUCCEEDED:
         overrides = {
             **overrides,
@@ -265,6 +265,8 @@ def _state(
     product_id = getattr(product, "id", None)
     if product_id and stage == WORKFLOW_NODE_AUTO_SELECT_IMAGES:
         related_correlation_key = f"product:{product_id}:auto_image_selection"
+    elif product_id and stage == WORKFLOW_NODE_SEARCH_COMPETITOR and _is_auto_competitor_search(product):
+        related_correlation_key = f"product:{product_id}:competitor_search"
     elif product_id and stage == WORKFLOW_NODE_IMAGE_ANALYSIS:
         related_correlation_key = f"product:{product_id}:image_analysis"
     elif product_id and stage == WORKFLOW_NODE_LISTING_GENERATION:
@@ -289,9 +291,9 @@ def _state(
     }
 
 
-def _status_overrides(node: str, status: str) -> dict[str, Any]:
+def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
     if status == WORKFLOW_STATUS_FAILED:
-        return _failed_overrides(node)
+        return _failed_overrides(product, node)
 
     if node == WORKFLOW_NODE_AUTO_SELECT_IMAGES and status == WORKFLOW_STATUS_PENDING:
         return {
@@ -306,24 +308,44 @@ def _status_overrides(node: str, status: str) -> dict[str, Any]:
     if node == WORKFLOW_NODE_AUTO_SELECT_IMAGES and status == WORKFLOW_STATUS_SUCCEEDED:
         return {"label": "自动选图完成", "work_status": "ready_to_search_competitor", "color": "success"}
     if node == WORKFLOW_NODE_SEARCH_COMPETITOR and status == WORKFLOW_STATUS_PROCESSING:
+        if not _is_auto_competitor_search(product):
+            return {
+                "label": "竞品搜索中",
+                "work_status": "competitor_searching",
+                "primary_action": "open_detail",
+                "primary_action_label": "查看",
+                "allowed_actions": ("open_detail",),
+                "action_reason": "旧竞品搜索路径已停用，请按当前自动竞品搜索任务处理",
+                "color": "processing",
+            }
         return {
             "label": "竞品搜索中",
             "work_status": "competitor_searching",
-            "primary_action": "open_competitor_review",
-            "primary_action_label": "查看搜索",
-            "allowed_actions": ("open_competitor_review",),
-            "action_reason": "正在用主图搜索 Amazon 参考竞品",
+            "primary_action": "open_task_center",
+            "primary_action_label": "任务中心",
+            "allowed_actions": ("open_task_center", "open_detail"),
+            "action_reason": "自动竞品搜索正在任务中心执行或等待执行",
             "color": "processing",
         }
     if node == WORKFLOW_NODE_SEARCH_COMPETITOR and status == WORKFLOW_STATUS_SUCCEEDED:
         return {
-            "label": "待选择竞品",
+            "label": "竞品搜索完成",
             "work_status": "select_competitor",
-            "primary_action": "open_competitor_review",
-            "primary_action_label": "选竞品",
-            "allowed_actions": ("open_competitor_review",),
-            "action_reason": "竞品搜索已完成，需要选择参考竞品",
+            "primary_action": "open_detail",
+            "primary_action_label": "查看",
+            "allowed_actions": ("open_detail",),
+            "action_reason": "竞品搜索已完成",
             "color": "purple",
+        }
+    if node == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS and status == WORKFLOW_STATUS_PENDING:
+        return {
+            "label": "待视觉初筛竞品",
+            "work_status": "select_competitor",
+            "primary_action": "open_detail",
+            "primary_action_label": "查看",
+            "allowed_actions": ("open_detail",),
+            "action_reason": "Amazon 搜索候选已保存，等待后续视觉初筛任务",
+            "color": "warning",
         }
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL and status == WORKFLOW_STATUS_PENDING:
         return {"label": "待抓取竞品详情", "color": "warning", "action_reason": "已选择竞品，等待抓取详情"}
@@ -350,7 +372,7 @@ def _status_overrides(node: str, status: str) -> dict[str, Any]:
     return {}
 
 
-def _failed_overrides(node: str) -> dict[str, Any]:
+def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
     if node == WORKFLOW_NODE_AUTO_SELECT_IMAGES:
         return {
             "label": "自动选图失败",
@@ -362,13 +384,23 @@ def _failed_overrides(node: str) -> dict[str, Any]:
             "color": "error",
         }
     if node == WORKFLOW_NODE_SEARCH_COMPETITOR:
+        if not _is_auto_competitor_search(product):
+            return {
+                "label": "竞品搜索失败",
+                "work_status": "select_competitor",
+            "primary_action": "open_detail",
+            "primary_action_label": "查看",
+            "allowed_actions": ("open_detail",),
+            "action_reason": "旧竞品搜索路径已停用，请使用自动竞品搜索任务",
+                "color": "error",
+            }
         return {
             "label": "竞品搜索失败",
             "work_status": "select_competitor",
             "primary_action": "retry_competitor_search",
-            "primary_action_label": "重新搜索",
-            "allowed_actions": ("retry_competitor_search", "open_competitor_review"),
-            "action_reason": "竞品搜索失败，可重新搜索",
+            "primary_action_label": "重试 Amazon 搜索",
+            "allowed_actions": ("retry_competitor_search", "open_detail"),
+            "action_reason": "竞品搜索失败，可重试 Amazon 搜索或手动选择竞品",
             "color": "error",
         }
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL:
@@ -377,7 +409,7 @@ def _failed_overrides(node: str) -> dict[str, Any]:
             "work_status": "select_competitor",
             "primary_action": "retry_competitor_capture",
             "primary_action_label": "重新抓取",
-            "allowed_actions": ("retry_competitor_capture", "change_competitor", "open_competitor_review"),
+            "allowed_actions": ("retry_competitor_capture", "open_detail"),
             "action_reason": "竞品详情抓取失败，可重新抓取或更换竞品",
             "color": "error",
         }
@@ -429,3 +461,8 @@ def _compact_error(value: str | None) -> str | None:
     if len(text) <= 180:
         return text
     return text[:177].rstrip() + "..."
+
+
+def _is_auto_competitor_search(product: Any) -> bool:
+    marker = "自动竞品搜索"
+    return marker in str(getattr(product, "error_message", "") or "") or marker in str(getattr(product, "workflow_error", "") or "")

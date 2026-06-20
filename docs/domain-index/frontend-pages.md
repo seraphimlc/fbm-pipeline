@@ -23,7 +23,7 @@
 - Amazon 详情：`frontend/src/pages/ProductDetail.tsx`
 - TikTok 详情：`frontend/src/pages/TikTokProductDetail.tsx`
 - 图片确认：`frontend/src/pages/ProductImageReview.tsx`
-- 竞品确认：`frontend/src/pages/ProductCompetitorReview.tsx`
+- 竞品确认旧页已退役：`/products/competitor-review` 仅重定向到商品列表；竞品搜索入口在商品列表 workflow action 和任务中心。
 - 新任务中心：`frontend/src/pages/TaskRunCenter.tsx`
 - 旧离线任务中心：`frontend/src/pages/OfflineTaskCenter.tsx`
 - 导出中心：`frontend/src/pages/CatalogList.tsx`

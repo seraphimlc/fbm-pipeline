@@ -14,7 +14,7 @@ from datetime import datetime
 
 from app.config import settings
 from app.database import async_session
-from app.models import AmazonListingCapture, CatalogProduct, Product
+from app.models import CatalogProduct, Product
 from app.models.status import *
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -41,44 +41,6 @@ def _json_loads(value: str | None, fallback):
         return fallback
 
 
-ACTIVE_LISTING_CAPTURE_STATUSES = {"queued", "running"}
-
-
-async def _has_captured_competitor(db, product: Product) -> bool:
-    if not product.data:
-        return False
-    snapshot = _json_loads(product.data.gigab2b_raw_snapshot, {})
-    if not isinstance(snapshot, dict):
-        return False
-    selected = snapshot.get("selected_stylesnap")
-    capture = snapshot.get("amazon_listing_capture")
-    if _is_competitor_listing_capture_state(product):
-        raise RuntimeError("前置节点未完成：竞品详情仍在抓取中，请等待完成后再进入图片分析")
-    if isinstance(capture, dict) and capture.get("status") in ACTIVE_LISTING_CAPTURE_STATUSES:
-        raise RuntimeError("前置节点未完成：竞品详情仍在抓取中，请等待完成后再进入图片分析")
-    candidate_id = selected.get("candidate_id") if isinstance(selected, dict) else None
-    if candidate_id:
-        result = await db.execute(
-            select(AmazonListingCapture).where(AmazonListingCapture.selected_candidate_id == int(candidate_id))
-        )
-        current_capture = result.scalar_one_or_none()
-        if current_capture and current_capture.capture_status in ACTIVE_LISTING_CAPTURE_STATUSES:
-            raise RuntimeError("前置节点未完成：竞品详情仍在抓取中，请等待完成后再进入图片分析")
-        if (
-            current_capture
-            and current_capture.capture_status == "captured"
-            and current_capture.asin == product.competitor_asin
-        ):
-            return True
-    return bool(
-        product.competitor_asin
-        and isinstance(selected, dict)
-        and isinstance(capture, dict)
-        and capture.get("status") == "captured"
-        and capture.get("asin") == product.competitor_asin
-    )
-
-
 def _is_competitor_listing_capture_state(product: Product) -> bool:
     return (
         product.status == STEP5_LISTING
@@ -86,21 +48,6 @@ def _is_competitor_listing_capture_state(product: Product) -> bool:
         and "竞品" in (product.error_message or "")
         and "抓取中" in (product.error_message or "")
     )
-
-
-def _selected_stylesnap_candidate_id(product: Product) -> int | None:
-    if not product.data:
-        return None
-    snapshot = _json_loads(product.data.gigab2b_raw_snapshot, {})
-    if not isinstance(snapshot, dict):
-        return None
-    selected = snapshot.get("selected_stylesnap")
-    if not isinstance(selected, dict) or not selected.get("candidate_id"):
-        return None
-    try:
-        return int(selected["candidate_id"])
-    except (TypeError, ValueError):
-        return None
 
 
 async def _assert_step_prerequisites(product_id: int, step: int) -> None:
@@ -118,8 +65,6 @@ async def _assert_step_prerequisites(product_id: int, step: int) -> None:
                 raise RuntimeError("前置节点未完成：请先确认商品主图和 Listing 图片")
             if not product.competitor_asin:
                 raise RuntimeError("前置节点未完成：请先从候选中选择参考竞品")
-            if not await _has_captured_competitor(db, product):
-                raise RuntimeError("前置节点未完成：请先抓取选中竞品的 Amazon Listing 详情")
         if step >= 6 and (not product.images or not product.images.image_analysis):
             raise RuntimeError("前置节点未完成：图片分析节点未完成，不能进入 Listing 文案")
         if step >= 7:
@@ -405,44 +350,12 @@ async def recover_interrupted_pipelines() -> None:
                 product.current_step = 2
                 product.error_message = "Amazon 同款搜索被中断，请重新搜索候选"
                 product.updated_at = now
-                if product.data:
-                    snapshot = _json_loads(product.data.gigab2b_raw_snapshot, {})
-                    if isinstance(snapshot, dict):
-                        snapshot["stylesnap_search"] = {
-                            "status": "failed",
-                            "error": product.error_message,
-                            "searched_at": now.isoformat(),
-                        }
-                        product.data.gigab2b_raw_snapshot = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
                 continue
             if _is_competitor_listing_capture_state(product):
-                # STEP5_LISTING is also used while the selected competitor detail
-                # capture is in progress. After a process restart the background
-                # capture task is gone, so expose it as a retryable failure.
                 product.status = FAILED
                 product.current_step = 4
-                product.error_message = "竞品详情抓取被中断，请重新抓详情"
+                product.error_message = "旧竞品详情抓取入口已停用，请重新进入当前自动竞品搜索节点"
                 product.updated_at = now
-                if product.data:
-                    snapshot = _json_loads(product.data.gigab2b_raw_snapshot, {})
-                    if isinstance(snapshot, dict):
-                        capture_snapshot = snapshot.get("amazon_listing_capture")
-                        if isinstance(capture_snapshot, dict):
-                            capture_snapshot["status"] = "failed"
-                            capture_snapshot["capture_status"] = "failed"
-                            capture_snapshot["capture_error"] = product.error_message
-                            capture_snapshot["updated_at"] = now.isoformat()
-                        product.data.gigab2b_raw_snapshot = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
-                candidate_id = _selected_stylesnap_candidate_id(product)
-                if candidate_id:
-                    capture_result = await db.execute(
-                        select(AmazonListingCapture).where(AmazonListingCapture.selected_candidate_id == candidate_id)
-                    )
-                    capture = capture_result.scalar_one_or_none()
-                    if capture and capture.capture_status in ACTIVE_LISTING_CAPTURE_STATUSES:
-                        capture.capture_status = "failed"
-                        capture.capture_error = product.error_message
-                        capture.updated_at = now
                 continue
             step = product.current_step or 1
             if step < 1:

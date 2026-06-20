@@ -14,8 +14,6 @@ from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.models import (
-    AmazonListingCapture,
-    AmazonStyleSnapCandidate,
     CatalogProduct,
     GigaInventory,
     GigaItem,
@@ -28,8 +26,14 @@ from app.models import (
     ProductData,
     ProductImage,
 )
-from app.models.status import WORKFLOW_NODE_SELECT_IMAGES, WORKFLOW_STATUS_PENDING
+from app.models.status import (
+    WORKFLOW_NODE_AUTO_SELECT_IMAGES,
+    WORKFLOW_NODE_SELECT_IMAGES,
+    WORKFLOW_STATUS_FAILED,
+    WORKFLOW_STATUS_PENDING,
+)
 from app.pipeline.step2_pricing import calculate_price
+from app.task_planners.product_auto_image_selection import create_product_auto_image_selection_runs
 from app.product_tasks.workflow import set_product_workflow
 from app.services.product_duplicates import find_duplicate_by_item_code
 from app.services.upc_pool import ensure_product_upc
@@ -105,69 +109,6 @@ def _attr_text(detail: dict[str, Any], key: str) -> str | None:
     return _text(detail.get(key)) or _text(attrs.get(key)) or _text(attrs.get(key.replace("main", "Main ")))
 
 
-def _category_path_from_candidate(candidate: AmazonStyleSnapCandidate) -> tuple[list[str], str | None]:
-    categories: list[str] = []
-    for text in (candidate.category_rank, candidate.raw_snippet):
-        if not text:
-            continue
-        cleaned_text = re.sub(r"\s+", " ", text)
-        pattern = (
-            r"#?[\d,]+\s+in\s+(.+?)"
-            r"(?=(?:\s+#?[\d,]+\s+in\s+| ASIN:| 品牌:| 卖家:| 配送:| 加入产品库|"
-            r"近30天|销售额|FBA费用|毛利率|变体数|价格:|评分|配送时长|Color:|"
-            r"Style:|Size:|商品重量|商品尺寸|包装重量|包装尺寸|上架时间|全部流量词|"
-            r"自然搜索词|广告流量词|搜索推荐词|$))"
-        )
-        for match in re.finditer(pattern, cleaned_text, flags=re.I):
-            category = re.sub(r"\([^)]*\)", "", match.group(1))
-            category = re.sub(r"\s+", " ", category).strip(" >›-")
-            if category and category not in categories:
-                categories.append(category)
-    return categories, categories[0] if categories else None
-
-
-def _category_path_from_listing_capture(capture: AmazonListingCapture | None) -> tuple[list[str], str | None]:
-    if not capture:
-        return [], None
-    categories = [str(item).strip() for item in _json_loads(capture.categories, []) if str(item).strip()]
-    if categories or capture.leaf_category:
-        return categories, capture.leaf_category or (categories[-1] if categories else None)
-    if capture.category_rank:
-        matches = re.findall(r"#?[\d,]+\s+in\s+([^#()]+)", capture.category_rank)
-        cleaned = [re.sub(r"\s+", " ", item).strip(" >›-") for item in matches if item.strip()]
-        if cleaned:
-            return cleaned, cleaned[-1]
-    return [], None
-
-
-def _listing_capture_snapshot(capture: AmazonListingCapture | None) -> dict[str, Any] | None:
-    if not capture:
-        return None
-    return {
-        "capture_id": capture.id,
-        "status": capture.capture_status,
-        "capture_error": capture.capture_error,
-        "asin": capture.asin,
-        "url": capture.url,
-        "title": capture.title,
-        "brand": capture.brand,
-        "seller": capture.seller,
-        "price": capture.price,
-        "rating": capture.rating,
-        "review_count": capture.review_count,
-        "availability": capture.availability,
-        "categories": _json_loads(capture.categories, []),
-        "leaf_category": capture.leaf_category,
-        "category_rank": capture.category_rank,
-        "bullets": _json_loads(capture.bullets_json, []),
-        "description": capture.description,
-        "product_details": _json_loads(capture.product_details_json, {}),
-        "aplus_text": capture.aplus_text,
-        "main_image_url": capture.main_image_url,
-        "image_urls": _json_loads(capture.image_urls_json, []),
-    }
-
-
 async def _load_price_inventory(
     db: AsyncSession,
     site: str,
@@ -215,7 +156,7 @@ async def _load_price_inventory(
     )
 
 
-def _representative_sku(item_code: str, skus: list[GigaSku], selected: list[AmazonStyleSnapCandidate]) -> GigaSku | None:
+def _representative_sku(item_code: str, skus: list[GigaSku]) -> GigaSku | None:
     if not skus:
         return None
     by_code = {sku.sku_code: sku for sku in skus}
@@ -224,9 +165,6 @@ def _representative_sku(item_code: str, skus: list[GigaSku], selected: list[Amaz
     for sku in skus:
         if sku.is_primary_child:
             return sku
-    for candidate in selected:
-        if candidate.sku_code in by_code:
-            return by_code[candidate.sku_code]
     return skus[0]
 
 
@@ -465,7 +403,7 @@ async def create_product_draft_from_giga_item(
     if not skus:
         raise ValueError("缺少 GIGA SKU 明细，不能创建商品草稿")
 
-    representative = _representative_sku(normalized_item_code, skus, [])
+    representative = _representative_sku(normalized_item_code, skus)
     if not representative:
         raise ValueError("缺少代表 SKU，不能创建商品草稿")
 
@@ -528,13 +466,13 @@ async def create_product_draft_from_giga_item(
             brand=brand or settings.DEFAULT_BRAND,
             status="created",
             current_step=0,
-            error_message="待确认商品图片",
+            error_message=None,
             created_at=now,
             updated_at=now,
         )
         set_product_workflow(
             product,
-            node=WORKFLOW_NODE_SELECT_IMAGES,
+            node=WORKFLOW_NODE_AUTO_SELECT_IMAGES,
             status=WORKFLOW_STATUS_PENDING,
             error=None,
             now=now,
@@ -551,11 +489,11 @@ async def create_product_draft_from_giga_item(
     product.source_site = normalized_site
     product.source_batch_id = batch_id
     if product.status == "created" and product.current_step <= 0:
-        product.error_message = product.error_message or "待确认商品图片"
+        product.error_message = product.error_message or (None if created else "待确认商品图片")
         if not product.workflow_node and not product.workflow_status and not product.competitor_asin:
             set_product_workflow(
                 product,
-                node=WORKFLOW_NODE_SELECT_IMAGES,
+                node=WORKFLOW_NODE_AUTO_SELECT_IMAGES if created else WORKFLOW_NODE_SELECT_IMAGES,
                 status=WORKFLOW_STATUS_PENDING,
                 error=None,
                 now=now,
@@ -627,6 +565,43 @@ async def create_product_draft_from_giga_item(
         db.add(ProductAplus(product_id=product.id))
     await db.commit()
     await db.refresh(product)
+    if created:
+        try:
+            await create_product_auto_image_selection_runs(
+                db,
+                [product.id],
+                created_by="giga_product_draft",
+                auto_start=True,
+            )
+            await db.refresh(product)
+        except Exception as exc:
+            await db.rollback()
+            failed_at = datetime.now()
+            message = f"自动选图任务创建失败: {type(exc).__name__}: {exc}"
+            result = await db.execute(
+                select(Product)
+                .options(selectinload(Product.catalog_item))
+                .where(Product.id == product.id)
+            )
+            failed_product = result.scalar_one_or_none()
+            if failed_product:
+                failed_product.status = "failed"
+                failed_product.current_step = 1
+                failed_product.error_message = message
+                set_product_workflow(
+                    failed_product,
+                    node=WORKFLOW_NODE_AUTO_SELECT_IMAGES,
+                    status=WORKFLOW_STATUS_FAILED,
+                    error=message,
+                    now=failed_at,
+                )
+                failed_product.updated_at = failed_at
+                if failed_product.catalog_item:
+                    failed_product.catalog_item.status = failed_product.status
+                    failed_product.catalog_item.updated_at = failed_at
+                await db.commit()
+                await db.refresh(failed_product)
+                product = failed_product
     return product, created
 
 

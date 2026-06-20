@@ -101,9 +101,6 @@ LISTING_PROMPT_TEMPLATE = """Generate an Amazon product listing based on the fol
 ## Category-Specific Selling Strategy
 {category_strategy}
 
-## Selected Amazon Competitor Reference
-{competitor_reference}
-
 ## Strategic Requirements
 Before writing copy, build a keyword and positioning strategy. Keywords serve Amazon search relevance; the copy serves buyer click-through and conversion.
 
@@ -172,60 +169,6 @@ def _compact_text(value: str | None, limit: int = 1200) -> str:
     return text[:limit].rstrip(" ,;-") + "..."
 
 
-def _competitor_reference(pd: ProductData) -> str:
-    snapshot = {}
-    if pd.gigab2b_raw_snapshot:
-        try:
-            snapshot = json.loads(pd.gigab2b_raw_snapshot)
-        except Exception:
-            snapshot = {}
-    capture = snapshot.get("amazon_listing_capture") if isinstance(snapshot, dict) else None
-    selected = snapshot.get("selected_stylesnap") if isinstance(snapshot, dict) else None
-    if not isinstance(capture, dict) and not isinstance(selected, dict):
-        return "N/A"
-    capture = capture if isinstance(capture, dict) else {}
-    selected = selected if isinstance(selected, dict) else {}
-
-    bullets = capture.get("bullets")
-    if not isinstance(bullets, list):
-        bullets = []
-    bullet_lines = []
-    for bullet in bullets[:5]:
-        text = _compact_text(str(bullet), 500)
-        if text:
-            bullet_lines.append(f"  - {text}")
-
-    product_details = capture.get("product_details")
-    if isinstance(product_details, dict) and product_details:
-        detail_items = list(product_details.items())[:12]
-        details_text = "; ".join(
-            f"{_compact_text(str(key), 80)}: {_compact_text(str(value), 160)}"
-            for key, value in detail_items
-            if str(key).strip() and str(value).strip()
-        )
-    else:
-        details_text = ""
-
-    lines = [
-        f"- ASIN: {capture.get('asin') or selected.get('asin') or 'N/A'}",
-        f"- URL: {capture.get('url') or selected.get('url') or 'N/A'}",
-        f"- Title: {_compact_text(capture.get('title'), 600) or 'N/A'}",
-        f"- Brand: {capture.get('brand') or 'N/A'}",
-        f"- Seller: {capture.get('seller') or 'N/A'}",
-        f"- Price: {capture.get('price') or 'N/A'}",
-        f"- Rating/Reviews: {' / '.join(str(item) for item in [capture.get('rating'), capture.get('review_count')] if item) or 'N/A'}",
-        f"- Category Rank: {_compact_text(capture.get('category_rank'), 600) or selected.get('category_rank') or 'N/A'}",
-        "- Bullet Points:",
-        *(bullet_lines or ["  - N/A"]),
-        f"- Description: {_compact_text(capture.get('description'), 1200) or 'N/A'}",
-        f"- Product Details: {details_text or 'N/A'}",
-    ]
-    aplus_text = _compact_text(capture.get("aplus_text"), 1600)
-    if aplus_text:
-        lines.append(f"- A+ Highlights: {aplus_text}")
-    return "\n".join(lines)
-
-
 def _build_prompt(product: Product, pd: ProductData) -> str:
     """构建LLM Prompt"""
     # 解析关键词
@@ -256,7 +199,6 @@ def _build_prompt(product: Product, pd: ProductData) -> str:
 
     keywords_json = json.dumps(keywords, ensure_ascii=False, indent=2) if keywords else "[]"
     category_strategy = _listing_strategy(pd, category_path)
-    competitor_reference = _competitor_reference(pd)
 
     return LISTING_PROMPT_TEMPLATE.format(
         title=pd.title or "N/A",
@@ -275,7 +217,6 @@ def _build_prompt(product: Product, pd: ProductData) -> str:
         keywords_json=keywords_json,
         category_path=category_path,
         category_strategy=category_strategy,
-        competitor_reference=competitor_reference,
         search_terms_max_keywords=SEARCH_TERMS_MAX_KEYWORDS,
     )
 

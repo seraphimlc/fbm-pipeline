@@ -328,6 +328,85 @@ cd frontend && npm run build
 git diff --check
 ```
 
+## 19. 阶段 B 技术设计 / 实现对账
+
+状态：2026-06-20 实现对账。
+
+阶段 B 把阶段 A 后端闭环接入真实 Amazon 商品主流程，但仍不实现自动竞品、图片分析、Listing、A+、导出、Amazon 上传、Step 10 或模板映射。
+
+### 19.1 新建商品入口
+
+- `backend/app/services/giga_product_drafts.py`
+  - 新建 Amazon 商品 `created=True` 时，初始 workflow 从 `select_images/pending` 切到 `auto_select_images/pending`。
+  - 商品、源数据、`ProductImage.gallery_order` 和 A+ 初始记录先完整落库并提交。
+  - 提交后调用 `create_product_auto_image_selection_runs(..., created_by="giga_product_draft", auto_start=True)` 创建或复用 `product_auto_image_selection` task run。
+  - task action 的 `reserve()` 会把商品投影到 `auto_select_images/processing`，任务中心通过 correlation key 追踪。
+  - 如果 task run 创建/复用失败，商品投影到 `auto_select_images/failed` 并记录错误，不回退到人工选图默认路径。
+  - duplicate/update 商品不批量迁移、不静默改变既有 workflow。
+
+### 19.2 重试 API
+
+- `backend/app/api/products.py`
+  - 新增 `POST /api/products/{product_id}/auto-image-selection/retry`。
+  - 只接受 `workflow_node = auto_select_images`。
+  - `failed` / `pending` 可创建或复用 `product_auto_image_selection` run。
+  - `processing` 不重复创建 run，返回当前商品状态，商品列表主动作继续进入任务中心。
+  - 响应挂载同源 workflow 投影；`ProductWorkflowState` 暴露 `related_correlation_key`，让前端任务中心入口能按商品自动选图 run 定位。
+  - `auto_select_images/pending` 是正式工作台状态桶；overview、列表筛选、前端 filter/meta 均显式支持，`processing` 仍归入已有 `running`。
+  - `GET /api/products?work_status=auto_select_images` 使用 DB 级 `workflow_node/status` 谓词和 count，不进入旧的全量加载后 Python 过滤分页路径。
+  - 命中 protected evidence 时拒绝，不写 `processing`。
+  - 其它节点不允许用自动选图重试覆盖当前图片事实。
+
+### 19.3 手动调整图片
+
+- `PUT /api/products/{id}/listing-images` 继续作为手动调整图片保存入口。
+- 保存前先调用共享保护门，遇到真实 ASIN、Catalog ASIN、Catalog confirmed/exported、Amazon 模板输出证据、Amazon 模板 ProductFile 输出证据、A+ uploaded/uploading 时拒绝。
+- 保存成功后复用 `_reset_product_after_image_selection()`：
+  - 写 `main_image_source = manual_selected`。
+  - 清竞品、图片分析、Listing、A+ 当前派生状态。
+  - 清 `image_selection_analysis` 和 `image_selected_at`，避免展示过期模型选择理由。
+  - 保留 GIGA 源事实、候选图片来源、真实文件、历史保护证据和 Step 10/template mappings。
+  - 进入 `search_competitor/pending`。
+
+共享保护门位于 `backend/app/services/product_protection.py`，供 ProductTaskAction 和商品 API 共同使用。
+
+### 19.4 前端动作
+
+- `frontend/src/api/index.ts`
+  - 新增 `retryProductAutoImageSelection(productId)`。
+- `frontend/src/pages/ProductList.tsx`
+  - 消费后端 `workflow.primary_action` / `allowed_actions` / `related_correlation_key`。
+  - `open_task_center` 进入任务中心 correlation 视图。
+  - `retry_auto_image_selection` 调用重试 API 并刷新列表。
+  - `manual_adjust_images` 按 `allowed_actions` 提供次级按钮，打开现有图片确认页作为纠偏入口。
+  - 不用 `current_step`、`error_message` 或前端字符串规则推导自动选图动作。
+- `frontend/src/pages/ProductImageReview.tsx`
+  - 保存成功文案收敛为“图片已保存”，避免继续表达成默认必经确认流程。
+
+### 19.5 测试和验证
+
+项目规则新增 Phase B 覆盖：
+
+- 新建商品先完整落库，再创建/复用自动选图 task run。
+- task run 创建失败时落 `auto_select_images/failed`。
+- `auto_select_images/pending` 被 overview/list/frontend 作为正式工作状态桶接住，不会崩溃或回落旧状态推导。
+- `auto_select_images` 列表筛选使用 SQL 谓词和 DB count，不触发高频列表内存分页红线。
+- duplicate/update 商品不批量迁移 workflow。
+- 重试 API 基于 workflow 状态，走任务中心 planner，不用裸后台任务。
+- 手动调整图片先过保护门，并清理自动选图分析字段。
+- 保护门覆盖 `ProductData.amazon_template_*` 和 `ProductFile.file_type in amazon_import_template/amazon_template`。
+- 商品列表消费后端 workflow action。
+- 不夹带 Step 10、`template_mappings` 或自动竞品实现。
+
+验证命令：
+
+```bash
+python -m compileall backend/app
+make test-project-rules
+cd frontend && npm run build
+git diff --check
+```
+
 如实现触及迁移，需要补迁移验证。
 
 ## 17. 禁止范围

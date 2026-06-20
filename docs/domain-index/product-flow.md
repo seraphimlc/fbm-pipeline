@@ -17,11 +17,10 @@
 - 商品状态只表达业务节点和业务结果，不表达任务执行细节；Amazon 主流程最终 PRD 以 `docs/superpowers/specs/2026-06-18-amazon-product-workflow-prd.md` 为准。
 - Amazon workflow T1 已进入结构层：`products.workflow_node/workflow_status/workflow_error/workflow_updated_at` 和集中枚举常量定义在后端模型/状态常量中；后续投影和写入统一入口仍按 PRD 分阶段推进。
 - Amazon workflow T2 的 Product Workflow Service 位于 `backend/app/product_tasks/workflow.py`：集中提供 `set_product_workflow()`、`build_product_workflow()` 和 node/action 映射；商品列表/详情 workflow 投影应同源调用该 service。
-- Amazon workflow T3：新建 Amazon 商品默认 `select_images/pending`；图片确认接口 `PUT /api/products/{id}/listing-images` 只保存主图/副图并执行 destructive reset，成功后进入 `search_competitor/pending`，不得自动启动 StyleSnap 搜索、后台任务或任务中心 task run。
-- Amazon 自动选图阶段 A：`auto_select_images` 节点、`product_auto_image_selection` ProductTaskAction、候选收集服务和自动选图服务已建立后端闭环；成功写当前图片事实并进入 `search_competitor/pending`，失败/取消/中断/锁超时进入 `auto_select_images/failed`。阶段 A 不切新建商品默认入口、不改默认前端路径、不自动启动竞品搜索。
-- Amazon workflow T4：搜索竞品入口 `POST /api/amazon-stylesnap/products/{id}/competitor-candidates/search` 触发 `search_competitor/processing`，成功或已有候选进入 `select_competitor/pending`，普通失败进入 `search_competitor/failed`，token/browser/Chrome 权限问题进入 `get_stylesnap_token/pending`；竞品队列/详情优先读 workflow，不写 task run、不进入任务中心。
-- Amazon workflow T5：选择竞品入口 `POST /api/amazon-stylesnap/products/{id}/competitor-candidates/{candidate_id}/select` 写 `capture_competitor_detail/processing` 并后台抓详情；详情成功后触发/复用图片分析任务并进入 `image_analysis/processing`，详情失败或中断进入 `capture_competitor_detail/failed`；换竞品只清当前竞品详情、图片分析、Listing、A+ 派生态，遇到真实 ASIN、人工确认、导出历史或 Amazon 模板输出证据必须阻断；抓详情本身不写 task run、不进入任务中心、不实现 T6-T9。
-- StyleSnap / 搜索竞品插件方案是长期合理方向，但当前 on hold；决策记录见 `docs/superpowers/specs/2026-06-17-stylesnap-client-extension-decision.md`。
+- Amazon workflow T3：旧人工图片确认入口仍由 `PUT /api/products/{id}/listing-images` 保存主图/副图并执行 destructive reset，成功后进入 `search_competitor/pending`；该入口现在是自动选图失败/用户主动纠偏入口，保存前必须保护真实 ASIN、导出历史、Amazon 模板输出和 A+ 上传证据。
+- Amazon 自动选图阶段 B：新建 Amazon 商品默认进入 `auto_select_images/pending`，完整落库后创建/复用 `product_auto_image_selection` task run 并投影 `processing`；`auto_select_images/pending` 是商品工作台正式状态桶，overview/list/frontend filter 均需显式支持，`processing` 归入 `running`。task run 创建失败落 `auto_select_images/failed`。`POST /api/products/{id}/auto-image-selection/retry` 基于 workflow 状态重试；商品列表消费后端 `retry_auto_image_selection` / `manual_adjust_images` action。阶段 B 不自动启动竞品搜索。
+- Amazon 自动竞品搜索 Phase A：`search_competitor/pending|failed` 可通过 `POST /api/products/{id}/competitor-search/retry` 创建/复用 `product_competitor_search` task run；reserve 投影 `search_competitor/processing`，成功把 Amazon 页面搜索候选写入 `amazon_competitor_search_candidates` 并进入 `visual_match_competitors/pending`，失败回到 `search_competitor/failed`。`amazon_competitor_search_candidates` 是自动竞品搜索主事实源。本阶段不做视觉初筛、抓详情或自动选择竞品。
+- 旧 StyleSnap 模式已退役：后端不再注册或保留 `/api/amazon-stylesnap` router，旧前端竞品确认页已删除，`/products/competitor-review` 仅重定向到商品列表；代码层不再保留旧 `AmazonStyleSnapCandidate` / `AmazonListingCapture` 模型、旧 snapshot key 读取或导出兼容逻辑。已存在的旧物理表不由应用启动逻辑维护或自动 drop。
 - 已修 P0：ProductTaskAction reserve 后的图片分析/Listing 入队态不能再被旧 pipeline `is_running(product.id)` 误判为中断。后续结构治理应把商品主状态从 task queued/running 语义收敛为业务节点四态。
 
 ## 关键入口
@@ -30,22 +29,21 @@
 - Amazon 详情：`frontend/src/pages/ProductDetail.tsx`
 - TikTok 详情：`frontend/src/pages/TikTokProductDetail.tsx`
 - 图片确认：`frontend/src/pages/ProductImageReview.tsx`
-- 竞品确认：`frontend/src/pages/ProductCompetitorReview.tsx`
 - 新建商品：`frontend/src/pages/CreateProduct.tsx`
 - 前端 API client：`frontend/src/api/index.ts`
 - 商品 API：`backend/app/api/products.py`
-- StyleSnap API：`backend/app/api/amazon_stylesnap.py`
-- 自动选图：`backend/app/services/product_image_candidates.py`, `backend/app/services/product_image_vlm.py`, `backend/app/product_tasks/auto_image_selection.py`, `backend/app/task_planners/product_auto_image_selection.py`
+- 自动选图：`backend/app/services/product_image_candidates.py`, `backend/app/services/product_image_vlm.py`, `backend/app/services/product_protection.py`, `backend/app/product_tasks/auto_image_selection.py`, `backend/app/task_planners/product_auto_image_selection.py`
+- 自动竞品搜索：`backend/app/services/amazon_competitor_query.py`, `backend/app/services/amazon_search_page.py`, `backend/app/task_planners/product_competitor_search.py`, `backend/app/product_tasks/actions.py`
 - TikTok API：`backend/app/api/tiktok.py`
 - pipeline：`backend/app/pipeline/engine.py`, `backend/app/pipeline/step*.py`
 - 模型：`backend/app/models/models.py`
-- 表：`products`, `product_data`, `product_images`, `product_aplus`, `catalog_products`
+- 表：`products`, `product_data`, `product_images`, `product_aplus`, `catalog_products`, `amazon_competitor_search_candidates`
 
 ## 关键流程
 
 - 商品列表/详情：页面 -> `frontend/src/api/index.ts` -> `backend/app/api/products.py`；详情素材摘要通过 `backend/app/services/material_assets.py` 只读扫描。
 - 图片确认：`ProductImageReview.tsx` -> 商品 API -> `product_images`。
-- 竞品确认：`ProductCompetitorReview.tsx` -> StyleSnap API/service。
+- 自动竞品搜索：商品列表/详情 workflow action -> `POST /api/products/{id}/competitor-search/retry` -> `product_competitor_search` task run -> `amazon_competitor_search_candidates`。
 - Amazon/TikTok 详情分流：前端路由和数据源类型共同决定详情入口。
 
 ## 相关文档
@@ -59,14 +57,12 @@
 - `docs/superpowers/specs/2026-06-19-amazon-auto-image-selection-prd.md`
 - `docs/superpowers/specs/2026-06-19-amazon-auto-competitor-selection-prd.md`
 - `docs/superpowers/specs/2026-06-17-product-workflow-node-state-prd.md`
-- `docs/superpowers/specs/2026-06-17-stylesnap-client-extension-decision.md`
 - `docs/superpowers/specs/2026-06-16-product-task-action-refactor-prd.md`
 
 ## 验证入口
 
 - 商品列表：`http://localhost:3190/products`
 - 图片确认：`http://localhost:3190/products/image-review?data_source_id=<id>`
-- 竞品确认：`http://localhost:3190/products/competitor-review?data_source_id=<id>`
 - Amazon 详情：`http://localhost:3190/products/<id>`
 - TikTok 详情：`http://localhost:3190/tiktok/products/<id>`
 - 商品总览：`GET /api/products/overview?data_source_id=<id>`
@@ -75,8 +71,9 @@
 
 - 状态/按钮/统计问题：先看 `backend/app/api/products.py` 返回字段，再看页面消费逻辑。
 - 商品详情打开后素材文件位置变化：先看 `backend/app/api/products.py` 的 GET 详情链路和 `backend/app/services/material_assets.py`，GET 路径不得调用 mutating 素材整理函数。
-- 图片选择问题：默认人工图片确认仍看 `ProductImageReview.tsx` 和 `product_images`；自动选图后端闭环先看 `backend/app/services/product_image_candidates.py`、`backend/app/services/product_image_vlm.py`、`backend/app/product_tasks/auto_image_selection.py` 和 `backend/app/product_tasks/actions.py`。
-- 竞品信息问题：先看 `backend/app/api/amazon_stylesnap.py` 和 `backend/app/services/amazon_stylesnap_search.py`。
+- 图片选择问题：手动纠偏看 `ProductImageReview.tsx`、`PUT /api/products/{id}/listing-images`、`product_images` 和 `backend/app/services/product_protection.py`；自动选图入口/重试看 `backend/app/services/giga_product_drafts.py`、`POST /api/products/{id}/auto-image-selection/retry`、`backend/app/task_planners/product_auto_image_selection.py`、`backend/app/product_tasks/actions.py`、`backend/app/product_tasks/auto_image_selection.py`。
+- 自动竞品搜索问题：先看 `POST /api/products/{id}/competitor-search/retry`、`backend/app/task_planners/product_competitor_search.py`、`backend/app/product_tasks/actions.py` 的 `ProductCompetitorSearchAction`、`backend/app/services/amazon_competitor_query.py` 和 `backend/app/services/amazon_search_page.py`。
+- 旧 StyleSnap 残留问题：先确认是否还有 `/api/amazon-stylesnap`、旧 service、旧前端页面、旧 ORM 模型、旧 snapshot key 读取或 Step 10/export 兼容读取；不要恢复旧运行入口。
 - 数据源分流问题：先看 `frontend/src/App.tsx`、详情页和 `backend/app/api/products.py`。
 
 ## 维护规则

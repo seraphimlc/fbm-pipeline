@@ -359,7 +359,7 @@ const ProductImageReview: React.FC = () => {
         main_image_path: draftPaths[0],
         gallery_images: draftPaths.slice(1),
       });
-      message.success('商品图片已确认');
+      message.success('图片已保存');
       const nextQueue = queue.filter((item) => item.id !== detail.id);
       setQueue(nextQueue);
       setQueueTotal((previous) => Math.max(previous - 1, 0));

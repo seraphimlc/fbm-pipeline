@@ -681,63 +681,6 @@ class PaginatedGigaInventory(BaseModel):
     pulled_at: datetime | None = None
 
 
-class AmazonStyleSnapCandidateResponse(BaseModel):
-    id: int
-    batch_id: str
-    site: str
-    item_code: str
-    sku_code: str
-    product_name: str | None = None
-    source_image_url: str | None = None
-    source_image_path: str | None = None
-    rank: int
-    asin: str
-    title: str | None = None
-    url: str | None = None
-    brand: str | None = None
-    seller: str | None = None
-    delivery: str | None = None
-    price: str | None = None
-    rating: str | None = None
-    review_count: str | None = None
-    leaf_category: str | None = None
-    category_rank: str | None = None
-    color: str | None = None
-    size: str | None = None
-    style: str | None = None
-    amazon_image_url: str | None = None
-    raw_snippet: str | None = None
-    is_selected: int = 0
-    selected_at: datetime | None = None
-    listing_capture_id: int | None = None
-    listing_capture_status: str | None = None
-    listing_capture_error: str | None = None
-    listing_capture_has_main_image: bool = False
-    listing_summary: str | None = None
-    listing_captured_at: datetime | None = None
-    captured_at: datetime | None = None
-    imported_at: datetime | None = None
-    updated_at: datetime | None = None
-
-    model_config = {"from_attributes": True}
-
-
-class AmazonStyleSnapCandidateGroupResponse(BaseModel):
-    batch_id: str
-    site: str
-    item_code: str
-    sku_code: str
-    product_name: str | None = None
-    source_image_url: str | None = None
-    source_image_path: str | None = None
-    selected_candidate_id: int | None = None
-    product_task_id: int | None = None
-    product_task_status: str | None = None
-    task_ready: bool = False
-    task_ready_reason: str | None = None
-    candidates: list[AmazonStyleSnapCandidateResponse]
-
-
 class UpcPoolImportResponse(BaseModel):
     added: int
     duplicated: int
@@ -772,6 +715,8 @@ class ProductWorkflowState(BaseModel):
     allowed_actions: list[str] = Field(default_factory=list)
     action_reason: str | None = None
     color: str = "default"
+    related_task_run_id: int | None = None
+    related_correlation_key: str | None = None
 
 
 class ProductResponse(BaseModel):
@@ -859,55 +804,6 @@ class ProductImageReviewDetailResponse(BaseModel):
     current_task_status: str | None = None
     data: ProductImageReviewDetailData | None = None
     images: ProductImageReviewDetailImages | None = None
-
-
-class ProductCompetitorReviewQueueItem(BaseModel):
-    id: int
-    source_item_id: str | None = None
-    gigab2b_product_id: str | None = None
-    competitor_asin: str | None = None
-    status: str
-    current_step: int = 0
-    current_task_status: str | None = None
-    workflow: ProductWorkflowState | None = None
-    error_message: str | None = None
-    item_code: str | None = None
-    title: str | None = None
-    leaf_category: str | None = None
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
-
-
-class ProductCompetitorReviewQueueResponse(BaseModel):
-    items: list[ProductCompetitorReviewQueueItem]
-    total: int
-    limit: int
-
-
-class ProductCompetitorReviewDetailData(ProductImageReviewDetailData):
-    gigab2b_raw_snapshot: str | None = None
-
-
-class ProductCompetitorReviewDetailImages(BaseModel):
-    id: int | None = None
-    product_id: int
-    main_image_path: str | None = None
-    main_image_source: str | None = None
-
-
-class ProductCompetitorReviewDetailResponse(BaseModel):
-    id: int
-    source_item_id: str | None = None
-    gigab2b_product_id: str | None = None
-    competitor_asin: str | None = None
-    status: str
-    current_step: int = 0
-    current_task_status: str | None = None
-    workflow: ProductWorkflowState | None = None
-    error_message: str | None = None
-    leaf_category: str | None = None
-    data: ProductCompetitorReviewDetailData | None = None
-    images: ProductCompetitorReviewDetailImages | None = None
 
 
 class ProductFileEntry(BaseModel):
@@ -1399,6 +1295,7 @@ class BulkImportResponse(BaseModel):
 class WorkbenchOverview(BaseModel):
     total_products: int = 0
     needs_initialization: int = 0
+    auto_select_images: int = 0
     select_images: int = 0
     competitor_searching: int = 0
     select_competitor: int = 0

@@ -230,53 +230,6 @@ export interface ProductImageReviewDetail {
   } | null;
 }
 
-export interface ProductCompetitorReviewQueueItem {
-  id: number;
-  source_item_id: string | null;
-  gigab2b_product_id: string | null;
-  competitor_asin: string | null;
-  status: string;
-  current_step: number;
-  current_task_status: string | null;
-  workflow?: ProductWorkflowState | null;
-  error_message: string | null;
-  item_code: string | null;
-  title: string | null;
-  leaf_category: string | null;
-  created_at: string | null;
-  updated_at: string | null;
-}
-
-export interface ProductCompetitorReviewQueue {
-  items: ProductCompetitorReviewQueueItem[];
-  total: number;
-  limit: number;
-}
-
-export interface ProductCompetitorReviewDetail {
-  id: number;
-  source_item_id: string | null;
-  gigab2b_product_id: string | null;
-  competitor_asin: string | null;
-  status: string;
-  current_step: number;
-  current_task_status: string | null;
-  workflow?: ProductWorkflowState | null;
-  error_message: string | null;
-  leaf_category: string | null;
-  data: {
-    item_code: string | null;
-    title: string | null;
-    gigab2b_raw_snapshot: string | null;
-  } | null;
-  images: {
-    id: number | null;
-    product_id: number;
-    main_image_path: string | null;
-    main_image_source: string | null;
-  } | null;
-}
-
 export interface CategoryOption {
   key: string;
   label: string;
@@ -839,61 +792,6 @@ export interface TaskRunBatchQueuedResult {
   errors?: string[];
 }
 
-export interface AmazonStyleSnapCandidate {
-  id: number;
-  batch_id: string;
-  site: string;
-  item_code: string;
-  sku_code: string;
-  product_name: string | null;
-  source_image_url: string | null;
-  source_image_path: string | null;
-  rank: number;
-  asin: string;
-  title: string | null;
-  url: string | null;
-  brand: string | null;
-  seller: string | null;
-  delivery: string | null;
-  price: string | null;
-  rating: string | null;
-  review_count: string | null;
-  leaf_category: string | null;
-  category_rank: string | null;
-  color: string | null;
-  size: string | null;
-  style: string | null;
-  amazon_image_url: string | null;
-  raw_snippet: string | null;
-  is_selected: number;
-  selected_at: string | null;
-  listing_capture_id: number | null;
-  listing_capture_status: string | null;
-  listing_capture_error: string | null;
-  listing_capture_has_main_image: boolean;
-  listing_summary: string | null;
-  listing_captured_at: string | null;
-  captured_at: string | null;
-  imported_at: string | null;
-  updated_at: string | null;
-}
-
-export interface AmazonStyleSnapCandidateGroup {
-  batch_id: string;
-  site: string;
-  item_code: string;
-  sku_code: string;
-  product_name: string | null;
-  source_image_url: string | null;
-  source_image_path: string | null;
-  selected_candidate_id: number | null;
-  product_task_id: number | null;
-  product_task_status: string | null;
-  task_ready: boolean;
-  task_ready_reason: string | null;
-  candidates: AmazonStyleSnapCandidate[];
-}
-
 export interface GigaInventoryAlert {
   id: number;
   batch_id: string;
@@ -1002,6 +900,7 @@ export interface PaginatedGigaInventory {
 
 export interface WorkbenchOverview {
   total_products: number;
+  auto_select_images: number;
   select_images: number;
   competitor_searching: number;
   select_competitor: number;
@@ -1300,12 +1199,6 @@ export const listProductImageReviewQueue = (params?: { data_source_id?: number; 
 export const getProductImageReviewDetail = (productId: number, params?: { image_limit?: number }) =>
   api.get<ProductImageReviewDetail>(`/products/image-review-detail/${productId}`, { params });
 
-export const listProductCompetitorReviewQueue = (params?: { data_source_id?: number; limit?: number }) =>
-  api.get<ProductCompetitorReviewQueue>('/products/competitor-review-queue', { params });
-
-export const getProductCompetitorReviewDetail = (productId: number) =>
-  api.get<ProductCompetitorReviewDetail>(`/products/competitor-review-detail/${productId}`);
-
 export const downloadImportTemplate = () =>
   api.get<Blob>('/products/import/template', { responseType: 'blob' });
 
@@ -1529,37 +1422,6 @@ export const listGigaInventoryAlerts = (params: { site: string; data_source_id?:
 export const listGigaPriceAlerts = (params: { site: string; data_source_id?: number; batch_id?: string; change_type?: string; page?: number; page_size?: number }) =>
   api.get<PaginatedGigaPriceAlerts>('/giga/price/alerts', { params });
 
-export const listProductCompetitorCandidates = (productId: number, params?: { enrich_images?: boolean }) =>
-  api.get<AmazonStyleSnapCandidateGroup>(`/amazon-stylesnap/products/${productId}/competitor-candidates`, { params });
-
-export const searchProductCompetitorCandidates = (productId: number, force = false) =>
-  api.post<Product>(
-    `/amazon-stylesnap/products/${productId}/competitor-candidates/search`,
-    null,
-    { params: { force }, timeout: 60000 },
-  );
-
-export const selectProductCompetitorCandidate = (productId: number, candidateId: number, forceCapture = false, autoStartGeneration = true) =>
-  api.post<AmazonStyleSnapCandidateGroup>(
-    `/amazon-stylesnap/products/${productId}/competitor-candidates/${candidateId}/select`,
-    null,
-    { params: { force_capture: forceCapture, auto_start_generation: autoStartGeneration }, timeout: 180000 },
-  );
-
-export const retryProductCompetitorCandidateCapture = (productId: number, candidateId: number, force = true) =>
-  api.post<AmazonStyleSnapCandidateGroup>(
-    `/amazon-stylesnap/products/${productId}/competitor-candidates/${candidateId}/capture`,
-    null,
-    { params: { force }, timeout: 60000 },
-  );
-
-export const captureMissingProductCompetitorCandidates = (productId: number, force = false) =>
-  api.post<AmazonStyleSnapCandidateGroup>(
-    `/amazon-stylesnap/products/${productId}/competitor-candidates/capture-missing`,
-    null,
-    { params: { force }, timeout: 60000 },
-  );
-
 export const getInventorySyncBatch = (id: number) =>
   api.get<InventorySyncBatchDetail>(`/products/inventory-sync-batches/${id}`);
 
@@ -1609,6 +1471,12 @@ export const updateProductListingImages = (id: number, data: {
   gallery_images: string[];
 }) =>
   api.put<ProductImage>(`/products/${id}/listing-images`, data);
+
+export const retryProductAutoImageSelection = (id: number) =>
+  api.post<Product>(`/products/${id}/auto-image-selection/retry`);
+
+export const retryProductCompetitorSearch = (id: number) =>
+  api.post<Product>(`/products/${id}/competitor-search/retry`);
 
 export const confirmProduct = (id: number) =>
   api.post<Product>(`/products/${id}/confirm`);

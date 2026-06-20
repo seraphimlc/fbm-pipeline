@@ -20,11 +20,11 @@ from openpyxl.utils import range_boundaries
 
 from app.config import settings
 from app.database import async_session
-from app.models import AmazonStyleSnapCandidate, Product, ProductData, ProductFile
+from app.models import Product, ProductData, ProductFile
 from app.pipeline.ride_on_category import RIDE_ON_CATEGORY_MARKERS, select_ride_on_category
 from app.pipeline.search_terms import normalize_search_terms
 from app.services.oss_uploader import oss_configured, upload_private_image
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 logger = logging.getLogger(__name__)
@@ -126,7 +126,6 @@ def _mapping_has_category_marker(mapping_path: Path, category_text: str) -> bool
 def _load_template_mapping(product: Product, pd: ProductData) -> dict:
     key = (product.brand or "", pd.leaf_category or "")
     mapping_path = BRAND_TEMPLATE_MAPPINGS.get(key)
-    selected_stylesnap_text = _selected_stylesnap_category_text(pd)
     category_text = " ".join(
         str(item or "")
         for item in (
@@ -134,7 +133,6 @@ def _load_template_mapping(product: Product, pd: ProductData) -> dict:
             pd.categories,
             pd.product_type,
             pd.title,
-            selected_stylesnap_text,
         )
     ).lower()
     if not mapping_path and (product.brand or "") == "Vindhvisk" and _mapping_has_category_marker(BICYCLE_MAPPING, category_text):
@@ -261,27 +259,6 @@ def _allowed_values_for_template_attr(template_path: Path, product_type: str | N
         if value not in values:
             values.append(value)
     return values
-
-
-def _selected_stylesnap_category_text(pd: ProductData) -> str:
-    values = [
-        getattr(pd, "amazon_stylesnap_selected_category_rank", None),
-        getattr(pd, "amazon_stylesnap_selected_raw_snippet", None),
-    ]
-    return " ".join(str(value or "") for value in values if value)
-
-
-def _selected_stylesnap_summary(pd: ProductData) -> str | None:
-    asin = getattr(pd, "amazon_stylesnap_selected_asin", None)
-    category_rank = getattr(pd, "amazon_stylesnap_selected_category_rank", None)
-    if not asin and not category_rank:
-        return None
-    parts = []
-    if asin:
-        parts.append(f"ASIN {asin}")
-    if category_rank:
-        parts.append(str(category_rank))
-    return " / ".join(parts)
 
 
 def _information_workbook_values(pd: ProductData) -> dict[str, Any]:
@@ -888,7 +865,6 @@ def _description(pd: ProductData) -> str:
 
 def _facts_text(pd: ProductData) -> str:
     values = [
-        _selected_stylesnap_category_text(pd),
         pd.title,
         pd.listing_title,
         pd.color,
@@ -1051,7 +1027,6 @@ def _amazon_item_type_keyword(option: dict[str, Any]) -> str:
 
 def _furniture_match_text(pd: ProductData) -> str:
     text_values = [
-        _selected_stylesnap_category_text(pd),
         pd.leaf_category,
         pd.categories,
         pd.product_type,
@@ -1073,7 +1048,6 @@ def _find_browse_option(options: list[Any], node: str) -> dict[str, Any] | None:
 
 def _source_category_text(pd: ProductData) -> str:
     return " ".join(str(value or "") for value in (
-        _selected_stylesnap_category_text(pd),
         pd.leaf_category,
         pd.categories,
         pd.product_type,
@@ -1312,16 +1286,11 @@ def _semantic_dropdown_prompt(product: Product, pd: ProductData, options: dict[s
     bullets = _json_loads(pd.listing_bullets, [])
     bullets = bullets if isinstance(bullets, list) else []
     categories = _json_loads(pd.categories, pd.categories)
-    snapshot = _json_loads(pd.gigab2b_raw_snapshot, {})
-    capture = snapshot.get("amazon_listing_capture") if isinstance(snapshot, dict) else None
-    capture = capture if isinstance(capture, dict) else {}
-    selected = snapshot.get("selected_stylesnap") if isinstance(snapshot, dict) else None
-    selected = selected if isinstance(selected, dict) else {}
     return f"""Analyze Amazon import template semantic dropdown fields for this product.
 
 Rules:
 - For each field, choose only from that field's allowed_values list.
-- Return [] for a field when none of its allowed values is explicitly supported by the product facts, listing, or competitor reference.
+- Return [] for a field when none of its allowed values is explicitly supported by the product facts or listing.
 - Do not infer generic audience, use, room, shape, component, mounting, style, theme, gender, or age range details unless the selected value is directly supported.
 - Do not invent a value outside the allowed list. Values must be exact string matches.
 - Output valid JSON only in this shape:
@@ -1346,12 +1315,6 @@ Product facts:
 - Leaf category: {_compact_template_text(pd.leaf_category, 200)}
 - Features: {_compact_template_text(pd.features, 700)}
 - Variants: {_compact_template_text(pd.variants, 700)}
-
-Selected competitor reference:
-- ASIN: {capture.get("asin") or selected.get("asin") or "N/A"}
-- Title: {_compact_template_text(capture.get("title"), 500)}
-- Category rank: {_compact_template_text(capture.get("category_rank") or selected.get("category_rank"), 500)}
-- Bullets: {json.dumps([_compact_template_text(item, 300) for item in (capture.get("bullets") or [])[:5]], ensure_ascii=False) if isinstance(capture.get("bullets"), list) else "[]"}
 """
 
 
@@ -1570,7 +1533,6 @@ def _set_sequence_fields(fill: dict[str, Any], field_names: Any, values: list[An
 
 def _bicycle_match_text(pd: ProductData) -> str:
     text_values = [
-        _selected_stylesnap_category_text(pd),
         pd.leaf_category,
         pd.categories,
         pd.product_type,
@@ -2192,29 +2154,6 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
     return build_amazon_template_file(product, pd, mapping)
 
 
-async def _selected_stylesnap_candidate_for_product(db, pd: ProductData) -> AmazonStyleSnapCandidate | None:
-    item_code = (pd.item_code or "").strip()
-    if not item_code:
-        return None
-    result = await db.execute(
-        select(AmazonStyleSnapCandidate)
-        .where(
-            AmazonStyleSnapCandidate.is_selected == 1,
-            or_(
-                AmazonStyleSnapCandidate.item_code == item_code,
-                AmazonStyleSnapCandidate.sku_code == item_code,
-            ),
-        )
-        .order_by(
-            AmazonStyleSnapCandidate.selected_at.is_(None).asc(), AmazonStyleSnapCandidate.selected_at.desc(),
-            AmazonStyleSnapCandidate.updated_at.desc(),
-            AmazonStyleSnapCandidate.id.desc(),
-        )
-        .limit(1)
-    )
-    return result.scalar_one_or_none()
-
-
 async def run_amazon_template(product_id: int) -> dict:
     """生成 Amazon 类目导入模板。"""
     async with async_session() as db:
@@ -2233,11 +2172,6 @@ async def run_amazon_template(product_id: int) -> dict:
             raise ValueError(f"Product {product_id} not found or no data")
 
         pd = product.data
-        selected_stylesnap_candidate = await _selected_stylesnap_candidate_for_product(db, pd)
-        if selected_stylesnap_candidate:
-            pd.amazon_stylesnap_selected_asin = selected_stylesnap_candidate.asin
-            pd.amazon_stylesnap_selected_category_rank = selected_stylesnap_candidate.category_rank
-            pd.amazon_stylesnap_selected_raw_snippet = selected_stylesnap_candidate.raw_snippet
         mapping = _load_template_mapping(product, pd)
         template_path = Path(mapping["template_path"])
         if not template_path.is_file():
@@ -2265,10 +2199,6 @@ async def run_amazon_template(product_id: int) -> dict:
         product_snapshot.images = _snapshot_model(product.images)
         product_snapshot.aplus = _snapshot_model(product.aplus)
         pd_snapshot = product_snapshot.data
-        if selected_stylesnap_candidate:
-            pd_snapshot.amazon_stylesnap_selected_asin = selected_stylesnap_candidate.asin
-            pd_snapshot.amazon_stylesnap_selected_category_rank = selected_stylesnap_candidate.category_rank
-            pd_snapshot.amazon_stylesnap_selected_raw_snippet = selected_stylesnap_candidate.raw_snippet
 
         try:
             template_result = await asyncio.to_thread(_build_amazon_template_file, product_snapshot, pd_snapshot, mapping)

@@ -9,8 +9,8 @@ import {
   CheckOutlined, DragOutlined, CopyOutlined, ExportOutlined,
   PictureOutlined,
 } from '@ant-design/icons';
-import { getProduct, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, generateProductAplus, runProductFromStep, updateProduct, updateProductListingImages, listCategoryOptions, listProductCompetitorCandidates, searchProductCompetitorCandidates, selectProductCompetitorCandidate, retryProductCompetitorCandidateCapture } from '../api';
-import type { AmazonStyleSnapCandidateGroup, CategoryOption, ProductDetail } from '../api';
+import { getProduct, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, generateProductAplus, runProductFromStep, updateProduct, updateProductListingImages, listCategoryOptions } from '../api';
+import type { CategoryOption, ProductDetail } from '../api';
 
 const { Title, Text } = Typography;
 const PRODUCT_LIST_RETURN_KEY = 'fbm.productList.returnPath';
@@ -70,29 +70,6 @@ const parseJson = (value: string | null | undefined, fallback: any = null) => {
 };
 
 const normalizeComparableImage = (value: string | null | undefined) => String(value || '').trim();
-
-const competitorSourceImageForDetail = (detail: ProductDetail | null | undefined) => {
-  if (!detail) return '';
-  const snapshot = parseJson(detail.data?.gigab2b_raw_snapshot, {});
-  return normalizeComparableImage(
-    detail.images?.main_image_path
-    || snapshot?.selected_stylesnap?.source_image_path
-    || snapshot?.stylesnap_search?.source_image_path
-  );
-};
-
-const competitorGroupMatchesProductDetail = (
-  detail: ProductDetail | null | undefined,
-  group: AmazonStyleSnapCandidateGroup | null | undefined,
-) => {
-  if (!detail || !group) return false;
-  if (group.product_task_id && group.product_task_id !== detail.id) return false;
-  const expectedSource = competitorSourceImageForDetail(detail);
-  const groupSource = normalizeComparableImage(group.source_image_path || group.source_image_url);
-  return !expectedSource || !groupSource || expectedSource === groupSource;
-};
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const normalizeImagePath = (item: any) => {
   const path = typeof item === 'string' ? item : item?.path;
@@ -172,28 +149,12 @@ const fileSize = (bytes: number | null | undefined) => {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 };
 const valueText = (value: string | null | undefined) => value || '-';
-const captureStatusTag = (status: string | null | undefined) => {
-  if (!status) return <Tag>未抓详情</Tag>;
-  if (status === 'captured') return <Tag color="success">已抓详情</Tag>;
-  if (status === 'queued') return <Tag color="processing">等待抓详情</Tag>;
-  if (status === 'running') return <Tag color="processing">抓详情中</Tag>;
-  if (status === 'failed') return <Tag color="error">详情抓取失败</Tag>;
-  return <Tag color="processing">{status}</Tag>;
-};
-
 const defaultProductDetailTab = (detail: ProductDetail | null | undefined) => {
   if (!detail) return 'basic';
 
-  const snapshot = parseJson(detail.data?.gigab2b_raw_snapshot, {});
-  const searchStatus = snapshot?.stylesnap_search?.status || '';
-  const captureStatus = snapshot?.amazon_listing_capture?.status || '';
-  const selectedAsin = snapshot?.selected_stylesnap?.asin || detail.competitor_asin;
+  const selectedAsin = detail.competitor_asin;
   const step = Number(detail.current_step || 0);
-  const hasMainImage = Boolean(detail.images?.main_image_path || snapshot?.selected_stylesnap?.source_image_path);
-  const hasListingCapture = Boolean(
-    captureStatus === 'captured'
-    || (snapshot?.amazon_listing_capture?.title && captureStatus !== 'failed')
-  );
+  const hasMainImage = Boolean(detail.images?.main_image_path);
   const hasListingContent = Boolean(
     detail.data?.listing_title
     || detail.data?.listing_bullets
@@ -212,10 +173,7 @@ const defaultProductDetailTab = (detail: ProductDetail | null | undefined) => {
   if (!hasMainImage || (detail.status === 'created' && step <= 0)) return 'images';
   if (
     detail.status === 'competitor_searching'
-    || searchStatus === 'running'
-    || searchStatus === 'failed'
     || (!selectedAsin && hasMainImage)
-    || ['queued', 'running', 'failed'].includes(captureStatus)
     || (detail.status === 'failed' && competitorCaptureMessage.test(detail.error_message || ''))
   ) {
     return 'competitor';
@@ -224,7 +182,6 @@ const defaultProductDetailTab = (detail: ProductDetail | null | undefined) => {
     step === 5
     || detail.status === 'step6_curating'
     || (detail.status === 'failed' && imageAnalysisMessage.test(detail.error_message || ''))
-    || (hasListingCapture && !detail.images?.image_analysis && !hasListingContent)
   ) {
     return 'images';
   }
@@ -254,12 +211,6 @@ const ProductDetail: React.FC = () => {
   const [selectedCategoryKey, setSelectedCategoryKey] = useState<string | undefined>();
   const [categoryOptionsLoading, setCategoryOptionsLoading] = useState(false);
   const [categorySaving, setCategorySaving] = useState(false);
-  const [competitorModalOpen, setCompetitorModalOpen] = useState(false);
-  const [competitorGroup, setCompetitorGroup] = useState<AmazonStyleSnapCandidateGroup | null>(null);
-  const [competitorLoading, setCompetitorLoading] = useState(false);
-  const [competitorSearchLoading, setCompetitorSearchLoading] = useState(false);
-  const [selectingCompetitorId, setSelectingCompetitorId] = useState<number | null>(null);
-  const [retryingCompetitorCandidateId, setRetryingCompetitorCandidateId] = useState<number | null>(null);
   const [listingEditOpen, setListingEditOpen] = useState(false);
   const [listingTitleInput, setListingTitleInput] = useState('');
   const [listingBulletsInput, setListingBulletsInput] = useState('');
@@ -281,38 +232,6 @@ const ProductDetail: React.FC = () => {
   const autoTabProductIdRef = useRef<number | null>(null);
   const userTouchedTabRef = useRef(false);
 
-  const refreshCompetitorGroupFromProduct = async (detail: ProductDetail) => {
-    if (activeTabKey !== 'competitor' && !competitorModalOpen) {
-      return;
-    }
-    if (competitorLoading || competitorGroupMatchesProductDetail(detail, competitorGroup)) {
-      return;
-    }
-    const snapshot = parseJson(detail.data?.gigab2b_raw_snapshot, {});
-    const searchStatus = snapshot?.stylesnap_search?.status;
-    const shouldLoadCandidates = Boolean(
-      detail.images?.main_image_path
-      && (
-        searchStatus === 'captured'
-        || detail.status === 'competitor_searching'
-        || detail.competitor_asin
-        || Number(detail.current_step || 0) >= 2
-      )
-    );
-    if (!shouldLoadCandidates) {
-      return;
-    }
-    setCompetitorLoading(true);
-    try {
-      const { data: group } = await listProductCompetitorCandidates(detail.id, { enrich_images: true });
-      setCompetitorGroup(competitorGroupMatchesProductDetail(detail, group) ? group : null);
-    } catch {
-      setCompetitorGroup(null);
-    } finally {
-      setCompetitorLoading(false);
-    }
-  };
-
   const fetchDetail = async () => {
     if (!id) return;
     try {
@@ -323,13 +242,11 @@ const ProductDetail: React.FC = () => {
       if (isNewProduct) {
         autoTabProductIdRef.current = data.id;
         userTouchedTabRef.current = false;
-        setCompetitorGroup(null);
         setActiveTabKey(nextDefaultTab);
       } else if (!userTouchedTabRef.current) {
         setActiveTabKey(nextDefaultTab);
       }
       setLoading(false);
-      void refreshCompetitorGroupFromProduct(data);
     } catch {
       message.error('加载失败');
       setLoading(false);
@@ -371,26 +288,6 @@ const ProductDetail: React.FC = () => {
     listingImageDraftProductId,
   ]);
 
-  useEffect(() => {
-    if (!product) return;
-    if (activeTabKey !== 'competitor' && !competitorModalOpen) return;
-    if (competitorGroup || competitorLoading) return;
-    void refreshCompetitorGroupFromProduct(product);
-  }, [product?.id, activeTabKey, competitorModalOpen]);
-
-  useEffect(() => {
-    if (!product || !competitorGroup) return;
-    if (!competitorGroupMatchesProductDetail(product, competitorGroup)) {
-      setCompetitorGroup(null);
-    }
-  }, [
-    product?.id,
-    product?.images?.main_image_path,
-    competitorGroup?.product_task_id,
-    competitorGroup?.source_image_path,
-    competitorGroup?.source_image_url,
-  ]);
-
   if (loading) return <Spin size="large" style={{ display: 'block', margin: '100px auto' }} />;
   if (!product) return <div>商品不存在</div>;
 
@@ -417,11 +314,6 @@ const ProductDetail: React.FC = () => {
   const aplusFolder = product.aplus_folder;
   const packages = parseJson(data?.packages, []);
   const rawSnapshot = parseJson(data?.gigab2b_raw_snapshot, null);
-  const selectedStyleSnap = rawSnapshot?.selected_stylesnap || null;
-  const amazonListingCapture = rawSnapshot?.amazon_listing_capture || null;
-  const amazonCompetitorBullets = Array.isArray(amazonListingCapture?.bullets)
-    ? amazonListingCapture.bullets.filter((item: any) => String(item || '').trim())
-    : [];
   const exportPreview = product.amazon_export_preview || null;
   const exportPackage = exportPreview?.package_aggregate || null;
   const rawProductDimensions = rawSnapshot?.specification?.product_dimensions?.assemble_info || {};
@@ -710,176 +602,6 @@ const ProductDetail: React.FC = () => {
       message.success('已复制');
     } catch {
       message.error('复制失败');
-    }
-  };
-
-  const loadCompetitorCandidates = async (silent = false) => {
-    setCompetitorLoading(true);
-    try {
-      const { data: group } = await listProductCompetitorCandidates(product.id, { enrich_images: true });
-      setCompetitorGroup(competitorGroupMatchesProductDetail(product, group) ? group : null);
-    } catch (error: any) {
-      setCompetitorGroup(null);
-      if (!silent) message.error(error?.response?.data?.detail || '加载候选竞品失败');
-    } finally {
-      setCompetitorLoading(false);
-    }
-  };
-
-  const waitForCompetitorCandidateGroup = async (productId: number) => {
-    let latestGroup: AmazonStyleSnapCandidateGroup | null = null;
-    for (let attempt = 0; attempt < 30; attempt += 1) {
-      if (attempt > 0) await sleep(2000);
-      const { data: latestDetail } = await getProduct(productId, { compact: true });
-      setProduct(latestDetail);
-      const snapshot = parseJson(latestDetail.data?.gigab2b_raw_snapshot, {});
-      const searchState = snapshot?.stylesnap_search || {};
-      const failed = searchState?.status === 'failed'
-        || (latestDetail.status === 'failed' && /同款搜索|StyleSnap/i.test(latestDetail.error_message || ''));
-      if (failed) {
-        throw new Error(searchState?.error || latestDetail.error_message || '候选竞品搜索失败');
-      }
-      try {
-        const { data: group } = await listProductCompetitorCandidates(productId, { enrich_images: true });
-        if (competitorGroupMatchesProductDetail(latestDetail, group)) {
-          latestGroup = group;
-          setCompetitorGroup(group);
-          if (group.candidates?.length || searchState?.status === 'captured') {
-            return group;
-          }
-        } else {
-          setCompetitorGroup(null);
-        }
-      } catch {
-        if (searchState?.status === 'captured') return latestGroup;
-      }
-    }
-    return latestGroup;
-  };
-
-  const searchCompetitorCandidates = async (force = false) => {
-    setCompetitorSearchLoading(true);
-    message.loading({ content: '正在启动 Amazon StyleSnap 同款搜索', key: 'competitor-search', duration: 0 });
-    try {
-      if (force) {
-        setCompetitorGroup(null);
-      }
-      await searchProductCompetitorCandidates(product.id, force);
-      message.loading({ content: '已提交同款搜索，正在等待当前主图的候选写入', key: 'competitor-search', duration: 0 });
-      const group = await waitForCompetitorCandidateGroup(product.id);
-      if (group?.candidates?.length) {
-        message.success({ content: `已找到 ${group.candidates.length} 个候选竞品`, key: 'competitor-search' });
-      } else {
-        message.info({ content: '搜索已提交，候选写入较慢，请稍后刷新候选状态', key: 'competitor-search' });
-      }
-    } catch (error: any) {
-      message.destroy('competitor-search');
-      message.error(error?.response?.data?.detail || error?.message || '启动同款搜索失败');
-    } finally {
-      setCompetitorSearchLoading(false);
-    }
-  };
-
-  const chooseCompetitorCandidate = async (candidate: any) => {
-    const selectedId = competitorGroup?.selected_candidate_id;
-    const isSwitching = selectedId && selectedId !== candidate.id;
-    const selected = selectedId === candidate.id || candidate.is_selected === 1;
-    const selectionReady = candidate.title && candidate.amazon_image_url;
-    if (!selected && !selectionReady) {
-      message.warning('这个候选列表信息还没有标题和主图，请先重新抓取后再选择');
-      return;
-    }
-    const forceCapture = selected || candidate.listing_capture_status === 'failed';
-    const hasDownstreamOutput = hasListingContent || hasListingImages || hasImageAnalysis || hasAplusOutput || product.current_step >= 5;
-    const doSelect = async () => {
-      setSelectingCompetitorId(candidate.id);
-      message.loading({ content: '正在提交选择，竞品详情抓取会在后台执行', key: 'competitor-select', duration: 0 });
-      try {
-        const { data: group } = await selectProductCompetitorCandidate(product.id, candidate.id, forceCapture);
-        setCompetitorGroup(group);
-        message.success({ content: `${forceCapture ? '已重新提交' : '已选择'}参考竞品 ${candidate.asin}，竞品详情抓取已转后台执行`, key: 'competitor-select' });
-        await fetchDetail();
-      } catch (error: any) {
-        message.destroy('competitor-select');
-        message.error(error?.response?.data?.detail || '选择竞品失败');
-      } finally {
-        setSelectingCompetitorId(null);
-      }
-    };
-    if (isSwitching && hasDownstreamOutput) {
-      Modal.confirm({
-        title: '确认切换参考竞品？',
-        content: '切换后会记录新的 ASIN，并在后台抓取这个竞品的详情页。当前商品后续的 Listing 文案、图片分析、A+ 需要重新生成。',
-        okText: '切换并抓详情',
-        cancelText: '取消',
-        onOk: doSelect,
-      });
-      return;
-    }
-    if (forceCapture && hasDownstreamOutput) {
-      Modal.confirm({
-        title: '确认重新抓取竞品详情？',
-        content: '重新抓取后会刷新选中竞品的标题、五点、描述、类目等参考数据；后续生成内容需要重跑。',
-        okText: '重新抓详情',
-        cancelText: '取消',
-        onOk: doSelect,
-      });
-      return;
-    }
-    await doSelect();
-  };
-
-  const retrySelectedCompetitorCapture = async () => {
-    const selectedId = competitorGroup?.selected_candidate_id || rawSnapshot?.selected_stylesnap?.candidate_id;
-    let group = competitorGroup;
-    if (!group) {
-      setCompetitorLoading(true);
-      try {
-        const { data } = await listProductCompetitorCandidates(product.id, { enrich_images: true });
-        group = data;
-        setCompetitorGroup(data);
-      } catch (error: any) {
-        message.error(error?.response?.data?.detail || '加载候选竞品失败，无法重新抓取');
-        return;
-      } finally {
-        setCompetitorLoading(false);
-      }
-    }
-    const selected = group?.candidates?.find((candidate: any) => (
-      candidate.id === selectedId || candidate.is_selected === 1
-    ));
-    if (!selected) {
-      message.warning('当前未找到已选竞品，请先在候选竞品中选择一个');
-      return;
-    }
-    setSelectingCompetitorId(selected.id);
-    message.loading({ content: '正在重新提交当前竞品详情抓取', key: 'competitor-select', duration: 0 });
-    try {
-      const { data: nextGroup } = await selectProductCompetitorCandidate(product.id, selected.id, true);
-      setCompetitorGroup(nextGroup);
-      message.success({ content: `已重新提交参考竞品 ${selected.asin}，竞品详情抓取已转后台执行`, key: 'competitor-select' });
-      await fetchDetail();
-    } catch (error: any) {
-      message.destroy('competitor-select');
-      message.error(error?.response?.data?.detail || '重新抓取竞品详情失败');
-    } finally {
-      setSelectingCompetitorId(null);
-    }
-  };
-
-  const retryCompetitorCandidateCapture = async (candidate: any) => {
-    if (!product?.id || !candidate?.id) return;
-    setRetryingCompetitorCandidateId(candidate.id);
-    message.loading({ content: `正在重新抓取候选 ${candidate.asin || ''} 的竞品详情`, key: 'competitor-candidate-retry', duration: 0 });
-    try {
-      const { data: nextGroup } = await retryProductCompetitorCandidateCapture(product.id, candidate.id, true);
-      setCompetitorGroup(nextGroup);
-      message.success({ content: `已提交候选 ${candidate.asin || ''} 重新抓取`, key: 'competitor-candidate-retry' });
-    } catch (error: any) {
-      message.destroy('competitor-candidate-retry');
-      message.error(error?.response?.data?.detail || '重新抓取候选竞品失败');
-    } finally {
-      setRetryingCompetitorCandidateId(null);
     }
   };
 
@@ -1338,32 +1060,12 @@ const ProductDetail: React.FC = () => {
   const isStopped = stoppedStatuses.includes(product.status);
   const isPaused = product.status === 'paused';
   const isReadyToExport = product.status === 'completed' && product.current_step >= 6;
-  const stylesnapSearch = rawSnapshot?.stylesnap_search || {};
-  const stylesnapSearchStatus = stylesnapSearch?.status || '';
-  const competitorGroupMatchesCurrentSource = competitorGroupMatchesProductDetail(product, competitorGroup);
-  const stylesnapSearchSourceMatchesCurrent = Boolean(
-    !stylesnapSearch?.source_image_path
-    || !images?.main_image_path
-    || normalizeComparableImage(stylesnapSearch.source_image_path) === normalizeComparableImage(images.main_image_path)
-  );
-  const competitorCandidateCount = competitorGroupMatchesCurrentSource
-    ? (competitorGroup?.candidates?.length || 0)
-    : (stylesnapSearchSourceMatchesCurrent ? Number(stylesnapSearch?.count || 0) : 0);
-  const referenceAsin = selectedStyleSnap?.asin || product.competitor_asin || '';
-  const hasConfirmedSearchImage = Boolean(
-    images?.main_image_path
-    || selectedStyleSnap?.source_image_path
-  );
+  const referenceAsin = product.competitor_asin || '';
+  const hasConfirmedSearchImage = Boolean(images?.main_image_path);
   const hasReferenceCompetitor = Boolean(referenceAsin);
   const isCompetitorSearching = product.status === 'competitor_searching';
   const isCompetitorSearchFailed = Boolean(
-    stylesnapSearchStatus === 'failed'
-    || (product.status === 'failed' && /同款搜索|StyleSnap/i.test(product.error_message || ''))
-  );
-  const hasCompetitorCandidates = Boolean(
-    competitorCandidateCount > 0
-    && !isCompetitorSearching
-    && !isCompetitorSearchFailed
+    product.status === 'failed' && /同款搜索|候选竞品|参考竞品|选择竞品|自动竞品搜索/i.test(product.error_message || '')
   );
   const isLegacyGigaBrowserCollectError = Boolean(
     product.status === 'failed'
@@ -1374,40 +1076,20 @@ const ProductDetail: React.FC = () => {
     ? '旧浏览器采集已停用。请回到商品工作台或任务中心，通过店铺/OpenAPI 同步商品源数据。'
     : product.error_message;
   const failedStep = Number(product.current_step || 0);
-  const listingCaptureErrorPattern = /竞品详情|竞品 Listing|Amazon Listing 详情|Amazon Listing 抓取|抓取选中竞品|选中竞品.*抓取|Amazon.*详情抓取/i;
   const isImageAnalysisPrerequisiteFailed = Boolean(
     product.status === 'failed'
     && /图片分析节点未完成|不能进入 Listing 文案/.test(product.error_message || '')
-  );
-  const isListingCaptureFailed = Boolean(
-    amazonListingCapture?.status === 'failed'
-    || (
-      product.status === 'failed'
-      && !isImageAnalysisPrerequisiteFailed
-      && listingCaptureErrorPattern.test(product.error_message || '')
-    )
   );
   const isImageAnalysisFailed = Boolean(
     isImageAnalysisPrerequisiteFailed
     || (
       product.status === 'failed'
       && failedStep === 5
-      && !isListingCaptureFailed
     )
   );
-  const isHardStopped = isStopped && !isCompetitorSearchFailed && !isListingCaptureFailed && !isImageAnalysisFailed;
-  const isListingCaptureRunning = Boolean(
-    product.status === 'step5_listing'
-    && /竞品.*抓取中|Listing.*抓取中/i.test(product.error_message || '')
-  );
+  const isHardStopped = isStopped && !isCompetitorSearchFailed && !isImageAnalysisFailed;
   const showTopProductError = Boolean(
     productErrorMessage
-    && !isListingCaptureFailed
-    && !isListingCaptureRunning
-  );
-  const hasListingCapture = Boolean(
-    amazonListingCapture?.status === 'captured'
-    || (amazonListingCapture?.title && amazonListingCapture?.status !== 'failed')
   );
   const hasListingContent = Boolean(
     data?.listing_title
@@ -1444,26 +1126,22 @@ const ProductDetail: React.FC = () => {
   const statusSuffix = isPaused ? '，已挂起' : '';
   const nodeErrorAt = (node: string) => {
     if (isCompetitorSearchFailed) return node === 'find-competitors';
-    if (isListingCaptureFailed) return node === 'capture-competitor-detail';
     if (isImageAnalysisFailed) return node === 'image-analysis';
     if (!isStopped) return false;
     const step = failedStep;
     if (node === 'find-competitors') return step <= 2;
     if (node === 'choose-competitor') return step <= 4;
-    if (node === 'capture-competitor-detail') return step <= 4;
     if (node === 'image-analysis') return step === 5;
     if (node === 'listing') return step === 6;
     return false;
   };
   const nodeActiveAt = (node: string) => {
     if (isHardStopped || isReadyToExport) return false;
-    const step = Number(product.current_step || 0);
     if (node === 'search-image') return !hasConfirmedSearchImage;
-    if (node === 'find-competitors') return isCompetitorSearching || (hasConfirmedSearchImage && !hasReferenceCompetitor && !hasCompetitorCandidates && !isCompetitorSearchFailed);
-    if (node === 'choose-competitor') return hasConfirmedSearchImage && !hasReferenceCompetitor && hasCompetitorCandidates;
-    if (node === 'capture-competitor-detail') return isListingCaptureRunning || (hasReferenceCompetitor && !hasListingCapture);
-    if (node === 'image-analysis') return !isListingCaptureRunning && hasListingCapture && hasListingImages && !hasImageAnalysis;
-    if (node === 'listing') return !isListingCaptureRunning && hasReferenceCompetitor && hasListingCapture && hasImageAnalysis && !hasListingContent;
+    if (node === 'find-competitors') return isCompetitorSearching || (hasConfirmedSearchImage && !hasReferenceCompetitor && !isCompetitorSearchFailed);
+    if (node === 'choose-competitor') return hasConfirmedSearchImage && !hasReferenceCompetitor && !isCompetitorSearching;
+    if (node === 'image-analysis') return hasReferenceCompetitor && hasListingImages && !hasImageAnalysis;
+    if (node === 'listing') return hasReferenceCompetitor && hasImageAnalysis && !hasListingContent;
     if (node === 'export') return isReadyToExport;
     return false;
   };
@@ -1478,23 +1156,21 @@ const ProductDetail: React.FC = () => {
     {
       title: '确认商品图片',
       description: hasConfirmedSearchImage ? `已确认主图和 Listing 图片，已选 ${listingImageCount || 1} 张` : `等待确认主图和 Listing 图片${statusSuffix}`,
-      done: hasConfirmedSearchImage || hasReferenceCompetitor || hasListingCapture || product.current_step >= 5,
+      done: hasConfirmedSearchImage || hasReferenceCompetitor || product.current_step >= 5,
       active: nodeActiveAt('search-image'),
     },
     {
       title: '搜索候选竞品',
       description: isCompetitorSearchFailed
-        ? (stylesnapSearch?.error || product.error_message || 'Amazon 同款搜索失败，可重新搜索候选')
+        ? (product.error_message || 'Amazon 竞品搜索失败，请回到商品列表或任务中心重试')
         : isCompetitorSearching
-          ? (product.error_message || '正在用主图搜索 Amazon 同款')
+          ? (product.error_message || '正在搜索 Amazon 参考竞品')
         : hasReferenceCompetitor
-          ? '已完成候选搜索，可重新搜索候选'
-          : hasCompetitorCandidates
-            ? `已找到 ${competitorCandidateCount} 个候选；不合适可重新搜索候选`
-            : hasConfirmedSearchImage
-              ? `等待用主图搜索 Amazon 同款${statusSuffix}`
-              : `等待先确认商品图片${statusSuffix}`,
-      done: (hasReferenceCompetitor || hasCompetitorCandidates || hasListingCapture) && !isCompetitorSearchFailed && !isCompetitorSearching,
+          ? '已完成参考竞品选择'
+          : hasConfirmedSearchImage
+            ? `等待自动搜索 Amazon 参考竞品${statusSuffix}`
+            : `等待先确认商品图片${statusSuffix}`,
+      done: hasReferenceCompetitor && !isCompetitorSearchFailed && !isCompetitorSearching,
       active: nodeActiveAt('find-competitors'),
       error: nodeErrorAt('find-competitors'),
     },
@@ -1502,29 +1178,10 @@ const ProductDetail: React.FC = () => {
       title: '选择竞品',
       description: referenceAsin
         ? `已选参考竞品 ${referenceAsin}`
-        : hasCompetitorCandidates
-          ? `等待从 ${competitorCandidateCount} 个候选中选择一个竞品${statusSuffix}`
-          : `等待先搜索候选竞品${statusSuffix}`,
+        : `等待自动竞品链路选择参考竞品${statusSuffix}`,
       done: hasReferenceCompetitor,
       active: nodeActiveAt('choose-competitor'),
       error: nodeErrorAt('choose-competitor') && !hasReferenceCompetitor,
-    },
-    {
-      title: '抓取竞品详情',
-      description: isListingCaptureFailed
-        ? (amazonListingCapture?.capture_error || product.error_message || '竞品详情抓取失败')
-        : isListingCaptureRunning
-          ? (product.error_message || '正在抓取选中竞品详情')
-          : hasListingCapture
-            ? '已抓取选中竞品的标题、五点、描述、类目和图片链接'
-            : hasReferenceCompetitor
-              ? `等待抓取选中竞品详情${statusSuffix}`
-              : hasCompetitorCandidates
-                ? `等待先选择竞品${statusSuffix}`
-                : `等待先搜索并选择竞品${statusSuffix}`,
-      done: hasListingCapture && !isListingCaptureFailed && !isListingCaptureRunning,
-      active: nodeActiveAt('capture-competitor-detail'),
-      error: nodeErrorAt('capture-competitor-detail'),
     },
     {
       title: '图片分析',
@@ -1539,9 +1196,9 @@ const ProductDetail: React.FC = () => {
       title: 'Listing文案',
       description: hasListingContent
         ? '标题、五点、描述已生成'
-        : hasListingCapture
-          ? `竞品详情已抓取，等待结合图片分析生成文案${statusSuffix}`
-          : `等待竞品详情抓取完成${statusSuffix}`,
+        : hasReferenceCompetitor
+          ? `等待结合图片分析生成文案${statusSuffix}`
+          : `等待参考竞品选择完成${statusSuffix}`,
       done: hasListingContent || product.current_step >= 6 || isReadyToExport,
       active: nodeActiveAt('listing'),
       error: nodeErrorAt('listing'),
@@ -1567,7 +1224,7 @@ const ProductDetail: React.FC = () => {
   const isInterruptedProduct = /运行状态已中断|未在当前服务中运行/.test(product.current_task_status || '');
   const isPipelineRunning = !isInterruptedProduct
     && !PRODUCT_NON_RUNNING_STATUSES.includes(product.status);
-  const canRegenerateListing = Boolean(hasListingCapture && hasImageAnalysis && !isPipelineRunning && !isPaused && !isHardStopped);
+  const canRegenerateListing = Boolean(hasReferenceCompetitor && hasImageAnalysis && !isPipelineRunning && !isPaused && !isHardStopped);
   const canGenerateMissingListing = Boolean(
     canRegenerateListing
     && !hasListingContent
@@ -1580,8 +1237,6 @@ const ProductDetail: React.FC = () => {
   const hasRestartableDownstreamState = Boolean(
     product.current_step > 0
     || hasReferenceCompetitor
-    || hasCompetitorCandidates
-    || hasListingCapture
     || hasImageAnalysis
     || hasListingContent
     || hasAplusOutput
@@ -1591,20 +1246,6 @@ const ProductDetail: React.FC = () => {
     && !isInterruptedProduct
     && !['unavailable', 'source_unavailable'].includes(product.status)
     && hasRestartableDownstreamState;
-  const canOperateCompetitor = product.status !== 'completed'
-    && !isListingCaptureRunning
-    && (!isPipelineRunning || isListingCaptureFailed);
-  const canSwitchCompetitor = canOperateCompetitor;
-  const competitorCandidateActionDisabled = Boolean(selectingCompetitorId)
-    || !canSwitchCompetitor
-    || isCompetitorSearching
-    || isListingCaptureRunning;
-  const competitorCandidateButtonText = (selected: boolean) => {
-    if (isListingCaptureRunning && selected) return '抓取中';
-    return selected ? '重新抓详情' : '选择';
-  };
-  const shouldForceCompetitorSearch = Boolean(hasCompetitorCandidates || isCompetitorSearchFailed || hasReferenceCompetitor);
-  const competitorSearchButtonText = shouldForceCompetitorSearch ? '重新搜索候选' : '搜索候选';
 
   // 安全解析JSON
   const tabItems = [
@@ -1870,301 +1511,47 @@ const ProductDetail: React.FC = () => {
             style={{ marginBottom: 16 }}
           >
             <Space direction="vertical" style={{ width: '100%' }} size={12}>
-              {isListingCaptureFailed && (
-                <Alert
-                  type="error"
-                  showIcon
-                  message="竞品详情抓取失败"
-                  description={amazonListingCapture?.capture_error || product.error_message || '可以重新抓取当前竞品，或在下方候选中切换其它竞品。'}
-                  action={
-                    <Button
-                      size="small"
-                      danger
-                      icon={<RedoOutlined />}
-                      loading={Boolean(selectingCompetitorId)}
-                      disabled={isListingCaptureRunning || isCompetitorSearching || isPipelineRunning}
-                      onClick={retrySelectedCompetitorCapture}
-                    >
-                      重新抓取当前竞品
-                    </Button>
-                  }
-                />
-              )}
-              <div>
-                <Text type="secondary">Amazon标题</Text>
-                <Typography.Paragraph
-                  style={{ marginBottom: 0, marginTop: 4 }}
-                  ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}
-                >
-                  {amazonListingCapture?.title || '-'}
-                </Typography.Paragraph>
-              </div>
               <Descriptions bordered column={{ xs: 1, sm: 1, md: 2 }} size="small">
                 <Descriptions.Item label="选中 ASIN">
-                  {selectedStyleSnap?.url || product.competitor_asin ? (
+                  {product.competitor_asin ? (
                     <Space size={8}>
-                      <Typography.Link href={selectedStyleSnap?.url || `https://www.amazon.com/dp/${product.competitor_asin}`} target="_blank">
-                        {selectedStyleSnap?.asin || product.competitor_asin}
+                      <Typography.Link href={`https://www.amazon.com/dp/${product.competitor_asin}`} target="_blank">
+                        {product.competitor_asin}
                       </Typography.Link>
-                      <Button size="small" icon={<CopyOutlined />} onClick={() => copyText(selectedStyleSnap?.asin || product.competitor_asin)}>复制</Button>
+                      <Button size="small" icon={<CopyOutlined />} onClick={() => copyText(product.competitor_asin)}>复制</Button>
                     </Space>
                   ) : '-'}
                 </Descriptions.Item>
-                <Descriptions.Item label="抽卡排名">{selectedStyleSnap?.rank ?? '-'}</Descriptions.Item>
-                <Descriptions.Item label="Amazon品牌">{amazonListingCapture?.brand || '-'}</Descriptions.Item>
-                <Descriptions.Item label="卖家">{amazonListingCapture?.seller || '-'}</Descriptions.Item>
-                <Descriptions.Item label="Amazon价格">{amazonListingCapture?.price || '-'}</Descriptions.Item>
-                <Descriptions.Item label="评分/评论">
-                  {[amazonListingCapture?.rating, amazonListingCapture?.review_count ? `${amazonListingCapture.review_count} reviews` : null].filter(Boolean).join(' / ') || '-'}
-                </Descriptions.Item>
-                <Descriptions.Item label="可售状态">{amazonListingCapture?.availability || '-'}</Descriptions.Item>
-                <Descriptions.Item label="Amazon主图">
-                  {amazonListingCapture?.main_image_url ? (
-                    <Image
-                      src={amazonListingCapture.main_image_url}
-                      width={72}
-                      height={72}
-                      style={{ objectFit: 'cover', borderRadius: 4, border: '1px solid #f0f0f0' }}
-                      preview={{ src: amazonListingCapture.main_image_url }}
-                    />
-                  ) : '-'}
-                </Descriptions.Item>
-                <Descriptions.Item label="类目排名" span="filled">
-                  <Typography.Paragraph style={{ marginBottom: 0 }} ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}>
-                    {amazonListingCapture?.category_rank || selectedStyleSnap?.category_rank || '-'}
-                  </Typography.Paragraph>
-                </Descriptions.Item>
+                <Descriptions.Item label="来源">自动竞品搜索流程</Descriptions.Item>
               </Descriptions>
-              <div>
-                <Text type="secondary">竞品五点</Text>
-                {amazonCompetitorBullets.length ? (
-                  <List
-                    size="small"
-                    dataSource={amazonCompetitorBullets.slice(0, 5)}
-                    renderItem={(item: string) => (
-                      <List.Item style={{ paddingLeft: 0, paddingRight: 0 }}>
-                        <Typography.Paragraph style={{ marginBottom: 0 }} copyable>
-                          {item}
-                        </Typography.Paragraph>
-                      </List.Item>
-                    )}
-                  />
-                ) : <Text type="secondary"> 未抓到竞品五点</Text>}
-              </div>
             </Space>
           </Card>
 
-          <Card
-            title={`候选竞品${competitorCandidateCount ? `（${competitorCandidateCount} 个）` : ''}`}
-            size="small"
-            extra={
-              <Button
-                size="small"
-                icon={shouldForceCompetitorSearch ? <ReloadOutlined /> : <PlayCircleOutlined />}
-                loading={competitorSearchLoading || isCompetitorSearching}
-                disabled={!hasConfirmedSearchImage || !canOperateCompetitor || isHardStopped || isReadyToExport}
-                onClick={() => searchCompetitorCandidates(shouldForceCompetitorSearch)}
-              >
-                {competitorSearchButtonText}
-              </Button>
-            }
-          >
-            <Spin spinning={competitorLoading}>
-              {competitorGroup ? (
-                <Space direction="vertical" size={12} style={{ width: '100%' }}>
-                  {isCompetitorSearching && (
-                    <Alert
-                      type="info"
-                      showIcon
-                      message="正在追加搜索候选"
-                      description="原有候选会保留在页面上；新一轮搜索完成后会追加到列表末尾。"
-                    />
-                  )}
-                  {hasListingContent && (
-                    <Alert
-                      type="warning"
-                      showIcon
-                      message="切换竞品后要重走后续流程"
-                      description="切换后会记录新的 ASIN、Amazon 类目，并重新抓取竞品详情。当前商品后续的 Listing 文案、图片分析、A+ 需要重新生成。"
-                    />
-                  )}
-                  <div style={{ display: 'grid', gridTemplateColumns: '180px minmax(0, 1fr)', gap: 16 }}>
-                    <div>
-                      <div
-                        style={{
-                          height: 180,
-                          border: '1px solid #e5e7eb',
-                          borderRadius: 8,
-                          background: '#f8fafc',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          overflow: 'hidden',
-                          marginBottom: 10,
-                        }}
-                      >
-                        {(competitorGroup.source_image_path || competitorGroup.source_image_url) ? (
-                          <Image
-                            src={competitorGroup.source_image_path ? imgUrl(competitorGroup.source_image_path) : competitorGroup.source_image_url || ''}
-                            height={178}
-                            style={{ objectFit: 'contain' }}
-                            preview={{ src: competitorGroup.source_image_path ? imgUrl(competitorGroup.source_image_path) : competitorGroup.source_image_url || '' }}
-                          />
-                        ) : (
-                          <Text type="secondary">无源图</Text>
-                        )}
-                      </div>
-                      <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                        <Text strong>{competitorGroup.product_name || competitorGroup.item_code}</Text>
-                        <Text type="secondary">SKU：{competitorGroup.sku_code || '-'}</Text>
-                        <Text type="secondary">{competitorGroup.task_ready_reason || '从候选中选择一个 Item 级参考竞品'}</Text>
-                      </Space>
-                    </div>
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(185px, 1fr))', gap: 12 }}>
-                      {competitorGroup.candidates.map((candidate: any) => {
-                        const selected = competitorGroup.selected_candidate_id === candidate.id || candidate.is_selected === 1;
-                        const captureStatus = candidate.listing_capture_status;
-                        const captureFailed = captureStatus === 'failed';
-                        const captureRunning = captureStatus === 'queued' || captureStatus === 'running';
-                        const captureMissingImage = captureStatus === 'captured' && !candidate.amazon_image_url;
-                        const captureMissingTitle = captureStatus === 'captured' && !candidate.title;
-                        const selectionReady = candidate.title && candidate.amazon_image_url;
-                        const canRetryCapture = !captureRunning && (!selectionReady || captureFailed || captureMissingImage || captureMissingTitle);
-                        const captureReady = captureStatus === 'captured' && candidate.title && candidate.amazon_image_url;
-                        const selectDisabled = competitorCandidateActionDisabled || (!selected && !selectionReady);
-                        return (
-                          <div
-                            key={candidate.id}
-                            style={{
-                              border: selected ? '2px solid #16a34a' : '1px solid #d9e1ec',
-                              background: selected ? '#f0fdf4' : '#fff',
-                              borderRadius: 8,
-                              padding: 10,
-                              minHeight: 340,
-                              display: 'flex',
-                              flexDirection: 'column',
-                              gap: 8,
-                            }}
-                          >
-                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6, alignItems: 'center' }}>
-                              <Space size={4}>
-                                <Tag color={selected ? 'success' : 'blue'}>#{candidate.rank}</Tag>
-                                <Text strong>{candidate.asin}</Text>
-                              </Space>
-                              {selected ? <Tag color="success">已选</Tag> : null}
-                            </div>
-                            <div
-                              style={{
-                                height: 110,
-                                borderRadius: 6,
-                                background: '#f5f7fb',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                overflow: 'hidden',
-                              }}
-                            >
-                              {candidate.amazon_image_url ? (
-                                <Image
-                                  src={candidate.amazon_image_url}
-                                  height={110}
-                                  style={{ objectFit: 'contain' }}
-                                  preview={{ src: candidate.amazon_image_url }}
-                                />
-                              ) : (
-                                <Text type="secondary">{candidate.asin}</Text>
-                              )}
-                            </div>
-                            <Space size={[4, 4]} wrap>
-                              <Tag>{valueText(candidate.brand)}</Tag>
-                              <Tag color={candidate.seller === 'Amazon' ? 'green' : 'default'}>{valueText(candidate.seller)}</Tag>
-                              {candidate.price ? <Tag color="gold">{candidate.price}</Tag> : null}
-                            </Space>
-                            <div style={{ display: 'grid', gap: 4, fontSize: 12 }}>
-                              <Text type="secondary">评分：{valueText(candidate.rating)}</Text>
-                              <Text type="secondary">类目：{valueText(candidate.category_rank)}</Text>
-                              {(candidate.color || candidate.size || candidate.style) ? (
-                                <Text type="secondary">
-                                  变体：{[candidate.color, candidate.size, candidate.style].filter(Boolean).join(' / ')}
-                                </Text>
-                              ) : null}
-                              {captureStatusTag(candidate.listing_capture_status)}
-                              {captureMissingImage ? <Tag color="warning">缺主图</Tag> : null}
-                              {captureMissingTitle ? <Tag color="warning">缺标题</Tag> : null}
-                            </div>
-                            <Typography.Paragraph
-                              type="secondary"
-                              ellipsis={{ rows: 3, expandable: false }}
-                              style={{ fontSize: 12, margin: 0, minHeight: 54 }}
-                            >
-                              {candidate.raw_snippet || ''}
-                            </Typography.Paragraph>
-                            <div style={{ marginTop: 'auto', display: 'flex', gap: 8 }}>
-                              <Button
-                                type={selected ? 'primary' : 'default'}
-                                icon={<CheckOutlined />}
-                                loading={selectingCompetitorId === candidate.id}
-                                disabled={selectDisabled}
-                                onClick={() => chooseCompetitorCandidate(candidate)}
-                                block
-                              >
-                                {competitorCandidateButtonText(selected)}
-                              </Button>
-                              <Button
-                                icon={<ReloadOutlined />}
-                                loading={retryingCompetitorCandidateId === candidate.id}
-                                disabled={retryingCompetitorCandidateId !== null && retryingCompetitorCandidateId !== candidate.id}
-                                onClick={() => retryCompetitorCandidateCapture(candidate)}
-                                style={{ display: canRetryCapture ? undefined : 'none' }}
-                              >
-                                重新抓取
-                              </Button>
-                              <Button
-                                icon={<ExportOutlined />}
-                                href={candidate.url || `https://www.amazon.com/dp/${candidate.asin}`}
-                                target="_blank"
-                              />
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </Space>
-              ) : (
-                <Empty description={
-                  isCompetitorSearching
-                    ? '正在用主图搜索 Amazon 同款'
-                    : competitorLoading
-                      ? '正在加载候选竞品'
-                      : isCompetitorSearchFailed
-                        ? (stylesnapSearch?.error || productErrorMessage || '候选竞品搜索失败，请重新搜索')
-                      : hasCompetitorCandidates
-                        ? '候选已生成，加载候选列表'
-                        : '暂无候选竞品'
-                }>
-                  {hasCompetitorCandidates ? (
-                    <Button
-                      icon={<ReloadOutlined />}
-                      loading={competitorLoading}
-                      onClick={() => loadCompetitorCandidates()}
-                    >
-                      加载候选列表
-                    </Button>
-                  ) : (
-                    <Button
-                      type="primary"
-                      icon={<PlayCircleOutlined />}
-                      loading={competitorSearchLoading || isCompetitorSearching}
-                      disabled={!hasConfirmedSearchImage || !canOperateCompetitor || isHardStopped || isReadyToExport}
-                      onClick={() => searchCompetitorCandidates(shouldForceCompetitorSearch)}
-                    >
-                      {competitorSearchButtonText}
-                    </Button>
-                  )}
-                </Empty>
-              )}
-            </Spin>
+          <Card title="竞品搜索状态" size="small">
+            {isCompetitorSearching ? (
+              <Alert
+                type="info"
+                showIcon
+                message="正在自动搜索 Amazon 参考竞品"
+                description={product.error_message || '搜索任务执行状态请以任务中心为准。'}
+              />
+            ) : isCompetitorSearchFailed ? (
+              <Alert
+                type="error"
+                showIcon
+                message="自动竞品搜索失败"
+                description={productErrorMessage || '请回到商品列表或任务中心按当前自动流程重试。'}
+              />
+            ) : hasReferenceCompetitor ? (
+              <Alert
+                type="success"
+                showIcon
+                message="参考竞品已确认"
+                description="竞品搜索和后续生成将继续由自动流程处理。"
+              />
+            ) : (
+              <Empty description={hasConfirmedSearchImage ? '等待自动竞品搜索任务' : '等待先确认商品图片'} />
+            )}
           </Card>
         </div>
       ),
@@ -3063,11 +2450,6 @@ const ProductDetail: React.FC = () => {
         </Title>
         <Space>
           <Button icon={<ReloadOutlined />} onClick={fetchDetail}>刷新</Button>
-          {isCompetitorSearchFailed && (
-            <Button type="primary" icon={<ReloadOutlined />} loading={competitorSearchLoading} onClick={() => searchCompetitorCandidates(true)}>
-              重新搜索候选
-            </Button>
-          )}
           {product.status === 'failed' && !isLegacyGigaBrowserCollectError && !isCompetitorSearchFailed && (
             <Button icon={<RedoOutlined />} onClick={async () => { await retryStep(product.id); fetchDetail(); }}>
               重试
@@ -3191,193 +2573,6 @@ const ProductDetail: React.FC = () => {
         }}
       />
     </div>
-    <Modal
-      title={`选择参考竞品${data?.item_code ? `：${data.item_code}` : ''}`}
-      open={competitorModalOpen}
-      onCancel={() => {
-        if (!selectingCompetitorId) {
-          setCompetitorModalOpen(false);
-        }
-      }}
-      footer={null}
-      width={1180}
-      destroyOnHidden
-    >
-      <Spin spinning={competitorLoading}>
-        {competitorGroup ? (
-          <Space direction="vertical" size={12} style={{ width: '100%' }}>
-            {hasListingContent && (
-              <Alert
-                type="warning"
-                showIcon
-                message="更换竞品后需要重新生成 Listing"
-                description="当前商品已经有生成文案。选择新竞品会记录 ASIN、类目并抓取竞品详情，但不会自动覆盖已有文案和 A+，需要手动重跑生成。"
-              />
-            )}
-            <div style={{ display: 'grid', gridTemplateColumns: '180px minmax(0, 1fr)', gap: 16 }}>
-              <div>
-                <div
-                  style={{
-                    height: 180,
-                    border: '1px solid #e5e7eb',
-                    borderRadius: 8,
-                    background: '#f8fafc',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    overflow: 'hidden',
-                    marginBottom: 10,
-                  }}
-                >
-                  {(competitorGroup.source_image_path || competitorGroup.source_image_url) ? (
-                    <Image
-                      src={competitorGroup.source_image_path ? imgUrl(competitorGroup.source_image_path) : competitorGroup.source_image_url || ''}
-                      height={178}
-                      style={{ objectFit: 'contain' }}
-                      preview={{ src: competitorGroup.source_image_path ? imgUrl(competitorGroup.source_image_path) : competitorGroup.source_image_url || '' }}
-                    />
-                  ) : (
-                    <Text type="secondary">无源图</Text>
-                  )}
-                </div>
-                <Space direction="vertical" size={6} style={{ width: '100%' }}>
-                  <Text strong>{competitorGroup.product_name || competitorGroup.item_code}</Text>
-                  <Text type="secondary">SKU：{competitorGroup.sku_code || '-'}</Text>
-                  <Text type="secondary">{competitorGroup.task_ready_reason || '从候选中选择一个 Item 级参考竞品'}</Text>
-                </Space>
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(185px, 1fr))', gap: 12 }}>
-                {competitorGroup.candidates.map((candidate: any) => {
-                  const selected = competitorGroup.selected_candidate_id === candidate.id || candidate.is_selected === 1;
-                  const captureStatus = candidate.listing_capture_status;
-                  const captureFailed = captureStatus === 'failed';
-                  const captureRunning = captureStatus === 'queued' || captureStatus === 'running';
-                  const captureMissingImage = captureStatus === 'captured' && !candidate.amazon_image_url;
-                  const captureMissingTitle = captureStatus === 'captured' && !candidate.title;
-                  const selectionReady = candidate.title && candidate.amazon_image_url;
-                  const canRetryCapture = !captureRunning && (!selectionReady || captureFailed || captureMissingImage || captureMissingTitle);
-                  const captureReady = captureStatus === 'captured' && candidate.title && candidate.amazon_image_url;
-                  const selectDisabled = competitorCandidateActionDisabled || (!selected && !selectionReady);
-                  return (
-                    <div
-                      key={candidate.id}
-                      style={{
-                        border: selected ? '2px solid #16a34a' : '1px solid #d9e1ec',
-                        background: selected ? '#f0fdf4' : '#fff',
-                        borderRadius: 8,
-                        padding: 10,
-                        minHeight: 340,
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: 8,
-                      }}
-                    >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', gap: 6, alignItems: 'center' }}>
-                        <Space size={4}>
-                          <Tag color={selected ? 'success' : 'blue'}>#{candidate.rank}</Tag>
-                          <Text strong>{candidate.asin}</Text>
-                        </Space>
-                        {selected ? <Tag color="success">已选</Tag> : null}
-                      </div>
-                      <div
-                        style={{
-                          height: 110,
-                          borderRadius: 6,
-                          background: '#f5f7fb',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          overflow: 'hidden',
-                        }}
-                      >
-                        {candidate.amazon_image_url ? (
-                          <Image
-                            src={candidate.amazon_image_url}
-                            height={110}
-                            style={{ objectFit: 'contain' }}
-                            preview={{ src: candidate.amazon_image_url }}
-                          />
-                        ) : (
-                          <Text type="secondary">{candidate.asin}</Text>
-                        )}
-                      </div>
-                      <Space size={[4, 4]} wrap>
-                        <Tag>{valueText(candidate.brand)}</Tag>
-                        <Tag color={candidate.seller === 'Amazon' ? 'green' : 'default'}>{valueText(candidate.seller)}</Tag>
-                        {candidate.price ? <Tag color="gold">{candidate.price}</Tag> : null}
-                      </Space>
-                      <div style={{ display: 'grid', gap: 4, fontSize: 12 }}>
-                        <Text type="secondary">评分：{valueText(candidate.rating)}</Text>
-                        <Text type="secondary">类目：{valueText(candidate.category_rank)}</Text>
-                        {(candidate.color || candidate.size || candidate.style) ? (
-                          <Text type="secondary">
-                            变体：{[candidate.color, candidate.size, candidate.style].filter(Boolean).join(' / ')}
-                          </Text>
-                        ) : null}
-                        {captureStatusTag(candidate.listing_capture_status)}
-                        {captureMissingImage ? <Tag color="warning">缺主图</Tag> : null}
-                        {captureMissingTitle ? <Tag color="warning">缺标题</Tag> : null}
-                      </div>
-                      <Typography.Paragraph
-                        type="secondary"
-                        ellipsis={{ rows: 3, expandable: false }}
-                        style={{ fontSize: 12, margin: 0, minHeight: 54 }}
-                      >
-                        {candidate.raw_snippet || ''}
-                      </Typography.Paragraph>
-                      <div style={{ marginTop: 'auto', display: 'flex', gap: 8 }}>
-                        <Button
-                          type={selected ? 'primary' : 'default'}
-                          icon={<CheckOutlined />}
-                          loading={selectingCompetitorId === candidate.id}
-                          disabled={selectDisabled}
-                          onClick={() => chooseCompetitorCandidate(candidate)}
-                          block
-                        >
-                        {competitorCandidateButtonText(selected)}
-                      </Button>
-                      <Button
-                        icon={<ReloadOutlined />}
-                        loading={retryingCompetitorCandidateId === candidate.id}
-                        disabled={retryingCompetitorCandidateId !== null && retryingCompetitorCandidateId !== candidate.id}
-                        onClick={() => retryCompetitorCandidateCapture(candidate)}
-                        style={{ display: canRetryCapture ? undefined : 'none' }}
-                      >
-                        重新抓取
-                      </Button>
-                      <Button
-                        icon={<ExportOutlined />}
-                        href={candidate.url || `https://www.amazon.com/dp/${candidate.asin}`}
-                          target="_blank"
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          </Space>
-        ) : (
-          <Empty description={
-            competitorLoading
-              ? '正在加载候选竞品'
-              : isCompetitorSearchFailed
-                ? (stylesnapSearch?.error || productErrorMessage || '候选竞品搜索失败，请重新搜索')
-                : '暂无候选竞品'
-          }>
-            <Button
-              type="primary"
-              icon={<PlayCircleOutlined />}
-              loading={competitorSearchLoading || isCompetitorSearching}
-              disabled={!hasConfirmedSearchImage || !canOperateCompetitor || isHardStopped || isReadyToExport}
-              onClick={() => searchCompetitorCandidates(shouldForceCompetitorSearch)}
-            >
-              {competitorSearchButtonText}
-            </Button>
-          </Empty>
-        )}
-      </Spin>
-    </Modal>
     <Modal
       title={`重新生成A+模块 ${regenTarget?.module_position || ''}`}
       open={!!regenTarget}

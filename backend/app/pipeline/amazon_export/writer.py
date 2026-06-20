@@ -35,9 +35,6 @@ def build_amazon_template_file(product: Product, pd: ProductData, mapping: dict[
     columns = legacy._index_template_columns(ws)
     data_row = legacy._mapping_data_row(mapping)
     warnings: list[str] = []
-    stylesnap_summary = legacy._selected_stylesnap_summary(pd)
-    if stylesnap_summary:
-        warnings.append(f"Amazon 导入类目参考已选同款候选: {stylesnap_summary}")
 
     for cell in ws[data_row]:
         cell.value = None

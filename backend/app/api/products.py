@@ -27,8 +27,6 @@ from app.models import (
     AsinSyncBatch,
     AsinSyncItem,
     CatalogProduct,
-    AmazonListingCapture,
-    AmazonStyleSnapCandidate,
     InventorySyncBatch,
     InventorySyncItem,
     GigaItem,
@@ -58,9 +56,8 @@ from app.models.status import (
     STEP6_DONE,
     STEP_LABELS,
     STEP_STATUS_MAP,
-    WORKFLOW_NODE_GET_STYLESNAP_TOKEN,
+    WORKFLOW_NODE_AUTO_SELECT_IMAGES,
     WORKFLOW_NODE_SEARCH_COMPETITOR,
-    WORKFLOW_NODE_SELECT_COMPETITOR,
     WORKFLOW_NODE_SELECT_IMAGES,
     WORKFLOW_STATUS_FAILED,
     WORKFLOW_STATUS_PENDING,
@@ -69,7 +66,6 @@ from app.models.status import (
 from app.api.schemas import (
     ProductCreate, ProductUpdate, ProductListingImagesUpdate, ProductGigaRefreshRequest, ProductResponse, ProductDetail, ProductImageResponse,
     PaginatedResponse, ProductFileEntry, AplusRegenerateRequest,
-    ProductCompetitorReviewDetailResponse, ProductCompetitorReviewQueueResponse,
     ProductImageReviewDetailResponse, ProductImageReviewQueueResponse,
     AsinSyncBatchDetail, AsinSyncBatchResponse, AsinSyncCreateRequest,
     AplusUploadBatchDetail, AplusUploadBatchResponse, AplusUploadCreateRequest, AplusGenerateRequest,
@@ -131,9 +127,12 @@ from app.services.upc_pool import (
     ensure_product_upc,
 )
 from app.services.giga_openapi import GigaOpenApiError, GigaSyncOptions, sync_giga_products
-from app.services.stylesnap_product_tasks import upsert_product_drafts_from_giga_batch
+from app.services.product_protection import raise_if_auto_image_selection_protected, raise_if_image_selection_reset_protected
+from app.services.giga_product_drafts import upsert_product_drafts_from_giga_batch
 from app.task_planners.aplus_generate import create_aplus_generate_runs
 from app.task_planners.product_bulk_advance import create_product_bulk_advance_run
+from app.task_planners.product_auto_image_selection import create_product_auto_image_selection_runs
+from app.task_planners.product_competitor_search import create_product_competitor_search_runs
 from app.task_planners.product_image_analysis import create_product_image_analysis_runs
 from app.task_planners.product_listing import create_product_listing_runs
 
@@ -162,9 +161,9 @@ RUNNING_STATUSES = {
 }
 
 APLUS_REGEN_ACTIVE_STATUSES = {"regen_queued", "regen_script_running", "regen_image_running"}
-COMPETITOR_REVIEW_ERROR_KEYWORDS = ("同款搜索", "StyleSnap", "候选竞品", "参考竞品", "选择竞品")
 WORKBENCH_STATUS_KEYS = (
     "needs_initialization",
+    "auto_select_images",
     "select_images",
     "competitor_searching",
     "select_competitor",
@@ -294,87 +293,6 @@ def _product_snapshot(product: Product) -> dict:
     return snapshot if isinstance(snapshot, dict) else {}
 
 
-ACTIVE_LISTING_CAPTURE_STATUSES = {"queued", "running"}
-
-
-def _is_competitor_listing_capture_state(product: Product) -> bool:
-    return (
-        product.status == STEP5_LISTING
-        and bool(product.error_message)
-        and "竞品" in (product.error_message or "")
-        and "抓取中" in (product.error_message or "")
-    )
-
-
-def _is_competitor_search_failed(product: Product) -> bool:
-    return bool(
-        product.status == "failed"
-        and re.search("|".join(re.escape(keyword) for keyword in COMPETITOR_REVIEW_ERROR_KEYWORDS), product.error_message or "", re.I)
-    )
-
-
-def _competitor_search_failed_sql_condition():
-    condition = Product.status == "failed"
-    keyword_condition = None
-    for keyword in COMPETITOR_REVIEW_ERROR_KEYWORDS:
-        next_condition = Product.error_message.ilike(f"%{keyword}%")
-        keyword_condition = next_condition if keyword_condition is None else keyword_condition | next_condition
-    return condition & keyword_condition
-
-
-def _competitor_review_workflow_sql_condition():
-    search_review = (
-        (Product.workflow_node == WORKFLOW_NODE_SEARCH_COMPETITOR)
-        & Product.workflow_status.in_(
-            [
-                WORKFLOW_STATUS_PENDING,
-                WORKFLOW_STATUS_PROCESSING,
-                WORKFLOW_STATUS_FAILED,
-            ]
-        )
-    )
-    token_review = (
-        (Product.workflow_node == WORKFLOW_NODE_GET_STYLESNAP_TOKEN)
-        & (Product.workflow_status == WORKFLOW_STATUS_PENDING)
-    )
-    select_review = (
-        (Product.workflow_node == WORKFLOW_NODE_SELECT_COMPETITOR)
-        & (Product.workflow_status == WORKFLOW_STATUS_PENDING)
-    )
-    return Product.competitor_asin.is_(None) & (search_review | token_review | select_review)
-
-
-async def _product_has_captured_competitor(db: AsyncSession, product: Product) -> bool:
-    snapshot = _product_snapshot(product)
-    selected = snapshot.get("selected_stylesnap")
-    capture = snapshot.get("amazon_listing_capture")
-    if _is_competitor_listing_capture_state(product):
-        raise HTTPException(400, "不能进入图片分析：竞品详情仍在抓取中，请等待完成")
-    if isinstance(capture, dict) and capture.get("status") in ACTIVE_LISTING_CAPTURE_STATUSES:
-        raise HTTPException(400, "不能进入图片分析：竞品详情仍在抓取中，请等待完成")
-    candidate_id = selected.get("candidate_id") if isinstance(selected, dict) else None
-    if candidate_id:
-        result = await db.execute(
-            select(AmazonListingCapture).where(AmazonListingCapture.selected_candidate_id == int(candidate_id))
-        )
-        current_capture = result.scalar_one_or_none()
-        if current_capture and current_capture.capture_status in ACTIVE_LISTING_CAPTURE_STATUSES:
-            raise HTTPException(400, "不能进入图片分析：竞品详情仍在抓取中，请等待完成")
-        if (
-            current_capture
-            and current_capture.capture_status == "captured"
-            and current_capture.asin == product.competitor_asin
-        ):
-            return True
-    return bool(
-        product.competitor_asin
-        and isinstance(selected, dict)
-        and isinstance(capture, dict)
-        and capture.get("status") == "captured"
-        and capture.get("asin") == product.competitor_asin
-    )
-
-
 async def _require_generation_prerequisites(db: AsyncSession, product: Product, start_step: int) -> None:
     """Block a node from starting unless all previous business nodes are complete."""
     if start_step >= 5:
@@ -382,8 +300,6 @@ async def _require_generation_prerequisites(db: AsyncSession, product: Product, 
             raise HTTPException(400, "不能进入图片分析：请先在详情页确认商品主图和 Listing 图片")
         if not product.competitor_asin:
             raise HTTPException(400, "不能进入图片分析：请先从候选竞品中选择一个参考竞品")
-        if not await _product_has_captured_competitor(db, product):
-            raise HTTPException(400, "不能进入图片分析：请先完成选中竞品的 Amazon Listing 详情抓取")
     if start_step >= 6:
         if not product.images or not product.images.image_analysis:
             raise HTTPException(400, "不能进入 Listing 文案：图片分析节点未完成")
@@ -428,9 +344,6 @@ def _current_task_status(product: Product) -> str:
     if product.status == "failed":
         if _is_legacy_giga_browser_collect_error(product):
             return _legacy_giga_browser_collect_message()
-        if _is_competitor_search_failed(product):
-            detail = _compact_error_message(product.error_message)
-            return f"候选竞品搜索失败：{detail or '请重新搜索候选竞品'}"
         detail = _compact_error_message(product.error_message)
         return f"失败：{detail or step_label}"
     if product.status == SOURCE_UNAVAILABLE:
@@ -679,6 +592,16 @@ def _product_list_work_status(product: Product) -> str:
     catalog_item = getattr(product, "catalog_item", None)
     catalog_exported = bool(catalog_item and (catalog_item.exported_at or catalog_item.export_task_id))
     return _workflow_state(product, catalog_exported=catalog_exported)["work_status"]
+
+
+def _apply_product_work_status_db_filter(query, count_query, work_status: str | None):
+    if work_status != "auto_select_images":
+        return query, count_query, False
+    predicate = (
+        (Product.workflow_node == WORKFLOW_NODE_AUTO_SELECT_IMAGES)
+        & (Product.workflow_status == WORKFLOW_STATUS_PENDING)
+    )
+    return query.where(predicate), count_query.where(predicate), True
 
 
 def _template_risk_from_data(pd: ProductData | None) -> tuple[str | None, int | None]:
@@ -1522,8 +1445,6 @@ def _catalog_template_status_for_category(
             categories=category,
             product_type="",
             title="",
-            amazon_stylesnap_selected_asin=None,
-            amazon_stylesnap_selected_category_rank=None,
         )
         try:
             mapping = _load_template_mapping(product, pd)
@@ -1988,6 +1909,8 @@ GENERATED_PRODUCT_IMAGE_FIELDS = {
     "image_selling_points",
     "category_style",
     "main_image_summary",
+    "image_selection_analysis",
+    "image_selected_at",
     "analyzed_at",
 }
 
@@ -2030,63 +1953,6 @@ def _reset_product_images(pi: ProductImage) -> None:
     pi.vlm_model = settings.VLM_MODEL
 
 
-def _strip_competitor_snapshot(snapshot_text: str | None) -> str | None:
-    if not snapshot_text:
-        return snapshot_text
-    try:
-        snapshot = json.loads(snapshot_text)
-    except Exception:
-        return snapshot_text
-    if not isinstance(snapshot, dict):
-        return snapshot_text
-    for key in ("selected_stylesnap", "amazon_listing_capture", "stylesnap_search"):
-        snapshot.pop(key, None)
-    return json.dumps(snapshot, ensure_ascii=False)
-
-
-async def _delete_product_competitor_records(db: AsyncSession, product: Product) -> None:
-    if not product.data:
-        return
-    snapshot = {}
-    if product.data.gigab2b_raw_snapshot:
-        try:
-            loaded = json.loads(product.data.gigab2b_raw_snapshot)
-            if isinstance(loaded, dict):
-                snapshot = loaded
-        except Exception:
-            snapshot = {}
-    batch_id = snapshot.get("batch_id")
-    site = str(snapshot.get("site") or "US").strip().upper()
-    item_code = product.data.item_code
-    representative_sku = snapshot.get("representative_sku") or item_code
-    if not batch_id or not item_code:
-        return
-
-    candidate_query = select(AmazonStyleSnapCandidate.id).where(
-        AmazonStyleSnapCandidate.batch_id == batch_id,
-        AmazonStyleSnapCandidate.site == site,
-        AmazonStyleSnapCandidate.item_code == item_code,
-    )
-    if representative_sku:
-        candidate_query = candidate_query.where(AmazonStyleSnapCandidate.sku_code == representative_sku)
-    result = await db.execute(candidate_query)
-    candidate_ids = [row[0] for row in result.all()]
-    if not candidate_ids and representative_sku and representative_sku != item_code:
-        result = await db.execute(
-            select(AmazonStyleSnapCandidate.id).where(
-                AmazonStyleSnapCandidate.batch_id == batch_id,
-                AmazonStyleSnapCandidate.site == site,
-                AmazonStyleSnapCandidate.item_code == item_code,
-            )
-        )
-        candidate_ids = [row[0] for row in result.all()]
-    if candidate_ids:
-        await db.execute(
-            delete(AmazonListingCapture).where(AmazonListingCapture.selected_candidate_id.in_(candidate_ids))
-        )
-        await db.execute(delete(AmazonStyleSnapCandidate).where(AmazonStyleSnapCandidate.id.in_(candidate_ids)))
-
-
 async def _reset_product_after_image_selection(
     db: AsyncSession,
     product: Product,
@@ -2095,6 +1961,7 @@ async def _reset_product_after_image_selection(
     gallery_paths: list[str],
     now: datetime,
 ) -> None:
+    raise_if_image_selection_reset_protected(product)
     if not product.data:
         product.data = ProductData(product_id=product.id)
         db.add(product.data)
@@ -2102,15 +1969,14 @@ async def _reset_product_after_image_selection(
         product.images = ProductImage(product_id=product.id)
         db.add(product.images)
 
-    await _delete_product_competitor_records(db, product)
-
     _reset_product_data_after_image_selection(product.data)
-    product.data.gigab2b_raw_snapshot = _strip_competitor_snapshot(product.data.gigab2b_raw_snapshot)
 
     _reset_product_images(product.images)
     product.images.main_image_path = main_image_path
     product.images.main_image_source = "manual_selected"
     product.images.gallery_images = json.dumps(gallery_paths, ensure_ascii=False)
+    product.images.image_selection_analysis = None
+    product.images.image_selected_at = None
 
     if product.aplus:
         _reset_product_aplus(product.aplus)
@@ -2601,6 +2467,7 @@ async def get_workbench_overview(
     return WorkbenchOverview(
         total_products=len(products),
         needs_initialization=status_counts["needs_initialization"],
+        auto_select_images=status_counts["auto_select_images"],
         select_images=status_counts["select_images"],
         competitor_searching=status_counts["competitor_searching"],
         select_competitor=status_counts["select_competitor"],
@@ -2765,7 +2632,9 @@ async def list_products(
         query = query.where(Product.created_at <= created_to)
         count_query = count_query.where(Product.created_at <= created_to)
 
-    if work_status:
+    query, count_query, db_filtered_work_status = _apply_product_work_status_db_filter(query, count_query, work_status)
+
+    if work_status and not db_filtered_work_status:
         result = await db.execute(query)
         matched_items = [
             item for item in result.scalars().unique().all()
@@ -2923,153 +2792,6 @@ async def get_product_image_review_detail(
         "data": {
             "item_code": row.item_code,
             "title": row.title,
-        },
-        "images": images,
-    }
-
-
-@router.get("/competitor-review-queue", response_model=ProductCompetitorReviewQueueResponse)
-async def list_product_competitor_review_queue(
-    data_source_id: int | None = Query(None, ge=1),
-    limit: int = Query(100, ge=1, le=500),
-    db: AsyncSession = Depends(get_db),
-):
-    """Lightweight queue for products that need competitor review."""
-    query = (
-        select(
-            Product.id,
-            Product.gigab2b_product_id,
-            Product.competitor_asin,
-            Product.status,
-            Product.current_step,
-            Product.error_message,
-            Product.workflow_node,
-            Product.workflow_status,
-            Product.workflow_error,
-            Product.workflow_updated_at,
-            Product.created_at,
-            Product.updated_at,
-            ProductData.item_code,
-            ProductData.title,
-            ProductData.leaf_category,
-        )
-        .select_from(Product)
-        .join(ProductData, ProductData.product_id == Product.id, isouter=True)
-        .where(_competitor_review_workflow_sql_condition())
-        .order_by(Product.updated_at.is_(None).asc(), Product.updated_at.desc(), Product.created_at.desc())
-        .limit(limit)
-    )
-    if data_source_id:
-        query = query.where(_product_data_source_filter(data_source_id))
-
-    result = await db.execute(query)
-    items = []
-    for row in result.all():
-        product = Product(
-            id=row.id,
-            gigab2b_url="",
-            gigab2b_product_id=row.gigab2b_product_id,
-            competitor_asin=row.competitor_asin,
-            status=row.status,
-            current_step=row.current_step or 0,
-            error_message=row.error_message,
-        )
-        product.workflow_node = row.workflow_node
-        product.workflow_status = row.workflow_status
-        product.workflow_error = row.workflow_error
-        product.workflow_updated_at = row.workflow_updated_at
-        workflow = _workflow_state(product)
-        items.append({
-            "id": row.id,
-            "source_item_id": row.gigab2b_product_id,
-            "gigab2b_product_id": row.gigab2b_product_id,
-            "competitor_asin": row.competitor_asin,
-            "status": row.status,
-            "current_step": row.current_step or 0,
-            "current_task_status": workflow["action_reason"],
-            "workflow": workflow,
-            "error_message": row.error_message,
-            "item_code": row.item_code,
-            "title": row.title,
-            "leaf_category": row.leaf_category,
-            "created_at": row.created_at,
-            "updated_at": row.updated_at,
-        })
-    return ProductCompetitorReviewQueueResponse(items=items, total=len(items), limit=limit)
-
-
-@router.get("/competitor-review-detail/{product_id}", response_model=ProductCompetitorReviewDetailResponse)
-async def get_product_competitor_review_detail(
-    product_id: int,
-    db: AsyncSession = Depends(get_db),
-):
-    """Lightweight product detail for the competitor review page."""
-    result = await db.execute(
-        select(
-            Product.id,
-            Product.gigab2b_product_id,
-            Product.competitor_asin,
-            Product.status,
-            Product.current_step,
-            Product.error_message,
-            Product.workflow_node,
-            Product.workflow_status,
-            Product.workflow_error,
-            Product.workflow_updated_at,
-            ProductData.item_code,
-            ProductData.title,
-            ProductData.leaf_category,
-            ProductData.gigab2b_raw_snapshot,
-            ProductImage.id.label("image_id"),
-            ProductImage.main_image_path,
-            ProductImage.main_image_source,
-        )
-        .select_from(Product)
-        .join(ProductData, ProductData.product_id == Product.id, isouter=True)
-        .join(ProductImage, ProductImage.product_id == Product.id, isouter=True)
-        .where(Product.id == product_id)
-    )
-    row = result.one_or_none()
-    if not row:
-        raise HTTPException(404, "Product not found")
-
-    product = Product(
-        id=row.id,
-        gigab2b_url="",
-        gigab2b_product_id=row.gigab2b_product_id,
-        competitor_asin=row.competitor_asin,
-        status=row.status,
-        current_step=row.current_step or 0,
-        error_message=row.error_message,
-    )
-    product.workflow_node = row.workflow_node
-    product.workflow_status = row.workflow_status
-    product.workflow_error = row.workflow_error
-    product.workflow_updated_at = row.workflow_updated_at
-    workflow = _workflow_state(product)
-    images = None
-    if row.image_id or row.main_image_path:
-        images = {
-            "id": row.image_id or 0,
-            "product_id": row.id,
-            "main_image_path": row.main_image_path,
-            "main_image_source": row.main_image_source,
-        }
-    return {
-        "id": row.id,
-        "source_item_id": row.gigab2b_product_id,
-        "gigab2b_product_id": row.gigab2b_product_id,
-        "competitor_asin": row.competitor_asin,
-        "status": row.status,
-        "current_step": row.current_step or 0,
-        "current_task_status": workflow["action_reason"],
-        "workflow": workflow,
-        "error_message": row.error_message,
-        "leaf_category": row.leaf_category,
-        "data": {
-            "item_code": row.item_code,
-            "title": row.title,
-            "gigab2b_raw_snapshot": _compact_gigab2b_snapshot(row.gigab2b_raw_snapshot),
         },
         "images": images,
     }
@@ -4759,38 +4481,15 @@ def _compact_gigab2b_snapshot(value: str | None) -> str | None:
     snapshot = _json_loads(value, None)
     if not isinstance(snapshot, dict):
         return value
-    capture = snapshot.get("amazon_listing_capture")
-    compact_capture = None
-    if isinstance(capture, dict):
-        compact_capture = {
-            key: capture.get(key)
-            for key in (
-                "asin",
-                "status",
-                "capture_status",
-                "capture_error",
-                "title",
-                "brand",
-                "categories",
-                "leaf_category",
-                "category_rank",
-                "url",
-            )
-            if capture.get(key) is not None
-        }
     keep_keys = (
         "batch_id",
         "site",
         "data_source_id",
         "data_source_name",
         "representative_sku",
-        "selected_stylesnap",
-        "stylesnap_search",
         "item",
     )
     compact = {key: snapshot.get(key) for key in keep_keys if snapshot.get(key) is not None}
-    if compact_capture:
-        compact["amazon_listing_capture"] = compact_capture
     return json.dumps(compact, ensure_ascii=False)
 
 
@@ -5036,6 +4735,7 @@ async def update_product_listing_images(
             selectinload(Product.data),
             selectinload(Product.aplus),
             selectinload(Product.catalog_item),
+            selectinload(Product.files),
         )
         .where(Product.id == product_id)
     )
@@ -5045,16 +4745,112 @@ async def update_product_listing_images(
 
     main_path, gallery_paths = _normalize_listing_image_paths(body.main_image_path, body.gallery_images)
     now = datetime.now()
-    await _reset_product_after_image_selection(
-        db,
-        product,
-        main_image_path=main_path,
-        gallery_paths=gallery_paths,
-        now=now,
-    )
+    try:
+        await _reset_product_after_image_selection(
+            db,
+            product,
+            main_image_path=main_path,
+            gallery_paths=gallery_paths,
+            now=now,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(400, str(exc)) from exc
     await db.commit()
     await db.refresh(product.images)
     return product.images
+
+
+@router.post("/{product_id}/auto-image-selection/retry", response_model=ProductResponse)
+async def retry_product_auto_image_selection(product_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Product)
+        .options(
+            selectinload(Product.data),
+            selectinload(Product.images),
+            selectinload(Product.aplus),
+            selectinload(Product.catalog_item),
+            selectinload(Product.files),
+        )
+        .where(Product.id == product_id)
+    )
+    product = result.scalar_one_or_none()
+    if not product:
+        raise HTTPException(404, "Product not found")
+    if product.workflow_node != WORKFLOW_NODE_AUTO_SELECT_IMAGES:
+        raise HTTPException(400, "当前商品不在自动选图节点，不能重试自动选图")
+    if product.workflow_status == WORKFLOW_STATUS_PROCESSING:
+        product.workflow = _workflow_state(product)
+        product.current_task_status = product.workflow["action_reason"]
+        return product
+    if product.workflow_status not in {WORKFLOW_STATUS_FAILED, WORKFLOW_STATUS_PENDING}:
+        raise HTTPException(400, "当前自动选图状态不可重试")
+    try:
+        raise_if_auto_image_selection_protected(product)
+        await create_product_auto_image_selection_runs(db, [product.id], created_by="web", auto_start=True)
+    except RuntimeError as exc:
+        await db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(502, f"自动选图重试任务创建失败: {type(exc).__name__}: {exc}") from exc
+
+    refreshed = await db.execute(
+        select(Product)
+        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
+        .where(Product.id == product_id)
+    )
+    queued_product = refreshed.scalar_one_or_none()
+    if not queued_product:
+        raise HTTPException(404, "Product not found")
+    queued_product.workflow = _workflow_state(queued_product)
+    queued_product.current_task_status = queued_product.workflow["action_reason"]
+    return queued_product
+
+
+@router.post("/{product_id}/competitor-search/retry", response_model=ProductResponse)
+async def retry_product_competitor_search(product_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Product)
+        .options(
+            selectinload(Product.data),
+            selectinload(Product.images),
+            selectinload(Product.aplus),
+            selectinload(Product.catalog_item),
+            selectinload(Product.files),
+        )
+        .where(Product.id == product_id)
+    )
+    product = result.scalar_one_or_none()
+    if not product:
+        raise HTTPException(404, "Product not found")
+    if product.workflow_node != WORKFLOW_NODE_SEARCH_COMPETITOR:
+        raise HTTPException(400, "当前商品不在搜索竞品节点，不能启动自动竞品搜索")
+    if product.workflow_status == WORKFLOW_STATUS_PROCESSING:
+        product.workflow = _workflow_state(product)
+        product.current_task_status = product.workflow["action_reason"]
+        return product
+    if product.workflow_status not in {WORKFLOW_STATUS_FAILED, WORKFLOW_STATUS_PENDING}:
+        raise HTTPException(400, "当前搜索竞品状态不可启动自动竞品搜索")
+    try:
+        await create_product_competitor_search_runs(db, [product.id], created_by="web", auto_start=True)
+    except RuntimeError as exc:
+        await db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(502, f"自动竞品搜索任务创建失败: {type(exc).__name__}: {exc}") from exc
+
+    refreshed = await db.execute(
+        select(Product)
+        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
+        .where(Product.id == product_id)
+    )
+    queued_product = refreshed.scalar_one_or_none()
+    if not queued_product:
+        raise HTTPException(404, "Product not found")
+    queued_product.workflow = _workflow_state(queued_product)
+    queued_product.current_task_status = queued_product.workflow["action_reason"]
+    return queued_product
 
 
 @router.delete("/{product_id}", status_code=204)
@@ -5127,7 +4923,6 @@ async def restart_pipeline(
 
     if product.data:
         _reset_product_data(product.data)
-        product.data.gigab2b_raw_snapshot = _strip_competitor_snapshot(product.data.gigab2b_raw_snapshot)
     else:
         db.add(ProductData(product_id=product.id))
 
@@ -5144,17 +4939,12 @@ async def restart_pipeline(
     for file_record in list(product.files or []):
         await db.delete(file_record)
 
-    await _delete_product_competitor_records(db, product)
-
     snapshot = _json_loads(product.data.gigab2b_raw_snapshot, {}) if product.data else {}
     if not isinstance(snapshot, dict):
         snapshot = {}
-    batch_id = snapshot.get("batch_id")
-    site = str(snapshot.get("site") or "US").strip().upper()
     item_code = product.data.item_code if product.data else None
-    representative_sku = snapshot.get("representative_sku") or item_code
     has_confirmed_main_image = bool(product.images and product.images.main_image_path)
-    can_search_competitors = bool(has_confirmed_main_image and batch_id and item_code)
+    can_search_competitors = bool(has_confirmed_main_image and item_code)
     now = datetime.now()
 
     product.competitor_asin = None
@@ -5163,27 +4953,16 @@ async def restart_pipeline(
     product.aplus_upload_error = None
     product.updated_at = now
     if can_search_competitors:
-        product.status = "competitor_searching"
+        product.status = "created"
         product.current_step = 2
-        product.error_message = "重新开始流程：正在用已确认主图重新搜索 Amazon 候选竞品"
-        if product.data:
-            product.data.gigab2b_raw_snapshot = json.dumps(
-                {
-                    **snapshot,
-                    "batch_id": batch_id,
-                    "site": site,
-                    "representative_sku": representative_sku or item_code,
-                    "stylesnap_search": {
-                        "status": "running",
-                        "started_at": now.isoformat(),
-                        "source_image_path": product.images.main_image_path,
-                        "append": False,
-                        "previous_count": 0,
-                        "restart": True,
-                    },
-                },
-                ensure_ascii=False,
-            )
+        product.error_message = None
+        set_product_workflow(
+            product,
+            node=WORKFLOW_NODE_SEARCH_COMPETITOR,
+            status=WORKFLOW_STATUS_PENDING,
+            error=None,
+            now=now,
+        )
     else:
         product.status = "created"
         product.current_step = 1 if has_confirmed_main_image else 0
@@ -5199,11 +4978,6 @@ async def restart_pipeline(
         product.catalog_item.updated_at = now
     await db.commit()
     await db.refresh(product)
-
-    if can_search_competitors:
-        from app.api.amazon_stylesnap import _run_product_competitor_search_background
-
-        background_tasks.add_task(_run_product_competitor_search_background, product.id)
 
     return product
 

@@ -42,6 +42,11 @@ class Product(Base):
     aplus: Mapped["ProductAplus | None"] = relationship("ProductAplus", back_populates="product", uselist=False, cascade="all, delete-orphan")
     files: Mapped[list["ProductFile"]] = relationship("ProductFile", back_populates="product", cascade="all, delete-orphan")
     catalog_item: Mapped["CatalogProduct | None"] = relationship("CatalogProduct", back_populates="source_product", uselist=False, cascade="all, delete-orphan")
+    competitor_search_candidates: Mapped[list["AmazonCompetitorSearchCandidate"]] = relationship(
+        "AmazonCompetitorSearchCandidate",
+        back_populates="product",
+        cascade="all, delete-orphan",
+    )
 
     @property
     def source_url(self) -> str:
@@ -861,95 +866,43 @@ class GigaGroup(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
-class AmazonStyleSnapCandidate(Base):
-    __tablename__ = "amazon_stylesnap_candidates"
+class AmazonCompetitorSearchCandidate(Base):
+    __tablename__ = "amazon_competitor_search_candidates"
     __table_args__ = (
-        UniqueConstraint(
-            "batch_id",
-            "site",
-            "item_code",
-            "sku_code",
-            "rank",
-            "asin",
-            name="uq_amazon_stylesnap_candidate_identity",
-        ),
+        UniqueConstraint("product_id", "asin", name="uq_amazon_competitor_search_product_asin"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    batch_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    site: Mapped[str] = mapped_column(String(20), nullable=False)
-    item_code: Mapped[str] = mapped_column(String(100), nullable=False)
-    sku_code: Mapped[str] = mapped_column(String(100), nullable=False)
-    product_name: Mapped[str | None] = mapped_column(Text)
-    source_image_url: Mapped[str | None] = mapped_column(Text)
-    source_image_path: Mapped[str | None] = mapped_column(Text)
-    rank: Mapped[int] = mapped_column(Integer, nullable=False)
-    asin: Mapped[str] = mapped_column(String(20), nullable=False)
-    title: Mapped[str | None] = mapped_column(Text)
-    url: Mapped[str | None] = mapped_column(Text)
-    brand: Mapped[str | None] = mapped_column(String(200))
-    seller: Mapped[str | None] = mapped_column(String(200))
-    delivery: Mapped[str | None] = mapped_column(String(200))
-    price: Mapped[str | None] = mapped_column(String(100))
-    rating: Mapped[str | None] = mapped_column(String(100))
-    category_rank: Mapped[str | None] = mapped_column(Text)
-    color: Mapped[str | None] = mapped_column(String(200))
-    size: Mapped[str | None] = mapped_column(String(200))
-    style: Mapped[str | None] = mapped_column(String(200))
-    amazon_image_url: Mapped[str | None] = mapped_column(Text)
-    amazon_image_path: Mapped[str | None] = mapped_column(Text)
-    raw_snippet: Mapped[str | None] = mapped_column(Text)
-    raw_candidate_json: Mapped[str | None] = mapped_column(Text)
-    raw_capture_json: Mapped[str | None] = mapped_column(Text)
-    page_href: Mapped[str | None] = mapped_column(Text)
-    page_title: Mapped[str | None] = mapped_column(Text)
-    page_body_length: Mapped[int | None] = mapped_column(Integer)
-    capture_error: Mapped[str | None] = mapped_column(Text)
-    is_selected: Mapped[int] = mapped_column(Integer, default=0)
-    selected_at: Mapped[datetime | None] = mapped_column(DateTime)
-    source_platform: Mapped[str] = mapped_column(String(30), default="AMAZON_STYLESNAP")
+    product_id: Mapped[int] = mapped_column(Integer, ForeignKey("products.id"), nullable=False)
+    task_run_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("task_runs.id"))
+    task_step_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("task_steps.id"))
+    source_data_source_id: Mapped[int | None] = mapped_column(Integer)
+    source_site: Mapped[str | None] = mapped_column(String(20))
+    source_batch_id: Mapped[str | None] = mapped_column(String(100))
+    item_code: Mapped[str | None] = mapped_column(String(100))
+    sku_code: Mapped[str | None] = mapped_column(String(100))
+    search_query: Mapped[str] = mapped_column(String(500), nullable=False)
+    query_intent: Mapped[str | None] = mapped_column(String(80))
+    query_index: Mapped[int | None] = mapped_column(Integer)
+    search_rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    source: Mapped[str] = mapped_column(String(50), default="amazon_search_page")
     captured_at: Mapped[datetime | None] = mapped_column(DateTime)
-    imported_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
-
-
-class AmazonListingCapture(Base):
-    __tablename__ = "amazon_listing_captures"
-    __table_args__ = (
-        UniqueConstraint("selected_candidate_id", name="uq_amazon_listing_capture_candidate"),
-    )
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    selected_candidate_id: Mapped[int] = mapped_column(Integer, ForeignKey("amazon_stylesnap_candidates.id"), nullable=False)
-    batch_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    site: Mapped[str] = mapped_column(String(20), nullable=False)
-    item_code: Mapped[str] = mapped_column(String(100), nullable=False)
-    sku_code: Mapped[str] = mapped_column(String(100), nullable=False)
     asin: Mapped[str] = mapped_column(String(20), nullable=False)
     url: Mapped[str | None] = mapped_column(Text)
     title: Mapped[str | None] = mapped_column(Text)
-    brand: Mapped[str | None] = mapped_column(String(200))
-    seller: Mapped[str | None] = mapped_column(String(200))
+    image_url: Mapped[str | None] = mapped_column(Text)
     price: Mapped[str | None] = mapped_column(String(100))
     rating: Mapped[str | None] = mapped_column(String(100))
     review_count: Mapped[str | None] = mapped_column(String(100))
-    availability: Mapped[str | None] = mapped_column(Text)
-    categories: Mapped[str | None] = mapped_column(Text)
-    leaf_category: Mapped[str | None] = mapped_column(String(200))
-    category_rank: Mapped[str | None] = mapped_column(Text)
-    bullets_json: Mapped[str | None] = mapped_column(Text)
-    description: Mapped[str | None] = mapped_column(Text)
-    product_details_json: Mapped[str | None] = mapped_column(Text)
-    aplus_text: Mapped[str | None] = mapped_column(Text)
-    main_image_url: Mapped[str | None] = mapped_column(Text)
-    image_urls_json: Mapped[str | None] = mapped_column(Text)
-    raw_json: Mapped[str | None] = mapped_column(Text)
-    page_url: Mapped[str | None] = mapped_column(Text)
-    page_title: Mapped[str | None] = mapped_column(Text)
-    page_body_length: Mapped[int | None] = mapped_column(Integer)
-    capture_status: Mapped[str] = mapped_column(String(30), default="captured")
-    capture_error: Mapped[str | None] = mapped_column(Text)
-    source_platform: Mapped[str] = mapped_column(String(30), default="AMAZON_LISTING")
-    captured_at: Mapped[datetime | None] = mapped_column(DateTime)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    sponsored: Mapped[int] = mapped_column(Integer, default=0)
+    is_accessory: Mapped[int] = mapped_column(Integer, default=0)
+    is_replacement_part: Mapped[int] = mapped_column(Integer, default=0)
+    is_cover_only: Mapped[int] = mapped_column(Integer, default=0)
+    is_excluded: Mapped[int] = mapped_column(Integer, default=0)
+    exclusion_reason: Mapped[str | None] = mapped_column(Text)
+    raw_candidate_json: Mapped[str | None] = mapped_column(Text)
+    raw_search_page_json: Mapped[str | None] = mapped_column(Text)
+    imported_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    product: Mapped["Product"] = relationship("Product", back_populates="competitor_search_candidates")
