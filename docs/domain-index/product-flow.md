@@ -20,6 +20,7 @@
 - Amazon workflow T3：旧人工图片确认入口仍由 `PUT /api/products/{id}/listing-images` 保存主图/副图并执行 destructive reset，成功后进入 `search_competitor/pending`；该入口现在是自动选图失败/用户主动纠偏入口，保存前必须保护真实 ASIN、导出历史、Amazon 模板输出和 A+ 上传证据。
 - Amazon 自动选图阶段 B：新建 Amazon 商品默认进入 `auto_select_images/pending`，完整落库后创建/复用 `product_auto_image_selection` task run 并投影 `processing`；`auto_select_images/pending` 是商品工作台正式状态桶，overview/list/frontend filter 均需显式支持，`processing` 归入 `running`。task run 创建失败落 `auto_select_images/failed`。`POST /api/products/{id}/auto-image-selection/retry` 基于 workflow 状态重试；商品列表消费后端 `retry_auto_image_selection` / `manual_adjust_images` action。阶段 B 不自动启动竞品搜索。
 - Amazon 自动竞品搜索 Phase A：`search_competitor/pending|failed` 可通过 `POST /api/products/{id}/competitor-search/retry` 创建/复用 `product_competitor_search` task run；reserve 投影 `search_competitor/processing`，成功把 Amazon 页面搜索候选写入 `amazon_competitor_search_candidates` 并进入 `visual_match_competitors/pending`，失败回到 `search_competitor/failed`。`amazon_competitor_search_candidates` 是自动竞品搜索主事实源。本阶段不做视觉初筛、抓详情或自动选择竞品。
+- Amazon 竞品视觉初筛 Phase B：`visual_match_competitors/pending|failed` 可通过 `POST /api/products/{id}/competitor-visual-match/retry` 创建/复用 `product_competitor_visual_match` task run；`processing` 状态由 API 直接返回当前 workflow/task-center correlation，不调用 planner。reserve 会清空同商品旧视觉当前事实和 `visual_selected_for_capture`，execute 只读取最近成功 `product_competitor_search` run/step 的候选，默认用源商品主图 URL + 候选 `image_url` direct VLM 做视觉初筛，不下载候选图、不生成 Contact Sheet、不做拼接兜底；只在显式测试 fixture 路径使用 fake review。成功只给当前 run/step Top 4-6 写 `visual_selected_for_capture=1` 并进入 `capture_competitor_candidates/pending`，失败/取消/中断回到 `visual_match_competitors/failed` 且不保留 current selected candidates。本阶段不抓 Amazon 详情、不自动选最终竞品。
 - 旧 StyleSnap 模式已退役：后端不再注册或保留 `/api/amazon-stylesnap` router，旧前端竞品确认页已删除，`/products/competitor-review` 仅重定向到商品列表；代码层不再保留旧 `AmazonStyleSnapCandidate` / `AmazonListingCapture` 模型、旧 snapshot key 读取或导出兼容逻辑。已存在的旧物理表不由应用启动逻辑维护或自动 drop。
 - 已修 P0：ProductTaskAction reserve 后的图片分析/Listing 入队态不能再被旧 pipeline `is_running(product.id)` 误判为中断。后续结构治理应把商品主状态从 task queued/running 语义收敛为业务节点四态。
 
@@ -32,8 +33,8 @@
 - 新建商品：`frontend/src/pages/CreateProduct.tsx`
 - 前端 API client：`frontend/src/api/index.ts`
 - 商品 API：`backend/app/api/products.py`
-- 自动选图：`backend/app/services/product_image_candidates.py`, `backend/app/services/product_image_vlm.py`, `backend/app/services/product_protection.py`, `backend/app/product_tasks/auto_image_selection.py`, `backend/app/task_planners/product_auto_image_selection.py`
-- 自动竞品搜索：`backend/app/services/amazon_competitor_query.py`, `backend/app/services/amazon_search_page.py`, `backend/app/task_planners/product_competitor_search.py`, `backend/app/product_tasks/actions.py`
+- 自动选图：`backend/app/services/giga_product_drafts.py`, `backend/app/services/product_image_candidates.py`, `backend/app/services/product_image_vlm.py`, `backend/app/services/product_protection.py`, `backend/app/product_tasks/auto_image_selection.py`, `backend/app/task_planners/product_auto_image_selection.py`
+- 自动竞品搜索/视觉初筛：`backend/app/services/amazon_competitor_query.py`, `backend/app/services/amazon_search_page.py`, `backend/app/services/amazon_competitor_visual_match.py`, `backend/app/task_planners/product_competitor_search.py`, `backend/app/task_planners/product_competitor_visual_match.py`, `backend/app/product_tasks/actions.py`
 - TikTok API：`backend/app/api/tiktok.py`
 - pipeline：`backend/app/pipeline/engine.py`, `backend/app/pipeline/step*.py`
 - 模型：`backend/app/models/models.py`
@@ -44,6 +45,7 @@
 - 商品列表/详情：页面 -> `frontend/src/api/index.ts` -> `backend/app/api/products.py`；详情素材摘要通过 `backend/app/services/material_assets.py` 只读扫描。
 - 图片确认：`ProductImageReview.tsx` -> 商品 API -> `product_images`。
 - 自动竞品搜索：商品列表/详情 workflow action -> `POST /api/products/{id}/competitor-search/retry` -> `product_competitor_search` task run -> `amazon_competitor_search_candidates`。
+- 竞品视觉初筛：商品列表 workflow action -> `POST /api/products/{id}/competitor-visual-match/retry` -> `product_competitor_visual_match` task run -> 当前搜索 run/step 的 `amazon_competitor_search_candidates.visual_*` 字段 -> `capture_competitor_candidates/pending`。
 - Amazon/TikTok 详情分流：前端路由和数据源类型共同决定详情入口。
 
 ## 相关文档
@@ -73,6 +75,7 @@
 - 商品详情打开后素材文件位置变化：先看 `backend/app/api/products.py` 的 GET 详情链路和 `backend/app/services/material_assets.py`，GET 路径不得调用 mutating 素材整理函数。
 - 图片选择问题：手动纠偏看 `ProductImageReview.tsx`、`PUT /api/products/{id}/listing-images`、`product_images` 和 `backend/app/services/product_protection.py`；自动选图入口/重试看 `backend/app/services/giga_product_drafts.py`、`POST /api/products/{id}/auto-image-selection/retry`、`backend/app/task_planners/product_auto_image_selection.py`、`backend/app/product_tasks/actions.py`、`backend/app/product_tasks/auto_image_selection.py`。
 - 自动竞品搜索问题：先看 `POST /api/products/{id}/competitor-search/retry`、`backend/app/task_planners/product_competitor_search.py`、`backend/app/product_tasks/actions.py` 的 `ProductCompetitorSearchAction`、`backend/app/services/amazon_competitor_query.py` 和 `backend/app/services/amazon_search_page.py`。
+- 竞品视觉初筛问题：先看 `POST /api/products/{id}/competitor-visual-match/retry`、`backend/app/task_planners/product_competitor_visual_match.py`、`backend/app/product_tasks/actions.py` 的 `ProductCompetitorVisualMatchAction` 和 `backend/app/services/amazon_competitor_visual_match.py`；重点核对当前成功 Phase A run/step 限定、processing API bypass、旧 selected 清理和失败态不保留 current selected。
 - 旧 StyleSnap 残留问题：先确认是否还有 `/api/amazon-stylesnap`、旧 service、旧前端页面、旧 ORM 模型、旧 snapshot key 读取或 Step 10/export 兼容读取；不要恢复旧运行入口。
 - 数据源分流问题：先看 `frontend/src/App.tsx`、详情页和 `backend/app/api/products.py`。
 

@@ -18,6 +18,7 @@ import {
   restartPipeline,
   retryProductAutoImageSelection,
   retryProductCompetitorSearch,
+  retryProductCompetitorVisualMatch,
   resumePipeline,
   retryStep,
   STEP_LABELS,
@@ -324,6 +325,19 @@ const ProductList: React.FC = () => {
       message.success('已创建或复用自动竞品搜索任务');
     } catch (error: any) {
       message.error(error?.response?.data?.detail || '启动自动竞品搜索失败');
+    } finally {
+      setRerunningId(null);
+    }
+  };
+
+  const retryCompetitorVisualMatch = async (productId: number) => {
+    setRerunningId(productId);
+    try {
+      await retryProductCompetitorVisualMatch(productId);
+      await refreshWorkbenchRows();
+      message.success('已创建或复用竞品视觉初筛任务');
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '启动竞品视觉初筛失败');
     } finally {
       setRerunningId(null);
     }
@@ -754,7 +768,7 @@ const ProductList: React.FC = () => {
           </Button>
         );
       }
-      if (workflowAction === 'start_competitor_search' || workflowAction === 'retry_competitor_search') {
+      if (workflowAction === 'start_competitor_search' || workflowAction === 'retry_competitor_search' || workflowAction === 'restart_competitor_search') {
         return (
           <Button
             size="small"
@@ -762,6 +776,19 @@ const ProductList: React.FC = () => {
             icon={<RedoOutlined />}
             loading={rerunningId === product.id}
             onClick={() => retryCompetitorSearch(product.id)}
+          >
+            {label}
+          </Button>
+        );
+      }
+      if (workflowAction === 'retry_competitor_visual_match') {
+        return (
+          <Button
+            size="small"
+            type="primary"
+            icon={<RedoOutlined />}
+            loading={rerunningId === product.id}
+            onClick={() => retryCompetitorVisualMatch(product.id)}
           >
             {label}
           </Button>
@@ -922,6 +949,9 @@ const ProductList: React.FC = () => {
         const canManualAdjustImages = hasWorkflow
           && workflowAllowedActions.includes('manual_adjust_images')
           && product.workflow?.primary_action !== 'manual_adjust_images';
+        const canRestartCompetitorSearch = hasWorkflow
+          && workflowAllowedActions.includes('restart_competitor_search')
+          && product.workflow?.primary_action !== 'restart_competitor_search';
         const primaryAction = renderPrimaryRowAction(row);
         return (
           <Space size="small">
@@ -929,6 +959,16 @@ const ProductList: React.FC = () => {
             {canManualAdjustImages ? (
               <Button size="small" icon={<EditOutlined />} onClick={() => openReviewPage('/products/image-review', product.id)}>
                 手动调图
+              </Button>
+            ) : null}
+            {canRestartCompetitorSearch ? (
+              <Button
+                size="small"
+                icon={<RedoOutlined />}
+                loading={rerunningId === product.id}
+                onClick={() => retryCompetitorSearch(product.id)}
+              >
+                重搜竞品
               </Button>
             ) : null}
             {!primaryIsDetail ? <Button size="small" onClick={() => openProductDetail(product.id)}>详情</Button> : null}

@@ -6,7 +6,7 @@ from app.models import Product
 AMAZON_TEMPLATE_FILE_TYPES = {"amazon_import_template", "amazon_template"}
 
 
-def auto_image_selection_protection_reasons(product: Product) -> list[str]:
+def product_external_result_protection_reasons(product: Product) -> list[str]:
     reasons: list[str] = []
     catalog = product.catalog_item
     data = product.data
@@ -34,6 +34,10 @@ def auto_image_selection_protection_reasons(product: Product) -> list[str]:
     if any(str(getattr(item, "file_type", "") or "").strip().lower() in AMAZON_TEMPLATE_FILE_TYPES for item in files):
         reasons.append("商品已有 Amazon 模板文件输出证据")
     return reasons
+
+
+def auto_image_selection_protection_reasons(product: Product) -> list[str]:
+    return product_external_result_protection_reasons(product)
 
 
 def raise_if_auto_image_selection_protected(product: Product) -> None:

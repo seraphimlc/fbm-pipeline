@@ -33,6 +33,7 @@ async def init_db():
         await _ensure_mysql_product_source_columns_and_indexes(conn)
         await _ensure_mysql_product_workflow_columns(conn)
         await _ensure_mysql_product_image_selection_columns(conn)
+        await _ensure_mysql_competitor_visual_match_columns(conn)
         await _ensure_mysql_catalog_export_columns(conn)
         await _ensure_mysql_task_run_action_columns(conn)
         await _ensure_mysql_longtext_columns(conn)
@@ -178,6 +179,29 @@ async def _ensure_mysql_product_image_selection_columns(conn) -> None:
             await conn.execute(text(f"ALTER TABLE `product_images` ADD COLUMN `{column_name}` {column_type}"))
 
 
+async def _ensure_mysql_competitor_visual_match_columns(conn) -> None:
+    for column_name, column_type in (
+        ("visual_similarity_score", "DOUBLE NULL"),
+        ("visual_same_product_type", "INTEGER NULL"),
+        ("visual_attribute_match_score", "DOUBLE NULL"),
+        ("visual_title_match_score", "DOUBLE NULL"),
+        ("visual_reject", "INTEGER NULL"),
+        ("visual_reject_reason", "LONGTEXT NULL"),
+        ("visual_reason", "LONGTEXT NULL"),
+        ("visual_sheet_path", "LONGTEXT NULL"),
+        ("visual_sheet_page", "INTEGER NULL"),
+        ("visual_sheet_label", "VARCHAR(40) NULL"),
+        ("visual_rank", "INTEGER NULL"),
+        ("visual_selected_for_capture", "INTEGER NOT NULL DEFAULT 0"),
+        ("visual_exclusion_reason", "LONGTEXT NULL"),
+        ("visual_model", "VARCHAR(100) NULL"),
+        ("visual_raw_json", "LONGTEXT NULL"),
+        ("visual_matched_at", "DATETIME NULL"),
+    ):
+        if not await _mysql_column_exists(conn, "amazon_competitor_search_candidates", column_name):
+            await conn.execute(text(f"ALTER TABLE `amazon_competitor_search_candidates` ADD COLUMN `{column_name}` {column_type}"))
+
+
 async def _ensure_mysql_hot_path_indexes(conn) -> None:
     indexes = (
         ("products", "ix_products_source_status_updated", ("source_data_source_id", "status", "current_step", "updated_at")),
@@ -203,6 +227,8 @@ async def _ensure_mysql_hot_path_indexes(conn) -> None:
         ("amazon_competitor_search_candidates", "ix_amz_comp_search_product_excluded", ("product_id", "is_excluded", "id")),
         ("amazon_competitor_search_candidates", "ix_amz_comp_search_asin", ("asin",)),
         ("amazon_competitor_search_candidates", "ix_amz_comp_search_task_run", ("task_run_id", "id")),
+        ("amazon_competitor_search_candidates", "ix_amz_comp_visual_current", ("product_id", "visual_selected_for_capture", "visual_rank", "id")),
+        ("amazon_competitor_search_candidates", "ix_amz_comp_visual_run_step", ("product_id", "task_run_id", "task_step_id", "is_excluded", "id")),
     )
     for table_name, index_name, columns in indexes:
         if await _mysql_index_exists(conn, table_name, index_name):

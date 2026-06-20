@@ -7,7 +7,7 @@
 
 ## 1. 一句话结论
 
-竞品选择从默认人工选择改为系统自动异步链路：系统根据大健商品信息生成 Amazon 搜索关键词，用浏览器慢速搜索 Amazon 页面，抓取少量候选；再把候选按 4 个一组做视觉初筛，抓取 Top 候选详情，最后通过结构化评分自动选出最适合作为关键词、类目、Listing 和模板参考的竞品。
+竞品选择从默认人工选择改为系统自动异步链路：系统根据大健商品信息生成 Amazon 搜索关键词，用浏览器慢速搜索 Amazon 页面，抓取少量候选；再用源商品主图 URL + 候选 image URL 做视觉初筛，抓取 Top 候选详情，最后通过结构化评分自动选出最适合作为关键词、类目、Listing 和模板参考的竞品。
 
 ## 2. 目标
 
@@ -194,23 +194,29 @@ workflow_error = 失败原因
 
 ### 8.1 目标
 
-把 Amazon 搜索候选按 4 个一组拼成候选 Contact Sheet，让模型对照大健商品主图和商品事实，筛出视觉和商品类型最接近的候选。
+把源商品主图作为 reference，把 Amazon 搜索候选的图片 URL 作为独立图片输入给 VLM，让模型对照大健商品主图和商品事实，筛出视觉和商品类型最接近的候选。
 
-### 8.2 拼图规则
+### 8.2 Direct URL 输入规则
 
-V1 固定 4 个候选一组，使用 2x2 布局。
+V1 默认 direct image URL only，不生成候选 Contact Sheet，不下载候选图做 fallback。
 
-每个候选 tile 必须显示：
+输入必须包含：
 
 ```text
-#编号
-ASIN
-title 截断文本
-query/rank
-price/rating/reviews 简要信息
+reference:
+- source image URL
+- 商品 title / item_code / sku_code 等商品事实
+
+candidates:
+- slot，如 C01/C02
+- ASIN
+- title
+- query/rank
+- price/rating/reviews 简要信息
+- image_url
 ```
 
-大健商品主图作为单独参考图传给模型，不混进候选 2x2 图里。
+候选图片必须作为独立 `image_url` 输入；文本元数据必须紧跟对应图片，便于模型回填 `slot + asin`。
 
 ### 8.3 模型输出
 
@@ -218,7 +224,9 @@ price/rating/reviews 简要信息
 
 ```json
 {
+  "slot": "C01",
   "asin": "",
+  "image_loaded": true,
   "visual_similarity": 0.0,
   "same_product_type": true,
   "attribute_match": 0.0,
@@ -230,6 +238,7 @@ price/rating/reviews 简要信息
 ```
 
 不得只输出 winner。
+解析必须做 `slot + asin` 双重校验；未知 slot、重复 slot、ASIN 不匹配或缺失候选都不得按顺序猜，必须形成可解释失败。
 
 ### 8.4 初筛结果
 
@@ -599,3 +608,51 @@ API / 前端：
 - 后端入口：`POST /api/products/{product_id}/competitor-search/retry`。
 - 商品列表消费后端 workflow action：`start_competitor_search`、`retry_competitor_search`、`open_task_center`、`open_detail`。
 - 旧 StyleSnap API / service / 前端竞品确认页已退役；代码层不再保留旧 `amazon_stylesnap_candidates` / `amazon_listing_captures` ORM 模型、旧 snapshot key 读取或导出兼容，新自动搜索入口不复用 `BackgroundTasks`。
+
+## Phase B 视觉初筛实现对账
+
+范围：实现原方案阶段 1-4，不实现 Phase A -> Phase B 自动串联，不抓 Amazon 详情，不最终选择竞品，不触发图片分析、Listing、A+、导出或上传。
+
+数据契约：
+
+- `amazon_competitor_search_candidates` 增加当前视觉事实字段：`visual_similarity_score`、`visual_same_product_type`、`visual_attribute_match_score`、`visual_title_match_score`、`visual_reject`、`visual_reject_reason`、`visual_reason`、`visual_rank`、`visual_selected_for_capture`、`visual_exclusion_reason`、`visual_model`、`visual_raw_json`、`visual_matched_at`。
+- 已存在的 `visual_sheet_path`、`visual_sheet_page`、`visual_sheet_label` 属于旧 Contact Sheet 方案残留字段；当前 direct URL 主路径不写入、不作为证据字段，后续可单独评估物理 drop。
+- MySQL startup ensure columns/indexes 增加 `ix_amz_comp_visual_current` 和 `ix_amz_comp_visual_run_step`。
+- 当前 selected 只表示最新一次视觉初筛当前事实；retry reserve 会清空同商品旧视觉事实和 `visual_selected_for_capture`。
+
+候选输入：
+
+- Phase B 只读取最近成功 `product_competitor_search` task run 和成功 step 写入的候选。
+- 查询必须同时绑定 `product_id + task_run_id + task_step_id`，并过滤 `is_excluded=0`、`image_url` 非空；不得读取同 product 历史所有候选再排序。
+- success 只对当前 run/step 输入集合写 Top 4-6；旧 run 候选不得保留 `visual_selected_for_capture=1`。
+
+服务：
+
+- 服务文件：`backend/app/services/amazon_competitor_visual_match.py`。
+- 每个商品最多处理 20 个当前 run/step 候选。
+- 默认运行路径为 direct image URL：源商品当前主图作为 reference，每个候选以独立 `image_url` 输入，并带 `slot`、`asin`、`title`、`search_rank`、`price/rating/review_count` 元数据。
+- VLM 输出固定为候选级 JSON：`slot`、`asin`、`image_loaded`、`same_product_type`、`visual_similarity`、`attribute_match`、`title_match`、`reject`、`reject_reason`、`reason`。
+- 解析必须做 `slot + asin` 双重校验；未知 slot、重复 slot、ASIN 不匹配、缺失候选、JSON 解析失败或 VLM 调用失败均使本轮视觉初筛失败，不按顺序猜测。
+- 不保留 Contact Sheet fallback；不下载候选图、不生成拼接图、不调用 `analyze_contact_sheet()`。
+- `fake_competitor_visual_match_v1` 仅作为显式测试 fixture，不得静默推进真实商品流程。
+
+任务中心：
+
+- task type：`product_competitor_visual_match`。
+- planner：`backend/app/task_planners/product_competitor_visual_match.py`。
+- action：`ProductCompetitorVisualMatchAction`，注册到 `register_product_task_actions()`。
+- correlation key：`product:{product_id}:competitor_visual_match`。
+- reserve：`visual_match_competitors/processing`，并清空旧 selected。
+- success：写当前 run/step visual 字段，Top 4-6 标记 `visual_selected_for_capture=1`，进入 `capture_competitor_candidates/pending`。
+- failure/cancel/interrupted：进入 `visual_match_competitors/failed`，且不保留 current selected candidates。
+
+API / 前端：
+
+- 后端入口：`POST /api/products/{product_id}/competitor-visual-match/retry`。
+- `visual_match_competitors/processing` 在 API 层直接返回当前 workflow/task-center correlation，不调用 planner，不创建重复 run。
+- 商品列表消费 `retry_competitor_visual_match`、`restart_competitor_search` 和 `open_task_center` action；不新增复杂页面。
+
+保护：
+
+- 中性 helper：`product_external_result_protection_reasons(product)`。
+- 自动选图保护 helper 委托中性 helper；视觉初筛 action 直接调用中性 helper，避免已有真实 ASIN、Catalog 确认/导出、Amazon 模板输出、A+ 上传证据被静默覆盖。

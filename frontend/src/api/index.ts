@@ -1478,6 +1478,9 @@ export const retryProductAutoImageSelection = (id: number) =>
 export const retryProductCompetitorSearch = (id: number) =>
   api.post<Product>(`/products/${id}/competitor-search/retry`);
 
+export const retryProductCompetitorVisualMatch = (id: number) =>
+  api.post<Product>(`/products/${id}/competitor-visual-match/retry`);
+
 export const confirmProduct = (id: number) =>
   api.post<Product>(`/products/${id}/confirm`);
 

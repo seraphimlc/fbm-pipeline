@@ -123,6 +123,7 @@ assert AMAZON_WORKFLOW_NODES == (
     "select_images",
     "search_competitor",
     "visual_match_competitors",
+    "capture_competitor_candidates",
     "select_competitor",
     "capture_competitor_detail",
     "image_analysis",
@@ -266,8 +267,10 @@ set_product_workflow(product, node=WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS, statu
 visual_pending = build_product_workflow(product)
 assert visual_pending["stage"] == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS, visual_pending
 assert visual_pending["work_status"] == "select_competitor", visual_pending
-assert visual_pending["primary_action"] == "open_detail", visual_pending
-assert "等待后续视觉初筛任务" in visual_pending["action_reason"], visual_pending
+assert visual_pending["primary_action"] == "retry_competitor_visual_match", visual_pending
+assert "restart_competitor_search" in visual_pending["allowed_actions"], visual_pending
+assert visual_pending["related_correlation_key"] == "product:123:competitor_visual_match", visual_pending
+assert "等待视觉初筛任务" in visual_pending["action_reason"], visual_pending
 
 for node, action in [
     (WORKFLOW_NODE_AUTO_SELECT_IMAGES, "retry_auto_image_selection"),
@@ -3065,6 +3068,184 @@ else:
     assert_true(result.returncode == 0, f"自动竞品搜索 Phase A query/fixture 行为验证失败: {result.stderr or result.stdout}")
 
 
+def test_auto_competitor_visual_match_phase_b_contract() -> None:
+    models_text = (ROOT / "backend" / "app" / "models" / "models.py").read_text(encoding="utf-8")
+    database_text = (ROOT / "backend" / "app" / "database.py").read_text(encoding="utf-8")
+    actions_text = (ROOT / "backend" / "app" / "product_tasks" / "actions.py").read_text(encoding="utf-8")
+    service_text = (ROOT / "backend" / "app" / "services" / "amazon_competitor_visual_match.py").read_text(encoding="utf-8")
+    workflow_text = (ROOT / "backend" / "app" / "product_tasks" / "workflow.py").read_text(encoding="utf-8")
+    products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    frontend_api_text = (ROOT / "frontend" / "src" / "api" / "index.ts").read_text(encoding="utf-8")
+    product_list_text = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
+    protection_text = (ROOT / "backend" / "app" / "services" / "product_protection.py").read_text(encoding="utf-8")
+    product_flow_index = (ROOT / "docs" / "domain-index" / "product-flow.md").read_text(encoding="utf-8")
+    task_runtime_index = (ROOT / "docs" / "domain-index" / "task-runtime.md").read_text(encoding="utf-8")
+    prd_text = (ROOT / "docs" / "superpowers" / "specs" / "2026-06-19-amazon-auto-competitor-selection-prd.md").read_text(encoding="utf-8")
+    visual_retry_section = products_text.split('@router.post("/{product_id}/competitor-visual-match/retry"', 1)[1].split('@router.delete("/{product_id}"', 1)[0]
+    create_runs_section = actions_text.split("async def create_product_action_runs", 1)[1].split("async def product_action_worker", 1)[0]
+
+    for field in (
+        "visual_similarity_score",
+        "visual_same_product_type",
+        "visual_attribute_match_score",
+        "visual_title_match_score",
+        "visual_reject",
+        "visual_reject_reason",
+        "visual_reason",
+        "visual_sheet_path",
+        "visual_sheet_page",
+        "visual_sheet_label",
+        "visual_rank",
+        "visual_selected_for_capture",
+        "visual_exclusion_reason",
+        "visual_model",
+        "visual_raw_json",
+        "visual_matched_at",
+    ):
+        assert_true(field in models_text and field in database_text, f"视觉初筛字段缺少 ORM 或 MySQL ensure: {field}")
+    assert_true(
+        "ix_amz_comp_visual_current" in database_text
+        and "ix_amz_comp_visual_run_step" in database_text,
+        "视觉初筛必须有 current selected 和 run/step 输入索引",
+    )
+    assert_true(
+        "ProductCompetitorVisualMatchAction" in actions_text
+        and '"product_competitor_visual_match"' in actions_text
+        and "run_competitor_visual_match(product_id, db=db)" in actions_text
+        and "clear_current_visual_match(db, product_id" in actions_text
+        and "WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES" in actions_text,
+        "Phase B 必须通过 ProductTaskAction 实现 reserve/service/success/failure 投影",
+    )
+    assert_true(
+        "await action.validate(db, payload)" in create_runs_section
+        and "existing = await _existing_active_run(db, action, payload)" in create_runs_section
+        and create_runs_section.index("await action.validate(db, payload)") < create_runs_section.index("existing = await _existing_active_run(db, action, payload)"),
+        "create_product_action_runs 顺序仍为 validate 后查 active run，processing 复用必须走 API bypass",
+    )
+    assert_true(
+        "if product.workflow_status == WORKFLOW_STATUS_PROCESSING" in visual_retry_section
+        and "return product" in visual_retry_section.split("if product.workflow_status == WORKFLOW_STATUS_PROCESSING", 1)[1].split("if product.workflow_status not in", 1)[0]
+        and "create_product_competitor_visual_match_runs" not in visual_retry_section.split("if product.workflow_status == WORKFLOW_STATUS_PROCESSING", 1)[1].split("return product", 1)[0],
+        "visual_match_competitors/processing 必须在 API 层 bypass，不能调用 planner 创建重复 run",
+    )
+    assert_true(
+        ".where(TaskRun.task_type == TASK_TYPE_COMPETITOR_SEARCH)" in service_text
+        and ".where(TaskRun.status == RUN_STATUS_SUCCEEDED)" in service_text
+        and ".where(TaskStep.status == STEP_STATUS_SUCCEEDED)" in service_text
+        and ".where(AmazonCompetitorSearchCandidate.task_run_id == search_run_id)" in service_text
+        and ".where(AmazonCompetitorSearchCandidate.task_step_id == search_step_id)" in service_text,
+        "视觉初筛必须限定当前成功 Phase A run/step 候选，不能按 product 历史候选全量排序",
+    )
+    for marker in (
+        "direct_image_url",
+        "_analyze_direct_url_reviews",
+        "_direct_visual_match_prompt",
+        "image_loaded",
+        "slot/asin 绑定失败",
+        "VLM direct URL JSON 解析失败",
+        "settings.VLM_MODEL",
+        "use_fake_vlm: bool = False",
+        "FAKE_VISUAL_MATCH_MODEL = \"fake_competitor_visual_match_v1\"",
+        "selected_for_capture",
+        "MIN_SELECTED = 4",
+        "MAX_SELECTED = 6",
+    ):
+        assert_true(marker in service_text, f"视觉初筛服务缺少合同标记: {marker}")
+    for forbidden in (
+        "analyze_contact_sheet",
+        "build_contact_sheets",
+        "download_candidate_image",
+        "DownloadedCandidateImage",
+        "CONTACT_SHEET_SIZE",
+        "MAX_IMAGE_BYTES",
+        "ALLOWED_CONTENT_TYPES",
+        "Image.open",
+        "ImageDraw",
+    ):
+        assert_true(forbidden not in service_text, f"竞品视觉初筛默认路径不得保留 Contact Sheet/下载主流程: {forbidden}")
+    assert_true(
+        "contact_sheet_evidence" not in service_text
+        and "contact_sheet_evidence" not in actions_text
+        and "row.visual_sheet_path = None" in actions_text
+        and "row.visual_sheet_page = None" in actions_text
+        and "row.visual_sheet_label = None" in actions_text,
+        "竞品视觉初筛不得继续写 Contact Sheet evidence；legacy visual_sheet_* 字段只能清空/停写",
+    )
+    assert_true(
+        "product_external_result_protection_reasons" in protection_text
+        and "return product_external_result_protection_reasons(product)" in protection_text
+        and "product_external_result_protection_reasons(product)" in actions_text,
+        "通用外部结果保护必须使用中性 helper，并由视觉任务直接调用",
+    )
+    assert_true(
+        "retry_competitor_visual_match" in workflow_text
+        and "restart_competitor_search" in workflow_text
+        and "product:{product_id}:competitor_visual_match" in workflow_text
+        and "WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES" in workflow_text,
+        "workflow 必须提供视觉初筛重试、重搜和任务中心 correlation",
+    )
+    assert_true(
+        "retryProductCompetitorVisualMatch" in frontend_api_text
+        and "retry_competitor_visual_match" in product_list_text
+        and "retryCompetitorVisualMatch(product.id)" in product_list_text
+        and "restart_competitor_search" in product_list_text,
+        "商品列表必须消费后端视觉初筛 action 和重搜 action",
+    )
+    assert_true(
+        "Amazon 竞品视觉初筛 Phase B" in product_flow_index
+        and "product_competitor_visual_match" in task_runtime_index
+        and "Phase B 视觉初筛实现对账" in prd_text,
+        "Phase B 新任务、状态和数据契约必须同步 PRD/domain index",
+    )
+
+
+def test_auto_competitor_visual_match_phase_b_fixture_behaviour() -> None:
+    code = r'''
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
+from app.services.amazon_competitor_visual_match import (
+    _fake_visual_reviews,
+    _record_for_candidate,
+)
+
+with TemporaryDirectory(prefix="fbm_visual_match_fixture_") as tmp:
+    root = Path(tmp)
+    records = []
+    product = SimpleNamespace(data=SimpleNamespace(title="Modern Modular Fabric Sofa Storage Chaise"), gigab2b_product_id="P1")
+    for index in range(1, 7):
+        candidate = SimpleNamespace(
+            id=index,
+            asin=f"B0TEST{index:03d}",
+            image_url=f"https://img.test/candidate-{index}.jpg",
+            search_rank=index,
+            title=f"Modern Modular Fabric Sofa Storage Chaise Living Room {index}",
+            price="$99.99",
+            rating="4.5",
+            review_count="100",
+        )
+        records.append(_record_for_candidate(candidate, index))
+    reviews = _fake_visual_reviews(product, records)
+    accepted = [item for item in reviews if not item["reject"] and item["same_product_type"] and item["visual_similarity"] >= 0.65]
+    assert len(accepted) >= 4, reviews
+    assert all(item["slot"] == f"C{index:02d}" for index, item in enumerate(reviews, start=1)), reviews
+    assert all(item["raw"]["input_mode"] == "fake_fixture" for item in reviews), reviews
+
+    accessory = dict(records[0])
+    accessory["title"] = "Replacement spare part cover only"
+    accessory_review = _fake_visual_reviews(product, [accessory])[0]
+    assert accessory_review["reject"] is True
+    assert accessory_review["reject_reason"] == "accessory_or_replacement", accessory_review
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"竞品视觉初筛 Phase B fake fixture 行为验证失败: {result.stderr or result.stdout}")
+
+
 def main() -> int:
     tests = [
         test_category_conflict_only_overrides_conflict,
@@ -3119,6 +3300,8 @@ def main() -> int:
         test_auto_image_selection_phase_b_protection_behaviour,
         test_auto_competitor_search_phase_a_contract,
         test_auto_competitor_search_phase_a_query_and_fixture_behaviour,
+        test_auto_competitor_visual_match_phase_b_contract,
+        test_auto_competitor_visual_match_phase_b_fixture_behaviour,
     ]
     for test in tests:
         test()

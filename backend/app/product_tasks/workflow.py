@@ -10,6 +10,7 @@ from app.models.status import (
     AMAZON_WORKFLOW_NODES,
     AMAZON_WORKFLOW_STATUSES,
     WORKFLOW_NODE_AUTO_SELECT_IMAGES,
+    WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES,
     WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
     WORKFLOW_NODE_FLOW_DONE,
     WORKFLOW_NODE_IMAGE_ANALYSIS,
@@ -72,10 +73,20 @@ WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
         label="视觉初筛竞品",
         node_type="async",
         default_work_status="select_competitor",
+        default_primary_action="retry_competitor_visual_match",
+        default_primary_action_label="开始视觉初筛",
+        default_allowed_actions=("retry_competitor_visual_match", "restart_competitor_search", "open_detail"),
+        default_action_reason="竞品搜索已完成，等待视觉初筛 Top 候选",
+        default_color="warning",
+    ),
+    WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES: WorkflowNodeView(
+        label="抓取候选竞品",
+        node_type="async",
+        default_work_status="capture_detail",
         default_primary_action="open_detail",
         default_primary_action_label="查看",
         default_allowed_actions=("open_detail",),
-        default_action_reason="竞品搜索已完成，等待后续视觉初筛任务",
+        default_action_reason="视觉初筛已完成，等待后续抓取候选竞品详情任务",
         default_color="warning",
     ),
     WORKFLOW_NODE_SELECT_COMPETITOR: WorkflowNodeView(
@@ -267,6 +278,8 @@ def _state(
         related_correlation_key = f"product:{product_id}:auto_image_selection"
     elif product_id and stage == WORKFLOW_NODE_SEARCH_COMPETITOR and _is_auto_competitor_search(product):
         related_correlation_key = f"product:{product_id}:competitor_search"
+    elif product_id and stage == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS:
+        related_correlation_key = f"product:{product_id}:competitor_visual_match"
     elif product_id and stage == WORKFLOW_NODE_IMAGE_ANALYSIS:
         related_correlation_key = f"product:{product_id}:image_analysis"
     elif product_id and stage == WORKFLOW_NODE_LISTING_GENERATION:
@@ -341,12 +354,36 @@ def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
         return {
             "label": "待视觉初筛竞品",
             "work_status": "select_competitor",
+            "primary_action": "retry_competitor_visual_match",
+            "primary_action_label": "开始视觉初筛",
+            "allowed_actions": ("retry_competitor_visual_match", "restart_competitor_search", "open_detail"),
+            "action_reason": "Amazon 搜索候选已保存，等待视觉初筛任务",
+            "color": "warning",
+        }
+    if node == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS and status == WORKFLOW_STATUS_PROCESSING:
+        return {
+            "label": "竞品视觉初筛中",
+            "work_status": "competitor_searching",
+            "primary_action": "open_task_center",
+            "primary_action_label": "任务中心",
+            "allowed_actions": ("open_task_center", "open_detail"),
+            "action_reason": "竞品视觉初筛正在任务中心执行或等待执行",
+            "color": "processing",
+        }
+    if node == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS and status == WORKFLOW_STATUS_SUCCEEDED:
+        return {
+            "label": "竞品视觉初筛完成",
+            "work_status": "capture_detail",
             "primary_action": "open_detail",
             "primary_action_label": "查看",
             "allowed_actions": ("open_detail",),
-            "action_reason": "Amazon 搜索候选已保存，等待后续视觉初筛任务",
-            "color": "warning",
+            "action_reason": "竞品视觉初筛已完成",
+            "color": "success",
         }
+    if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES and status == WORKFLOW_STATUS_PENDING:
+        return {"label": "待抓取候选竞品", "work_status": "capture_detail", "color": "warning", "action_reason": "视觉初筛 Top 候选已保存，等待抓取详情"}
+    if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES and status == WORKFLOW_STATUS_SUCCEEDED:
+        return {"label": "候选竞品详情已抓取", "work_status": "ready_to_generate", "color": "success"}
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL and status == WORKFLOW_STATUS_PENDING:
         return {"label": "待抓取竞品详情", "color": "warning", "action_reason": "已选择竞品，等待抓取详情"}
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL and status == WORKFLOW_STATUS_SUCCEEDED:
@@ -411,6 +448,26 @@ def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
             "primary_action_label": "重新抓取",
             "allowed_actions": ("retry_competitor_capture", "open_detail"),
             "action_reason": "竞品详情抓取失败，可重新抓取或更换竞品",
+            "color": "error",
+        }
+    if node == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS:
+        return {
+            "label": "竞品视觉初筛失败",
+            "work_status": "select_competitor",
+            "primary_action": "retry_competitor_visual_match",
+            "primary_action_label": "重试视觉初筛",
+            "allowed_actions": ("retry_competitor_visual_match", "restart_competitor_search", "open_detail"),
+            "action_reason": "竞品视觉初筛失败，可重试视觉初筛或重新搜索竞品",
+            "color": "error",
+        }
+    if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES:
+        return {
+            "label": "候选竞品详情抓取失败",
+            "work_status": "capture_detail",
+            "primary_action": "open_detail",
+            "primary_action_label": "查看",
+            "allowed_actions": ("open_detail",),
+            "action_reason": "候选竞品详情抓取失败，等待后续抓取任务",
             "color": "error",
         }
     if node == WORKFLOW_NODE_IMAGE_ANALYSIS:

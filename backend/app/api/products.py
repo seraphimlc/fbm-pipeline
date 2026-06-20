@@ -59,6 +59,7 @@ from app.models.status import (
     WORKFLOW_NODE_AUTO_SELECT_IMAGES,
     WORKFLOW_NODE_SEARCH_COMPETITOR,
     WORKFLOW_NODE_SELECT_IMAGES,
+    WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS,
     WORKFLOW_STATUS_FAILED,
     WORKFLOW_STATUS_PENDING,
     WORKFLOW_STATUS_PROCESSING,
@@ -133,6 +134,7 @@ from app.task_planners.aplus_generate import create_aplus_generate_runs
 from app.task_planners.product_bulk_advance import create_product_bulk_advance_run
 from app.task_planners.product_auto_image_selection import create_product_auto_image_selection_runs
 from app.task_planners.product_competitor_search import create_product_competitor_search_runs
+from app.task_planners.product_competitor_visual_match import create_product_competitor_visual_match_runs
 from app.task_planners.product_image_analysis import create_product_image_analysis_runs
 from app.task_planners.product_listing import create_product_listing_runs
 
@@ -4823,12 +4825,14 @@ async def retry_product_competitor_search(product_id: int, db: AsyncSession = De
     product = result.scalar_one_or_none()
     if not product:
         raise HTTPException(404, "Product not found")
-    if product.workflow_node != WORKFLOW_NODE_SEARCH_COMPETITOR:
+    if product.workflow_node not in {WORKFLOW_NODE_SEARCH_COMPETITOR, WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS}:
         raise HTTPException(400, "当前商品不在搜索竞品节点，不能启动自动竞品搜索")
-    if product.workflow_status == WORKFLOW_STATUS_PROCESSING:
+    if product.workflow_node == WORKFLOW_NODE_SEARCH_COMPETITOR and product.workflow_status == WORKFLOW_STATUS_PROCESSING:
         product.workflow = _workflow_state(product)
         product.current_task_status = product.workflow["action_reason"]
         return product
+    if product.workflow_node == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS and product.workflow_status not in {WORKFLOW_STATUS_FAILED, WORKFLOW_STATUS_PENDING}:
+        raise HTTPException(400, "当前视觉初筛状态不可重新搜索竞品")
     if product.workflow_status not in {WORKFLOW_STATUS_FAILED, WORKFLOW_STATUS_PENDING}:
         raise HTTPException(400, "当前搜索竞品状态不可启动自动竞品搜索")
     try:
@@ -4839,6 +4843,52 @@ async def retry_product_competitor_search(product_id: int, db: AsyncSession = De
     except Exception as exc:
         await db.rollback()
         raise HTTPException(502, f"自动竞品搜索任务创建失败: {type(exc).__name__}: {exc}") from exc
+
+    refreshed = await db.execute(
+        select(Product)
+        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
+        .where(Product.id == product_id)
+    )
+    queued_product = refreshed.scalar_one_or_none()
+    if not queued_product:
+        raise HTTPException(404, "Product not found")
+    queued_product.workflow = _workflow_state(queued_product)
+    queued_product.current_task_status = queued_product.workflow["action_reason"]
+    return queued_product
+
+
+@router.post("/{product_id}/competitor-visual-match/retry", response_model=ProductResponse)
+async def retry_product_competitor_visual_match(product_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(Product)
+        .options(
+            selectinload(Product.data),
+            selectinload(Product.images),
+            selectinload(Product.aplus),
+            selectinload(Product.catalog_item),
+            selectinload(Product.files),
+        )
+        .where(Product.id == product_id)
+    )
+    product = result.scalar_one_or_none()
+    if not product:
+        raise HTTPException(404, "Product not found")
+    if product.workflow_node != WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS:
+        raise HTTPException(400, "当前商品不在视觉初筛竞品节点，不能启动视觉初筛")
+    if product.workflow_status == WORKFLOW_STATUS_PROCESSING:
+        product.workflow = _workflow_state(product)
+        product.current_task_status = product.workflow["action_reason"]
+        return product
+    if product.workflow_status not in {WORKFLOW_STATUS_FAILED, WORKFLOW_STATUS_PENDING}:
+        raise HTTPException(400, "当前视觉初筛状态不可启动或重试")
+    try:
+        await create_product_competitor_visual_match_runs(db, [product.id], created_by="web", auto_start=True)
+    except RuntimeError as exc:
+        await db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(502, f"竞品视觉初筛任务创建失败: {type(exc).__name__}: {exc}") from exc
 
     refreshed = await db.execute(
         select(Product)
