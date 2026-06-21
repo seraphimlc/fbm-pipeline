@@ -1762,6 +1762,19 @@ def test_runtime_security_startup_p0_boundaries() -> None:
         "普通 API startup 不能默认 DDL/backfill/recover/kick；维护动作必须由显式配置开启",
     )
     assert_true(
+        "python -m app.database" in start_script
+        and "async def run_schema_maintenance" in database_text
+        and "asyncio.run(run_schema_maintenance())" in database_text,
+        "本地一键启动必须显式执行可重复 schema maintenance，避免 ORM 新字段缺列导致商品 API 500",
+    )
+    assert_true(
+        "async def _ensure_mysql_registered_tables" in database_text
+        and "await _ensure_mysql_registered_tables(conn)" in database_text
+        and database_text.index("await _ensure_mysql_registered_tables(conn)") < database_text.index("await _ensure_mysql_product_data_source_columns(conn)")
+        and "await conn.run_sync(table.create, checkfirst=True)" in database_text,
+        "schema maintenance 必须先确保所有 ORM 表存在，再执行表级列/索引 ensure，避免缺整表时启动维护失败",
+    )
+    assert_true(
         "EXTERNAL_HTTP_VERIFY_TLS: bool = True" in config_text
         and "EXTERNAL_HTTP_CA_BUNDLE" in config_text
         and "def external_http_verify" in config_text

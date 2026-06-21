@@ -11,6 +11,7 @@
 - 默认服务应只监听 `127.0.0.1`。
 - mutating endpoints 不能在默认配置下被局域网匿名调用；本机访问放行，远程访问必须显式配置 `API_DEV_TOKEN`。
 - 普通 API startup 不应自动执行 DDL/backfill/index rebuild/task kick；相关行为由 `STARTUP_RUN_DB_MAINTENANCE`、`STARTUP_RUN_BACKFILLS`、`STARTUP_RECOVER_TASKS`、`STARTUP_KICK_TASK_RUNTIME` 显式开启。
+- 本地一键启动 `scripts/start.sh` 在启动 uvicorn 前会显式执行 `python -m app.database`，跑可重复 schema maintenance，确保 ORM 新字段和 MySQL 现有测试库对齐；这不改变普通 API lifespan 的默认 no-DDL 边界。
 - 外部 token-bearing 请求默认开启 TLS verify；私有代理应配置 `EXTERNAL_HTTP_CA_BUNDLE`，不要默认关闭校验。
 - 文件/图片代理默认只开放 `PRODUCT_BASE_DIR`，额外目录必须通过 `IMAGE_PROXY_EXTRA_ROOTS` 显式配置；不默认开放 `~/Documents` 或 `/tmp`。
 
@@ -28,7 +29,7 @@
 
 ## 关键流程
 
-- 启动：`scripts/start.sh` -> `backend/app/main.py` lifespan -> DB/runtime 初始化。
+- 启动：`scripts/start.sh` -> `python -m app.database` 可重复 schema maintenance -> `backend/app/main.py` lifespan -> DB/runtime 初始化。
 - mutating API：`backend/app/main.py` middleware -> 本机访问/dev token guard -> router -> service/action。
 - TLS 请求：`settings.external_http_verify` -> HTTP client -> 外部服务。
 - 图片代理：`/api/images/{file_path}` -> `settings.image_proxy_roots` -> `Path.relative_to()` 结构化路径校验。
@@ -52,7 +53,7 @@
 ## 常见定位
 
 - 远程访问风险：先看 `scripts/start.sh`、`backend/app/main.py` 和 router guard。
-- 启动改库/唤醒任务：先看 `backend/app/main.py` lifespan 和 `backend/app/config.py` 的 `STARTUP_RUN_*` 开关，再看 `backend/app/database.py`。
+- 启动改库/唤醒任务：先区分本地一键启动脚本和普通 API lifespan；`scripts/start.sh` 会先跑 `python -m app.database` 补齐 schema，`backend/app/main.py` lifespan 仍由 `STARTUP_RUN_*` 开关控制维护、backfill、恢复和 runtime kick，再看 `backend/app/database.py`。
 - TLS verify：先看 `backend/app/config.py`、`aplus_upload.py`、`step9_aplus_image.py`。
 - 图片代理：先看 `backend/app/main.py` 中 image proxy 路由和允许根目录。
 

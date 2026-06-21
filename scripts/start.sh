@@ -44,6 +44,8 @@ fi
 echo "🔧 启动后端 ($BACKEND_HOST:$BACKEND_PORT)..."
 cd "$BACKEND_DIR"
 source .venv/bin/activate
+echo "🗄️  检查/补齐数据库 schema..."
+python -m app.database
 uvicorn app.main:app --host "$BACKEND_HOST" --port "$BACKEND_PORT" &
 BACKEND_PID=$!
 

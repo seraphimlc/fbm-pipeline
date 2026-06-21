@@ -29,6 +29,7 @@ async def init_db():
         if conn.dialect.name not in {"mysql", "mariadb"}:
             raise RuntimeError("fbm-pipeline now requires MySQL. Set DATABASE_URL to a mysql+asyncmy connection string.")
         await conn.run_sync(Base.metadata.create_all)
+        await _ensure_mysql_registered_tables(conn)
         await _ensure_mysql_product_data_source_columns(conn)
         await _ensure_mysql_product_source_columns_and_indexes(conn)
         await _ensure_mysql_product_workflow_columns(conn)
@@ -41,6 +42,17 @@ async def init_db():
         await _ensure_mysql_giga_relation_columns(conn)
         await _ensure_mysql_giga_store_scoped_unique_indexes(conn)
         await _ensure_mysql_hot_path_indexes(conn)
+
+
+async def run_schema_maintenance() -> None:
+    """Run repeatable local schema maintenance for startup scripts and operators."""
+    await init_db()
+
+
+async def _ensure_mysql_registered_tables(conn) -> None:
+    """Create every registered ORM table before table-specific column/index ensures."""
+    for table in Base.metadata.sorted_tables:
+        await conn.run_sync(table.create, checkfirst=True)
 
 
 async def _ensure_mysql_longtext_columns(conn) -> None:
@@ -323,3 +335,9 @@ async def _ensure_mysql_giga_store_scoped_unique_indexes(conn) -> None:
             await conn.execute(text(f"ALTER TABLE `{table_name}` DROP INDEX `{index_name}`"))
         columns_sql = ", ".join(f"`{column}`" for column in expected_columns)
         await conn.execute(text(f"ALTER TABLE `{table_name}` ADD UNIQUE INDEX `{index_name}` ({columns_sql})"))
+
+
+if __name__ == "__main__":
+    import asyncio
+
+    asyncio.run(run_schema_maintenance())
