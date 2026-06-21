@@ -3371,7 +3371,7 @@ def test_auto_competitor_candidate_capture_and_selection_phase1_contract() -> No
         and "ProductAutoCompetitorSelectionAction()" in actions_text
         and "class ProductCompetitorCandidateCaptureAction" in actions_text
         and "class ProductAutoCompetitorSelectionAction" in actions_text,
-        "两个 skeleton action 必须注册到 product task action registry",
+        "候选详情抓取和自动选竞品 action 必须注册到 product task action registry",
     )
     assert_true(
         '"product_competitor_candidate_capture"' in capture_planner_text
@@ -3418,13 +3418,22 @@ def test_auto_competitor_candidate_capture_and_selection_phase1_contract() -> No
         and "product.competitor_asin" not in capture_action_section,
         "Phase 2A candidate capture 只能写候选详情 current facts，不得写 final 选择或最终竞品 ASIN",
     )
+    selection_action_section = actions_text.split("class ProductAutoCompetitorSelectionAction", 1)[1].split("class ProductImageAnalysisAction", 1)[0]
     assert_true(
-        "阶段 1 skeleton：自动选竞品真实评分尚未启用" in actions_text
-        and "禁止写 competitor_asin" in actions_text
-        and "successful_detail_count" in actions_text
-        and "top_rank_detail_available" in actions_text
-        and "comparison_set_size" in actions_text,
-        "Phase 2A 只能打开候选详情 fixture/configured 执行，自动选竞品仍必须是 strict skeleton",
+        "AUTO_COMPETITOR_HIGH_THRESHOLD = 0.78" in actions_text
+        and "AUTO_COMPETITOR_MEDIUM_THRESHOLD = 0.68" in actions_text
+        and "_current_captured_candidates_for_auto_selection" in actions_text
+        and "_score_auto_competitor_candidates(product, rows)" in selection_action_section
+        and "different_product_type_low_title_and_category_alignment" in actions_text
+        and "selected_candidate_id" in selection_action_section
+        and "row.final_selected = 1" not in capture_action_section
+        and "selected_row.final_selected = 1" in selection_action_section
+        and "product.competitor_asin = asin" in selection_action_section
+        and "product.catalog_item.competitor_asin = asin" in selection_action_section
+        and 'snapshot["selected_competitor"]' in selection_action_section
+        and "_create_or_reuse_image_analysis_after_auto_competitor" in selection_action_section
+        and "auto_start=False" in actions_text,
+        "E4A 自动选竞品必须使用 current-set deterministic scoring，success hook 才写 final facts 并创建/复用 image_analysis 且不自动启动真实图片分析",
     )
     assert_true(
         "retry_competitor_candidate_capture" not in workflow_text
@@ -3451,10 +3460,11 @@ def test_auto_competitor_candidate_capture_and_selection_phase1_contract() -> No
     assert_true(
         "Phase 1 候选详情抓取与自动选竞品结构契约对账" in prd_text
         and "Phase 2A 候选详情抓取 fixture 执行与 current-set 对账" in prd_text
-        and "Amazon 候选详情抓取 / 自动选竞品 Phase 2A" in product_flow_index
+        and "Amazon 候选详情抓取 / 自动选竞品 E4A" in product_flow_index
+        and "deterministic final competitor scoring/write" in product_flow_index
         and "product_competitor_candidate_capture" in task_runtime_index
         and "product_auto_competitor_selection" in task_runtime_index,
-        "Phase 2A 新任务、状态和数据契约必须同步 PRD/domain index",
+        "Phase 2A/E4A 新任务、状态和数据契约必须同步 PRD/domain index",
     )
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import Any
 
@@ -8,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.database import async_session
 from app.config import settings
 from app.models import (
     AmazonCompetitorSearchCandidate,
@@ -82,6 +84,35 @@ from app.task_runtime.scheduler import kick_task_runtime
 ACTIVE_RUN_STATUSES = (RUN_STATUS_PENDING, RUN_STATUS_RUNNING)
 ACTIVE_STEP_STATUSES = (STEP_STATUS_PENDING, STEP_STATUS_READY, STEP_STATUS_RUNNING)
 logger = logging.getLogger(__name__)
+
+AUTO_COMPETITOR_SELECTION_MODEL = "rule_based_auto_competitor_v1"
+AUTO_COMPETITOR_SELECTION_RULE_VERSION = "auto_competitor_selection_v1"
+AUTO_COMPETITOR_HIGH_THRESHOLD = 0.78
+AUTO_COMPETITOR_MEDIUM_THRESHOLD = 0.68
+_TOKEN_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "by",
+    "for",
+    "in",
+    "of",
+    "on",
+    "the",
+    "to",
+    "with",
+}
+_ACCESSORY_TERMS = {
+    "accessory",
+    "accessories",
+    "cover",
+    "covers",
+    "replacement",
+    "part",
+    "parts",
+    "protector",
+    "slipcover",
+}
 
 PRODUCT_ACTION_TYPES = {
     "product_auto_image_selection",
@@ -191,6 +222,262 @@ def _workflow_node_for_step(step: int) -> str:
 
 def _json_from_text(value: str | None) -> Any:
     return json_loads(value, {})
+
+
+def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
+    return max(lower, min(upper, value))
+
+
+def _safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    match = re.search(r"\d+(?:\.\d+)?", str(value).replace(",", ""))
+    return float(match.group(0)) if match else None
+
+
+def _safe_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    match = re.search(r"\d+", str(value).replace(",", ""))
+    return int(match.group(0)) if match else None
+
+
+def _text_tokens(*values: Any) -> set[str]:
+    tokens: set[str] = set()
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, (list, tuple, set)):
+            tokens.update(_text_tokens(*value))
+            continue
+        if isinstance(value, dict):
+            tokens.update(_text_tokens(*value.values()))
+            continue
+        for token in re.findall(r"[a-z0-9]+", str(value).lower()):
+            if len(token) <= 2 or token in _TOKEN_STOPWORDS:
+                continue
+            if token.endswith("s") and len(token) > 4:
+                token = token[:-1]
+            tokens.add(token)
+    return tokens
+
+
+def _list_from_json_text(value: str | None) -> list[Any]:
+    parsed = json_loads(value, [])
+    return parsed if isinstance(parsed, list) else []
+
+
+def _dict_from_json_text(value: str | None) -> dict[str, Any]:
+    parsed = json_loads(value, {})
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _rank_quality(rank: int | None, *, scale: int = 6) -> float:
+    if not rank or rank <= 0:
+        return 0.4
+    return _clamp((scale + 1 - rank) / scale)
+
+
+def _source_product_tokens(product: Product) -> set[str]:
+    data = product.data
+    if not data:
+        return set()
+    features = _list_from_json_text(data.features)
+    return _text_tokens(data.title, data.material, data.product_type, data.description, features, data.leaf_category)
+
+
+def _candidate_bullets(row: AmazonCompetitorSearchCandidate) -> list[str]:
+    return [str(item) for item in _list_from_json_text(row.bullets_json) if str(item or "").strip()]
+
+
+def _candidate_tokens(row: AmazonCompetitorSearchCandidate) -> set[str]:
+    return _text_tokens(
+        row.title,
+        _candidate_bullets(row),
+        row.description,
+        row.leaf_category,
+        row.category_rank,
+        _dict_from_json_text(row.product_details_json),
+    )
+
+
+def _overlap_score(source_tokens: set[str], candidate_tokens: set[str]) -> float:
+    if not source_tokens or not candidate_tokens:
+        return 0.5
+    return _clamp(len(source_tokens & candidate_tokens) / max(1, len(source_tokens)))
+
+
+def _auto_competitor_hard_reject_reasons(row: AmazonCompetitorSearchCandidate) -> list[str]:
+    reasons: list[str] = []
+    if not str(row.asin or "").strip():
+        reasons.append("missing_asin")
+    if not str(row.url or "").strip():
+        reasons.append("missing_url")
+    if row.capture_status != "succeeded":
+        reasons.append("detail_capture_not_succeeded")
+    if row.visual_reject:
+        reasons.append("visual_reject")
+    if row.visual_same_product_type == 0:
+        reasons.append("different_visual_product_type")
+    if row.is_accessory or row.is_replacement_part or row.is_cover_only:
+        reasons.append("accessory_or_replacement")
+    candidate_tokens = _candidate_tokens(row)
+    if candidate_tokens & _ACCESSORY_TERMS:
+        reasons.append("accessory_terms")
+    if not str(row.title or "").strip() and not _candidate_bullets(row):
+        reasons.append("missing_title_and_bullets")
+    return reasons
+
+
+def _score_auto_competitor_candidate(
+    product: Product,
+    row: AmazonCompetitorSearchCandidate,
+    *,
+    comparison_success_count: int,
+) -> dict[str, Any]:
+    hard_rejects = _auto_competitor_hard_reject_reasons(row)
+    source_tokens = _source_product_tokens(product)
+    candidate_tokens = _candidate_tokens(row)
+
+    visual_values = [
+        _safe_float(row.visual_similarity_score),
+        _safe_float(row.visual_attribute_match_score),
+        _safe_float(row.visual_title_match_score),
+    ]
+    visual_numbers = [_clamp(value) for value in visual_values if value is not None]
+    visual_base = sum(visual_numbers) / len(visual_numbers) if visual_numbers else 0.0
+    visual_fit = _clamp((visual_base * 0.85) + (_rank_quality(row.visual_rank) * 0.15))
+    if row.visual_reject_reason:
+        visual_fit = _clamp(visual_fit - 0.1)
+
+    token_overlap = _overlap_score(source_tokens, candidate_tokens)
+    title_fit = _clamp(0.25 + token_overlap * 0.75)
+    if candidate_tokens & _ACCESSORY_TERMS:
+        title_fit = _clamp(title_fit - 0.35)
+
+    bullets = _candidate_bullets(row)
+    details = _dict_from_json_text(row.product_details_json)
+    detail_checks = [
+        bool(str(row.title or "").strip()),
+        len(bullets) >= 2,
+        bool(details),
+        bool(str(row.main_image_url or row.image_url or "").strip()),
+        bool(str(row.description or row.aplus_text or "").strip()),
+    ]
+    detail_completeness = sum(1 for item in detail_checks if item) / len(detail_checks)
+
+    category_tokens = _text_tokens(row.leaf_category, row.category_rank)
+    category_alignment = _overlap_score(source_tokens, category_tokens) if category_tokens else 0.6
+
+    rating = _safe_float(row.rating)
+    review_count = _safe_int(row.review_count)
+    marketplace_evidence = (
+        (0.35 if rating and rating >= 4.0 else 0.15 if rating else 0.0)
+        + (0.35 if review_count and review_count >= 50 else 0.2 if review_count else 0.0)
+        + (0.3 if str(row.price or "").strip() else 0.0)
+    )
+
+    stability = (_rank_quality(row.visual_rank) * 0.65) + (_rank_quality(row.search_rank, scale=12) * 0.35)
+
+    dimensions = {
+        "visual_fit": round(visual_fit, 4),
+        "title_source_fit": round(title_fit, 4),
+        "detail_completeness": round(detail_completeness, 4),
+        "category_alignment": round(category_alignment, 4),
+        "marketplace_evidence": round(_clamp(marketplace_evidence), 4),
+        "rank_stability": round(_clamp(stability), 4),
+    }
+    if (
+        source_tokens
+        and candidate_tokens
+        and dimensions["title_source_fit"] <= 0.35
+        and dimensions["category_alignment"] <= 0.25
+    ):
+        hard_rejects.append("different_product_type_low_title_and_category_alignment")
+    score = (
+        dimensions["visual_fit"] * 0.35
+        + dimensions["title_source_fit"] * 0.20
+        + dimensions["detail_completeness"] * 0.15
+        + dimensions["category_alignment"] * 0.10
+        + dimensions["marketplace_evidence"] * 0.10
+        + dimensions["rank_stability"] * 0.10
+    )
+    score = round(_clamp(score), 4)
+
+    risks: list[str] = []
+    if comparison_success_count < 2:
+        risks.append("only_one_detail_success_candidate")
+    if dimensions["visual_fit"] < 0.78:
+        risks.append("visual_score_below_high_confidence")
+    if dimensions["title_source_fit"] < 0.65:
+        risks.append("limited_source_title_overlap")
+    if dimensions["category_alignment"] < 0.65:
+        risks.append("limited_category_alignment")
+    if row.sponsored:
+        risks.append("sponsored_candidate")
+
+    if hard_rejects:
+        confidence = "rejected"
+    elif score >= AUTO_COMPETITOR_HIGH_THRESHOLD and not any(risk in risks for risk in {"visual_score_below_high_confidence", "limited_source_title_overlap"}):
+        confidence = "high"
+    elif score >= AUTO_COMPETITOR_MEDIUM_THRESHOLD:
+        confidence = "medium"
+        if "score_below_high_threshold" not in risks:
+            risks.append("score_below_high_threshold")
+    else:
+        confidence = "low"
+        risks.append("score_below_medium_threshold")
+
+    asin = str(row.asin or "").strip().upper()
+    reason = (
+        f"{confidence} confidence auto competitor {asin}: score={score}, "
+        f"visual={dimensions['visual_fit']}, title={dimensions['title_source_fit']}, "
+        f"detail={dimensions['detail_completeness']}"
+    )
+    return {
+        "candidate_id": row.id,
+        "asin": asin,
+        "visual_rank": row.visual_rank,
+        "search_rank": row.search_rank,
+        "score": score,
+        "confidence": confidence,
+        "dimensions": dimensions,
+        "risks": risks,
+        "hard_rejects": hard_rejects,
+        "reason": reason,
+    }
+
+
+def _score_auto_competitor_candidates(product: Product, rows: list[AmazonCompetitorSearchCandidate]) -> dict[str, Any]:
+    comparison_success_count = sum(1 for row in rows if row.capture_status == "succeeded")
+    scored = [
+        _score_auto_competitor_candidate(product, row, comparison_success_count=comparison_success_count)
+        for row in rows
+    ]
+    scored.sort(key=lambda item: (item["hard_rejects"] != [], -float(item["score"]), int(item.get("visual_rank") or 999), int(item["candidate_id"])))
+    qualified = [
+        item
+        for item in scored
+        if not item["hard_rejects"] and item["confidence"] in {"high", "medium"} and float(item["score"]) >= AUTO_COMPETITOR_MEDIUM_THRESHOLD
+    ]
+    if not qualified:
+        best = scored[0] if scored else None
+        raise RuntimeError(
+            "自动选竞品没有达到 medium 阈值的候选"
+            + (f": best={best['asin']} score={best['score']} confidence={best['confidence']} rejects={best['hard_rejects']}" if best else "")
+        )
+    selected = qualified[0]
+    return {
+        "scored_candidates": scored,
+        "selected": selected,
+        "success_count": comparison_success_count,
+    }
 
 
 def _clear_auto_image_downstream_outputs(product: Product) -> None:
@@ -424,6 +711,44 @@ async def _project_auto_competitor_selection_failed(
     product.updated_at = now
     _sync_catalog_item(product)
     await db.commit()
+
+
+async def _project_image_analysis_creation_failed(
+    db: AsyncSession,
+    *,
+    product_id: int,
+    message: str,
+) -> None:
+    try:
+        product = await _load_product(db, product_id)
+    except RuntimeError:
+        return
+    now = datetime.now()
+    product.status = FAILED
+    product.current_step = 5
+    product.error_message = message
+    set_product_workflow(
+        product,
+        node=WORKFLOW_NODE_IMAGE_ANALYSIS,
+        status=WORKFLOW_STATUS_FAILED,
+        error=message,
+        now=now,
+    )
+    product.updated_at = now
+    _sync_catalog_item(product)
+    await db.commit()
+
+
+async def _create_or_reuse_image_analysis_after_auto_competitor(product_id: int) -> list[int]:
+    async with async_session() as planner_db:
+        runs = await create_product_action_runs(
+            planner_db,
+            "product_image_analysis",
+            [{"product_id": product_id, "created_by": "product_auto_competitor_selection"}],
+            created_by="product_auto_competitor_selection",
+            auto_start=False,
+        )
+        return [run.id for run in runs]
 
 
 async def _best_effort_update_step_progress(
@@ -1405,6 +1730,22 @@ async def _current_visual_selected_for_capture(
     return result.scalars().all()
 
 
+async def _current_captured_candidates_for_auto_selection(
+    db: AsyncSession,
+    product_id: int,
+    *,
+    visual_task_run_id: int | None = None,
+    visual_task_step_id: int | None = None,
+) -> list[AmazonCompetitorSearchCandidate]:
+    rows = await _current_visual_selected_for_capture(
+        db,
+        product_id,
+        visual_task_run_id=visual_task_run_id,
+        visual_task_step_id=visual_task_step_id,
+    )
+    return [row for row in rows if row.capture_status == "succeeded"]
+
+
 async def _captured_candidate_success_count(db: AsyncSession, product_id: int) -> int:
     result = await db.execute(
         select(AmazonCompetitorSearchCandidate)
@@ -1724,11 +2065,12 @@ class ProductAutoCompetitorSelectionAction:
             raise RuntimeError("当前商品已有不可逆外部结果，不能自动选择竞品：" + "；".join(reasons))
         if product.workflow_node != WORKFLOW_NODE_AUTO_SELECT_COMPETITOR:
             raise RuntimeError("当前商品不在自动选竞品节点，不能启动自动选择")
-        if product.workflow_status not in {WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_FAILED}:
+        if product.workflow_status not in {WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_FAILED, WORKFLOW_STATUS_PROCESSING}:
             raise RuntimeError("当前自动选竞品状态不可启动或重试")
-        success_count = await _captured_candidate_success_count(db, product_id)
-        if success_count <= 0:
-            raise RuntimeError("缺少已成功抓取详情的候选，不能自动选择竞品")
+        rows = await _current_captured_candidates_for_auto_selection(db, product_id)
+        if not rows:
+            raise RuntimeError("缺少当前视觉集合内已成功抓取详情的候选，不能自动选择竞品")
+        _score_auto_competitor_candidates(product, rows)
 
     def dedupe_key(self, payload: dict[str, Any]) -> str | None:
         return f"product_auto_competitor_selection:product:{_product_id(payload)}"
@@ -1778,32 +2120,205 @@ class ProductAutoCompetitorSelectionAction:
 
     async def execute_step(self, db: AsyncSession, step: TaskStep, payload: dict[str, Any]) -> dict[str, Any]:
         product_id = _product_id(payload)
+        product = await _load_product(db, product_id)
+        rows = await _current_captured_candidates_for_auto_selection(db, product_id)
+        if not rows:
+            raise RuntimeError("缺少当前视觉集合内已成功抓取详情的候选，不能自动选择竞品")
+        visual_task_run_id = int(rows[0].visual_task_run_id or 0)
+        visual_task_step_id = int(rows[0].visual_task_step_id or 0)
         await update_step_progress(
             db,
             step,
             current=0,
-            total=1,
-            message="阶段 1 skeleton：自动选竞品真实评分尚未启用",
+            total=len(rows),
+            message="开始自动选竞品规则评分",
             data={
                 "product_id": product_id,
-                "required_future_dimensions": [
-                    "successful_detail_count",
-                    "top_rank_detail_available",
-                    "comparison_set_size",
-                ],
+                "visual_task_run_id": visual_task_run_id,
+                "visual_task_step_id": visual_task_step_id,
+                "candidate_count": len(rows),
             },
         )
-        raise RuntimeError("阶段 1 skeleton 尚未实现自动选竞品评分；禁止写 competitor_asin")
+        scored = _score_auto_competitor_candidates(product, rows)
+        selected = scored["selected"]
+        result = {
+            "product_id": product_id,
+            "visual_task_run_id": visual_task_run_id,
+            "visual_task_step_id": visual_task_step_id,
+            "candidate_count": len(rows),
+            "success_count": scored["success_count"],
+            "selected_candidate_id": selected["candidate_id"],
+            "selected_asin": selected["asin"],
+            "selected_score": selected["score"],
+            "selected_confidence": selected["confidence"],
+            "selected_dimensions": selected["dimensions"],
+            "selected_reason": selected["reason"],
+            "selected_risks": selected["risks"],
+            "scored_candidates": scored["scored_candidates"],
+            "rule_version": AUTO_COMPETITOR_SELECTION_RULE_VERSION,
+            "model": AUTO_COMPETITOR_SELECTION_MODEL,
+        }
+        step.task_run.summary_json = json_dumps({
+            **result,
+            "status": "auto_competitor_scored",
+        })
+        await update_step_progress(
+            db,
+            step,
+            current=len(rows),
+            total=len(rows),
+            message="自动选竞品规则评分完成",
+            data={
+                "product_id": product_id,
+                "selected_candidate_id": selected["candidate_id"],
+                "selected_asin": selected["asin"],
+                "confidence": selected["confidence"],
+                "score": selected["score"],
+            },
+        )
+        return result
 
     async def on_step_success(self, db: AsyncSession, step: TaskStep, result: dict[str, Any]) -> None:
         product_id = int(result.get("product_id") or _payload_for_step(step).get("product_id") or 0)
         if product_id <= 0:
             return
-        await _project_auto_competitor_selection_failed(
+        visual_task_run_id = int(result.get("visual_task_run_id") or 0)
+        visual_task_step_id = int(result.get("visual_task_step_id") or 0)
+        selected_candidate_id = int(result.get("selected_candidate_id") or 0)
+        if not visual_task_run_id or not visual_task_step_id or not selected_candidate_id:
+            message = "自动选竞品结果缺少 current set 或 selected candidate 证据"
+            await _project_auto_competitor_selection_failed(db, product_id=product_id, message=message)
+            raise RuntimeError(message)
+        product = await _load_product(db, product_id)
+        reasons = product_external_result_protection_reasons(product)
+        if reasons:
+            message = "当前商品已有不可逆外部结果，不能写入自动竞品：" + "；".join(reasons)
+            await _project_auto_competitor_selection_failed(db, product_id=product_id, message=message)
+            raise RuntimeError(message)
+        rows = await _current_captured_candidates_for_auto_selection(
             db,
-            product_id=product_id,
-            message="阶段 1 skeleton 不允许自动选竞品成功投影",
+            product_id,
+            visual_task_run_id=visual_task_run_id,
+            visual_task_step_id=visual_task_step_id,
         )
+        rows_by_id = {row.id: row for row in rows}
+        selected_row = rows_by_id.get(selected_candidate_id)
+        if not selected_row:
+            message = "自动选竞品结果不属于当前视觉/详情集合"
+            await _project_auto_competitor_selection_failed(db, product_id=product_id, message=message)
+            raise RuntimeError(message)
+        rescored = _score_auto_competitor_candidates(product, rows)
+        selected = rescored["selected"]
+        if int(selected["candidate_id"]) != selected_candidate_id:
+            message = "自动选竞品 success hook 重算结果与 execute_step 不一致"
+            await _project_auto_competitor_selection_failed(db, product_id=product_id, message=message)
+            raise RuntimeError(message)
+
+        now = datetime.now()
+        await clear_current_auto_competitor_selection(db, product_id, now=now, clear_product_fact=True)
+        product = await _load_product(db, product_id)
+        selected_row = rows_by_id[selected_candidate_id]
+        selected_row.final_selected = 1
+        selected_row.final_rank = 1
+        selected_row.final_score = float(selected["score"])
+        selected_row.final_confidence = str(selected["confidence"])
+        selected_row.final_dimension_scores_json = json_dumps(selected["dimensions"])
+        selected_row.final_reason = str(selected["reason"])
+        selected_row.final_risks_json = json_dumps(selected["risks"])
+        selected_row.final_model = AUTO_COMPETITOR_SELECTION_MODEL
+        selected_row.final_rule_version = AUTO_COMPETITOR_SELECTION_RULE_VERSION
+        selected_row.final_raw_json = json_dumps({
+            "visual_task_run_id": visual_task_run_id,
+            "visual_task_step_id": visual_task_step_id,
+            "scored_candidates": rescored["scored_candidates"],
+            "execute_result": result,
+        })
+        selected_row.final_selected_at = now
+        selected_row.updated_at = now
+        asin = str(selected_row.asin or selected["asin"] or "").strip().upper()
+        product.competitor_asin = asin
+        product.status = "created"
+        product.current_step = 2
+        product.error_message = None
+        product.updated_at = now
+        if product.catalog_item:
+            product.catalog_item.competitor_asin = asin
+            product.catalog_item.updated_at = now
+        if product.data:
+            snapshot = _json_from_text(product.data.gigab2b_raw_snapshot)
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+            selected_competitor = {
+                "asin": asin,
+                "candidate_id": selected_row.id,
+                "url": selected_row.url,
+                "title": selected_row.title,
+                "image_url": selected_row.main_image_url or selected_row.image_url,
+                "score": selected["score"],
+                "confidence": selected["confidence"],
+                "selected_at": now.isoformat(),
+            }
+            snapshot["selected_competitor"] = selected_competitor
+            snapshot["auto_competitor_selection"] = {
+                "model": AUTO_COMPETITOR_SELECTION_MODEL,
+                "rule_version": AUTO_COMPETITOR_SELECTION_RULE_VERSION,
+                "visual_task_run_id": visual_task_run_id,
+                "visual_task_step_id": visual_task_step_id,
+                "selected_candidate_id": selected_row.id,
+                "selected_asin": asin,
+                "score": selected["score"],
+                "confidence": selected["confidence"],
+                "risks": selected["risks"],
+            }
+            product.data.gigab2b_raw_snapshot = json_dumps(snapshot)
+        _sync_catalog_item(product)
+        step.task_run.summary_json = json_dumps({
+            "product_id": product_id,
+            "status": "auto_competitor_selected",
+            "next_node": WORKFLOW_NODE_IMAGE_ANALYSIS,
+            "visual_task_run_id": visual_task_run_id,
+            "visual_task_step_id": visual_task_step_id,
+            "selected_candidate_id": selected_row.id,
+            "selected_asin": asin,
+            "score": selected["score"],
+            "confidence": selected["confidence"],
+            "risks": selected["risks"],
+        })
+        await db.commit()
+
+        try:
+            image_run_ids = await _create_or_reuse_image_analysis_after_auto_competitor(product_id)
+        except Exception as exc:
+            message = f"自动竞品已选定，但创建图片分析任务失败: {type(exc).__name__}: {exc}"
+            await _project_image_analysis_creation_failed(db, product_id=product_id, message=message)
+            result["status"] = "downstream_failed"
+            result["downstream_error"] = message
+            return
+
+        await db.refresh(product)
+        step.task_run.summary_json = json_dumps({
+            "product_id": product_id,
+            "status": "auto_competitor_selected",
+            "next_node": WORKFLOW_NODE_IMAGE_ANALYSIS,
+            "image_analysis_task_run_ids": image_run_ids,
+            "selected_candidate_id": selected_row.id,
+            "selected_asin": asin,
+            "score": selected["score"],
+            "confidence": selected["confidence"],
+            "risks": selected["risks"],
+        })
+        await db.commit()
+        await _best_effort_update_step_progress(
+            db,
+            step,
+            current=1,
+            total=1,
+            message="自动选竞品完成，已提交图片分析任务",
+            data={"product_id": product_id, "selected_asin": asin, "image_analysis_task_run_ids": image_run_ids},
+        )
+        result["status"] = "done"
+        result["next_node"] = WORKFLOW_NODE_IMAGE_ANALYSIS
+        result["image_analysis_task_run_ids"] = image_run_ids
 
     async def on_step_failure(self, db: AsyncSession, step: TaskStep, error: Exception) -> None:
         product_id = int(_payload_for_step(step).get("product_id") or 0)
