@@ -22,6 +22,7 @@
 - Amazon 自动竞品搜索 Phase A：`search_competitor/pending|failed` 可通过 `POST /api/products/{id}/competitor-search/retry` 创建/复用 `product_competitor_search` task run；reserve 投影 `search_competitor/processing`，成功把 Amazon 页面搜索候选写入 `amazon_competitor_search_candidates` 并进入 `visual_match_competitors/pending`，失败回到 `search_competitor/failed`。`amazon_competitor_search_candidates` 是自动竞品搜索主事实源。本阶段不做视觉初筛、抓详情或自动选择竞品。
 - Amazon 竞品视觉初筛 Phase B：`visual_match_competitors/pending|failed` 可通过 `POST /api/products/{id}/competitor-visual-match/retry` 创建/复用 `product_competitor_visual_match` task run；`processing` 状态由 API 直接返回当前 workflow/task-center correlation，不调用 planner。reserve 会清空同商品旧视觉当前事实和 `visual_selected_for_capture`，execute 只读取最近成功 `product_competitor_search` run/step 的候选，默认用源商品主图 URL + 候选 `image_url` direct VLM 做视觉初筛，不下载候选图、不生成 Contact Sheet、不做拼接兜底；只在显式测试 fixture 路径使用 fake review。成功只给当前 run/step Top 4-6 写 `visual_selected_for_capture=1` 并进入 `capture_competitor_candidates/pending`，失败/取消/中断回到 `visual_match_competitors/failed` 且不保留 current selected candidates。本阶段不抓 Amazon 详情、不自动选最终竞品。
 - Amazon 候选详情抓取 / 自动选竞品 E4A：`capture_competitor_candidates` 已增加 `visual_task_run_id/visual_task_step_id` current-set evidence；视觉初筛 success 会给当前 Top 候选写入 visual task run/step。`product_competitor_candidate_capture` 可在 fixture/configured adapter 下执行，`execute_step()` 只返回结构化候选详情结果、不写候选表；`on_step_success()` 单事务写 `detail_* / capture_*` current facts，并推进到 `auto_select_competitor/pending`。`product_auto_competitor_selection` 后端已基于最新成功视觉 run/step 的当前 successful detail rows 做 deterministic rule scoring，`execute_step()` 只返回评分结果，`on_step_success()` 重查 current set 和保护门后写 selected row `final_*`、`products.competitor_asin`、`catalog_products.competitor_asin` 和 snapshot selected competitor，并创建/复用 `product_image_analysis` task run（E4A 不自动启动真实图片分析）。低置信度、事实不足、硬拒绝、保护门、取消或中断回到失败态且不清 search/visual/detail facts。真实 API/前端 retry 入口仍未启用，商品 workflow 在 pending/failed 仍只暴露 `open_detail` / `restart_competitor_search`；processing 用 `open_task_center`。
+- Amazon 图片分析 / Listing 生成 E5：`product_image_analysis` success 通过 `create_product_action_runs()` 创建或复用 `product_listing_generation` run，重复 success 复用 active listing run，已 `flow_done/succeeded` / `Product.status=completed` 的商品 no-op。Listing 创建失败会投影到 `listing_generation/failed` 并暴露 `retry_listing_generation`。`product_listing_generation` success 是唯一进入 `flow_done/succeeded`、`Product.status=completed`、商品列表 `export_ready/待导出` 的主流程入口；failure/cancel/interrupted 不得写 completed。E5 保护门阻断真实 ASIN、导出历史、Amazon 模板输出、A+ 上传证据和预先存在的 `CatalogProduct.confirmed_at`，Listing success 只允许受控创建待导出用 `confirmed_at`。
 - 今日自动主链路目标见 `docs/superpowers/specs/2026-06-21-amazon-auto-flow-to-export-ready-prd.md`：从 GIGA 商品入库/分组自动推进到 `Product.status=completed`，前端展示 `export_ready / 待导出`；不包含自动导出、Amazon 上传或外部平台发布。
 - A+ 自动触发见 `docs/superpowers/specs/2026-06-21-amazon-aplus-auto-after-export-ready-prd.md`：A+ 是待导出后的独立派生链路，不并入商品主 workflow；A+ 失败不能让商品退出待导出。
 - TikTok 链路重设计见 `docs/superpowers/specs/2026-06-21-tiktok-listing-flow-redesign-prd.md`：TikTok 需要独立状态、类目、库存、价格和导出/发布口径，不能复用 Amazon 类目/竞品/导出语义。
@@ -51,6 +52,7 @@
 - 自动竞品搜索：商品列表/详情 workflow action -> `POST /api/products/{id}/competitor-search/retry` -> `product_competitor_search` task run -> `amazon_competitor_search_candidates`。
 - 竞品视觉初筛：商品列表 workflow action -> `POST /api/products/{id}/competitor-visual-match/retry` -> `product_competitor_visual_match` task run -> 当前搜索 run/step 的 `amazon_competitor_search_candidates.visual_*` 字段 -> `capture_competitor_candidates/pending`。
 - 候选详情抓取/自动选竞品 E4A：`capture_competitor_candidates/pending|failed` 与 `auto_select_competitor/pending|failed` 仍仅用 `open_detail` / `restart_competitor_search` 表示安全用户动作；`processing` 用 `open_task_center` 定位已注册 task correlation。后端 candidate capture action 已支持 fixture/configured adapter 执行和 success hook 落库；auto competitor selection action 已支持 deterministic final competitor scoring/write 和 image_analysis task 创建/复用。真实 API retry、前端按钮、真实 Amazon adapter 和真实图片分析执行仍未启用。
+- 图片分析/Listing 生成 E5：图片分析 success hook -> `product_listing_generation` task run -> Listing success hook -> `_project_listing_completed()` -> `flow_done/succeeded` / `Product.status=completed` / 商品列表 `export_ready`。`retry_image_analysis`、`retry_listing_generation` 由 workflow 暴露并由商品列表映射到后端安全 `retryStep`；前端不自行推业务状态。
 - Amazon/TikTok 详情分流：前端路由和数据源类型共同决定详情入口。
 
 ## 相关文档
@@ -76,6 +78,7 @@
 - Amazon 详情：`http://localhost:3190/products/<id>`
 - TikTok 详情：`http://localhost:3190/tiktok/products/<id>`
 - 商品总览：`GET /api/products/overview?data_source_id=<id>`
+- E5 行为脚本：`cd backend && .venv/bin/python ../scripts/test_image_analysis_listing_e5.py`
 
 ## 常见定位
 

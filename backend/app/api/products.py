@@ -5157,9 +5157,6 @@ async def retry_step(product_id: int, db: AsyncSession = Depends(get_db)):
                 raise HTTPException(404, "Product not found")
             queued_product.current_task_status = _current_task_status(queued_product)
             return queued_product
-        if step == 6 and product.catalog_item:
-            product.catalog_item.confirmed_at = None
-            product.catalog_item.updated_at = datetime.now()
         if step == 6:
             await _queue_product_listing_generation(db, product, created_by="retry_step")
         else:

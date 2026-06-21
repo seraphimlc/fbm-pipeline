@@ -2082,6 +2082,18 @@ async def main():
                 current_step=0,
                 error_message=None,
                 competitor_asin="B000TEST",
+                amazon_asin=None,
+                asin_sync_status=None,
+                asin_synced_at=None,
+                asin_sync_error=None,
+                amazon_product_status=None,
+                amazon_product_status_synced_at=None,
+                amazon_product_status_error=None,
+                aplus_upload_status="not_uploaded",
+                aplus_uploaded_at=None,
+                aplus_upload_error=None,
+                data=None,
+                files=[],
                 catalog_item=None,
                 workflow_node=None,
                 workflow_status=None,
@@ -2215,6 +2227,63 @@ asyncio.run(main())
         capture_output=True,
     )
     assert_true(result.returncode == 0, f"ProductTaskAction lifecycle workflow 写入验证失败: {result.stderr or result.stdout}")
+
+
+def test_image_analysis_listing_e5_contract() -> None:
+    actions_text = (ROOT / "backend" / "app" / "product_tasks" / "actions.py").read_text(encoding="utf-8")
+    products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    workflow_text = (ROOT / "backend" / "app" / "product_tasks" / "workflow.py").read_text(encoding="utf-8")
+    product_list_text = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
+
+    image_section = actions_text.split("class ProductImageAnalysisAction", 1)[1].split("class ProductListingGenerationAction", 1)[0]
+    listing_section = actions_text.split("class ProductListingGenerationAction", 1)[1].split("async def _existing_active_run", 1)[0]
+    retry_section = products_text.split("async def retry_step", 1)[1].split("async def run_product_from_step", 1)[0]
+    product_list_action_section = product_list_text.split("const renderPrimaryRowAction", 1)[1].split("const columns =", 1)[0]
+    e5_sections = image_section + "\n" + listing_section
+
+    assert_true(
+        actions_text.count("_project_listing_completed(") == 2
+        and "ProductListingGenerationAction().on_step_success" not in actions_text,
+        "E5 只能由 ProductListingGenerationAction.on_step_success 调用 _project_listing_completed；不能新增其它 completed 投影入口",
+    )
+    assert_true(
+        "def _e5_export_ready_protection_reasons" in actions_text
+        and "_raise_if_e5_export_ready_protected(product, action_label=\"启动图片分析\")" in image_section
+        and "_raise_if_e5_export_ready_protected(product, action_label=\"启动 Listing 生成\")" in listing_section
+        and "_raise_if_e5_export_ready_protected(product, action_label=\"完成 Listing 并进入待导出\")" in listing_section,
+        "E5 图片分析/Listing reserve/success 必须走专用保护 helper，阻断外部不可逆事实",
+    )
+    assert_true(
+        "already_completed" in image_section
+        and "downstream_failed" in image_section
+        and "create_product_action_runs(" in image_section
+        and "self._listing_action_type()" in image_section,
+        "图片分析 success 必须 completed no-op，并且只通过 ProductTaskAction planner 创建/复用 Listing run，创建失败要可见",
+    )
+    assert_true(
+        "confirmed_at = None" not in listing_section
+        and "confirmed_at = None" not in retry_section,
+        "E5 Listing reserve/retry 不得清空 CatalogProduct.confirmed_at；预先确认必须由保护门阻断",
+    )
+    assert_true(
+        '"retry_image_analysis"' in workflow_text
+        and '"retry_listing_generation"' in workflow_text
+        and "workflowAction === 'retry_image_analysis' || workflowAction === 'retry_listing_generation'" in product_list_action_section
+        and "await retryStep(product.id)" in product_list_action_section,
+        "workflow 暴露的 retry_image_analysis/retry_listing_generation 必须在 ProductList 映射到后端安全 retry，不能成为 ghost action",
+    )
+    for forbidden in (
+        "create_catalog_export_tasks",
+        "run_amazon_template",
+        "aplus_upload",
+        "Seller Central",
+        "sellercentral",
+        "tiktok",
+        "BackgroundTasks",
+        "threading.Thread",
+        "enqueue_pipeline(",
+    ):
+        assert_true(forbidden not in e5_sections, f"E5 image/listing action 不得触发导出/A+/上传/TikTok/旧 pipeline 副作用: {forbidden}")
 
 
 def test_product_action_worker_does_not_project_failure_for_interrupted() -> None:
@@ -3587,6 +3656,7 @@ def main() -> int:
         test_product_action_backfill_updates_only_task_run_metadata,
         test_product_task_action_reserve_states_are_not_marked_interrupted,
         test_product_action_lifecycle_writes_workflow_fields,
+        test_image_analysis_listing_e5_contract,
         test_product_action_worker_does_not_project_failure_for_interrupted,
         test_product_action_final_progress_failure_is_best_effort,
         test_auto_image_selection_phase_a_contract,

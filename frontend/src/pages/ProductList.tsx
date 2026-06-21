@@ -794,6 +794,19 @@ const ProductList: React.FC = () => {
           </Button>
         );
       }
+      if (workflowAction === 'retry_image_analysis' || workflowAction === 'retry_listing_generation') {
+        return (
+          <Button
+            size="small"
+            type="primary"
+            icon={<RedoOutlined />}
+            loading={rerunningId === product.id}
+            onClick={async () => { setRerunningId(product.id); try { await retryStep(product.id); await refreshWorkbenchRows(); } finally { setRerunningId(null); } }}
+          >
+            {label}
+          </Button>
+        );
+      }
       if (workflowAction === 'manual_adjust_images') {
         return <Button size="small" onClick={() => openReviewPage('/products/image-review', product.id)}>{label}</Button>;
       }

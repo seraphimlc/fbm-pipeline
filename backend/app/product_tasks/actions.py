@@ -216,6 +216,16 @@ def _sync_catalog_item(product: Product) -> None:
         product.catalog_item.updated_at = product.updated_at
 
 
+def _e5_export_ready_protection_reasons(product: Product) -> list[str]:
+    return product_external_result_protection_reasons(product)
+
+
+def _raise_if_e5_export_ready_protected(product: Product, *, action_label: str) -> None:
+    reasons = _e5_export_ready_protection_reasons(product)
+    if reasons:
+        raise RuntimeError(f"当前商品已有不可逆外部结果，不能{action_label}：" + "；".join(reasons))
+
+
 def _workflow_node_for_step(step: int) -> str:
     return WORKFLOW_NODE_IMAGE_ANALYSIS if step == 5 else WORKFLOW_NODE_LISTING_GENERATION
 
@@ -778,6 +788,7 @@ async def _best_effort_update_step_progress(
 
 
 def _project_listing_completed(product: Product) -> None:
+    _raise_if_e5_export_ready_protected(product, action_label="完成 Listing 并进入待导出")
     now = datetime.now()
     product.status = COMPLETED
     product.current_step = 6
@@ -2356,7 +2367,8 @@ class ProductImageAnalysisAction:
 
     async def validate(self, db: AsyncSession, payload: dict[str, Any]) -> None:
         product_id = _product_id(payload)
-        await _load_product(db, product_id)
+        product = await _load_product(db, product_id)
+        _raise_if_e5_export_ready_protected(product, action_label="启动图片分析")
         await _assert_step_prerequisites(product_id, 5)
 
     def dedupe_key(self, payload: dict[str, Any]) -> str | None:
@@ -2367,6 +2379,7 @@ class ProductImageAnalysisAction:
 
     async def reserve(self, db: AsyncSession, payload: dict[str, Any], run: TaskRun) -> None:
         product = await _load_product(db, _product_id(payload))
+        _raise_if_e5_export_ready_protected(product, action_label="启动图片分析")
         now = datetime.now()
         product.status = STEP6_CURATING
         product.current_step = 5
@@ -2427,6 +2440,30 @@ class ProductImageAnalysisAction:
             product = await _load_product(db, product_id)
         except RuntimeError:
             return
+        if (
+            product.status == COMPLETED
+            and product.workflow_node == WORKFLOW_NODE_FLOW_DONE
+            and product.workflow_status == WORKFLOW_STATUS_SUCCEEDED
+        ):
+            step.task_run.summary_json = json_dumps({
+                "product_id": product_id,
+                "item_code": result.get("item_code"),
+                "status": "already_completed",
+                "next_step": None,
+                "listing_task_run_ids": [],
+            })
+            await db.commit()
+            result["status"] = "already_completed"
+            result["next_step"] = None
+            result["listing_task_run_ids"] = []
+            return
+        reasons = _e5_export_ready_protection_reasons(product)
+        if reasons:
+            message = "图片分析完成，但当前商品已有不可逆外部结果，不能创建 Listing 任务：" + "；".join(reasons)
+            await _project_product_failure(db, product_id=product_id, step=6, label="Listing 任务创建", error=message)
+            result["status"] = "downstream_failed"
+            result["downstream_error"] = message
+            return
         now = datetime.now()
         product.status = STEP6_DONE
         product.current_step = 5
@@ -2440,12 +2477,20 @@ class ProductImageAnalysisAction:
         )
         product.updated_at = now
         _sync_catalog_item(product)
-        listing_runs = await create_product_action_runs(
-            db,
-            self._listing_action_type(),
-            [{"product_id": product_id, "created_by": "product_image_analysis"}],
-            created_by="product_image_analysis",
-        )
+        try:
+            listing_runs = await create_product_action_runs(
+                db,
+                self._listing_action_type(),
+                [{"product_id": product_id, "created_by": "product_image_analysis"}],
+                created_by="product_image_analysis",
+            )
+        except Exception as exc:
+            await db.rollback()
+            message = f"图片分析已完成，但 Listing 任务创建失败: {type(exc).__name__}: {exc}"
+            await _project_product_failure(db, product_id=product_id, step=6, label="Listing 任务创建", error=message)
+            result["status"] = "downstream_failed"
+            result["downstream_error"] = message
+            return
         listing_run_ids = [run.id for run in listing_runs]
         step.task_run.summary_json = json_dumps({
             "product_id": product_id,
@@ -2505,7 +2550,8 @@ class ProductListingGenerationAction:
 
     async def validate(self, db: AsyncSession, payload: dict[str, Any]) -> None:
         product_id = _product_id(payload)
-        await _load_product(db, product_id)
+        product = await _load_product(db, product_id)
+        _raise_if_e5_export_ready_protected(product, action_label="启动 Listing 生成")
         await _assert_step_prerequisites(product_id, 6)
 
     def dedupe_key(self, payload: dict[str, Any]) -> str | None:
@@ -2516,6 +2562,7 @@ class ProductListingGenerationAction:
 
     async def reserve(self, db: AsyncSession, payload: dict[str, Any], run: TaskRun) -> None:
         product = await _load_product(db, _product_id(payload))
+        _raise_if_e5_export_ready_protected(product, action_label="启动 Listing 生成")
         now = datetime.now()
         product.status = STEP5_LISTING
         product.current_step = 6
@@ -2529,8 +2576,6 @@ class ProductListingGenerationAction:
         )
         product.updated_at = now
         _sync_catalog_item(product)
-        if product.catalog_item:
-            product.catalog_item.confirmed_at = None
 
     def build_plan(self, payload: dict[str, Any]) -> TaskRunPlan:
         product_id = _product_id(payload)
@@ -2576,6 +2621,7 @@ class ProductListingGenerationAction:
     async def on_step_success(self, db: AsyncSession, step: TaskStep, result: dict[str, Any]) -> None:
         product_id = int(result.get("product_id") or _payload_for_step(step).get("product_id") or 0)
         product = await _load_product(db, product_id)
+        _raise_if_e5_export_ready_protected(product, action_label="完成 Listing 并进入待导出")
         _project_listing_completed(product)
         step.task_run.summary_json = json_dumps({
             "product_id": product_id,
