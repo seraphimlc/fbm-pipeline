@@ -206,6 +206,8 @@ async def _ensure_mysql_competitor_visual_match_columns(conn) -> None:
         ("visual_sheet_label", "VARCHAR(40) NULL"),
         ("visual_rank", "INTEGER NULL"),
         ("visual_selected_for_capture", "INTEGER NOT NULL DEFAULT 0"),
+        ("visual_task_run_id", "INTEGER NULL"),
+        ("visual_task_step_id", "INTEGER NULL"),
         ("visual_exclusion_reason", "LONGTEXT NULL"),
         ("visual_model", "VARCHAR(100) NULL"),
         ("visual_raw_json", "LONGTEXT NULL"),
@@ -275,6 +277,7 @@ async def _ensure_mysql_hot_path_indexes(conn) -> None:
         ("amazon_competitor_search_candidates", "ix_amz_comp_search_task_run", ("task_run_id", "id")),
         ("amazon_competitor_search_candidates", "ix_amz_comp_visual_current", ("product_id", "visual_selected_for_capture", "visual_rank", "id")),
         ("amazon_competitor_search_candidates", "ix_amz_comp_visual_run_step", ("product_id", "task_run_id", "task_step_id", "is_excluded", "id")),
+        ("amazon_competitor_search_candidates", "ix_amz_comp_visual_capture_set", ("product_id", "visual_task_run_id", "visual_task_step_id", "visual_selected_for_capture", "visual_rank", "id")),
         ("amazon_competitor_search_candidates", "ix_amz_comp_capture_current", ("product_id", "visual_selected_for_capture", "capture_status", "visual_rank", "id")),
         ("amazon_competitor_search_candidates", "ix_amz_comp_final_current", ("product_id", "final_selected", "final_rank", "id")),
     )

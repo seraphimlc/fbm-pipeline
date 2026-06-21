@@ -914,6 +914,8 @@ class AmazonCompetitorSearchCandidate(Base):
     visual_sheet_label: Mapped[str | None] = mapped_column(String(40))
     visual_rank: Mapped[int | None] = mapped_column(Integer)
     visual_selected_for_capture: Mapped[int] = mapped_column(Integer, default=0)
+    visual_task_run_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("task_runs.id"))
+    visual_task_step_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("task_steps.id"))
     visual_exclusion_reason: Mapped[str | None] = mapped_column(Text)
     visual_model: Mapped[str | None] = mapped_column(String(100))
     visual_raw_json: Mapped[str | None] = mapped_column(Text)

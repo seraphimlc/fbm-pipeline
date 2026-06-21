@@ -399,6 +399,8 @@ def _clear_visual_fields(row: AmazonCompetitorSearchCandidate, *, now: datetime)
     row.visual_sheet_label = None
     row.visual_rank = None
     row.visual_selected_for_capture = 0
+    row.visual_task_run_id = None
+    row.visual_task_step_id = None
     row.visual_exclusion_reason = None
     row.visual_model = None
     row.visual_raw_json = None

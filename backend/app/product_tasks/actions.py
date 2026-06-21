@@ -49,6 +49,11 @@ from app.services.amazon_competitor_visual_match import (
     clear_current_visual_match,
     run_competitor_visual_match,
 )
+from app.services.amazon_listing_detail import (
+    AmazonListingDetailError,
+    get_amazon_listing_detail_adapter,
+    listing_detail_to_dict,
+)
 from app.services.amazon_search_page import AmazonSearchPageError, candidate_to_dict, run_amazon_search_queries
 from app.services.product_protection import (
     auto_image_selection_protection_reasons,
@@ -65,6 +70,7 @@ from app.task_runtime.constants import (
     STEP_STATUS_PENDING,
     STEP_STATUS_READY,
     STEP_STATUS_RUNNING,
+    STEP_STATUS_SUCCEEDED,
 )
 from app.task_runtime.events import update_step_progress
 from app.task_runtime.exceptions import TaskStepCanceled, TaskStepInterrupted
@@ -376,6 +382,8 @@ async def _project_competitor_candidate_capture_failed(
     except RuntimeError:
         return
     now = datetime.now()
+    await clear_current_competitor_capture(db, product_id, now=now)
+    await clear_current_auto_competitor_selection(db, product_id, now=now, clear_product_fact=False)
     product.status = FAILED
     product.current_step = 2
     product.error_message = message
@@ -1112,6 +1120,8 @@ class ProductCompetitorVisualMatchAction:
             product_id=product_id,
             search_run_id=search_run_id,
             search_step_id=search_step_id,
+            visual_task_run_id=step.task_run_id,
+            visual_task_step_id=step.id,
             candidate_results=candidate_results,
             model=str(result.get("model") or ""),
             now=now,
@@ -1215,6 +1225,8 @@ async def _write_visual_match_results(
     product_id: int,
     search_run_id: int,
     search_step_id: int,
+    visual_task_run_id: int,
+    visual_task_step_id: int,
     candidate_results: list[dict[str, Any]],
     model: str,
     now: datetime,
@@ -1246,6 +1258,8 @@ async def _write_visual_match_results(
         row.visual_sheet_label = None
         row.visual_rank = int(item.get("visual_rank") or 0) or None
         row.visual_selected_for_capture = 1 if item.get("selected_for_capture") else 0
+        row.visual_task_run_id = visual_task_run_id
+        row.visual_task_step_id = visual_task_step_id
         row.visual_exclusion_reason = str(item.get("visual_exclusion_reason") or "") or None
         row.visual_model = model or None
         row.visual_raw_json = json_dumps(item.get("raw") if isinstance(item.get("raw"), dict) else item)
@@ -1346,16 +1360,49 @@ async def clear_current_auto_competitor_selection(
     return len(rows)
 
 
-async def _current_visual_selected_for_capture_count(db: AsyncSession, product_id: int) -> int:
-    search_run_id, search_step_id = await _latest_successful_competitor_search_ids(db, product_id)
+async def _latest_successful_competitor_visual_match_ids(db: AsyncSession, product_id: int) -> tuple[int, int]:
+    run_result = await db.execute(
+        select(TaskRun)
+        .where(TaskRun.task_type == "product_competitor_visual_match")
+        .where(TaskRun.correlation_key == f"product:{product_id}:competitor_visual_match")
+        .where(TaskRun.status == RUN_STATUS_SUCCEEDED)
+        .order_by(TaskRun.updated_at.desc(), TaskRun.id.desc())
+    )
+    run = run_result.scalars().first()
+    if not run:
+        raise RuntimeError("缺少当前成功的竞品视觉初筛任务")
+    step_result = await db.execute(
+        select(TaskStep)
+        .where(TaskStep.task_run_id == run.id)
+        .where(TaskStep.step_type == "product_competitor_visual_match")
+        .where(TaskStep.status == STEP_STATUS_SUCCEEDED)
+        .order_by(TaskStep.updated_at.desc(), TaskStep.id.desc())
+    )
+    step = step_result.scalars().first()
+    if not step:
+        raise RuntimeError("缺少当前成功的竞品视觉初筛步骤")
+    return run.id, step.id
+
+
+async def _current_visual_selected_for_capture(
+    db: AsyncSession,
+    product_id: int,
+    *,
+    visual_task_run_id: int | None = None,
+    visual_task_step_id: int | None = None,
+) -> list[AmazonCompetitorSearchCandidate]:
+    if visual_task_run_id is None or visual_task_step_id is None:
+        visual_task_run_id, visual_task_step_id = await _latest_successful_competitor_visual_match_ids(db, product_id)
     result = await db.execute(
         select(AmazonCompetitorSearchCandidate)
         .where(AmazonCompetitorSearchCandidate.product_id == product_id)
-        .where(AmazonCompetitorSearchCandidate.task_run_id == search_run_id)
-        .where(AmazonCompetitorSearchCandidate.task_step_id == search_step_id)
+        .where(AmazonCompetitorSearchCandidate.visual_task_run_id == visual_task_run_id)
+        .where(AmazonCompetitorSearchCandidate.visual_task_step_id == visual_task_step_id)
         .where(AmazonCompetitorSearchCandidate.visual_selected_for_capture == 1)
+        .where(AmazonCompetitorSearchCandidate.visual_rank.is_not(None))
+        .order_by(AmazonCompetitorSearchCandidate.visual_rank.asc(), AmazonCompetitorSearchCandidate.id.asc())
     )
-    return len(result.scalars().all())
+    return result.scalars().all()
 
 
 async def _captured_candidate_success_count(db: AsyncSession, product_id: int) -> int:
@@ -1380,9 +1427,12 @@ class ProductCompetitorCandidateCaptureAction:
             raise RuntimeError("当前商品不在抓取候选竞品节点，不能启动候选详情抓取")
         if product.workflow_status not in {WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_FAILED}:
             raise RuntimeError("当前候选详情抓取状态不可启动或重试")
-        selected_count = await _current_visual_selected_for_capture_count(db, product_id)
+        selected_rows = await _current_visual_selected_for_capture(db, product_id)
+        selected_count = len(selected_rows)
         if selected_count <= 0:
             raise RuntimeError("缺少当前视觉初筛 Top 候选，不能抓取候选竞品详情")
+        if selected_count > 6:
+            raise RuntimeError(f"当前视觉初筛 Top 候选超过上限: {selected_count}")
 
     def dedupe_key(self, payload: dict[str, Any]) -> str | None:
         return f"product_competitor_candidate_capture:product:{_product_id(payload)}"
@@ -1433,25 +1483,204 @@ class ProductCompetitorCandidateCaptureAction:
 
     async def execute_step(self, db: AsyncSession, step: TaskStep, payload: dict[str, Any]) -> dict[str, Any]:
         product_id = _product_id(payload)
+        selected_rows = await _current_visual_selected_for_capture(db, product_id)
+        if not selected_rows:
+            raise RuntimeError("缺少当前视觉初筛 Top 候选，不能抓取候选竞品详情")
+        if len(selected_rows) > 6:
+            raise RuntimeError(f"当前视觉初筛 Top 候选超过上限: {len(selected_rows)}")
+        visual_task_run_id = int(selected_rows[0].visual_task_run_id or 0)
+        visual_task_step_id = int(selected_rows[0].visual_task_step_id or 0)
+        adapter = get_amazon_listing_detail_adapter()
         await update_step_progress(
             db,
             step,
             current=0,
-            total=1,
-            message="阶段 1 skeleton：候选详情抓取真实执行尚未启用",
-            data={"product_id": product_id, "mode": "strict_no_candidate_table_writes"},
+            total=len(selected_rows),
+            message="开始抓取候选竞品详情",
+            data={
+                "product_id": product_id,
+                "visual_task_run_id": visual_task_run_id,
+                "visual_task_step_id": visual_task_step_id,
+                "selected_count": len(selected_rows),
+            },
         )
-        raise RuntimeError("阶段 1 skeleton 尚未实现候选详情抓取；禁止真实访问 Amazon 或写候选详情")
+        candidate_results: list[dict[str, Any]] = []
+        for index, row in enumerate(selected_rows, start=1):
+            asin = str(row.asin or "").strip().upper()
+            try:
+                detail = await adapter.fetch(asin, url=row.url, marketplace="US")
+                detail_dict = listing_detail_to_dict(detail)
+                qualified = bool(detail.title or detail.bullets)
+                candidate_results.append({
+                    "candidate_id": row.id,
+                    "asin": asin,
+                    "visual_rank": row.visual_rank,
+                    "status": "succeeded" if qualified else "failed",
+                    "detail": detail_dict if qualified else None,
+                    "error_type": None if qualified else "missing_title_and_bullets",
+                    "error_message": None if qualified else "候选详情缺少 title 和 bullets",
+                    "raw": detail_dict,
+                })
+            except AmazonListingDetailError as exc:
+                candidate_results.append({
+                    "candidate_id": row.id,
+                    "asin": asin,
+                    "visual_rank": row.visual_rank,
+                    "status": "failed",
+                    "detail": None,
+                    "error_type": exc.error_type,
+                    "error_message": str(exc),
+                    "raw": {"error_type": exc.error_type, "message": str(exc)},
+                })
+            except Exception as exc:
+                candidate_results.append({
+                    "candidate_id": row.id,
+                    "asin": asin,
+                    "visual_rank": row.visual_rank,
+                    "status": "failed",
+                    "detail": None,
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                    "raw": {"error_type": type(exc).__name__, "message": str(exc)},
+                })
+            await update_step_progress(
+                db,
+                step,
+                current=index,
+                total=len(selected_rows),
+                message=f"候选竞品详情抓取进度 {index}/{len(selected_rows)}",
+                data={"product_id": product_id, "candidate_id": row.id, "asin": asin},
+            )
+
+        success_count = sum(1 for item in candidate_results if item.get("status") == "succeeded")
+        warnings: list[str] = []
+        if 0 < success_count < len(candidate_results):
+            warnings.append("partial_capture")
+        if success_count < 3:
+            warnings.append("low_success_count")
+        top_two = [item for item in candidate_results if int(item.get("visual_rank") or 99) <= 2]
+        if top_two and not any(item.get("status") == "succeeded" for item in top_two):
+            warnings.append("top_rank_failed")
+        result = {
+            "product_id": product_id,
+            "visual_task_run_id": visual_task_run_id,
+            "visual_task_step_id": visual_task_step_id,
+            "candidate_results": candidate_results,
+            "selected_count": len(selected_rows),
+            "success_count": success_count,
+            "warnings": warnings,
+        }
+        if success_count <= 0:
+            step.task_run.summary_json = json_dumps({
+                **result,
+                "status": "candidate_capture_failed",
+            })
+            await update_step_progress(
+                db,
+                step,
+                current=len(selected_rows),
+                total=len(selected_rows),
+                message="候选竞品详情抓取全失败",
+                data={"product_id": product_id, "success_count": success_count, "warnings": warnings},
+            )
+            raise RuntimeError("候选竞品详情抓取全失败")
+        return result
 
     async def on_step_success(self, db: AsyncSession, step: TaskStep, result: dict[str, Any]) -> None:
         product_id = int(result.get("product_id") or _payload_for_step(step).get("product_id") or 0)
         if product_id <= 0:
             return
-        await _project_competitor_candidate_capture_failed(
+        visual_task_run_id = int(result.get("visual_task_run_id") or 0)
+        visual_task_step_id = int(result.get("visual_task_step_id") or 0)
+        if not visual_task_run_id or not visual_task_step_id:
+            message = "候选详情抓取结果缺少当前视觉 run/step 证据"
+            await _project_competitor_candidate_capture_failed(db, product_id=product_id, message=message)
+            raise RuntimeError(message)
+        selected_rows = await _current_visual_selected_for_capture(
             db,
-            product_id=product_id,
-            message="阶段 1 skeleton 不允许候选详情抓取成功投影",
+            product_id,
+            visual_task_run_id=visual_task_run_id,
+            visual_task_step_id=visual_task_step_id,
         )
+        rows_by_id = {row.id: row for row in selected_rows}
+        candidate_results = result.get("candidate_results") if isinstance(result.get("candidate_results"), list) else []
+        result_ids = {int(item.get("candidate_id") or 0) for item in candidate_results if isinstance(item, dict)}
+        if result_ids != set(rows_by_id):
+            message = "候选详情抓取结果未完整匹配当前视觉 Top 集合"
+            await _project_competitor_candidate_capture_failed(db, product_id=product_id, message=message)
+            raise RuntimeError(message)
+
+        now = datetime.now()
+        success_count = 0
+        for item in candidate_results:
+            if not isinstance(item, dict):
+                continue
+            row = rows_by_id.get(int(item.get("candidate_id") or 0))
+            if not row:
+                continue
+            status = "succeeded" if item.get("status") == "succeeded" else "failed"
+            detail = item.get("detail") if isinstance(item.get("detail"), dict) else {}
+            row.detail_task_run_id = step.task_run_id
+            row.detail_task_step_id = step.id
+            row.detail_captured_at = now
+            row.capture_status = status
+            row.capture_error = None if status == "succeeded" else str(item.get("error_message") or item.get("error_type") or "capture_failed")
+            row.capture_raw_json = json_dumps(item.get("raw") if item.get("raw") is not None else item)
+            if status == "succeeded":
+                row.brand = str(detail.get("brand") or "") or None
+                row.seller = str(detail.get("seller") or "") or None
+                row.category_rank = str(detail.get("category_rank") or "") or None
+                row.leaf_category = str(detail.get("leaf_category") or "") or None
+                row.main_image_url = str(detail.get("main_image_url") or "") or None
+                bullets = detail.get("bullets") if isinstance(detail.get("bullets"), list) else []
+                row.bullets_json = json_dumps([str(value) for value in bullets if str(value or "").strip()])
+                row.description = str(detail.get("description") or "") or None
+                product_details = detail.get("product_details") if isinstance(detail.get("product_details"), dict) else {}
+                row.product_details_json = json_dumps(product_details)
+                row.aplus_text = str(detail.get("aplus_text") or "") or None
+                success_count += 1
+            row.updated_at = now
+
+        if success_count <= 0:
+            message = "候选详情抓取没有任何合格成功结果"
+            await _project_competitor_candidate_capture_failed(db, product_id=product_id, message=message)
+            raise RuntimeError(message)
+
+        product = await _load_product(db, product_id)
+        product.status = "created"
+        product.current_step = 2
+        product.error_message = None
+        set_product_workflow(
+            product,
+            node=WORKFLOW_NODE_AUTO_SELECT_COMPETITOR,
+            status=WORKFLOW_STATUS_PENDING,
+            error=None,
+            now=now,
+        )
+        product.updated_at = now
+        _sync_catalog_item(product)
+        warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
+        step.task_run.summary_json = json_dumps({
+            "product_id": product_id,
+            "status": "candidate_capture_done",
+            "next_node": WORKFLOW_NODE_AUTO_SELECT_COMPETITOR,
+            "visual_task_run_id": visual_task_run_id,
+            "visual_task_step_id": visual_task_step_id,
+            "selected_count": len(selected_rows),
+            "success_count": success_count,
+            "warnings": warnings,
+        })
+        await db.commit()
+        await _best_effort_update_step_progress(
+            db,
+            step,
+            current=len(selected_rows),
+            total=len(selected_rows),
+            message="候选竞品详情抓取完成，已进入自动选竞品待处理",
+            data={"product_id": product_id, "success_count": success_count, "warnings": warnings},
+        )
+        result["status"] = "done"
+        result["next_node"] = WORKFLOW_NODE_AUTO_SELECT_COMPETITOR
 
     async def on_step_failure(self, db: AsyncSession, step: TaskStep, error: Exception) -> None:
         product_id = int(_payload_for_step(step).get("product_id") or 0)

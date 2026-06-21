@@ -3315,6 +3315,8 @@ def test_auto_competitor_candidate_capture_and_selection_phase1_contract() -> No
     for field in (
         "detail_task_run_id",
         "detail_task_step_id",
+        "visual_task_run_id",
+        "visual_task_step_id",
         "detail_captured_at",
         "brand",
         "seller",
@@ -3348,6 +3350,14 @@ def test_auto_competitor_candidate_capture_and_selection_phase1_contract() -> No
         "Phase 1 必须补 startup ensure 和 current fact 查询索引",
     )
     assert_true(
+        "visual_task_run_id" in models_text
+        and "visual_task_step_id" in models_text
+        and "ix_amz_comp_visual_capture_set" in database_text
+        and "row.visual_task_run_id = visual_task_run_id" in actions_text
+        and "row.visual_task_step_id = visual_task_step_id" in actions_text,
+        "Phase 2A 必须把视觉 Top 集合绑定到当前 visual task run/step，不能只靠商品历史或搜索 run",
+    )
+    assert_true(
         '"product_competitor_candidate_capture"' in actions_text
         and '"product_auto_competitor_selection"' in actions_text
         and 'return f"product_competitor_candidate_capture:product:{product_id}"' in actions_text
@@ -3378,7 +3388,7 @@ def test_auto_competitor_candidate_capture_and_selection_phase1_contract() -> No
         and "row.search_rank" not in actions_text.split("async def clear_current_competitor_capture", 1)[1].split("async def clear_current_auto_competitor_selection", 1)[0],
         "clear_current_competitor_capture 只能清候选详情 current fact，不得清搜索/视觉事实",
     )
-    selection_clear_section = actions_text.split("async def clear_current_auto_competitor_selection", 1)[1].split("async def _current_visual_selected_for_capture_count", 1)[0]
+    selection_clear_section = actions_text.split("async def clear_current_auto_competitor_selection", 1)[1].split("async def _latest_successful_competitor_visual_match_ids", 1)[0]
     assert_true(
         "product_external_result_protection_reasons(product)" in selection_clear_section
         and "row.final_selected = 0" in selection_clear_section
@@ -3389,14 +3399,32 @@ def test_auto_competitor_candidate_capture_and_selection_phase1_contract() -> No
         and 'snapshot.pop("auto_competitor_selection", None)' in selection_clear_section,
         "clear_current_auto_competitor_selection 必须清 final current fact，并在 clear_product_fact=True 时经过保护门后清当前派生竞品事实",
     )
+    capture_action_section = actions_text.split("class ProductCompetitorCandidateCaptureAction", 1)[1].split("class ProductAutoCompetitorSelectionAction", 1)[0]
     assert_true(
-        "strict_no_candidate_table_writes" in actions_text
-        and "禁止真实访问 Amazon 或写候选详情" in actions_text
+        "_current_visual_selected_for_capture" in actions_text
+        and "AmazonListingDetailError" in capture_action_section
+        and "get_amazon_listing_detail_adapter" in capture_action_section
+        and "listing_detail_to_dict" in capture_action_section
+        and "候选详情抓取结果未完整匹配当前视觉 Top 集合" in capture_action_section
+        and 'node=WORKFLOW_NODE_AUTO_SELECT_COMPETITOR' in capture_action_section
+        and 'status=WORKFLOW_STATUS_PENDING' in capture_action_section,
+        "Phase 2A candidate capture 必须按当前 visual run/step 抓详情，success hook 才写 detail facts 并推进 auto_select_competitor/pending",
+    )
+    assert_true(
+        "row.detail_task_run_id = step.task_run_id" in capture_action_section
+        and "row.capture_status = status" in capture_action_section
+        and "row.capture_raw_json = json_dumps" in capture_action_section
+        and "row.final_selected" not in capture_action_section
+        and "product.competitor_asin" not in capture_action_section,
+        "Phase 2A candidate capture 只能写候选详情 current facts，不得写 final 选择或最终竞品 ASIN",
+    )
+    assert_true(
+        "阶段 1 skeleton：自动选竞品真实评分尚未启用" in actions_text
         and "禁止写 competitor_asin" in actions_text
         and "successful_detail_count" in actions_text
         and "top_rank_detail_available" in actions_text
         and "comparison_set_size" in actions_text,
-        "Phase 1 skeleton 必须严格拒绝真实抓详情/真实评分，并保留后续评分维度契约",
+        "Phase 2A 只能打开候选详情 fixture/configured 执行，自动选竞品仍必须是 strict skeleton",
     )
     assert_true(
         "retry_competitor_candidate_capture" not in workflow_text
@@ -3422,10 +3450,11 @@ def test_auto_competitor_candidate_capture_and_selection_phase1_contract() -> No
         assert_true(forbidden not in detail_service_text, f"Phase 1 listing detail adapter 禁止真实网络/浏览器依赖: {forbidden}")
     assert_true(
         "Phase 1 候选详情抓取与自动选竞品结构契约对账" in prd_text
-        and "Amazon 候选详情抓取 / 自动选竞品 Phase 1" in product_flow_index
+        and "Phase 2A 候选详情抓取 fixture 执行与 current-set 对账" in prd_text
+        and "Amazon 候选详情抓取 / 自动选竞品 Phase 2A" in product_flow_index
         and "product_competitor_candidate_capture" in task_runtime_index
         and "product_auto_competitor_selection" in task_runtime_index,
-        "Phase 1 新任务、状态和数据契约必须同步 PRD/domain index",
+        "Phase 2A 新任务、状态和数据契约必须同步 PRD/domain index",
     )
 
 

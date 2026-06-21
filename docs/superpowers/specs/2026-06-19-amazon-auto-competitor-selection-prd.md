@@ -1,7 +1,7 @@
 # Amazon Auto Competitor Selection PRD
 
 状态：从总 PRD 拆出的执行设计；待派工
-更新：2026-06-19
+更新：2026-06-21
 负责人：若命
 适用范围：Amazon 商品主流程中自动搜索、视觉初筛、抓详情并选择参考竞品。自动选商品图详见 `2026-06-19-amazon-auto-image-selection-prd.md`。
 
@@ -697,3 +697,43 @@ API / 前端：
 - 候选详情真实落库 success hook。
 - 最终评分、置信度决策和最终 ASIN 写入。
 - 前端 retry 入口、真实商品 task run、真实 VLM、外部平台或 Step 10。
+
+## Phase 2A 候选详情抓取 fixture 执行与 current-set 对账
+
+状态：2026-06-21 按 `MSG-20260621-021` 实现 Backend Fixture Execution and Current-Set Contract。
+
+本阶段只打开后端候选详情抓取的 fixture/configured adapter 执行路径；不开放商品侧 API/前端按钮，不访问真实 Amazon，不触发自动最终选竞品，不写最终 `competitor_asin`。
+
+current-set evidence：
+
+- `amazon_competitor_search_candidates` 增加 `visual_task_run_id`、`visual_task_step_id`。
+- 视觉初筛 success 给本次视觉任务触达的候选写入 `visual_task_run_id=step.task_run_id`、`visual_task_step_id=step.id`。
+- 候选详情抓取只读取最近成功 `product_competitor_visual_match` run/step 对应的 Top 候选：
+  - `product_id = 当前商品`
+  - `visual_task_run_id = latest successful visual run`
+  - `visual_task_step_id = latest successful visual step`
+  - `visual_selected_for_capture = 1`
+  - `visual_rank IS NOT NULL`
+  - order by `visual_rank ASC, id ASC`
+- 对应 MySQL index：`ix_amz_comp_visual_capture_set(product_id, visual_task_run_id, visual_task_step_id, visual_selected_for_capture, visual_rank, id)`。
+
+任务执行：
+
+- `ProductCompetitorCandidateCaptureAction.validate()` 必须用 current visual run/step 解析精确 Top 集合；0 个候选或超过 6 个候选直接失败。
+- `execute_step()` 只调用 `get_amazon_listing_detail_adapter()` 返回的 fixture/configured adapter，返回 per-candidate 结构化结果；不写 `amazon_competitor_search_candidates`。
+- 默认 adapter 仍是 `UnconfiguredAmazonListingDetailAdapter`，只抛 `adapter_not_configured`，不能伪造成功。
+- 全失败必须让任务失败；partial success 允许进入 success hook，但要把失败候选写成 `capture_status=failed`。
+
+成功投影：
+
+- `on_step_success()` 重新用 result 中的 `visual_task_run_id/visual_task_step_id` 加载当前 Top 集合，要求 result candidate ids 与当前集合完全一致。
+- success hook 单事务写候选详情 current facts：`detail_task_run_id/detail_task_step_id/detail_captured_at/brand/seller/category_rank/leaf_category/main_image_url/bullets_json/description/product_details_json/aplus_text/capture_status/capture_error/capture_raw_json`。
+- 至少 1 个候选成功且包含 title 或 bullets 后，商品 workflow 推进到 `auto_select_competitor/pending`。
+- failure/cancel/interrupted 清理当前候选详情和 final current facts，回到 `capture_competitor_candidates/failed`。
+
+仍未实现：
+
+- 真实 Amazon adapter 和真实小样本授权。
+- `POST /api/products/{id}/competitor-candidate-capture/retry`。
+- 前端 `retry_competitor_candidate_capture` 按钮。
+- 自动最终选竞品评分和最终 ASIN 写入。
