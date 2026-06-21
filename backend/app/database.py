@@ -34,6 +34,7 @@ async def init_db():
         await _ensure_mysql_product_workflow_columns(conn)
         await _ensure_mysql_product_image_selection_columns(conn)
         await _ensure_mysql_competitor_visual_match_columns(conn)
+        await _ensure_mysql_competitor_capture_selection_columns(conn)
         await _ensure_mysql_catalog_export_columns(conn)
         await _ensure_mysql_task_run_action_columns(conn)
         await _ensure_mysql_longtext_columns(conn)
@@ -202,6 +203,39 @@ async def _ensure_mysql_competitor_visual_match_columns(conn) -> None:
             await conn.execute(text(f"ALTER TABLE `amazon_competitor_search_candidates` ADD COLUMN `{column_name}` {column_type}"))
 
 
+async def _ensure_mysql_competitor_capture_selection_columns(conn) -> None:
+    for column_name, column_type in (
+        ("detail_task_run_id", "INTEGER NULL"),
+        ("detail_task_step_id", "INTEGER NULL"),
+        ("detail_captured_at", "DATETIME NULL"),
+        ("brand", "VARCHAR(200) NULL"),
+        ("seller", "VARCHAR(200) NULL"),
+        ("category_rank", "VARCHAR(200) NULL"),
+        ("leaf_category", "VARCHAR(200) NULL"),
+        ("main_image_url", "LONGTEXT NULL"),
+        ("bullets_json", "LONGTEXT NULL"),
+        ("description", "LONGTEXT NULL"),
+        ("product_details_json", "LONGTEXT NULL"),
+        ("aplus_text", "LONGTEXT NULL"),
+        ("capture_status", "VARCHAR(40) NULL"),
+        ("capture_error", "LONGTEXT NULL"),
+        ("capture_raw_json", "LONGTEXT NULL"),
+        ("final_selected", "INTEGER NOT NULL DEFAULT 0"),
+        ("final_rank", "INTEGER NULL"),
+        ("final_score", "DOUBLE NULL"),
+        ("final_confidence", "VARCHAR(20) NULL"),
+        ("final_dimension_scores_json", "LONGTEXT NULL"),
+        ("final_reason", "LONGTEXT NULL"),
+        ("final_risks_json", "LONGTEXT NULL"),
+        ("final_model", "VARCHAR(100) NULL"),
+        ("final_rule_version", "VARCHAR(100) NULL"),
+        ("final_raw_json", "LONGTEXT NULL"),
+        ("final_selected_at", "DATETIME NULL"),
+    ):
+        if not await _mysql_column_exists(conn, "amazon_competitor_search_candidates", column_name):
+            await conn.execute(text(f"ALTER TABLE `amazon_competitor_search_candidates` ADD COLUMN `{column_name}` {column_type}"))
+
+
 async def _ensure_mysql_hot_path_indexes(conn) -> None:
     indexes = (
         ("products", "ix_products_source_status_updated", ("source_data_source_id", "status", "current_step", "updated_at")),
@@ -229,6 +263,8 @@ async def _ensure_mysql_hot_path_indexes(conn) -> None:
         ("amazon_competitor_search_candidates", "ix_amz_comp_search_task_run", ("task_run_id", "id")),
         ("amazon_competitor_search_candidates", "ix_amz_comp_visual_current", ("product_id", "visual_selected_for_capture", "visual_rank", "id")),
         ("amazon_competitor_search_candidates", "ix_amz_comp_visual_run_step", ("product_id", "task_run_id", "task_step_id", "is_excluded", "id")),
+        ("amazon_competitor_search_candidates", "ix_amz_comp_capture_current", ("product_id", "visual_selected_for_capture", "capture_status", "visual_rank", "id")),
+        ("amazon_competitor_search_candidates", "ix_amz_comp_final_current", ("product_id", "final_selected", "final_rank", "id")),
     )
     for table_name, index_name, columns in indexes:
         if await _mysql_index_exists(conn, table_name, index_name):

@@ -124,6 +124,7 @@ assert AMAZON_WORKFLOW_NODES == (
     "search_competitor",
     "visual_match_competitors",
     "capture_competitor_candidates",
+    "auto_select_competitor",
     "select_competitor",
     "capture_competitor_detail",
     "image_analysis",
@@ -3280,6 +3281,216 @@ with TemporaryDirectory(prefix="fbm_visual_match_fixture_") as tmp:
     assert_true(result.returncode == 0, f"竞品视觉初筛 Phase B fake fixture 行为验证失败: {result.stderr or result.stdout}")
 
 
+def test_auto_competitor_candidate_capture_and_selection_phase1_contract() -> None:
+    status_text = (ROOT / "backend" / "app" / "models" / "status.py").read_text(encoding="utf-8")
+    models_text = (ROOT / "backend" / "app" / "models" / "models.py").read_text(encoding="utf-8")
+    database_text = (ROOT / "backend" / "app" / "database.py").read_text(encoding="utf-8")
+    actions_text = (ROOT / "backend" / "app" / "product_tasks" / "actions.py").read_text(encoding="utf-8")
+    workflow_text = (ROOT / "backend" / "app" / "product_tasks" / "workflow.py").read_text(encoding="utf-8")
+    capture_planner_text = (ROOT / "backend" / "app" / "task_planners" / "product_competitor_candidate_capture.py").read_text(encoding="utf-8")
+    selection_planner_text = (ROOT / "backend" / "app" / "task_planners" / "product_auto_competitor_selection.py").read_text(encoding="utf-8")
+    detail_service_text = (ROOT / "backend" / "app" / "services" / "amazon_listing_detail.py").read_text(encoding="utf-8")
+    product_flow_index = (ROOT / "docs" / "domain-index" / "product-flow.md").read_text(encoding="utf-8")
+    task_runtime_index = (ROOT / "docs" / "domain-index" / "task-runtime.md").read_text(encoding="utf-8")
+    prd_text = (ROOT / "docs" / "superpowers" / "specs" / "2026-06-19-amazon-auto-competitor-selection-prd.md").read_text(encoding="utf-8")
+
+    assert_true(
+        'WORKFLOW_NODE_AUTO_SELECT_COMPETITOR = "auto_select_competitor"' in status_text
+        and "WORKFLOW_NODE_AUTO_SELECT_COMPETITOR" in status_text.split("AMAZON_WORKFLOW_NODES = (", 1)[1].split(")", 1)[0],
+        "Phase 1 必须把 auto_select_competitor 注册为正式 Amazon workflow node",
+    )
+    for field in (
+        "detail_task_run_id",
+        "detail_task_step_id",
+        "detail_captured_at",
+        "brand",
+        "seller",
+        "category_rank",
+        "leaf_category",
+        "main_image_url",
+        "bullets_json",
+        "description",
+        "product_details_json",
+        "aplus_text",
+        "capture_status",
+        "capture_error",
+        "capture_raw_json",
+        "final_selected",
+        "final_rank",
+        "final_score",
+        "final_confidence",
+        "final_dimension_scores_json",
+        "final_reason",
+        "final_risks_json",
+        "final_model",
+        "final_rule_version",
+        "final_raw_json",
+        "final_selected_at",
+    ):
+        assert_true(field in models_text and field in database_text, f"候选详情/最终选择字段缺少 ORM 或 MySQL ensure: {field}")
+    assert_true(
+        "_ensure_mysql_competitor_capture_selection_columns(conn)" in database_text
+        and "ix_amz_comp_capture_current" in database_text
+        and "ix_amz_comp_final_current" in database_text,
+        "Phase 1 必须补 startup ensure 和 current fact 查询索引",
+    )
+    assert_true(
+        '"product_competitor_candidate_capture"' in actions_text
+        and '"product_auto_competitor_selection"' in actions_text
+        and 'return f"product_competitor_candidate_capture:product:{product_id}"' in actions_text
+        and 'return f"product_auto_competitor_selection:product:{product_id}"' in actions_text
+        and 'return f"product:{product_id}:competitor_candidate_capture"' in actions_text
+        and 'return f"product:{product_id}:auto_competitor_selection"' in actions_text,
+        "两个新 task type 必须注册到 ProductAction task type、dedupe key 和 correlation key",
+    )
+    assert_true(
+        "ProductCompetitorCandidateCaptureAction()" in actions_text
+        and "ProductAutoCompetitorSelectionAction()" in actions_text
+        and "class ProductCompetitorCandidateCaptureAction" in actions_text
+        and "class ProductAutoCompetitorSelectionAction" in actions_text,
+        "两个 skeleton action 必须注册到 product task action registry",
+    )
+    assert_true(
+        '"product_competitor_candidate_capture"' in capture_planner_text
+        and "create_product_action_runs" in capture_planner_text
+        and '"product_auto_competitor_selection"' in selection_planner_text
+        and "create_product_action_runs" in selection_planner_text,
+        "两个 planner 必须走 create_product_action_runs 创建/复用任务中心 run",
+    )
+    assert_true(
+        "clear_current_competitor_capture" in actions_text
+        and "row.detail_task_run_id = None" in actions_text
+        and "row.capture_status = None" in actions_text
+        and "row.visual_selected_for_capture" not in actions_text.split("async def clear_current_competitor_capture", 1)[1].split("async def clear_current_auto_competitor_selection", 1)[0]
+        and "row.search_rank" not in actions_text.split("async def clear_current_competitor_capture", 1)[1].split("async def clear_current_auto_competitor_selection", 1)[0],
+        "clear_current_competitor_capture 只能清候选详情 current fact，不得清搜索/视觉事实",
+    )
+    selection_clear_section = actions_text.split("async def clear_current_auto_competitor_selection", 1)[1].split("async def _current_visual_selected_for_capture_count", 1)[0]
+    assert_true(
+        "product_external_result_protection_reasons(product)" in selection_clear_section
+        and "row.final_selected = 0" in selection_clear_section
+        and "row.final_score = None" in selection_clear_section
+        and "product.competitor_asin = None" in selection_clear_section
+        and "product.catalog_item.competitor_asin = None" in selection_clear_section
+        and 'snapshot.pop("selected_competitor", None)' in selection_clear_section
+        and 'snapshot.pop("auto_competitor_selection", None)' in selection_clear_section,
+        "clear_current_auto_competitor_selection 必须清 final current fact，并在 clear_product_fact=True 时经过保护门后清当前派生竞品事实",
+    )
+    assert_true(
+        "strict_no_candidate_table_writes" in actions_text
+        and "禁止真实访问 Amazon 或写候选详情" in actions_text
+        and "禁止写 competitor_asin" in actions_text
+        and "successful_detail_count" in actions_text
+        and "top_rank_detail_available" in actions_text
+        and "comparison_set_size" in actions_text,
+        "Phase 1 skeleton 必须严格拒绝真实抓详情/真实评分，并保留后续评分维度契约",
+    )
+    assert_true(
+        "retry_competitor_candidate_capture" not in workflow_text
+        and "retry_auto_competitor_selection" not in workflow_text
+        and "product:{product_id}:competitor_candidate_capture" in workflow_text
+        and "product:{product_id}:auto_competitor_selection" in workflow_text
+        and '"primary_action": "open_task_center"' in workflow_text
+        and '"allowed_actions": ("open_task_center", "open_detail")' in workflow_text
+        and '"primary_action": "open_detail"' in workflow_text
+        and '"allowed_actions": ("open_detail", "restart_competitor_search")' in workflow_text
+        and "manual_select_competitor" not in workflow_text,
+        "Phase 1 workflow 只能暴露 open_detail/restart/open_task_center 等前端已支持安全动作，不能泄漏未实现 retry 或 manual action",
+    )
+    assert_true(
+        "FixtureAmazonListingDetailAdapter" in detail_service_text
+        and "UnconfiguredAmazonListingDetailAdapter" in detail_service_text
+        and "adapter_not_configured" in detail_service_text
+        and "parse_amazon_listing_detail_html" in detail_service_text
+        and "listing_detail_to_dict" in detail_service_text,
+        "Amazon listing detail service 必须只有 fixture/default adapter 边界和 fixture parser",
+    )
+    for forbidden in ("requests", "httpx", "aiohttp", "playwright", "selenium", "urlopen"):
+        assert_true(forbidden not in detail_service_text, f"Phase 1 listing detail adapter 禁止真实网络/浏览器依赖: {forbidden}")
+    assert_true(
+        "Phase 1 候选详情抓取与自动选竞品结构契约对账" in prd_text
+        and "Amazon 候选详情抓取 / 自动选竞品 Phase 1" in product_flow_index
+        and "product_competitor_candidate_capture" in task_runtime_index
+        and "product_auto_competitor_selection" in task_runtime_index,
+        "Phase 1 新任务、状态和数据契约必须同步 PRD/domain index",
+    )
+
+
+def test_auto_competitor_candidate_capture_fixture_adapter_behaviour() -> None:
+    code = r'''
+import asyncio
+from app.services.amazon_listing_detail import (
+    AmazonListingDetailError,
+    FixtureAmazonListingDetailAdapter,
+    UnconfiguredAmazonListingDetailAdapter,
+    listing_detail_to_dict,
+    parse_amazon_listing_detail_html,
+)
+
+html = """
+<html><body data-asin="B0DETAIL001">
+  <span id="productTitle">Modern Modular Fabric Sofa with Storage Chaise</span>
+  <a id="bylineInfo">Visit the Vindhvisk Store</a>
+  <a id="sellerProfileTriggerId">Furniture Seller LLC</a>
+  <img id="landingImage" src="https://images.example/detail-main.jpg" />
+  <span class="a-price"><span class="a-offscreen">$399.99</span></span>
+  <span class="a-icon-alt">4.6 out of 5 stars</span>
+  <span id="acrCustomerReviewText">321 ratings</span>
+  <div id="feature-bullets">
+    <ul>
+      <li><span class="a-list-item">Spacious modular sofa for living rooms.</span></li>
+      <li><span class="a-list-item">Storage chaise with reversible layout.</span></li>
+    </ul>
+  </div>
+  <div id="productDescription"><span>Comfortable upholstered seating for apartments.</span></div>
+  <table>
+    <tr><th>Brand</th><td>Vindhvisk</td></tr>
+    <tr><th>Best Sellers Rank</th><td>#12 in Home & Kitchen &gt; Furniture &gt; Sofas</td></tr>
+  </table>
+  <div id="aplus">Premium fabric and sturdy frame.</div>
+</body></html>
+"""
+
+detail = parse_amazon_listing_detail_html(html, asin="b0detail001", url="https://www.amazon.com/dp/B0DETAIL001")
+assert detail.asin == "B0DETAIL001", detail
+assert detail.title == "Modern Modular Fabric Sofa with Storage Chaise", detail
+assert detail.brand == "Visit the Vindhvisk Store", detail
+assert detail.seller == "Furniture Seller LLC", detail
+assert detail.main_image_url == "https://images.example/detail-main.jpg", detail
+assert len(detail.bullets) == 2, detail.bullets
+assert detail.product_details["Brand"] == "Vindhvisk", detail.product_details
+assert detail.category_rank == "#12 in Home & Kitchen > Furniture > Sofas", detail.category_rank
+assert detail.leaf_category == "Sofas", detail.leaf_category
+assert listing_detail_to_dict(detail)["raw"]["parser"] == "fixture_html_v1"
+
+async def main():
+    fixture = FixtureAmazonListingDetailAdapter({"B0DETAIL001": html})
+    fetched = await fixture.fetch("B0DETAIL001", url="https://www.amazon.com/dp/B0DETAIL001")
+    assert fetched.title == detail.title, fetched
+    try:
+        await fixture.fetch("B0MISSING")
+    except AmazonListingDetailError as exc:
+        assert exc.error_type == "fixture_missing", exc.error_type
+    else:
+        raise AssertionError("missing fixture must fail explicitly")
+    try:
+        await UnconfiguredAmazonListingDetailAdapter().fetch("B0DETAIL001")
+    except AmazonListingDetailError as exc:
+        assert exc.error_type == "adapter_not_configured", exc.error_type
+    else:
+        raise AssertionError("unconfigured adapter must not access real Amazon")
+
+asyncio.run(main())
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"候选详情 fixture adapter 行为验证失败: {result.stderr or result.stdout}")
+
+
 def main() -> int:
     tests = [
         test_category_conflict_only_overrides_conflict,
@@ -3336,6 +3547,8 @@ def main() -> int:
         test_auto_competitor_search_phase_a_query_and_fixture_behaviour,
         test_auto_competitor_visual_match_phase_b_contract,
         test_auto_competitor_visual_match_phase_b_fixture_behaviour,
+        test_auto_competitor_candidate_capture_and_selection_phase1_contract,
+        test_auto_competitor_candidate_capture_fixture_adapter_behaviour,
     ]
     for test in tests:
         test()

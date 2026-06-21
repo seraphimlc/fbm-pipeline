@@ -10,6 +10,7 @@ from app.models.status import (
     AMAZON_WORKFLOW_NODES,
     AMAZON_WORKFLOW_STATUSES,
     WORKFLOW_NODE_AUTO_SELECT_IMAGES,
+    WORKFLOW_NODE_AUTO_SELECT_COMPETITOR,
     WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES,
     WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
     WORKFLOW_NODE_FLOW_DONE,
@@ -85,8 +86,18 @@ WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
         default_work_status="capture_detail",
         default_primary_action="open_detail",
         default_primary_action_label="查看",
-        default_allowed_actions=("open_detail",),
-        default_action_reason="视觉初筛已完成，等待后续抓取候选竞品详情任务",
+        default_allowed_actions=("open_detail", "restart_competitor_search"),
+        default_action_reason="视觉初筛已完成；候选详情抓取入口尚未启用，可查看商品或重新搜索竞品",
+        default_color="warning",
+    ),
+    WORKFLOW_NODE_AUTO_SELECT_COMPETITOR: WorkflowNodeView(
+        label="自动选竞品",
+        node_type="async",
+        default_work_status="select_competitor",
+        default_primary_action="open_detail",
+        default_primary_action_label="查看",
+        default_allowed_actions=("open_detail", "restart_competitor_search"),
+        default_action_reason="自动选竞品入口尚未启用，可查看商品或重新搜索竞品",
         default_color="warning",
     ),
     WORKFLOW_NODE_SELECT_COMPETITOR: WorkflowNodeView(
@@ -280,6 +291,10 @@ def _state(
         related_correlation_key = f"product:{product_id}:competitor_search"
     elif product_id and stage == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS:
         related_correlation_key = f"product:{product_id}:competitor_visual_match"
+    elif product_id and stage == WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES:
+        related_correlation_key = f"product:{product_id}:competitor_candidate_capture"
+    elif product_id and stage == WORKFLOW_NODE_AUTO_SELECT_COMPETITOR:
+        related_correlation_key = f"product:{product_id}:auto_competitor_selection"
     elif product_id and stage == WORKFLOW_NODE_IMAGE_ANALYSIS:
         related_correlation_key = f"product:{product_id}:image_analysis"
     elif product_id and stage == WORKFLOW_NODE_LISTING_GENERATION:
@@ -381,9 +396,49 @@ def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
             "color": "success",
         }
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES and status == WORKFLOW_STATUS_PENDING:
-        return {"label": "待抓取候选竞品", "work_status": "capture_detail", "color": "warning", "action_reason": "视觉初筛 Top 候选已保存，等待抓取详情"}
+        return {
+            "label": "待抓取候选竞品",
+            "work_status": "capture_detail",
+            "primary_action": "open_detail",
+            "primary_action_label": "查看",
+            "allowed_actions": ("open_detail", "restart_competitor_search"),
+            "color": "warning",
+            "action_reason": "视觉初筛 Top 候选已保存；候选详情抓取入口尚未启用",
+        }
+    if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES and status == WORKFLOW_STATUS_PROCESSING:
+        return {
+            "label": "候选竞品详情抓取中",
+            "work_status": "capture_detail",
+            "primary_action": "open_task_center",
+            "primary_action_label": "任务中心",
+            "allowed_actions": ("open_task_center", "open_detail"),
+            "action_reason": "候选竞品详情正在任务中心执行或等待执行",
+            "color": "processing",
+        }
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES and status == WORKFLOW_STATUS_SUCCEEDED:
         return {"label": "候选竞品详情已抓取", "work_status": "ready_to_generate", "color": "success"}
+    if node == WORKFLOW_NODE_AUTO_SELECT_COMPETITOR and status == WORKFLOW_STATUS_PENDING:
+        return {
+            "label": "待自动选竞品",
+            "work_status": "select_competitor",
+            "primary_action": "open_detail",
+            "primary_action_label": "查看",
+            "allowed_actions": ("open_detail", "restart_competitor_search"),
+            "action_reason": "候选详情已抓取；自动选竞品入口尚未启用",
+            "color": "warning",
+        }
+    if node == WORKFLOW_NODE_AUTO_SELECT_COMPETITOR and status == WORKFLOW_STATUS_PROCESSING:
+        return {
+            "label": "自动选竞品中",
+            "work_status": "select_competitor",
+            "primary_action": "open_task_center",
+            "primary_action_label": "任务中心",
+            "allowed_actions": ("open_task_center", "open_detail"),
+            "action_reason": "自动选竞品正在任务中心执行或等待执行",
+            "color": "processing",
+        }
+    if node == WORKFLOW_NODE_AUTO_SELECT_COMPETITOR and status == WORKFLOW_STATUS_SUCCEEDED:
+        return {"label": "自动选竞品完成", "work_status": "ready_to_generate", "color": "success"}
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL and status == WORKFLOW_STATUS_PENDING:
         return {"label": "待抓取竞品详情", "color": "warning", "action_reason": "已选择竞品，等待抓取详情"}
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL and status == WORKFLOW_STATUS_SUCCEEDED:
@@ -466,8 +521,18 @@ def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
             "work_status": "capture_detail",
             "primary_action": "open_detail",
             "primary_action_label": "查看",
-            "allowed_actions": ("open_detail",),
-            "action_reason": "候选竞品详情抓取失败，等待后续抓取任务",
+            "allowed_actions": ("open_detail", "restart_competitor_search"),
+            "action_reason": "候选竞品详情抓取入口尚未启用，可查看商品或重新搜索竞品",
+            "color": "error",
+        }
+    if node == WORKFLOW_NODE_AUTO_SELECT_COMPETITOR:
+        return {
+            "label": "自动选竞品失败",
+            "work_status": "select_competitor",
+            "primary_action": "open_detail",
+            "primary_action_label": "查看",
+            "allowed_actions": ("open_detail", "restart_competitor_search"),
+            "action_reason": "自动选竞品入口尚未启用，可查看商品或重新搜索竞品",
             "color": "error",
         }
     if node == WORKFLOW_NODE_IMAGE_ANALYSIS:

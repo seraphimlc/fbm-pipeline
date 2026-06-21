@@ -656,3 +656,44 @@ API / 前端：
 
 - 中性 helper：`product_external_result_protection_reasons(product)`。
 - 自动选图保护 helper 委托中性 helper；视觉初筛 action 直接调用中性 helper，避免已有真实 ASIN、Catalog 确认/导出、Amazon 模板输出、A+ 上传证据被静默覆盖。
+
+## Phase 1 候选详情抓取与自动选竞品结构契约对账
+
+状态：2026-06-21 按 `MSG-20260621-009` 只实现结构契约、任务 skeleton 和 fixture adapter。
+
+本阶段只为后续候选详情抓取和自动最终选竞品建立可测试边界；不访问真实 Amazon，不抓真实详情落库，不做最终评分，不写 `products.competitor_asin`，不改前端，不触发真实商品 task run。
+
+数据契约：
+
+- `amazon_competitor_search_candidates` 增加候选详情 current fact 字段：`detail_task_run_id`、`detail_task_step_id`、`detail_captured_at`、`brand`、`seller`、`category_rank`、`leaf_category`、`main_image_url`、`bullets_json`、`description`、`product_details_json`、`aplus_text`、`capture_status`、`capture_error`、`capture_raw_json`。
+- 同表增加最终选择 current fact 字段：`final_selected`、`final_rank`、`final_score`、`final_confidence`、`final_dimension_scores_json`、`final_reason`、`final_risks_json`、`final_model`、`final_rule_version`、`final_raw_json`、`final_selected_at`。
+- MySQL startup ensure 同步补字段，并新增 `ix_amz_comp_capture_current(product_id, visual_selected_for_capture, capture_status, visual_rank, id)` 和 `ix_amz_comp_final_current(product_id, final_selected, final_rank, id)`。
+- `capture_status/final_selected/final_*` 均为当前事实；后续查询不得把旧 run 的 current fact 当作当前结果。
+
+任务中心：
+
+- 新 workflow node：`auto_select_competitor`。
+- 新 task type：`product_competitor_candidate_capture`、`product_auto_competitor_selection`。
+- planner：`backend/app/task_planners/product_competitor_candidate_capture.py`、`backend/app/task_planners/product_auto_competitor_selection.py`，均只通过 `create_product_action_runs()` 创建/复用 task run。
+- action skeleton：`ProductCompetitorCandidateCaptureAction`、`ProductAutoCompetitorSelectionAction`，均注册到 `register_product_task_actions()`。
+- correlation key：`product:{product_id}:competitor_candidate_capture`、`product:{product_id}:auto_competitor_selection`。
+- skeleton 执行采用严格模式：`execute_step()` 只写进度后明确失败；候选详情抓取不得在 execute 阶段写候选表，后续真实落库只能在 success hook 单事务完成；自动选竞品 skeleton 禁止写 `competitor_asin`。
+- Phase 1 不启用商品侧真实 API/前端 retry 入口；`capture_competitor_candidates` 与 `auto_select_competitor` 的 pending/failed 商品 workflow 主操作只能是当前前端已支持的 `open_detail`，可保留已有 `restart_competitor_search` 作为辅助操作；processing 才能用 `open_task_center` 定位已注册 correlation。不得暴露未实现的 `retry_competitor_candidate_capture` 或 `retry_auto_competitor_selection`。
+
+清理契约：
+
+- `clear_current_competitor_capture(db, product_id, *, now)` 清同商品候选详情 current fact，包括 detail/capture/listing detail 字段；不清搜索事实、视觉事实或历史 task event。
+- `clear_current_auto_competitor_selection(db, product_id, *, now, clear_product_fact)` 清同商品 `final_selected/final_*`；当 `clear_product_fact=True` 时，必须先通过 `product_external_result_protection_reasons(product)` 保护门，之后才允许清 `Product.competitor_asin`、`CatalogProduct.competitor_asin` 和 `ProductData.gigab2b_raw_snapshot` 中的 `selected_competitor/auto_competitor_selection`。
+
+候选详情 adapter：
+
+- 服务边界：`backend/app/services/amazon_listing_detail.py`。
+- `FixtureAmazonListingDetailAdapter` 只读取测试传入的 fixture HTML，支持解析 title、brand、seller、main image、bullets、description、product details、Best Sellers Rank、leaf category 和 A+ 文本。
+- 默认 `UnconfiguredAmazonListingDetailAdapter` 只抛 `adapter_not_configured`，不访问真实 Amazon、不启动浏览器、不伪造空成功。
+
+未实现：
+
+- 真实 Amazon 详情抓取。
+- 候选详情真实落库 success hook。
+- 最终评分、置信度决策和最终 ASIN 写入。
+- 前端 retry 入口、真实商品 task run、真实 VLM、外部平台或 Step 10。
