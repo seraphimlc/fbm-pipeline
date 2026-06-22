@@ -26,7 +26,7 @@
 - Amazon 候选详情抓取 / 自动选竞品 E4A：`capture_competitor_candidates` 已增加 `visual_task_run_id/visual_task_step_id` current-set evidence；视觉初筛 success 会给当前 Top 候选写入 visual task run/step。`product_competitor_candidate_capture` 可在 fixture/configured adapter 下执行，`execute_step()` 只返回结构化候选详情结果、不写候选表；`on_step_success()` 单事务写 `detail_* / capture_*` current facts，并推进到 `auto_select_competitor/pending`。`product_auto_competitor_selection` 后端已基于最新成功视觉 run/step 的当前 successful detail rows 做 deterministic rule scoring，`execute_step()` 只返回评分结果，`on_step_success()` 重查 current set 和保护门后写 selected row `final_*`、`products.competitor_asin`、`catalog_products.competitor_asin` 和 snapshot selected competitor，并创建/复用 `product_image_analysis` task run（E4A 不自动启动真实图片分析）。低置信度、事实不足、硬拒绝、保护门、取消或中断回到失败态且不清 search/visual/detail facts。真实 API/前端 retry 入口仍未启用，商品 workflow 在 pending/failed 仍只暴露 `open_detail` / `restart_competitor_search`；processing 用 `open_task_center`。
 - Amazon 图片分析 / Listing 生成 E5：`product_image_analysis` success 通过 `create_product_action_runs()` 创建或复用 `product_listing_generation` run，重复 success 复用 active listing run，已 `flow_done/succeeded` / `Product.status=completed` 的商品 no-op。Listing 创建失败会投影到 `listing_generation/failed` 并暴露 `retry_listing_generation`。`product_listing_generation` success 是唯一进入 `flow_done/succeeded`、`Product.status=completed`、商品列表 `export_ready/待导出` 的主流程入口；failure/cancel/interrupted 不得写 completed。E5 保护门阻断真实 ASIN、导出历史、Amazon 模板输出、A+ 上传证据和预先存在的 `CatalogProduct.confirmed_at`，Listing success 只允许受控创建待导出用 `confirmed_at`。历史商品如果 `workflow_node/workflow_status` 为空但已有稳定 E5 事实，`build_product_workflow()` 会只读投影：`Product.status=completed` + `CatalogProduct.confirmed_at` 视为 `flow_done/succeeded`；failed 商品按 `ProductImage.image_analysis` / `ProductData.listing_title` 是否已产出区分图片分析或 Listing retry action，不用 `error_message` 字符串或 `current_step` 猜节点。商品列表所有接受的 `work_status` 均使用 DB 级 predicate/count/page；不可由内存过滤、内存分页或伪造 total 兜底。
 - 今日自动主链路目标见 `docs/superpowers/specs/2026-06-21-amazon-auto-flow-to-export-ready-prd.md`：从 GIGA 商品入库/分组自动推进到 `Product.status=completed`，前端展示 `export_ready / 待导出`；不包含自动导出、Amazon 上传或外部平台发布。
-- A+ 自动触发见 `docs/superpowers/specs/2026-06-21-amazon-aplus-auto-after-export-ready-prd.md`：A+ 是待导出后的独立派生链路，不并入商品主 workflow；A+ 失败不能让商品退出待导出。
+- A+ 自动触发见 `docs/superpowers/specs/2026-06-21-amazon-aplus-auto-after-export-ready-prd.md`：A+ 是待导出后的独立派生链路，不并入商品主 workflow；A+ 失败不能让商品退出待导出。A1 已增加默认关闭的只读 eligibility/policy helper `backend/app/services/aplus_auto_trigger.py` 和 DB 行为脚本 `scripts/test_aplus_auto_trigger_a1_a2.py --stage a1`；A1 不接 Listing success hook，不创建/复用/启动 A+ task，A2 自动触发 hook 未启用。
 - TikTok 链路重设计见 `docs/superpowers/specs/2026-06-21-tiktok-listing-flow-redesign-prd.md`：TikTok 需要独立状态、类目、库存、价格和导出/发布口径，不能复用 Amazon 类目/竞品/导出语义。
 - 旧 StyleSnap 模式已退役：后端不再注册或保留 `/api/amazon-stylesnap` router，旧前端竞品确认页已删除，`/products/competitor-review` 仅重定向到商品列表；代码层不再保留旧 `AmazonStyleSnapCandidate` / `AmazonListingCapture` 模型、旧 snapshot key 读取或导出兼容逻辑。已存在的旧物理表不由应用启动逻辑维护或自动 drop。
 - 已修 P0：ProductTaskAction reserve 后的图片分析/Listing 入队态不能再被旧 pipeline `is_running(product.id)` 误判为中断。后续结构治理应把商品主状态从 task queued/running 语义收敛为业务节点四态。
@@ -42,6 +42,7 @@
 - 商品 API：`backend/app/api/products.py`
 - 自动选图：`backend/app/services/giga_product_drafts.py`, `backend/app/services/product_image_candidates.py`, `backend/app/services/product_image_vlm.py`, `backend/app/services/product_protection.py`, `backend/app/product_tasks/auto_image_selection.py`, `backend/app/task_planners/product_auto_image_selection.py`
 - 自动竞品搜索/视觉初筛/候选详情/自动选竞品：`backend/app/services/amazon_competitor_query.py`, `backend/app/services/amazon_search_page.py`, `backend/app/services/amazon_competitor_visual_match.py`, `backend/app/services/amazon_listing_detail.py`, `backend/app/task_planners/product_competitor_search.py`, `backend/app/task_planners/product_competitor_visual_match.py`, `backend/app/task_planners/product_competitor_candidate_capture.py`, `backend/app/task_planners/product_auto_competitor_selection.py`, `backend/app/product_tasks/actions.py`
+- A+ 自动触发 policy：`backend/app/services/aplus_auto_trigger.py`（A1 只读 eligibility，不启动任务）
 - TikTok API：`backend/app/api/tiktok.py`
 - pipeline：`backend/app/pipeline/engine.py`, `backend/app/pipeline/step*.py`
 - 模型：`backend/app/models/models.py`
@@ -82,6 +83,7 @@
 - TikTok 详情：`http://localhost:3190/tiktok/products/<id>`
 - 商品总览：`GET /api/products/overview?data_source_id=<id>`
 - E5 行为脚本：`cd backend && .venv/bin/python ../scripts/test_image_analysis_listing_e5.py`
+- A+ 自动触发 A1 policy 行为脚本：`cd backend && .venv/bin/python ../scripts/test_aplus_auto_trigger_a1_a2.py --stage a1`
 
 ## 常见定位
 
@@ -91,6 +93,7 @@
 - 自动竞品搜索问题：先看 `POST /api/products/{id}/competitor-search/retry`、`backend/app/task_planners/product_competitor_search.py`、`backend/app/product_tasks/actions.py` 的 `ProductCompetitorSearchAction`、`backend/app/services/amazon_competitor_query.py` 和 `backend/app/services/amazon_search_page.py`。
 - 竞品视觉初筛问题：先看 `POST /api/products/{id}/competitor-visual-match/retry`、`backend/app/task_planners/product_competitor_visual_match.py`、`backend/app/product_tasks/actions.py` 的 `ProductCompetitorVisualMatchAction` 和 `backend/app/services/amazon_competitor_visual_match.py`；重点核对当前成功 Phase A run/step 限定、processing API bypass、旧 selected 清理和失败态不保留 current selected。
 - 候选详情抓取/自动选竞品问题：先看 `backend/app/task_planners/product_competitor_candidate_capture.py`、`backend/app/task_planners/product_auto_competitor_selection.py`、`backend/app/product_tasks/actions.py` 的 `ProductCompetitorCandidateCaptureAction` / `ProductAutoCompetitorSelectionAction` 和 `backend/app/services/amazon_listing_detail.py`；E4A 只允许 fixture/configured adapter 的候选详情抓取落库和 deterministic final competitor scoring/write，不应出现真实 Amazon 访问、前端 retry 入口或真实图片分析执行。
+- A+ 自动触发 eligibility 问题：先看 `backend/app/services/aplus_auto_trigger.py` 的 decision code；A1 只读检查 `completed`、`flow_done/succeeded`、`CatalogProduct.confirmed_at`、Listing/image facts、active 主流程 task、active A+ task、A+ 状态、真实 ASIN、A+ 上传、导出历史和 Amazon 模板输出保护。不要把它当作已启用自动触发。
 - 旧 StyleSnap 残留问题：先确认是否还有 `/api/amazon-stylesnap`、旧 service、旧前端页面、旧 ORM 模型、旧 snapshot key 读取或 Step 10/export 兼容读取；不要恢复旧运行入口。
 - 数据源分流问题：先看 `frontend/src/App.tsx`、详情页和 `backend/app/api/products.py`。
 

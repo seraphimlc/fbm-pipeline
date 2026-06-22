@@ -74,6 +74,7 @@ class Settings(BaseSettings):
     APLUS_IMAGE_MIN_JPEG_QUALITY: int = 55
     APLUS_IMAGE_API_RETRIES: int = 3
     APLUS_IMAGE_OVERWRITE_POLICY: str = "skip_success"  # skip_success/overwrite_all
+    AUTO_APLUS_AFTER_EXPORT_READY: bool = False
 
     # OSS 图片上传（Step10 Amazon导入表格图片URL）
     OSS_ACCESS_KEY_ID: str = ""

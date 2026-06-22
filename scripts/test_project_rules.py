@@ -2506,6 +2506,125 @@ def test_image_analysis_listing_e5_contract() -> None:
         assert_true(forbidden not in e5_sections, f"E5 image/listing action 不得触发导出/A+/上传/TikTok/旧 pipeline 副作用: {forbidden}")
 
 
+def test_aplus_auto_after_export_ready_a1_policy_contract() -> None:
+    config_text = (ROOT / "backend" / "app" / "config.py").read_text(encoding="utf-8")
+    env_text = (ROOT / "backend" / ".env.example").read_text(encoding="utf-8")
+    service_path = ROOT / "backend" / "app" / "services" / "aplus_auto_trigger.py"
+    service_text = service_path.read_text(encoding="utf-8")
+    actions_text = (ROOT / "backend" / "app" / "product_tasks" / "actions.py").read_text(encoding="utf-8")
+    aplus_planner_text = (ROOT / "backend" / "app" / "task_planners" / "aplus_generate.py").read_text(encoding="utf-8")
+    behavior_script = ROOT / "scripts" / "test_aplus_auto_trigger_a1_a2.py"
+    behavior_text = behavior_script.read_text(encoding="utf-8")
+
+    assert_true(
+        "AUTO_APLUS_AFTER_EXPORT_READY: bool = False" in config_text
+        and "AUTO_APLUS_AFTER_EXPORT_READY=false" in env_text,
+        "A+ 自动触发 A1 必须默认关闭，并在 .env.example 明确 false",
+    )
+    assert_true(
+        service_path.is_file()
+        and "class AplusAutoStartDecision" in service_text
+        and "async def should_auto_start_aplus(" in service_text
+        and "eligible: bool" in service_text
+        and "code: str" in service_text
+        and "message: str" in service_text
+        and "details: dict[str, Any]" in service_text,
+        "A1 必须提供结构化只读 eligibility decision service",
+    )
+    for code in (
+        "disabled_by_config",
+        "not_completed",
+        "not_flow_done",
+        "missing_catalog_export_ready",
+        "missing_listing_content",
+        "missing_image_analysis",
+        "main_workflow_active",
+        "active_aplus_task",
+        "aplus_done",
+        "aplus_upload_protected",
+        "real_asin_protected",
+        "export_history_protected",
+        "template_output_protected",
+        "eligible",
+    ):
+        assert_true(f'"{code}"' in service_text, f"A1 decision code 缺失: {code}")
+    assert_true(
+        "Product.status == completed" in service_text
+        or "product.status != COMPLETED" in service_text,
+        "A1 eligibility 必须要求 Product.status completed",
+    )
+    assert_true(
+        "WORKFLOW_NODE_FLOW_DONE" in service_text
+        and "WORKFLOW_STATUS_SUCCEEDED" in service_text
+        and "catalog.confirmed_at is None" in service_text
+        and "missing_catalog_export_ready" in service_text,
+        "A1 eligibility 必须要求 flow_done/succeeded 和 CatalogProduct.confirmed_at 待导出证据",
+    )
+    assert_true(
+        "listing_title" in service_text
+        and "listing_bullets" in service_text
+        and "image_analysis" in service_text,
+        "A1 eligibility 必须检查 Listing 内容和图片分析事实",
+    )
+    assert_true(
+        "PRODUCT_MAIN_ACTION_TYPES" in service_text
+        and "exclude_task_run_id" in service_text
+        and "aplus_generate_product" in service_text,
+        "A1 policy 必须检查 active 主流程 task，并支持后续 A2 排除 source listing run，同时阻断 active A+ step",
+    )
+    assert_true(
+        "SAFE_APLUS_UPLOAD_STATUSES" in service_text
+        and "product.amazon_asin" in service_text
+        and "catalog.amazon_asin" in service_text
+        and "catalog.exported_at" in service_text
+        and "catalog.export_task_id" in service_text
+        and "catalog.export_file_path" in service_text
+        and "amazon_template_path" in service_text
+        and "amazon_template_fill_summary" in service_text
+        and "amazon_template_warnings" in service_text
+        and "amazon_template_generated_at" in service_text
+        and "ProductFile" in service_text,
+        "A1 policy 必须覆盖真实 ASIN、A+ 上传、导出历史、ProductData/ProductFile 模板输出保护",
+    )
+    for forbidden in (
+        "create_aplus_generate_runs",
+        "kick_task_runtime",
+        "offline_tasks",
+        "ProductAplus(",
+        ".aplus_status =",
+        "set_product_workflow",
+        "product.workflow_node =",
+        "product.workflow_status =",
+        "product.workflow_error =",
+    ):
+        assert_true(forbidden not in service_text, f"A1 policy service 必须只读，不能包含副作用: {forbidden}")
+
+    listing_section = actions_text.split("class ProductListingGenerationAction", 1)[1].split("async def _existing_active_run", 1)[0]
+    for forbidden in (
+        "aplus_auto_trigger",
+        "should_auto_start_aplus",
+        "create_aplus_generate_runs",
+        "aplus_generate_product",
+    ):
+        assert_true(forbidden not in listing_section, f"A1 不能接 Listing success hook 或创建 A+ task: {forbidden}")
+    assert_true(
+        "async def create_aplus_generate_runs(" in aplus_planner_text
+        and "kick_task_runtime()" in aplus_planner_text
+        and "create_aplus_generate_runs" not in service_text,
+        "A+ planner 仍是独立已有能力，A1 policy 不得调用 planner 创建/启动任务",
+    )
+    assert_true(
+        behavior_script.is_file()
+        and 'parser.add_argument("--stage", default="a1", choices=("a1",))' in behavior_text
+        and "run_schema_maintenance()" in behavior_text
+        and "eligible" in behavior_text
+        and "active_aplus_task" in behavior_text
+        and "before_runs == after_runs" in behavior_text
+        and "before_status == after_status" in behavior_text,
+        "A1 必须有 deterministic DB 行为脚本，覆盖 eligibility/skip 且验证不创建 task、不写 A+ 状态",
+    )
+
+
 def test_product_action_worker_does_not_project_failure_for_interrupted() -> None:
     code = r'''
 import asyncio
@@ -3926,6 +4045,7 @@ def main() -> int:
         test_product_task_action_reserve_states_are_not_marked_interrupted,
         test_product_action_lifecycle_writes_workflow_fields,
         test_image_analysis_listing_e5_contract,
+        test_aplus_auto_after_export_ready_a1_policy_contract,
         test_product_action_worker_does_not_project_failure_for_interrupted,
         test_product_action_final_progress_failure_is_best_effort,
         test_auto_image_selection_phase_a_contract,
