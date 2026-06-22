@@ -101,6 +101,18 @@ class Settings(BaseSettings):
     CHROME_LOCK_TIMEOUT: int = 300  # Chrome串行操作锁超时(秒)
     BROWSER_WORKFLOW_CONCURRENCY: int = 1  # 完整浏览器业务流程并发数。当前共用一个 worker tab，建议保持 1。
 
+    # Amazon search page adapter. Defaults are fail-closed; real browser access must be explicitly enabled.
+    AMAZON_SEARCH_PAGE_ADAPTER: str = "unconfigured"  # unconfigured/chrome
+    AMAZON_SEARCH_ENABLE_REAL_BROWSER: bool = False
+    AMAZON_SEARCH_MARKETPLACE: str = "US"
+    AMAZON_SEARCH_BASE_URL: str = "https://www.amazon.com"
+    AMAZON_SEARCH_PER_QUERY_LIMIT: int = 12
+    AMAZON_SEARCH_MAX_CANDIDATES: int = 20
+    AMAZON_SEARCH_NAV_TIMEOUT_SECONDS: int = 45
+    AMAZON_SEARCH_AFTER_LOAD_WAIT_SECONDS: float = 4.0
+    AMAZON_SEARCH_BETWEEN_QUERY_DELAY_SECONDS: float = 10.0
+    AMAZON_SEARCH_EVIDENCE_DIR: Path | None = None
+
     # Pipeline
     PIPELINE_MAX_CONCURRENCY: int = 2  # 同时运行的Pipeline任务数上限
     BULK_START_MAX_TASKS: int = 100    # 单次批量启动最大任务数
@@ -134,6 +146,10 @@ class Settings(BaseSettings):
         self.DATA_DIR = _resolve_local_path(self.DATA_DIR)
         self.PRODUCT_BASE_DIR = _resolve_local_path(self.PRODUCT_BASE_DIR)
         self.PRICE_QUANTITY_TEMPLATE_PATH = _resolve_local_path(self.PRICE_QUANTITY_TEMPLATE_PATH)
+        if self.AMAZON_SEARCH_EVIDENCE_DIR is None:
+            self.AMAZON_SEARCH_EVIDENCE_DIR = self.DATA_DIR / "task_evidence" / "amazon_search_page"
+        else:
+            self.AMAZON_SEARCH_EVIDENCE_DIR = _resolve_local_path(self.AMAZON_SEARCH_EVIDENCE_DIR)
         if self.EXTERNAL_HTTP_CA_BUNDLE:
             self.EXTERNAL_HTTP_CA_BUNDLE = _resolve_local_path(self.EXTERNAL_HTTP_CA_BUNDLE)
         if not self.DATABASE_URL:

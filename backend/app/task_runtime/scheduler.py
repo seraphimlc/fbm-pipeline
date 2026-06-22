@@ -337,19 +337,55 @@ async def _execute_step(step_id: int, worker_id: str) -> bool:
 
 async def drain_ready_steps() -> None:
     worker_id = f"task-runtime-{uuid4().hex[:8]}"
+    claimed = 0
+    logger.info("[TaskRuntime] runner drain started: worker_id=%s", worker_id)
     while True:
         async with async_session() as db:
             step = await _claim_next_step(db, worker_id)
         if not step:
+            logger.info("[TaskRuntime] runner drain finished: worker_id=%s claimed=%s", worker_id, claimed)
             return
+        claimed += 1
+        logger.info(
+            "[TaskRuntime] runner claimed step: worker_id=%s run_id=%s step_id=%s step_type=%s",
+            worker_id,
+            step.task_run_id,
+            step.id,
+            step.step_type,
+        )
         await _execute_step(step.id, worker_id)
+
+
+def _clear_stale_runner_state() -> None:
+    global _runner_task, _runner_handle
+    if _runner_task and _runner_task.done():
+        _runner_task = None
+    if _runner_handle and _runner_handle.cancelled():
+        _runner_handle = None
+
+
+def _on_runner_done(task: asyncio.Task) -> None:
+    global _runner_task
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        logger.info("[TaskRuntime] runner task cancelled")
+    except Exception:
+        logger.exception("[TaskRuntime] runner task crashed")
+    finally:
+        if _runner_task is task:
+            _runner_task = None
+        logger.info("[TaskRuntime] runner task finished")
 
 
 def kick_task_runtime() -> None:
     global _runner_task, _runner_handle
+    _clear_stale_runner_state()
     if _runner_task and not _runner_task.done():
+        logger.debug("[TaskRuntime] kick ignored: runner task already active")
         return
     if _runner_handle and not _runner_handle.cancelled():
+        logger.debug("[TaskRuntime] kick ignored: runner start already scheduled")
         return
 
     async def runner() -> None:
@@ -359,11 +395,16 @@ def kick_task_runtime() -> None:
     def start_runner() -> None:
         global _runner_task, _runner_handle
         _runner_handle = None
+        _clear_stale_runner_state()
         if _runner_task and not _runner_task.done():
+            logger.debug("[TaskRuntime] scheduled runner skipped: runner task already active")
             return
+        logger.info("[TaskRuntime] starting runner task")
         _runner_task = asyncio.create_task(runner())
+        _runner_task.add_done_callback(_on_runner_done)
 
     loop = asyncio.get_running_loop()
+    logger.info("[TaskRuntime] scheduling runner task")
     _runner_handle = loop.call_later(0.05, start_runner)
 
 

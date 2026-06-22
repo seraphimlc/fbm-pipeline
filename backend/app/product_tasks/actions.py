@@ -1110,7 +1110,11 @@ class ProductCompetitorSearchAction:
         results = await run_amazon_search_queries(
             queries,
             marketplace=marketplace,
-            per_query_limit=12,
+            per_query_limit=settings.AMAZON_SEARCH_PER_QUERY_LIMIT,
+            product_id=product_id,
+            item_code=str(item_code or ""),
+            task_run_id=step.task_run_id,
+            task_step_id=step.id,
         )
         result_payload = {
             "product_id": product_id,
@@ -1231,6 +1235,7 @@ async def _upsert_competitor_search_candidates(
 ) -> int:
     flattened: list[dict[str, Any]] = []
     seen: set[str] = set()
+    max_candidates = max(1, int(settings.AMAZON_SEARCH_MAX_CANDIDATES or 20))
     for result in search_results:
         if not isinstance(result, dict):
             continue
@@ -1247,9 +1252,9 @@ async def _upsert_competitor_search_candidates(
                 "candidate": candidate,
                 "asin": asin,
             })
-            if len(flattened) >= 20:
+            if len(flattened) >= max_candidates:
                 break
-        if len(flattened) >= 20:
+        if len(flattened) >= max_candidates:
             break
 
     if not flattened:

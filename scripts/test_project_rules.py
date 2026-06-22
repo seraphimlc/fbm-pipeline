@@ -3635,25 +3635,25 @@ else:
 
 html = """
 <html><body>
-<div data-component-type="s-search-result" data-asin="B0TEST001">
+<div data-component-type="s-search-result" data-asin="B0TEST0001">
   <span>Sponsored</span>
-  <h2><a class="a-link-normal" href="/dp/B0TEST001"><span>Fabric Modular Sofa Cover Only</span></a></h2>
+  <h2><a class="a-link-normal" href="/dp/B0TEST0001"><span>Fabric Modular Sofa Cover Only</span></a></h2>
   <img class="s-image" src="https://images.example/1.jpg" />
   <span class="a-price"><span class="a-offscreen">$199.99</span></span>
   <span class="a-icon-alt">4.5 out of 5 stars</span>
   <span class="a-size-base s-underline-text">123</span>
 </div>
-<div data-component-type="s-search-result" data-asin="B0TEST002">
-  <h2><a class="a-link-normal" href="/dp/B0TEST002"><span>Fabric Modular Sofa for Living Room</span></a></h2>
+<div data-component-type="s-search-result" data-asin="B0TEST0002">
+  <h2><a class="a-link-normal" href="/dp/B0TEST0002"><span>Fabric Modular Sofa for Living Room</span></a></h2>
   <img class="s-image" src="https://images.example/2.jpg" />
 </div>
 </body></html>
 """
 candidates = parse_amazon_search_results_html(html, query="modular sofa fabric living room")
 assert len(candidates) == 2, candidates
-assert candidates[0].asin == "B0TEST001"
+assert candidates[0].asin == "B0TEST0001"
 assert candidates[0].sponsored is True
-assert candidates[0].url.endswith("/dp/B0TEST001"), candidates[0]
+assert candidates[0].url.endswith("/dp/B0TEST0001"), candidates[0]
 assert candidates[1].search_rank == 2, candidates[1]
 assert classify_amazon_search_page("<html>Robot Check</html>") == "bot_check"
 try:
@@ -3670,6 +3670,103 @@ else:
         capture_output=True,
     )
     assert_true(result.returncode == 0, f"自动竞品搜索 Phase A query/fixture 行为验证失败: {result.stderr or result.stdout}")
+
+
+def test_real_amazon_search_adapter_boundaries() -> None:
+    amazon_search_text = (ROOT / "backend" / "app" / "services" / "amazon_search_page.py").read_text(encoding="utf-8")
+    actions_text = (ROOT / "backend" / "app" / "product_tasks" / "actions.py").read_text(encoding="utf-8")
+    config_text = (ROOT / "backend" / "app" / "config.py").read_text(encoding="utf-8")
+    assert_true(
+        'AMAZON_SEARCH_PAGE_ADAPTER: str = "unconfigured"' in config_text
+        and "AMAZON_SEARCH_ENABLE_REAL_BROWSER: bool = False" in config_text
+        and "AMAZON_SEARCH_EVIDENCE_DIR" in config_text,
+        "真实 Amazon search adapter 必须默认 fail closed，并有显式配置和 evidence 目录",
+    )
+    assert_true(
+        "class ChromeAmazonSearchPageAdapter" in amazon_search_text
+        and "settings.AMAZON_SEARCH_PAGE_ADAPTER" in amazon_search_text
+        and "settings.AMAZON_SEARCH_ENABLE_REAL_BROWSER" in amazon_search_text
+        and "UnconfiguredAmazonSearchPageAdapter()" in amazon_search_text
+        and "FixtureAmazonSearchPageAdapter" in amazon_search_text,
+        "amazon_search_page 必须同时保留默认未配置、fixture parser 测试路径和显式 Chrome 真实 adapter",
+    )
+    assert_true(
+        "AmazonSearchEvidenceContext" in amazon_search_text
+        and "task_run_id" in amazon_search_text
+        and "task_step_id" in amazon_search_text
+        and "query_index" in amazon_search_text
+        and "_write_evidence" in amazon_search_text,
+        "真实 Amazon search evidence 必须按 task_run_id/task_step_id/query_index 归属",
+    )
+    for error_type in (
+        "adapter_not_configured",
+        "browser_unavailable",
+        "browser_permission_denied",
+        "navigation_timeout",
+        "login_required",
+        "captcha",
+        "bot_check",
+        "region_page",
+        "unsupported_page_structure",
+        "empty_results",
+        "parser_error",
+        "rate_limited",
+    ):
+        assert_true(error_type in amazon_search_text, f"Amazon search typed failure 缺失: {error_type}")
+    competitor_section = actions_text.split("class ProductCompetitorSearchAction", 1)[1].split("class ProductCompetitorVisualMatchAction", 1)[0]
+    assert_true(
+        "chrome_ctrl" not in competitor_section
+        and "task_run_id=step.task_run_id" in competitor_section
+        and "task_step_id=step.id" in competitor_section,
+        "ProductCompetitorSearchAction 只能传 evidence context，不能塞浏览器控制逻辑",
+    )
+    upsert_section = actions_text.split("async def _upsert_competitor_search_candidates", 1)[1].split("def _competitor_candidate_flags", 1)[0]
+    assert_true(
+        "settings.AMAZON_SEARCH_MAX_CANDIDATES" in upsert_section
+        and "max_candidates" in upsert_section
+        and "len(flattened) >= 20" not in upsert_section,
+        "自动竞品搜索候选落库上限必须使用 AMAZON_SEARCH_MAX_CANDIDATES 配置，不能死写 20",
+    )
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), str(ROOT / "scripts" / "test_amazon_search_page_real_adapter_boundaries.py")],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"真实 Amazon search adapter 边界行为验证失败: {result.stderr or result.stdout}")
+
+
+def test_task_runtime_autostart_runner_lifecycle_behaviour() -> None:
+    scheduler_text = (ROOT / "backend" / "app" / "task_runtime" / "scheduler.py").read_text(encoding="utf-8")
+    assert_true(
+        "_on_runner_done" in scheduler_text
+        and "_clear_stale_runner_state" in scheduler_text
+        and "runner task crashed" in scheduler_text
+        and "kick ignored: runner task already active" in scheduler_text
+        and "scheduling runner task" in scheduler_text,
+        "task runtime kick 必须有 runner 生命周期日志、异常可见性和 stale 状态清理",
+    )
+    runtime_script = (ROOT / "scripts" / "test_task_runtime_autostart.py").read_text(encoding="utf-8")
+    assert_true(
+        "_assert_ready_step_is_claimed_and_executed_without_wake" in runtime_script
+        and "TaskRun(" in runtime_script
+        and f"status=STEP_STATUS_READY" in runtime_script
+        and "register_worker(PROBE_STEP_TYPE" in runtime_script
+        and "scheduler.kick_task_runtime()" in runtime_script,
+        "task runtime auto_start 行为脚本必须构造 ready step 并触达 claim/worker 路径，不能只 stub drain_ready_steps",
+    )
+    assert_true(
+        "wake_task_run(" not in scheduler_text
+        and "wake_runtime" not in scheduler_text,
+        "runtime auto-start 修复不能通过自动调用 wake 伪装",
+    )
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), str(ROOT / "scripts" / "test_task_runtime_autostart.py")],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"task runtime auto_start 行为验证失败: {result.stderr or result.stdout}")
 
 
 def test_auto_competitor_visual_match_phase_b_contract() -> None:
@@ -4157,6 +4254,8 @@ def main() -> int:
         test_auto_image_selection_phase_b_protection_behaviour,
         test_auto_competitor_search_phase_a_contract,
         test_auto_competitor_search_phase_a_query_and_fixture_behaviour,
+        test_real_amazon_search_adapter_boundaries,
+        test_task_runtime_autostart_runner_lifecycle_behaviour,
         test_auto_competitor_visual_match_phase_b_contract,
         test_auto_competitor_visual_match_phase_b_fixture_behaviour,
         test_auto_competitor_candidate_capture_and_selection_phase1_contract,
