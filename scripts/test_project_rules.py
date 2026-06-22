@@ -2606,7 +2606,7 @@ def test_image_analysis_listing_e5_contract() -> None:
         assert_true(forbidden not in e5_sections, f"E5 image/listing action 不得触发导出/A+/上传/TikTok/旧 pipeline 副作用: {forbidden}")
 
 
-def test_aplus_auto_after_export_ready_a1_policy_contract() -> None:
+def test_aplus_auto_after_export_ready_a1_a2_contract() -> None:
     config_text = (ROOT / "backend" / "app" / "config.py").read_text(encoding="utf-8")
     env_text = (ROOT / "backend" / ".env.example").read_text(encoding="utf-8")
     service_path = ROOT / "backend" / "app" / "services" / "aplus_auto_trigger.py"
@@ -2625,11 +2625,12 @@ def test_aplus_auto_after_export_ready_a1_policy_contract() -> None:
         service_path.is_file()
         and "class AplusAutoStartDecision" in service_text
         and "async def should_auto_start_aplus(" in service_text
+        and "async def try_auto_start_aplus_after_export_ready(" in service_text
         and "eligible: bool" in service_text
         and "code: str" in service_text
         and "message: str" in service_text
         and "details: dict[str, Any]" in service_text,
-        "A1 必须提供结构化只读 eligibility decision service",
+        "A+ 自动触发必须提供结构化 eligibility decision service 和 A2 best-effort trigger helper",
     )
     for code in (
         "disabled_by_config",
@@ -2687,41 +2688,59 @@ def test_aplus_auto_after_export_ready_a1_policy_contract() -> None:
         "A1 policy 必须覆盖真实 ASIN、A+ 上传、导出历史、ProductData/ProductFile 模板输出保护",
     )
     for forbidden in (
-        "create_aplus_generate_runs",
-        "kick_task_runtime",
         "offline_tasks",
         "ProductAplus(",
-        ".aplus_status =",
         "set_product_workflow",
         "product.workflow_node =",
         "product.workflow_status =",
         "product.workflow_error =",
     ):
-        assert_true(forbidden not in service_text, f"A1 policy service 必须只读，不能包含副作用: {forbidden}")
+        assert_true(forbidden not in service_text, f"A+ auto service 不得写商品主流程或使用旧任务/直接写 A+ 状态: {forbidden}")
+    assert_true(
+        "create_aplus_generate_runs" in service_text
+        and "except Exception as exc:" in service_text
+        and '"trigger_failed"' in service_text
+        and '"reused"' in service_text
+        and '"active_aplus_task"' in service_text,
+        "A2 helper 必须通过现有 A+ planner best-effort 创建/复用，并结构化记录失败/复用",
+    )
 
     listing_section = actions_text.split("class ProductListingGenerationAction", 1)[1].split("async def _existing_active_run", 1)[0]
-    for forbidden in (
-        "aplus_auto_trigger",
-        "should_auto_start_aplus",
-        "create_aplus_generate_runs",
-        "aplus_generate_product",
-    ):
-        assert_true(forbidden not in listing_section, f"A1 不能接 Listing success hook 或创建 A+ task: {forbidden}")
+    assert_true(
+        "_project_listing_completed(product)" in listing_section
+        and "await db.commit()" in listing_section
+        and "try_auto_start_aplus_after_export_ready" in listing_section
+        and listing_section.index("_project_listing_completed(product)") < listing_section.index("await db.commit()")
+        and listing_section.index("await db.commit()") < listing_section.index("try_auto_start_aplus_after_export_ready"),
+        "A2 Listing success hook 必须在 E5 export-ready 投影提交后再 best-effort 触发 A+",
+    )
+    assert_true(
+        '"aplus_auto_trigger"' in listing_section
+        and 'summary["aplus_auto_trigger"]' in listing_section
+        and "result[\"aplus_auto_trigger\"]" in listing_section
+        and "_best_effort_update_step_progress" in listing_section,
+        "A2 必须把自动触发结果写入 listing task summary/result/progress data，并保留原 summary 字段",
+    )
     assert_true(
         "async def create_aplus_generate_runs(" in aplus_planner_text
         and "kick_task_runtime()" in aplus_planner_text
-        and "create_aplus_generate_runs" not in service_text,
-        "A+ planner 仍是独立已有能力，A1 policy 不得调用 planner 创建/启动任务",
+        and "dedupe_key=f\"aplus_generate:product:{auto_product_id}\"" in aplus_planner_text
+        and "correlation_key=f\"product:{auto_product_id}:aplus_generate\"" in aplus_planner_text,
+        "A+ planner 仍是独立已有能力，A2 自动单品 run 必须带 dedupe/correlation metadata",
     )
     assert_true(
         behavior_script.is_file()
-        and 'parser.add_argument("--stage", default="a1", choices=("a1",))' in behavior_text
+        and 'parser.add_argument("--stage", default="a1", choices=("a1", "a2"))' in behavior_text
         and "run_schema_maintenance()" in behavior_text
         and "eligible" in behavior_text
         and "active_aplus_task" in behavior_text
+        and "_test_listing_success_default_off_noops" in behavior_text
+        and "_test_listing_success_enabled_creates_aplus_task" in behavior_text
+        and "_test_try_helper_reuses_existing_active_aplus" in behavior_text
+        and "_test_listing_success_aplus_failure_does_not_rollback_export_ready" in behavior_text
         and "before_runs == after_runs" in behavior_text
         and "before_status == after_status" in behavior_text,
-        "A1 必须有 deterministic DB 行为脚本，覆盖 eligibility/skip 且验证不创建 task、不写 A+ 状态",
+        "A+ 必须有 deterministic DB 行为脚本，覆盖 A1 policy 和 A2 no-op/创建/复用/失败隔离",
     )
 
 
@@ -4243,7 +4262,7 @@ def main() -> int:
         test_product_task_action_reserve_states_are_not_marked_interrupted,
         test_product_action_lifecycle_writes_workflow_fields,
         test_image_analysis_listing_e5_contract,
-        test_aplus_auto_after_export_ready_a1_policy_contract,
+        test_aplus_auto_after_export_ready_a1_a2_contract,
         test_product_action_worker_does_not_project_failure_for_interrupted,
         test_product_action_final_progress_failure_is_best_effort,
         test_auto_image_selection_phase_a_contract,

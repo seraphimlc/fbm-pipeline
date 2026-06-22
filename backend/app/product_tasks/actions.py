@@ -62,6 +62,7 @@ from app.services.product_protection import (
     product_external_result_protection_reasons,
     raise_if_auto_image_selection_protected,
 )
+from app.services.aplus_auto_trigger import try_auto_start_aplus_after_export_ready
 from app.task_runtime.actions import TaskAction, TaskGroupPlan, TaskRunPlan, TaskStepPlan, action_for, register_action
 from app.task_runtime.constants import (
     RUN_STATUS_FAILED,
@@ -2625,26 +2626,74 @@ class ProductListingGenerationAction:
 
     async def on_step_success(self, db: AsyncSession, step: TaskStep, result: dict[str, Any]) -> None:
         product_id = int(result.get("product_id") or _payload_for_step(step).get("product_id") or 0)
+        source_task_run_id = step.task_run_id
+        source_task_step_id = step.id
         product = await _load_product(db, product_id)
         _raise_if_e5_export_ready_protected(product, action_label="完成 Listing 并进入待导出")
         _project_listing_completed(product)
-        step.task_run.summary_json = json_dumps({
+        summary = {
             "product_id": product_id,
             "item_code": result.get("item_code"),
             "status": "listing_done",
             "next_step": "export",
-        })
+        }
+        step.task_run.summary_json = json_dumps(summary)
         await db.commit()
+        try:
+            aplus_auto_trigger = await try_auto_start_aplus_after_export_ready(
+                db,
+                product_id,
+                source_task_run_id=source_task_run_id,
+                source_task_step_id=source_task_step_id,
+            )
+        except Exception as exc:
+            await db.rollback()
+            logger.exception(
+                "A+ auto trigger failed after listing export-ready commit: product_id=%s task_run_id=%s",
+                product_id,
+                source_task_run_id,
+            )
+            aplus_auto_trigger = {
+                "status": "failed",
+                "code": "trigger_failed",
+                "message": f"{type(exc).__name__}: {exc}",
+                "details": {"product_id": product_id},
+                "source_task_run_id": source_task_run_id,
+                "source_task_step_id": source_task_step_id,
+            }
+        summary["aplus_auto_trigger"] = aplus_auto_trigger
+        try:
+            refreshed_step = (
+                await db.execute(
+                    select(TaskStep)
+                    .where(TaskStep.id == source_task_step_id)
+                    .options(selectinload(TaskStep.task_run))
+                )
+            ).scalar_one()
+            step = refreshed_step
+            step.task_run.summary_json = json_dumps(summary)
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            logger.exception(
+                "Listing success A+ auto trigger summary write failed: product_id=%s task_run_id=%s",
+                product_id,
+                source_task_run_id,
+            )
+            reloaded_step = await db.get(TaskStep, source_task_step_id)
+            if reloaded_step is not None:
+                step = reloaded_step
         await _best_effort_update_step_progress(
             db,
             step,
             current=1,
             total=1,
             message="Listing 生成完成，已进入待导出",
-            data={"product_id": product_id, "item_code": result.get("item_code")},
+            data={"product_id": product_id, "item_code": result.get("item_code"), "aplus_auto_trigger": aplus_auto_trigger},
         )
         result["status"] = "done"
         result["next_step"] = "export"
+        result["aplus_auto_trigger"] = aplus_auto_trigger
 
     async def on_step_failure(self, db: AsyncSession, step: TaskStep, error: Exception) -> None:
         product_id = int(_payload_for_step(step).get("product_id") or 0)

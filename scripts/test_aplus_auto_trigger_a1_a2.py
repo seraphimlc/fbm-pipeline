@@ -16,10 +16,13 @@ if str(BACKEND) not in sys.path:
 
 from app.database import async_session, run_schema_maintenance  # noqa: E402
 from app.models import CatalogProduct, Product, ProductAplus, ProductData, ProductFile, ProductImage, TaskGroup, TaskRun, TaskStep, TaskStepEvent  # noqa: E402
-from app.models.status import COMPLETED, WORKFLOW_NODE_FLOW_DONE, WORKFLOW_NODE_LISTING_GENERATION, WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_SUCCEEDED  # noqa: E402
-from app.services.aplus_auto_trigger import should_auto_start_aplus  # noqa: E402
+from app.models.status import COMPLETED, STEP5_LISTING, WORKFLOW_NODE_FLOW_DONE, WORKFLOW_NODE_LISTING_GENERATION, WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_PROCESSING, WORKFLOW_STATUS_SUCCEEDED  # noqa: E402
+from app.product_tasks import actions as product_actions  # noqa: E402
+from app.services import aplus_auto_trigger as aplus_service  # noqa: E402
+from app.services.aplus_auto_trigger import should_auto_start_aplus, try_auto_start_aplus_after_export_ready  # noqa: E402
+from app.task_planners import aplus_generate as aplus_planner  # noqa: E402
 from app.task_runtime.constants import RUN_STATUS_RUNNING, STEP_STATUS_RUNNING  # noqa: E402
-from app.task_runtime.json_utils import json_dumps  # noqa: E402
+from app.task_runtime.json_utils import json_dumps, json_loads  # noqa: E402
 
 
 TEST_PREFIX = "APLUS_A1_TEST_"
@@ -34,7 +37,9 @@ async def _cleanup_markers() -> None:
         )
         run_ids = list(
             (
-                await session.execute(select(TaskRun.id).where(TaskRun.created_by == "aplus-a1-test"))
+                await session.execute(
+                    select(TaskRun.id).where(TaskRun.created_by.in_(("aplus-a1-test", "auto_after_export_ready")))
+                )
             ).scalars().all()
         )
         if run_ids:
@@ -196,6 +201,62 @@ async def _decision_code(session, product: Product, *, enabled: bool = True) -> 
     return decision.code
 
 
+async def _aplus_steps_for_product(session, product_id: int) -> list[tuple[TaskRun, TaskStep]]:
+    result = await session.execute(
+        select(TaskRun, TaskStep)
+        .join(TaskStep, TaskStep.task_run_id == TaskRun.id)
+        .where(TaskStep.step_type == "aplus_generate_product")
+        .order_by(TaskRun.id.asc(), TaskStep.id.asc())
+    )
+    rows: list[tuple[TaskRun, TaskStep]] = []
+    for run, step in result.all():
+        payload = json_loads(step.payload_json, {})
+        if isinstance(payload, dict) and int(payload.get("product_id") or 0) == product_id:
+            rows.append((run, step))
+    return rows
+
+
+async def _product_state(session, product_id: int) -> Product:
+    return (
+        await session.execute(
+            select(Product)
+            .where(Product.id == product_id)
+            .options(selectinload(Product.aplus), selectinload(Product.catalog_item))
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
+
+
+async def _run_summary(session, task_run_id: int) -> dict:
+    run = await session.get(TaskRun, task_run_id)
+    assert run is not None, task_run_id
+    return json_loads(run.summary_json, {})
+
+
+def _set_auto_enabled(value: bool) -> bool:
+    previous = bool(aplus_service.settings.AUTO_APLUS_AFTER_EXPORT_READY)
+    aplus_service.settings.AUTO_APLUS_AFTER_EXPORT_READY = value
+    return previous
+
+
+async def _listing_success(
+    session,
+    product: Product,
+    marker: str,
+) -> tuple[TaskRun, TaskStep, dict]:
+    listing_run, listing_step = await _make_active_task(
+        session,
+        product.id,
+        task_type="product_listing_generation",
+        step_type="product_listing_generation",
+        suffix=f"listing_{marker.lower()}",
+    )
+    await session.commit()
+    result = {"product_id": product.id, "item_code": f"{TEST_PREFIX}{marker}", "listing": {"fixture": True}}
+    await product_actions.ProductListingGenerationAction().on_step_success(session, listing_step, result)
+    return listing_run, listing_step, result
+
+
 async def _case(marker: str, expected: str, **overrides) -> None:
     async with async_session() as session:
         product = await _make_product(session, marker, **overrides)
@@ -261,13 +322,167 @@ async def _run_a1() -> None:
         await _cleanup_markers()
 
 
+async def _test_listing_success_default_off_noops() -> None:
+    previous = _set_auto_enabled(False)
+    try:
+        async with async_session() as session:
+            product = await _make_product(
+                session,
+                "A2_DEFAULT_OFF",
+                status=STEP5_LISTING,
+                workflow_node=WORKFLOW_NODE_LISTING_GENERATION,
+                workflow_status=WORKFLOW_STATUS_PROCESSING,
+                confirmed_at=None,
+            )
+            listing_run, _listing_step, result = await _listing_success(session, product, "A2_DEFAULT_OFF")
+
+            refreshed = await _product_state(session, product.id)
+            summary = json_loads(listing_run.summary_json, {})
+            aplus_rows = await _aplus_steps_for_product(session, product.id)
+            assert refreshed.status == COMPLETED, refreshed.status
+            assert refreshed.workflow_node == WORKFLOW_NODE_FLOW_DONE, refreshed.workflow_node
+            assert refreshed.workflow_status == WORKFLOW_STATUS_SUCCEEDED, refreshed.workflow_status
+            assert refreshed.catalog_item.confirmed_at is not None, refreshed.catalog_item.confirmed_at
+            assert refreshed.aplus is None, refreshed.aplus
+            assert aplus_rows == [], [(run.id, step.id) for run, step in aplus_rows]
+            assert summary["status"] == "listing_done", summary
+            assert summary["aplus_auto_trigger"]["code"] == "disabled_by_config", summary
+            assert result["aplus_auto_trigger"]["code"] == "disabled_by_config", result
+    finally:
+        _set_auto_enabled(previous)
+
+
+async def _test_listing_success_enabled_creates_aplus_task() -> tuple[int, int, int]:
+    previous = _set_auto_enabled(True)
+    old_kick = aplus_planner.kick_task_runtime
+    aplus_planner.kick_task_runtime = lambda: None
+    try:
+        async with async_session() as session:
+            product = await _make_product(
+                session,
+                "A2_ENABLED_QUEUE",
+                status=STEP5_LISTING,
+                workflow_node=WORKFLOW_NODE_LISTING_GENERATION,
+                workflow_status=WORKFLOW_STATUS_PROCESSING,
+                confirmed_at=None,
+            )
+            listing_run, _listing_step, result = await _listing_success(session, product, "A2_ENABLED_QUEUE")
+
+            refreshed = await _product_state(session, product.id)
+            summary = json_loads(listing_run.summary_json, {})
+            aplus_rows = await _aplus_steps_for_product(session, product.id)
+            assert refreshed.status == COMPLETED, refreshed.status
+            assert refreshed.workflow_node == WORKFLOW_NODE_FLOW_DONE, refreshed.workflow_node
+            assert refreshed.workflow_status == WORKFLOW_STATUS_SUCCEEDED, refreshed.workflow_status
+            assert refreshed.catalog_item.confirmed_at is not None, refreshed.catalog_item.confirmed_at
+            assert refreshed.aplus and refreshed.aplus.aplus_status == "queued", refreshed.aplus
+            assert len(aplus_rows) == 1, [(run.id, step.id) for run, step in aplus_rows]
+            aplus_run, aplus_step = aplus_rows[0]
+            assert aplus_run.created_by == "auto_after_export_ready", aplus_run.created_by
+            assert aplus_run.dedupe_key == f"aplus_generate:product:{product.id}", aplus_run.dedupe_key
+            assert aplus_run.correlation_key == f"product:{product.id}:aplus_generate", aplus_run.correlation_key
+            assert aplus_step.status in {"ready", "running", "pending"}, aplus_step.status
+            assert summary["status"] == "listing_done", summary
+            assert summary["aplus_auto_trigger"]["status"] == "queued", summary
+            assert summary["aplus_auto_trigger"]["code"] == "queued", summary
+            assert summary["aplus_auto_trigger"]["details"]["task_run_ids"] == [aplus_run.id], summary
+            assert result["aplus_auto_trigger"]["status"] == "queued", result
+            return product.id, aplus_run.id, listing_run.id
+    finally:
+        aplus_planner.kick_task_runtime = old_kick
+        _set_auto_enabled(previous)
+
+
+async def _test_try_helper_reuses_existing_active_aplus(product_id: int, existing_run_id: int, source_listing_run_id: int) -> None:
+    previous = _set_auto_enabled(True)
+    try:
+        async with async_session() as session:
+            before_rows = await _aplus_steps_for_product(session, product_id)
+            result = await try_auto_start_aplus_after_export_ready(
+                session,
+                product_id,
+                source_task_run_id=source_listing_run_id,
+                created_by="aplus-a1-test",
+            )
+            after_rows = await _aplus_steps_for_product(session, product_id)
+            assert result["status"] == "reused", result
+            assert result["code"] == "active_aplus_task", result
+            assert [run.id for run, _ in before_rows] == [run.id for run, _ in after_rows], result
+            assert len(after_rows) == 1, [(run.id, step.id) for run, step in after_rows]
+            assert after_rows[0][0].id == existing_run_id, after_rows[0][0].id
+    finally:
+        _set_auto_enabled(previous)
+
+
+async def _test_listing_success_aplus_failure_does_not_rollback_export_ready() -> None:
+    previous = _set_auto_enabled(True)
+    original_create = aplus_service.create_aplus_generate_runs
+
+    async def _raise_planner_failure(*args, **kwargs):
+        raise RuntimeError("forced aplus planner failure")
+
+    aplus_service.create_aplus_generate_runs = _raise_planner_failure
+    try:
+        async with async_session() as session:
+            product = await _make_product(
+                session,
+                "A2_PLANNER_FAIL",
+                status=STEP5_LISTING,
+                workflow_node=WORKFLOW_NODE_LISTING_GENERATION,
+                workflow_status=WORKFLOW_STATUS_PROCESSING,
+                confirmed_at=None,
+            )
+            product_id = product.id
+            listing_run, _listing_step, result = await _listing_success(session, product, "A2_PLANNER_FAIL")
+            listing_run_id = listing_run.id
+
+            refreshed = await _product_state(session, product_id)
+            summary = await _run_summary(session, listing_run_id)
+            aplus_rows = await _aplus_steps_for_product(session, product_id)
+            assert refreshed.status == COMPLETED, refreshed.status
+            assert refreshed.workflow_node == WORKFLOW_NODE_FLOW_DONE, refreshed.workflow_node
+            assert refreshed.workflow_status == WORKFLOW_STATUS_SUCCEEDED, refreshed.workflow_status
+            assert not refreshed.workflow_error, refreshed.workflow_error
+            assert refreshed.catalog_item.confirmed_at is not None, refreshed.catalog_item.confirmed_at
+            assert refreshed.aplus is None, refreshed.aplus
+            assert aplus_rows == [], [(run.id, step.id) for run, step in aplus_rows]
+            assert summary["aplus_auto_trigger"]["status"] == "failed", summary
+            assert summary["aplus_auto_trigger"]["code"] == "trigger_failed", summary
+            assert "forced aplus planner failure" in summary["aplus_auto_trigger"]["message"], summary
+            assert result["aplus_auto_trigger"]["status"] == "failed", result
+    finally:
+        aplus_service.create_aplus_generate_runs = original_create
+        _set_auto_enabled(previous)
+
+
+async def _run_a2() -> None:
+    await run_schema_maintenance()
+    await _cleanup_markers()
+    try:
+        await _test_listing_success_default_off_noops()
+        product_id, aplus_run_id, listing_run_id = await _test_listing_success_enabled_creates_aplus_task()
+        await _test_try_helper_reuses_existing_active_aplus(product_id, aplus_run_id, listing_run_id)
+        await _test_listing_success_aplus_failure_does_not_rollback_export_ready()
+    finally:
+        await _cleanup_markers()
+
+
+async def _run_a1_then_a2() -> None:
+    await _run_a1()
+    await _run_a2()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stage", default="a1", choices=("a1",))
+    parser.add_argument("--stage", default="a1", choices=("a1", "a2"))
     args = parser.parse_args()
     if args.stage == "a1":
         asyncio.run(_run_a1())
         print("A+ auto trigger A1 policy behavior checks passed")
+        return 0
+    if args.stage == "a2":
+        asyncio.run(_run_a1_then_a2())
+        print("A+ auto trigger A1/A2 behavior checks passed")
         return 0
     raise AssertionError(f"Unsupported stage: {args.stage}")
 

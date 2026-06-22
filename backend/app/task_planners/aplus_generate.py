@@ -104,16 +104,21 @@ async def create_aplus_generate_runs(
         await db.commit()
         return [], errors, []
 
+    auto_single_product = created_by == "auto_after_export_ready" and len(eligible) == 1
+    auto_product_id = eligible[0][1].id if auto_single_product else None
     run = TaskRun(
         task_type="aplus_generate",
         title=f"A+生成（{len(eligible)} 个商品）",
         status="pending",
         created_by=created_by,
+        dedupe_key=f"aplus_generate:product:{auto_product_id}" if auto_product_id else None,
+        correlation_key=f"product:{auto_product_id}:aplus_generate" if auto_product_id else None,
         payload_json=json_dumps({
             "catalog_product_ids": [catalog.id for catalog, _ in eligible],
             "requested_catalog_product_ids": requested_ids,
             "force": force,
             "errors": errors,
+            "auto_after_export_ready": auto_single_product,
         }),
         created_at=now,
         updated_at=now,

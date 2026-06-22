@@ -1,8 +1,4 @@
-"""A+ auto-start eligibility policy.
-
-A1 is intentionally read-only: it decides whether an export-ready product may
-auto-start A+ later, but it does not create task runs or mutate product state.
-"""
+"""A+ auto-start eligibility and post-export-ready trigger helpers."""
 
 from __future__ import annotations
 
@@ -17,6 +13,7 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.models import CatalogProduct, Product, ProductFile, TaskRun, TaskStep
 from app.models.status import COMPLETED, WORKFLOW_NODE_FLOW_DONE, WORKFLOW_STATUS_SUCCEEDED
+from app.task_planners.aplus_generate import create_aplus_generate_runs
 from app.task_runtime.constants import RUN_STATUS_PENDING, RUN_STATUS_RUNNING, STEP_STATUS_PENDING, STEP_STATUS_READY, STEP_STATUS_RUNNING
 from app.task_runtime.json_utils import json_loads
 
@@ -275,3 +272,121 @@ async def should_auto_start_aplus(
         confirmed_at=catalog.confirmed_at.isoformat(),
         aplus_status=normalized_aplus_status or None,
     )
+
+
+def _decision_result(decision: AplusAutoStartDecision, *, source_task_run_id: int | None = None, source_task_step_id: int | None = None) -> dict[str, Any]:
+    status = "reused" if decision.code == "active_aplus_task" else "skipped"
+    return {
+        "status": status,
+        "code": decision.code,
+        "message": decision.message,
+        "details": decision.details,
+        "source_task_run_id": source_task_run_id,
+        "source_task_step_id": source_task_step_id,
+    }
+
+
+async def try_auto_start_aplus_after_export_ready(
+    db: AsyncSession,
+    product_id: int,
+    *,
+    source_task_run_id: int | None = None,
+    source_task_step_id: int | None = None,
+    created_by: str = "auto_after_export_ready",
+) -> dict[str, Any]:
+    """Best-effort A+ trigger after Listing success has committed export-ready.
+
+    The helper returns structured evidence for task summaries and logs. Planner
+    failures are contained here so callers do not roll back the product main
+    workflow after it reached export-ready.
+    """
+    result = await db.execute(
+        select(Product)
+        .where(Product.id == product_id)
+        .options(selectinload(Product.catalog_item))
+    )
+    product = result.scalar_one_or_none()
+    if not product:
+        return {
+            "status": "skipped",
+            "code": "not_completed",
+            "message": "商品不存在或未落库",
+            "details": {"product_id": product_id},
+            "source_task_run_id": source_task_run_id,
+            "source_task_step_id": source_task_step_id,
+        }
+
+    decision = await should_auto_start_aplus(
+        db,
+        product,
+        exclude_task_run_id=source_task_run_id,
+    )
+    if not decision.eligible:
+        return _decision_result(
+            decision,
+            source_task_run_id=source_task_run_id,
+            source_task_step_id=source_task_step_id,
+        )
+
+    catalog_product_id = int(decision.details.get("catalog_product_id") or 0)
+    if catalog_product_id <= 0:
+        return {
+            "status": "failed",
+            "code": "trigger_failed",
+            "message": "A+ 自动触发缺少 catalog_product_id",
+            "details": {"product_id": product_id, "decision": decision.details},
+            "source_task_run_id": source_task_run_id,
+            "source_task_step_id": source_task_step_id,
+        }
+
+    try:
+        runs, errors, queued_product_ids = await create_aplus_generate_runs(
+            db,
+            [catalog_product_id],
+            force=False,
+            created_by=created_by,
+            auto_start=True,
+        )
+    except Exception as exc:
+        await db.rollback()
+        return {
+            "status": "failed",
+            "code": "trigger_failed",
+            "message": f"{type(exc).__name__}: {exc}",
+            "details": {
+                "product_id": product_id,
+                "catalog_product_id": catalog_product_id,
+            },
+            "source_task_run_id": source_task_run_id,
+            "source_task_step_id": source_task_step_id,
+        }
+
+    if runs:
+        return {
+            "status": "queued",
+            "code": "queued",
+            "message": "A+ 自动生成任务已创建或加入队列",
+            "details": {
+                "product_id": product_id,
+                "catalog_product_id": catalog_product_id,
+                "task_run_ids": [run.id for run in runs],
+                "queued_product_ids": queued_product_ids,
+                "planner_errors": errors,
+            },
+            "source_task_run_id": source_task_run_id,
+            "source_task_step_id": source_task_step_id,
+        }
+
+    return {
+        "status": "skipped",
+        "code": "planner_skipped",
+        "message": "A+ planner 未创建任务",
+        "details": {
+            "product_id": product_id,
+            "catalog_product_id": catalog_product_id,
+            "planner_errors": errors,
+            "queued_product_ids": queued_product_ids,
+        },
+        "source_task_run_id": source_task_run_id,
+        "source_task_step_id": source_task_step_id,
+    }
