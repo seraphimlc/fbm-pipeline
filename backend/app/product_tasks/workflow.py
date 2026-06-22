@@ -27,6 +27,19 @@ from app.models.status import (
     WORKFLOW_STATUS_PROCESSING,
     WORKFLOW_STATUS_SUCCEEDED,
 )
+from app.product_tasks.work_status import (
+    PRODUCT_WORK_STATUS_AUTO_SELECT_IMAGES,
+    PRODUCT_WORK_STATUS_CAPTURE_DETAIL,
+    PRODUCT_WORK_STATUS_COMPETITOR_SEARCHING,
+    PRODUCT_WORK_STATUS_EXPORTED,
+    PRODUCT_WORK_STATUS_EXPORT_READY,
+    PRODUCT_WORK_STATUS_FAILED,
+    PRODUCT_WORK_STATUS_NEEDS_INITIALIZATION,
+    PRODUCT_WORK_STATUS_READY_TO_GENERATE,
+    PRODUCT_WORK_STATUS_RUNNING,
+    PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
+    PRODUCT_WORK_STATUS_SELECT_IMAGES,
+)
 
 
 @dataclass(frozen=True)
@@ -45,7 +58,7 @@ WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
     WORKFLOW_NODE_AUTO_SELECT_IMAGES: WorkflowNodeView(
         label="自动选图",
         node_type="async",
-        default_work_status="running",
+        default_work_status=PRODUCT_WORK_STATUS_RUNNING,
         default_primary_action="open_task_center",
         default_primary_action_label="任务中心",
         default_allowed_actions=("open_task_center",),
@@ -55,7 +68,7 @@ WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
     WORKFLOW_NODE_SELECT_IMAGES: WorkflowNodeView(
         label="选择图片",
         node_type="sync",
-        default_work_status="select_images",
+        default_work_status=PRODUCT_WORK_STATUS_SELECT_IMAGES,
         default_primary_action="open_image_review",
         default_primary_action_label="确认图片",
         default_allowed_actions=("open_image_review",),
@@ -65,7 +78,7 @@ WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
     WORKFLOW_NODE_SEARCH_COMPETITOR: WorkflowNodeView(
         label="搜索竞品",
         node_type="async",
-        default_work_status="select_competitor",
+        default_work_status=PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
         default_primary_action="start_competitor_search",
         default_primary_action_label="开始搜索",
         default_allowed_actions=("start_competitor_search", "open_detail"),
@@ -75,7 +88,7 @@ WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
     WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS: WorkflowNodeView(
         label="视觉初筛竞品",
         node_type="async",
-        default_work_status="select_competitor",
+        default_work_status=PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
         default_primary_action="retry_competitor_visual_match",
         default_primary_action_label="开始视觉初筛",
         default_allowed_actions=("retry_competitor_visual_match", "restart_competitor_search", "open_detail"),
@@ -85,7 +98,7 @@ WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
     WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES: WorkflowNodeView(
         label="抓取候选竞品",
         node_type="async",
-        default_work_status="capture_detail",
+        default_work_status=PRODUCT_WORK_STATUS_CAPTURE_DETAIL,
         default_primary_action="open_detail",
         default_primary_action_label="查看",
         default_allowed_actions=("open_detail", "restart_competitor_search"),
@@ -95,7 +108,7 @@ WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
     WORKFLOW_NODE_AUTO_SELECT_COMPETITOR: WorkflowNodeView(
         label="自动选竞品",
         node_type="async",
-        default_work_status="select_competitor",
+        default_work_status=PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
         default_primary_action="open_detail",
         default_primary_action_label="查看",
         default_allowed_actions=("open_detail", "restart_competitor_search"),
@@ -105,7 +118,7 @@ WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
     WORKFLOW_NODE_SELECT_COMPETITOR: WorkflowNodeView(
         label="选择竞品",
         node_type="sync",
-        default_work_status="select_competitor",
+        default_work_status=PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
         default_primary_action="open_detail",
         default_primary_action_label="查看",
         default_allowed_actions=("open_detail",),
@@ -115,7 +128,7 @@ WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
     WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL: WorkflowNodeView(
         label="抓取竞品详情",
         node_type="async",
-        default_work_status="capture_detail",
+        default_work_status=PRODUCT_WORK_STATUS_CAPTURE_DETAIL,
         default_primary_action="open_detail",
         default_primary_action_label="查看",
         default_allowed_actions=("open_detail",),
@@ -125,7 +138,7 @@ WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
     WORKFLOW_NODE_IMAGE_ANALYSIS: WorkflowNodeView(
         label="图片分析",
         node_type="async",
-        default_work_status="running",
+        default_work_status=PRODUCT_WORK_STATUS_RUNNING,
         default_primary_action="open_task_center",
         default_primary_action_label="任务中心",
         default_allowed_actions=("open_task_center",),
@@ -135,7 +148,7 @@ WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
     WORKFLOW_NODE_LISTING_GENERATION: WorkflowNodeView(
         label="Listing 生成",
         node_type="async",
-        default_work_status="running",
+        default_work_status=PRODUCT_WORK_STATUS_RUNNING,
         default_primary_action="open_task_center",
         default_primary_action_label="任务中心",
         default_allowed_actions=("open_task_center",),
@@ -145,7 +158,7 @@ WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
     WORKFLOW_NODE_FLOW_DONE: WorkflowNodeView(
         label="主流程完成",
         node_type="done",
-        default_work_status="export_ready",
+        default_work_status=PRODUCT_WORK_STATUS_EXPORT_READY,
         default_primary_action="open_detail",
         default_primary_action_label="查看",
         default_allowed_actions=(),
@@ -189,7 +202,7 @@ def build_product_workflow(product: Any, *, catalog_exported: bool | None = None
             stage="workflow_uninitialized",
             stage_status=WORKFLOW_STATUS_PENDING,
             label="Workflow 待初始化",
-            work_status="needs_initialization",
+            work_status=PRODUCT_WORK_STATUS_NEEDS_INITIALIZATION,
             node_key=None,
             node_label="未初始化",
             node_type="uninitialized",
@@ -207,7 +220,7 @@ def build_product_workflow(product: Any, *, catalog_exported: bool | None = None
             stage="workflow_unknown",
             stage_status=WORKFLOW_STATUS_FAILED,
             label="Workflow 节点未知",
-            work_status="failed",
+            work_status=PRODUCT_WORK_STATUS_FAILED,
             node_key=str(node),
             node_label="未知节点",
             node_type="unknown",
@@ -225,7 +238,7 @@ def build_product_workflow(product: Any, *, catalog_exported: bool | None = None
             stage=node,
             stage_status=WORKFLOW_STATUS_FAILED,
             label="Workflow 状态未知",
-            work_status="failed",
+            work_status=PRODUCT_WORK_STATUS_FAILED,
             node_key=node,
             node_label=WORKFLOW_NODE_VIEWS[node].label,
             node_type=WORKFLOW_NODE_VIEWS[node].node_type,
@@ -243,7 +256,7 @@ def build_product_workflow(product: Any, *, catalog_exported: bool | None = None
         overrides = {
             **overrides,
             "label": "铺货内容已导出",
-            "work_status": "exported",
+            "work_status": PRODUCT_WORK_STATUS_EXPORTED,
             "primary_action": "open_detail",
             "primary_action_label": "查看",
             "allowed_actions": (),
@@ -284,7 +297,7 @@ def _legacy_empty_workflow_state(
             overrides = {
                 **overrides,
                 "label": "铺货内容已导出",
-                "work_status": "exported",
+                "work_status": PRODUCT_WORK_STATUS_EXPORTED,
                 "primary_action": "open_detail",
                 "primary_action_label": "查看",
                 "allowed_actions": (),
@@ -296,7 +309,7 @@ def _legacy_empty_workflow_state(
             stage=WORKFLOW_NODE_FLOW_DONE,
             stage_status=WORKFLOW_STATUS_SUCCEEDED,
             label=overrides.get("label", "铺货内容已生成"),
-            work_status=overrides.get("work_status", "export_ready"),
+            work_status=overrides.get("work_status", PRODUCT_WORK_STATUS_EXPORT_READY),
             node_key=WORKFLOW_NODE_FLOW_DONE,
             node_label=WORKFLOW_NODE_VIEWS[WORKFLOW_NODE_FLOW_DONE].label,
             node_type=WORKFLOW_NODE_VIEWS[WORKFLOW_NODE_FLOW_DONE].node_type,
@@ -318,7 +331,7 @@ def _legacy_empty_workflow_state(
             stage="workflow_uninitialized",
             stage_status=WORKFLOW_STATUS_FAILED,
             label="流程失败",
-            work_status="failed",
+            work_status=PRODUCT_WORK_STATUS_FAILED,
             node_key=None,
             node_label="未初始化",
             node_type="uninitialized",
@@ -336,7 +349,7 @@ def _legacy_empty_workflow_state(
         stage=node,
         stage_status=WORKFLOW_STATUS_FAILED,
         label=overrides.get("label", f"{WORKFLOW_NODE_VIEWS[node].label}失败"),
-        work_status=overrides.get("work_status", "failed"),
+        work_status=overrides.get("work_status", PRODUCT_WORK_STATUS_FAILED),
         node_key=node,
         node_label=WORKFLOW_NODE_VIEWS[node].label,
         node_type=WORKFLOW_NODE_VIEWS[node].node_type,
@@ -425,7 +438,7 @@ def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
     if node == WORKFLOW_NODE_AUTO_SELECT_IMAGES and status == WORKFLOW_STATUS_PENDING:
         return {
             "label": "待自动选图",
-            "work_status": "auto_select_images",
+            "work_status": PRODUCT_WORK_STATUS_AUTO_SELECT_IMAGES,
             "primary_action": "open_task_center",
             "primary_action_label": "任务中心",
             "allowed_actions": ("open_task_center",),
@@ -433,12 +446,12 @@ def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
             "color": "warning",
         }
     if node == WORKFLOW_NODE_AUTO_SELECT_IMAGES and status == WORKFLOW_STATUS_SUCCEEDED:
-        return {"label": "自动选图完成", "work_status": "select_competitor", "color": "success"}
+        return {"label": "自动选图完成", "work_status": PRODUCT_WORK_STATUS_SELECT_COMPETITOR, "color": "success"}
     if node == WORKFLOW_NODE_SEARCH_COMPETITOR and status == WORKFLOW_STATUS_PROCESSING:
         if not _is_auto_competitor_search(product):
             return {
                 "label": "竞品搜索中",
-                "work_status": "competitor_searching",
+                "work_status": PRODUCT_WORK_STATUS_COMPETITOR_SEARCHING,
                 "primary_action": "open_detail",
                 "primary_action_label": "查看",
                 "allowed_actions": ("open_detail",),
@@ -447,7 +460,7 @@ def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
             }
         return {
             "label": "竞品搜索中",
-            "work_status": "competitor_searching",
+            "work_status": PRODUCT_WORK_STATUS_COMPETITOR_SEARCHING,
             "primary_action": "open_task_center",
             "primary_action_label": "任务中心",
             "allowed_actions": ("open_task_center", "open_detail"),
@@ -457,7 +470,7 @@ def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
     if node == WORKFLOW_NODE_SEARCH_COMPETITOR and status == WORKFLOW_STATUS_SUCCEEDED:
         return {
             "label": "竞品搜索完成",
-            "work_status": "select_competitor",
+            "work_status": PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
             "primary_action": "open_detail",
             "primary_action_label": "查看",
             "allowed_actions": ("open_detail",),
@@ -467,7 +480,7 @@ def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
     if node == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS and status == WORKFLOW_STATUS_PENDING:
         return {
             "label": "待视觉初筛竞品",
-            "work_status": "select_competitor",
+            "work_status": PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
             "primary_action": "retry_competitor_visual_match",
             "primary_action_label": "开始视觉初筛",
             "allowed_actions": ("retry_competitor_visual_match", "restart_competitor_search", "open_detail"),
@@ -477,7 +490,7 @@ def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
     if node == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS and status == WORKFLOW_STATUS_PROCESSING:
         return {
             "label": "竞品视觉初筛中",
-            "work_status": "competitor_searching",
+            "work_status": PRODUCT_WORK_STATUS_COMPETITOR_SEARCHING,
             "primary_action": "open_task_center",
             "primary_action_label": "任务中心",
             "allowed_actions": ("open_task_center", "open_detail"),
@@ -487,7 +500,7 @@ def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
     if node == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS and status == WORKFLOW_STATUS_SUCCEEDED:
         return {
             "label": "竞品视觉初筛完成",
-            "work_status": "capture_detail",
+            "work_status": PRODUCT_WORK_STATUS_CAPTURE_DETAIL,
             "primary_action": "open_detail",
             "primary_action_label": "查看",
             "allowed_actions": ("open_detail",),
@@ -497,7 +510,7 @@ def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES and status == WORKFLOW_STATUS_PENDING:
         return {
             "label": "待抓取候选竞品",
-            "work_status": "capture_detail",
+            "work_status": PRODUCT_WORK_STATUS_CAPTURE_DETAIL,
             "primary_action": "open_detail",
             "primary_action_label": "查看",
             "allowed_actions": ("open_detail", "restart_competitor_search"),
@@ -507,7 +520,7 @@ def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES and status == WORKFLOW_STATUS_PROCESSING:
         return {
             "label": "候选竞品详情抓取中",
-            "work_status": "capture_detail",
+            "work_status": PRODUCT_WORK_STATUS_CAPTURE_DETAIL,
             "primary_action": "open_task_center",
             "primary_action_label": "任务中心",
             "allowed_actions": ("open_task_center", "open_detail"),
@@ -515,11 +528,11 @@ def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
             "color": "processing",
         }
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES and status == WORKFLOW_STATUS_SUCCEEDED:
-        return {"label": "候选竞品详情已抓取", "work_status": "ready_to_generate", "color": "success"}
+        return {"label": "候选竞品详情已抓取", "work_status": PRODUCT_WORK_STATUS_READY_TO_GENERATE, "color": "success"}
     if node == WORKFLOW_NODE_AUTO_SELECT_COMPETITOR and status == WORKFLOW_STATUS_PENDING:
         return {
             "label": "待自动选竞品",
-            "work_status": "select_competitor",
+            "work_status": PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
             "primary_action": "open_detail",
             "primary_action_label": "查看",
             "allowed_actions": ("open_detail", "restart_competitor_search"),
@@ -529,7 +542,7 @@ def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
     if node == WORKFLOW_NODE_AUTO_SELECT_COMPETITOR and status == WORKFLOW_STATUS_PROCESSING:
         return {
             "label": "自动选竞品中",
-            "work_status": "select_competitor",
+            "work_status": PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
             "primary_action": "open_task_center",
             "primary_action_label": "任务中心",
             "allowed_actions": ("open_task_center", "open_detail"),
@@ -537,23 +550,23 @@ def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
             "color": "processing",
         }
     if node == WORKFLOW_NODE_AUTO_SELECT_COMPETITOR and status == WORKFLOW_STATUS_SUCCEEDED:
-        return {"label": "自动选竞品完成", "work_status": "ready_to_generate", "color": "success"}
+        return {"label": "自动选竞品完成", "work_status": PRODUCT_WORK_STATUS_READY_TO_GENERATE, "color": "success"}
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL and status == WORKFLOW_STATUS_PENDING:
         return {"label": "待抓取竞品详情", "color": "warning", "action_reason": "已选择竞品，等待抓取详情"}
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL and status == WORKFLOW_STATUS_SUCCEEDED:
-        return {"label": "竞品详情已抓取", "work_status": "ready_to_generate", "color": "success"}
+        return {"label": "竞品详情已抓取", "work_status": PRODUCT_WORK_STATUS_READY_TO_GENERATE, "color": "success"}
     if node == WORKFLOW_NODE_IMAGE_ANALYSIS and status == WORKFLOW_STATUS_PENDING:
-        return {"label": "待图片分析", "work_status": "ready_to_generate", "color": "warning"}
+        return {"label": "待图片分析", "work_status": PRODUCT_WORK_STATUS_READY_TO_GENERATE, "color": "warning"}
     if node == WORKFLOW_NODE_IMAGE_ANALYSIS and status == WORKFLOW_STATUS_SUCCEEDED:
-        return {"label": "图片分析完成", "work_status": "ready_to_generate", "color": "success"}
+        return {"label": "图片分析完成", "work_status": PRODUCT_WORK_STATUS_READY_TO_GENERATE, "color": "success"}
     if node == WORKFLOW_NODE_LISTING_GENERATION and status == WORKFLOW_STATUS_PENDING:
-        return {"label": "待生成 Listing", "work_status": "ready_to_generate", "color": "warning"}
+        return {"label": "待生成 Listing", "work_status": PRODUCT_WORK_STATUS_READY_TO_GENERATE, "color": "warning"}
     if node == WORKFLOW_NODE_LISTING_GENERATION and status == WORKFLOW_STATUS_SUCCEEDED:
-        return {"label": "Listing 完成", "work_status": "export_ready", "color": "success"}
+        return {"label": "Listing 完成", "work_status": PRODUCT_WORK_STATUS_EXPORT_READY, "color": "success"}
     if node == WORKFLOW_NODE_FLOW_DONE and status == WORKFLOW_STATUS_SUCCEEDED:
         return {
             "label": "铺货内容已生成",
-            "work_status": "export_ready",
+            "work_status": PRODUCT_WORK_STATUS_EXPORT_READY,
             "primary_action": "open_detail",
             "primary_action_label": "查看",
             "allowed_actions": (),
@@ -567,7 +580,7 @@ def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
     if node == WORKFLOW_NODE_AUTO_SELECT_IMAGES:
         return {
             "label": "自动选图失败",
-            "work_status": "failed",
+            "work_status": PRODUCT_WORK_STATUS_FAILED,
             "primary_action": "retry_auto_image_selection",
             "primary_action_label": "重试自动选图",
             "allowed_actions": ("retry_auto_image_selection", "manual_adjust_images"),
@@ -578,7 +591,7 @@ def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
         if not _is_auto_competitor_search(product):
             return {
                 "label": "竞品搜索失败",
-                "work_status": "select_competitor",
+                "work_status": PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
             "primary_action": "open_detail",
             "primary_action_label": "查看",
             "allowed_actions": ("open_detail",),
@@ -587,7 +600,7 @@ def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
             }
         return {
             "label": "竞品搜索失败",
-            "work_status": "select_competitor",
+            "work_status": PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
             "primary_action": "retry_competitor_search",
             "primary_action_label": "重试 Amazon 搜索",
             "allowed_actions": ("retry_competitor_search", "open_detail"),
@@ -597,7 +610,7 @@ def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL:
         return {
             "label": "竞品详情抓取失败",
-            "work_status": "select_competitor",
+            "work_status": PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
             "primary_action": "retry_competitor_capture",
             "primary_action_label": "重新抓取",
             "allowed_actions": ("retry_competitor_capture", "open_detail"),
@@ -607,7 +620,7 @@ def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
     if node == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS:
         return {
             "label": "竞品视觉初筛失败",
-            "work_status": "select_competitor",
+            "work_status": PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
             "primary_action": "retry_competitor_visual_match",
             "primary_action_label": "重试视觉初筛",
             "allowed_actions": ("retry_competitor_visual_match", "restart_competitor_search", "open_detail"),
@@ -617,7 +630,7 @@ def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES:
         return {
             "label": "候选竞品详情抓取失败",
-            "work_status": "capture_detail",
+            "work_status": PRODUCT_WORK_STATUS_CAPTURE_DETAIL,
             "primary_action": "open_detail",
             "primary_action_label": "查看",
             "allowed_actions": ("open_detail", "restart_competitor_search"),
@@ -627,7 +640,7 @@ def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
     if node == WORKFLOW_NODE_AUTO_SELECT_COMPETITOR:
         return {
             "label": "自动选竞品失败",
-            "work_status": "select_competitor",
+            "work_status": PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
             "primary_action": "open_detail",
             "primary_action_label": "查看",
             "allowed_actions": ("open_detail", "restart_competitor_search"),
@@ -637,7 +650,7 @@ def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
     if node == WORKFLOW_NODE_IMAGE_ANALYSIS:
         return {
             "label": "图片分析失败",
-            "work_status": "failed",
+            "work_status": PRODUCT_WORK_STATUS_FAILED,
             "primary_action": "retry_image_analysis",
             "primary_action_label": "重试图片分析",
             "allowed_actions": ("retry_image_analysis",),
@@ -647,7 +660,7 @@ def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
     if node == WORKFLOW_NODE_LISTING_GENERATION:
         return {
             "label": "Listing 失败",
-            "work_status": "failed",
+            "work_status": PRODUCT_WORK_STATUS_FAILED,
             "primary_action": "retry_listing_generation",
             "primary_action_label": "重试 Listing",
             "allowed_actions": ("retry_listing_generation",),
@@ -656,7 +669,7 @@ def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
         }
     return {
         "label": f"{WORKFLOW_NODE_VIEWS[node].label}失败",
-        "work_status": "failed",
+        "work_status": PRODUCT_WORK_STATUS_FAILED,
         "primary_action": "open_detail",
         "primary_action_label": "查看",
         "allowed_actions": (),

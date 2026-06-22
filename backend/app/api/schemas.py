@@ -1302,9 +1302,6 @@ class WorkbenchOverview(BaseModel):
     capture_detail: int = 0
     ready_to_generate: int = 0
     running: int = 0
-    interrupted: int = 0
-    suspended: int = 0
-    manual_review: int = 0
     export_ready: int = 0
     export_ready_unexported: int = 0
     export_ready_exported: int = 0

@@ -93,9 +93,6 @@ const WORK_STATUS_FILTERS: Array<'all' | WorkStatus> = [
   'capture_detail',
   'ready_to_generate',
   'running',
-  'interrupted',
-  'suspended',
-  'manual_review',
   'export_ready',
   'exported',
   'failed',
@@ -1028,7 +1025,8 @@ const ProductList: React.FC = () => {
     if (!overview) return pageStatusCounts(status);
     if (status === 'exported') return Number(overview.export_ready_exported ?? pageStatusCounts(status));
     if (status === 'export_ready') return Number(overview.export_ready_unexported ?? overview.export_ready ?? pageStatusCounts(status));
-    return Number(overview[status] ?? pageStatusCounts(status));
+    const overviewCounts = overview as unknown as Partial<Record<WorkStatus, number>>;
+    return Number(overviewCounts[status] ?? pageStatusCounts(status));
   };
   const activeFilterCount = [
     itemId,

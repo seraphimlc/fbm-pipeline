@@ -17,6 +17,7 @@
 - 商品状态只表达业务节点和业务结果，不表达任务执行细节；Amazon 主流程最终 PRD 以 `docs/superpowers/specs/2026-06-18-amazon-product-workflow-prd.md` 为准。
 - Amazon workflow T1 已进入结构层：`products.workflow_node/workflow_status/workflow_error/workflow_updated_at` 和集中枚举常量定义在后端模型/状态常量中；后续投影和写入统一入口仍按 PRD 分阶段推进。
 - Amazon workflow T2 的 Product Workflow Service 位于 `backend/app/product_tasks/workflow.py`：集中提供 `set_product_workflow()`、`build_product_workflow()` 和 node/action 映射；商品列表/详情 workflow 投影应同源调用该 service。
+- ProductWorkStatus registry 位于 `backend/app/product_tasks/work_status.py`，是商品工作台状态 key、展示元信息、overview 归属、是否可列表筛选、DB predicate 绑定名和事实源说明的后端领域事实源。`workflow.py` 生产端必须引用 registry key；`backend/app/api/products.py` 的 `WORKBENCH_STATUS_KEYS` / `PRODUCT_LIST_WORK_STATUS_KEYS` 必须从 registry 派生；前端 `WorkStatus` / meta / filter 仍手写但由 `scripts/test_project_rules.py` 与 registry 和 producer outputs 做反向闭包校验。`interrupted` / `suspended` / `manual_review` 是 legacy diagnostic row fallback，不再属于正式 ProductWorkStatus，也不再作为 `work_status` 列表筛选项。
 - 空 workflow 字段投影为 `needs_initialization` 正式工作状态；后端 overview/list/filter/schema 和前端工作台类型、元信息、筛选入口都必须接住该状态，不得回退到旧 `status/current_step` 猜成图片确认等其它桶。
 - Amazon workflow T3：旧人工图片确认入口仍由 `PUT /api/products/{id}/listing-images` 保存主图/副图并执行 destructive reset，成功后进入 `search_competitor/pending`；该入口现在是自动选图失败/用户主动纠偏入口，保存前必须保护真实 ASIN、导出历史、Amazon 模板输出和 A+ 上传证据。
 - Amazon 自动选图阶段 B：新建 Amazon 商品默认进入 `auto_select_images/pending`，完整落库后创建/复用 `product_auto_image_selection` task run 并投影 `processing`；`auto_select_images/pending` 是商品工作台正式状态桶，overview/list/frontend filter 均需显式支持，`processing` 归入 `running`。`auto_select_images/succeeded` 的节点 label 可显示自动选图完成，但工作台 `work_status` 必须落入已有 `select_competitor` 桶，不能产生未注册的中间状态。task run 创建失败落 `auto_select_images/failed`。`POST /api/products/{id}/auto-image-selection/retry` 基于 workflow 状态重试；商品列表消费后端 `retry_auto_image_selection` / `manual_adjust_images` action。自动选图候选和成功写库均 URL 优先；已有 URL 时不下载候选图、不生成 Contact Sheet、不把本地路径写成主图/副图。阶段 B 不自动启动竞品搜索。
@@ -69,6 +70,7 @@
 - `docs/superpowers/specs/2026-06-21-amazon-auto-flow-to-export-ready-prd.md`
 - `docs/superpowers/specs/2026-06-21-amazon-aplus-auto-after-export-ready-prd.md`
 - `docs/superpowers/specs/2026-06-21-tiktok-listing-flow-redesign-prd.md`
+- `docs/superpowers/specs/2026-06-22-product-work-status-registry.md`
 - `docs/superpowers/specs/2026-06-17-product-workflow-node-state-prd.md`
 - `docs/superpowers/specs/2026-06-16-product-task-action-refactor-prd.md`
 

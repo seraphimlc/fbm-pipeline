@@ -158,6 +158,7 @@ for forbidden in ("export", "catalog_export", "amazon_upload"):
 
 def test_amazon_workflow_t2_service_projection_and_write_rules() -> None:
     workflow_text = (ROOT / "backend" / "app" / "product_tasks" / "workflow.py").read_text(encoding="utf-8")
+    work_status_text = (ROOT / "backend" / "app" / "product_tasks" / "work_status.py").read_text(encoding="utf-8")
     products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
     schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
     product_flow_index = (ROOT / "docs" / "domain-index" / "product-flow.md").read_text(encoding="utf-8")
@@ -184,10 +185,10 @@ def test_amazon_workflow_t2_service_projection_and_write_rules() -> None:
     assert_true(
         "return build_product_workflow(product, catalog_exported=catalog_exported)" in products_api_text
         and "def _workflow_state(" in products_api_text
-        and "_product_workbench_status(product) == body.work_status" in products_api_text
+        and "_apply_product_work_status_db_filter(query, select(func.count(Product.id)), body.work_status)" in products_api_text
         and '"workflow": workflow' in products_api_text
         and "detail.workflow = _workflow_state(product, catalog_exported=catalog_exported)" in products_api_text,
-        "products.py 必须把 _workflow_state 收敛为 Product Workflow Service 薄 wrapper，并让列表/详情/work_status 同源",
+        "products.py 必须把 _workflow_state 收敛为 Product Workflow Service 薄 wrapper，并让列表/详情/work_status 同源；按筛选批量推进也必须走同源 DB predicate",
     )
     workflow_state_body = products_api_text.split("def _workflow_state(", 1)[1].split("\ndef _split_category_path", 1)[0]
     assert_true(
@@ -198,7 +199,8 @@ def test_amazon_workflow_t2_service_projection_and_write_rules() -> None:
     )
     assert_true(
         "workflow_uninitialized" in workflow_text
-        and "needs_initialization" in workflow_text
+        and 'PRODUCT_WORK_STATUS_NEEDS_INITIALIZATION = "needs_initialization"' in work_status_text
+        and "PRODUCT_WORK_STATUS_NEEDS_INITIALIZATION" in workflow_text
         and "商品 workflow 字段为空" in workflow_text,
         "普通空 workflow 字段必须投影为显式未初始化/需初始化状态",
     )
@@ -437,6 +439,18 @@ from pathlib import Path
 from app.api.products import PRODUCT_LIST_WORK_STATUS_KEYS, WORKBENCH_STATUS_KEYS
 from app.api.schemas import WorkbenchOverview
 from app.models.status import AMAZON_WORKFLOW_NODES, AMAZON_WORKFLOW_STATUSES
+from app.product_tasks.work_status import (
+    EXPORT_READY_EXPORTED_BUCKET,
+    LEGACY_DIAGNOSTIC_WORK_STATUS_KEYS,
+    PRODUCT_FRONTEND_VISIBLE_STATUS_KEYS,
+    PRODUCT_LIST_FILTER_STATUS_KEYS,
+    PRODUCT_OVERVIEW_BUCKET_KEYS,
+    PRODUCT_PRIMARY_STATUS_KEYS,
+    PRODUCT_WORK_STATUS_BY_KEY,
+    PRODUCT_WORK_STATUS_EXPORTED,
+    PRODUCT_WORK_STATUS_KEYS,
+    PRODUCT_WORKBENCH_STATUS_KEYS,
+)
 from app.product_tasks.workflow import build_product_workflow
 
 root = Path.cwd().parent
@@ -446,8 +460,9 @@ frontend_overview_section = frontend_api_text.split("export interface WorkbenchO
 work_status_type_section = product_list_text.split("type WorkStatus =", 1)[1].split("type ProductRow", 1)[0]
 work_status_meta_section = product_list_text.split("const WORK_STATUS_META", 1)[1].split("const WORK_STATUS_FILTERS", 1)[0]
 work_status_filter_section = product_list_text.split("const WORK_STATUS_FILTERS", 1)[1].split("const PRIMARY_WORK_STATUS", 1)[0]
+primary_work_status_section = product_list_text.split("const PRIMARY_WORK_STATUS", 1)[1].split("const workStatusParam", 1)[0]
 
-supported_statuses = set(WORKBENCH_STATUS_KEYS) | set(PRODUCT_LIST_WORK_STATUS_KEYS)
+supported_statuses = set(PRODUCT_WORK_STATUS_KEYS)
 overview_fields = set(WorkbenchOverview.model_fields)
 produced_statuses = set()
 
@@ -492,18 +507,29 @@ unknown_statuses = produced_statuses - supported_statuses
 assert not unknown_statuses, (unknown_statuses, produced_statuses, supported_statuses)
 assert "ready_to_search_competitor" not in produced_statuses, produced_statuses
 
-overview_supported_statuses = set(WORKBENCH_STATUS_KEYS) | {"exported"}
+assert tuple(WORKBENCH_STATUS_KEYS) == tuple(PRODUCT_WORKBENCH_STATUS_KEYS), (WORKBENCH_STATUS_KEYS, PRODUCT_WORKBENCH_STATUS_KEYS)
+assert tuple(PRODUCT_LIST_WORK_STATUS_KEYS) == tuple(PRODUCT_LIST_FILTER_STATUS_KEYS), (PRODUCT_LIST_WORK_STATUS_KEYS, PRODUCT_LIST_FILTER_STATUS_KEYS)
+assert not (set(LEGACY_DIAGNOSTIC_WORK_STATUS_KEYS) & set(PRODUCT_WORK_STATUS_KEYS)), PRODUCT_WORK_STATUS_KEYS
+assert not (set(LEGACY_DIAGNOSTIC_WORK_STATUS_KEYS) & set(PRODUCT_LIST_WORK_STATUS_KEYS)), PRODUCT_LIST_WORK_STATUS_KEYS
+
 for status in produced_statuses:
-    if status == "exported":
-        assert "export_ready_exported" in overview_fields, overview_fields
-        assert "export_ready_exported?: number" in frontend_overview_section, frontend_overview_section
-    else:
-        assert status in overview_supported_statuses, (status, overview_supported_statuses)
-        assert status in overview_fields, (status, overview_fields)
-        assert f"{status}:" in frontend_overview_section, (status, frontend_overview_section)
+    definition = PRODUCT_WORK_STATUS_BY_KEY[status]
+    assert definition.overview_bucket in PRODUCT_OVERVIEW_BUCKET_KEYS, (status, PRODUCT_OVERVIEW_BUCKET_KEYS)
+    if status == PRODUCT_WORK_STATUS_EXPORTED:
+        assert definition.overview_bucket == EXPORT_READY_EXPORTED_BUCKET, definition
+    assert definition.overview_bucket in overview_fields, (status, definition.overview_bucket, overview_fields)
+    assert (
+        f"{definition.overview_bucket}:" in frontend_overview_section
+        or f"{definition.overview_bucket}?: number" in frontend_overview_section
+    ), (status, definition.overview_bucket, frontend_overview_section)
     assert f"| '{status}'" in work_status_type_section, (status, work_status_type_section)
     assert f"{status}:" in work_status_meta_section, (status, work_status_meta_section)
-    assert f"'{status}'" in work_status_filter_section, (status, work_status_filter_section)
+    if definition.frontend_visible:
+        assert status in PRODUCT_FRONTEND_VISIBLE_STATUS_KEYS, (status, PRODUCT_FRONTEND_VISIBLE_STATUS_KEYS)
+    if definition.is_list_filterable:
+        assert f"'{status}'" in work_status_filter_section, (status, work_status_filter_section)
+    if definition.primary_metric:
+        assert f"'{status}'" in primary_work_status_section, (status, primary_work_status_section)
 
 for frontend_section in (
     frontend_overview_section,
@@ -512,6 +538,12 @@ for frontend_section in (
     work_status_filter_section,
 ):
     assert "ready_to_search_competitor" not in frontend_section, frontend_section
+
+for legacy_status in LEGACY_DIAGNOSTIC_WORK_STATUS_KEYS:
+    assert f"| '{legacy_status}'" in work_status_type_section, (legacy_status, work_status_type_section)
+    assert f"{legacy_status}:" in work_status_meta_section, (legacy_status, work_status_meta_section)
+    assert f"'{legacy_status}'" not in work_status_filter_section, (legacy_status, work_status_filter_section)
+    assert f"{legacy_status}:" not in frontend_overview_section, (legacy_status, frontend_overview_section)
 
 auto_select_done = build_product_workflow(product(workflow_node="auto_select_images", workflow_status="succeeded"))
 assert auto_select_done["label"] == "自动选图完成", auto_select_done
@@ -530,10 +562,12 @@ def test_product_overview_handles_uninitialized_workflow_bucket() -> None:
     products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
     schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
     workflow_text = (ROOT / "backend" / "app" / "product_tasks" / "workflow.py").read_text(encoding="utf-8")
+    work_status_text = (ROOT / "backend" / "app" / "product_tasks" / "work_status.py").read_text(encoding="utf-8")
     overview_section = products_api_text.split('@router.get("/overview"', 1)[1].split('@router.get("/{product_id}"', 1)[0]
 
     assert_true(
-        '"needs_initialization"' in products_api_text.split("WORKBENCH_STATUS_KEYS = (", 1)[1].split(")", 1)[0]
+        'PRODUCT_WORK_STATUS_NEEDS_INITIALIZATION = "needs_initialization"' in work_status_text
+        and "WORKBENCH_STATUS_KEYS = PRODUCT_WORKBENCH_STATUS_KEYS" in products_api_text
         and "needs_initialization: int = 0" in schemas_text
         and 'needs_initialization=status_counts["needs_initialization"]' in overview_section,
         "overview 必须把空 workflow 投影的 needs_initialization 作为显式状态桶返回，不能 KeyError 或吞错",
@@ -1357,6 +1391,11 @@ def test_product_bulk_advance_runs_in_task_run_queue() -> None:
         and 'task_type="product_bulk_advance"' in product_bulk_planner_text
         and '"rows": rows' in product_bulk_planner_text,
         "批量推进必须走可审计 task run planner，并输出逐商品 rows/report",
+    )
+    assert_true(
+        "_apply_product_work_status_db_filter(query, select(func.count(Product.id)), body.work_status)" in products_api_text
+        and "_product_workbench_status(product) == body.work_status" not in products_api_text,
+        "按筛选批量推进的 work_status 必须复用 DB 级 ProductWorkStatus predicate，不能取全量后内存过滤",
     )
     assert_true(
         "createProductBulkAdvanceTask" in product_page_text
@@ -3113,7 +3152,7 @@ required_statuses = {
     "ready_to_generate",
     "needs_initialization",
 }
-assert required_statuses <= PRODUCT_LIST_WORK_STATUS_KEYS, PRODUCT_LIST_WORK_STATUS_KEYS
+assert required_statuses <= set(PRODUCT_LIST_WORK_STATUS_KEYS), PRODUCT_LIST_WORK_STATUS_KEYS
 for status in sorted(PRODUCT_LIST_WORK_STATUS_KEYS):
     status_query, status_count_query = _apply_product_work_status_db_filter(
         select(Product),
@@ -3142,6 +3181,15 @@ except ValueError:
     pass
 else:
     raise AssertionError("unsupported product list work_status must be rejected before any fallback")
+
+for legacy_status in ("interrupted", "suspended", "manual_review"):
+    assert legacy_status not in PRODUCT_LIST_WORK_STATUS_KEYS, PRODUCT_LIST_WORK_STATUS_KEYS
+    try:
+        _apply_product_work_status_db_filter(select(Product), select(func.count(Product.id)), legacy_status)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"legacy diagnostic work_status must not be accepted as ProductWorkStatus: {legacy_status}")
 '''
     result = subprocess.run(
         [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],

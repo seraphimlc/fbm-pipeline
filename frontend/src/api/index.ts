@@ -908,9 +908,6 @@ export interface WorkbenchOverview {
   capture_detail: number;
   ready_to_generate: number;
   running: number;
-  interrupted: number;
-  suspended: number;
-  manual_review: number;
   export_ready: number;
   export_ready_unexported?: number;
   export_ready_exported?: number;

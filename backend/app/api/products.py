@@ -13,7 +13,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from openpyxl import Workbook, load_workbook
-from sqlalchemy import case, delete, false, select, func
+from sqlalchemy import case, delete, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, selectinload
 from datetime import datetime
@@ -93,6 +93,11 @@ from app.api.schemas import (
 )
 from app.pipeline.engine import start_pipeline as enqueue_pipeline, cancel_pipeline, get_step_status, is_running
 from app.product_tasks.workflow import build_product_workflow, set_product_workflow
+from app.product_tasks.work_status import (
+    PRODUCT_LIST_FILTER_STATUS_KEYS,
+    PRODUCT_WORKBENCH_STATUS_KEYS,
+    get_product_work_status_definition,
+)
 from app.pipeline.step2_pricing import run_pricing
 from app.pipeline.step3_keywords import run_keywords
 from app.pipeline.step4_category import run_category
@@ -174,22 +179,8 @@ RUNNING_STATUSES = {
 }
 
 APLUS_REGEN_ACTIVE_STATUSES = {"regen_queued", "regen_script_running", "regen_image_running"}
-WORKBENCH_STATUS_KEYS = (
-    "needs_initialization",
-    "auto_select_images",
-    "select_images",
-    "competitor_searching",
-    "select_competitor",
-    "capture_detail",
-    "ready_to_generate",
-    "running",
-    "interrupted",
-    "suspended",
-    "manual_review",
-    "export_ready",
-    "failed",
-)
-PRODUCT_LIST_WORK_STATUS_KEYS = set(WORKBENCH_STATUS_KEYS) | {"exported", "needs_initialization"}
+WORKBENCH_STATUS_KEYS = PRODUCT_WORKBENCH_STATUS_KEYS
+PRODUCT_LIST_WORK_STATUS_KEYS = PRODUCT_LIST_FILTER_STATUS_KEYS
 AUTO_START_READY_GENERATION_LIMIT = 100
 IMAGE_REVIEW_SELECTED_IMAGE_LIMIT = 9
 IMAGE_REVIEW_INITIAL_GALLERY_LIMIT = 36
@@ -797,32 +788,32 @@ def _running_condition():
 
 
 def _work_status_condition(work_status: str):
-    if work_status == "needs_initialization":
-        return _needs_initialization_condition(), True
-    if work_status == "auto_select_images":
-        return (
-            (Product.workflow_node == WORKFLOW_NODE_AUTO_SELECT_IMAGES)
-            & (Product.workflow_status == WORKFLOW_STATUS_PENDING)
-        ), False
-    if work_status == "select_images":
-        return _select_images_condition(), False
-    if work_status == "competitor_searching":
-        return _competitor_searching_condition(), False
-    if work_status == "select_competitor":
-        return _select_competitor_condition(), False
-    if work_status == "capture_detail":
-        return _capture_detail_condition(), False
-    if work_status == "ready_to_generate":
-        return _ready_to_generate_condition(), False
-    if work_status == "running":
-        return _running_condition(), False
-    if work_status in {"interrupted", "suspended", "manual_review"}:
-        return false(), False
-    if work_status in {"export_ready", "exported"}:
-        return _export_ready_unexported_condition() if work_status == "export_ready" else _exported_condition(), True
-    if work_status == "failed":
-        return _failed_work_status_condition(), False
-    raise ValueError(f"Unsupported product list work_status: {work_status}")
+    definition = get_product_work_status_definition(work_status)
+    if not definition.is_list_filterable or not definition.db_filter_name:
+        raise ValueError(f"Unsupported product list work_status: {work_status}")
+    predicates = {
+        "needs_initialization": (_needs_initialization_condition, True),
+        "auto_select_images": (
+            lambda: _workflow_present_condition()
+            & (Product.workflow_node == WORKFLOW_NODE_AUTO_SELECT_IMAGES)
+            & (Product.workflow_status == WORKFLOW_STATUS_PENDING),
+            False,
+        ),
+        "select_images": (_select_images_condition, False),
+        "competitor_searching": (_competitor_searching_condition, False),
+        "select_competitor": (_select_competitor_condition, False),
+        "capture_detail": (_capture_detail_condition, False),
+        "ready_to_generate": (_ready_to_generate_condition, False),
+        "running": (_running_condition, False),
+        "export_ready_unexported": (_export_ready_unexported_condition, True),
+        "exported": (_exported_condition, True),
+        "failed": (_failed_work_status_condition, False),
+    }
+    try:
+        predicate_builder, needs_catalog_join = predicates[definition.db_filter_name]
+    except KeyError as exc:
+        raise ValueError(f"Product work_status lacks DB predicate binding: {work_status}") from exc
+    return predicate_builder(), needs_catalog_join
 
 
 def _apply_product_work_status_db_filter(query, count_query, work_status: str | None):
@@ -2721,15 +2712,12 @@ async def get_workbench_overview(
         capture_detail=status_counts["capture_detail"],
         ready_to_generate=status_counts["ready_to_generate"],
         running=status_counts["running"],
-        interrupted=status_counts["interrupted"],
-        suspended=status_counts["suspended"],
-        manual_review=status_counts["manual_review"],
         export_ready=export_ready_unexported,
         export_ready_unexported=export_ready_unexported,
         export_ready_exported=export_ready_exported,
         failed=status_counts["failed"],
         running_tasks=status_counts["running"],
-        manual_review_tasks=status_counts["manual_review"],
+        manual_review_tasks=0,
         failed_tasks=status_counts["failed"],
         confirmable_tasks=0,
         asin_not_synced=asin_not_synced_result.scalar() or 0,
@@ -3405,7 +3393,6 @@ async def create_product_bulk_advance_task_by_filter(body: ProductBulkAdvanceFil
         select(Product)
         .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
         .order_by(Product.updated_at.desc(), Product.created_at.desc())
-        .limit(body.limit)
     )
     needs_product_data_join = bool(body.item_id or body.sku_keyword)
     if needs_product_data_join:
@@ -3440,11 +3427,13 @@ async def create_product_bulk_advance_task_by_filter(body: ProductBulkAdvanceFil
             | (ProductData.item_code.ilike(keyword))
             | (ProductData.title.ilike(keyword))
         )
-
-    result = await db.execute(query)
-    products = result.scalars().unique().all()
     if body.work_status:
-        products = [product for product in products if _product_workbench_status(product) == body.work_status]
+        if body.work_status not in PRODUCT_LIST_WORK_STATUS_KEYS:
+            raise HTTPException(400, f"不支持的工作状态筛选：{body.work_status}")
+        query, _ = _apply_product_work_status_db_filter(query, select(func.count(Product.id)), body.work_status)
+
+    result = await db.execute(query.limit(body.limit))
+    products = result.scalars().unique().all()
     ids = [int(product.id) for product in products]
     if not ids:
         raise HTTPException(400, "当前筛选下没有商品")
