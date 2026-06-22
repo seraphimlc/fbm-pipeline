@@ -211,6 +211,15 @@ def _product_id(payload: dict[str, Any]) -> int:
     return product_id
 
 
+def _visual_ids_from_payload(payload: dict[str, Any]) -> tuple[int | None, int | None]:
+    visual_task_run_id = int(payload.get("visual_task_run_id") or 0)
+    visual_task_step_id = int(payload.get("visual_task_step_id") or 0)
+    return (
+        visual_task_run_id if visual_task_run_id > 0 else None,
+        visual_task_step_id if visual_task_step_id > 0 else None,
+    )
+
+
 def _sync_catalog_item(product: Product) -> None:
     if product.catalog_item:
         product.catalog_item.status = product.status
@@ -760,6 +769,15 @@ async def _create_or_reuse_image_analysis_after_auto_competitor(product_id: int)
             auto_start=False,
         )
         return [run.id for run in runs]
+
+
+async def _reload_step_for_product_action(db: AsyncSession, step_id: int) -> TaskStep | None:
+    result = await db.execute(
+        select(TaskStep)
+        .where(TaskStep.id == step_id)
+        .options(selectinload(TaskStep.task_run), selectinload(TaskStep.task_group))
+    )
+    return result.scalar_one_or_none()
 
 
 async def _best_effort_update_step_progress(
@@ -1497,16 +1515,53 @@ class ProductCompetitorVisualMatchAction:
             "valid_image_count": result.get("valid_image_count"),
         })
         await db.commit()
+        try:
+            capture_runs = await create_product_action_runs(
+                db,
+                "product_competitor_candidate_capture",
+                [
+                    {
+                        "product_id": product_id,
+                        "visual_task_run_id": step.task_run_id,
+                        "visual_task_step_id": step.id,
+                        "created_by": "product_competitor_visual_match",
+                    }
+                ],
+                created_by="product_competitor_visual_match",
+                auto_start=True,
+            )
+        except Exception as exc:
+            await db.rollback()
+            message = f"视觉初筛已完成，但候选详情抓取任务创建失败: {type(exc).__name__}: {exc}"
+            await _project_competitor_candidate_capture_failed(db, product_id=product_id, message=message)
+            result["status"] = "downstream_failed"
+            result["downstream_error"] = message
+            return
+
+        capture_run_ids = [run.id for run in capture_runs]
+        step.task_run.summary_json = json_dumps({
+            "product_id": product_id,
+            "item_code": result.get("item_code"),
+            "status": "competitor_visual_match_done",
+            "next_node": WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES,
+            "candidate_capture_task_run_ids": capture_run_ids,
+            "search_run_id": search_run_id,
+            "search_step_id": search_step_id,
+            "selected_count": selected_count,
+            "valid_image_count": result.get("valid_image_count"),
+        })
+        await db.commit()
         await _best_effort_update_step_progress(
             db,
             step,
             current=1,
             total=1,
-            message="竞品视觉初筛完成，已进入待抓候选详情",
-            data={"product_id": product_id, "selected_count": selected_count},
+            message="竞品视觉初筛完成，已提交候选详情抓取任务",
+            data={"product_id": product_id, "selected_count": selected_count, "candidate_capture_task_run_ids": capture_run_ids},
         )
         result["status"] = "done"
         result["next_node"] = WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES
+        result["candidate_capture_task_run_ids"] = capture_run_ids
 
     async def on_step_failure(self, db: AsyncSession, step: TaskStep, error: Exception) -> None:
         product_id = int(_payload_for_step(step).get("product_id") or 0)
@@ -1726,6 +1781,27 @@ async def _latest_successful_competitor_visual_match_ids(db: AsyncSession, produ
     return run.id, step.id
 
 
+async def _latest_visual_selected_for_capture_ids(db: AsyncSession, product_id: int) -> tuple[int, int]:
+    result = await db.execute(
+        select(AmazonCompetitorSearchCandidate)
+        .where(AmazonCompetitorSearchCandidate.product_id == product_id)
+        .where(AmazonCompetitorSearchCandidate.visual_selected_for_capture == 1)
+        .where(AmazonCompetitorSearchCandidate.visual_task_run_id.is_not(None))
+        .where(AmazonCompetitorSearchCandidate.visual_task_step_id.is_not(None))
+        .order_by(
+            AmazonCompetitorSearchCandidate.visual_matched_at.desc(),
+            AmazonCompetitorSearchCandidate.visual_task_run_id.desc(),
+            AmazonCompetitorSearchCandidate.visual_task_step_id.desc(),
+            AmazonCompetitorSearchCandidate.id.desc(),
+        )
+        .limit(1)
+    )
+    row = result.scalar_one_or_none()
+    if not row or not row.visual_task_run_id or not row.visual_task_step_id:
+        raise RuntimeError("缺少当前视觉初筛 Top 候选，不能抓取候选竞品详情")
+    return int(row.visual_task_run_id), int(row.visual_task_step_id)
+
+
 async def _current_visual_selected_for_capture(
     db: AsyncSession,
     product_id: int,
@@ -1734,7 +1810,10 @@ async def _current_visual_selected_for_capture(
     visual_task_step_id: int | None = None,
 ) -> list[AmazonCompetitorSearchCandidate]:
     if visual_task_run_id is None or visual_task_step_id is None:
-        visual_task_run_id, visual_task_step_id = await _latest_successful_competitor_visual_match_ids(db, product_id)
+        try:
+            visual_task_run_id, visual_task_step_id = await _latest_successful_competitor_visual_match_ids(db, product_id)
+        except RuntimeError:
+            visual_task_run_id, visual_task_step_id = await _latest_visual_selected_for_capture_ids(db, product_id)
     result = await db.execute(
         select(AmazonCompetitorSearchCandidate)
         .where(AmazonCompetitorSearchCandidate.product_id == product_id)
@@ -1777,6 +1856,7 @@ class ProductCompetitorCandidateCaptureAction:
 
     async def validate(self, db: AsyncSession, payload: dict[str, Any]) -> None:
         product_id = _product_id(payload)
+        visual_task_run_id, visual_task_step_id = _visual_ids_from_payload(payload)
         product = await _load_product(db, product_id)
         reasons = product_external_result_protection_reasons(product)
         if reasons:
@@ -1785,7 +1865,12 @@ class ProductCompetitorCandidateCaptureAction:
             raise RuntimeError("当前商品不在抓取候选竞品节点，不能启动候选详情抓取")
         if product.workflow_status not in {WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_FAILED}:
             raise RuntimeError("当前候选详情抓取状态不可启动或重试")
-        selected_rows = await _current_visual_selected_for_capture(db, product_id)
+        selected_rows = await _current_visual_selected_for_capture(
+            db,
+            product_id,
+            visual_task_run_id=visual_task_run_id,
+            visual_task_step_id=visual_task_step_id,
+        )
         selected_count = len(selected_rows)
         if selected_count <= 0:
             raise RuntimeError("缺少当前视觉初筛 Top 候选，不能抓取候选竞品详情")
@@ -1819,10 +1904,15 @@ class ProductCompetitorCandidateCaptureAction:
 
     def build_plan(self, payload: dict[str, Any]) -> TaskRunPlan:
         product_id = _product_id(payload)
+        visual_task_run_id, visual_task_step_id = _visual_ids_from_payload(payload)
+        plan_payload = {"product_id": product_id}
+        if visual_task_run_id and visual_task_step_id:
+            plan_payload["visual_task_run_id"] = visual_task_run_id
+            plan_payload["visual_task_step_id"] = visual_task_step_id
         return TaskRunPlan(
             task_type=self.action_type,
             title=f"抓取候选竞品详情：商品 #{product_id}",
-            payload={"product_id": product_id},
+            payload=plan_payload,
             groups=[
                 TaskGroupPlan(
                     group_key="competitor_candidate_capture",
@@ -1831,7 +1921,7 @@ class ProductCompetitorCandidateCaptureAction:
                         TaskStepPlan(
                             step_key=f"product:{product_id}:competitor_candidate_capture",
                             step_type=self.action_type,
-                            payload={"product_id": product_id},
+                            payload=plan_payload,
                             max_attempts=1,
                         )
                     ],
@@ -1841,7 +1931,13 @@ class ProductCompetitorCandidateCaptureAction:
 
     async def execute_step(self, db: AsyncSession, step: TaskStep, payload: dict[str, Any]) -> dict[str, Any]:
         product_id = _product_id(payload)
-        selected_rows = await _current_visual_selected_for_capture(db, product_id)
+        visual_task_run_id, visual_task_step_id = _visual_ids_from_payload(payload)
+        selected_rows = await _current_visual_selected_for_capture(
+            db,
+            product_id,
+            visual_task_run_id=visual_task_run_id,
+            visual_task_step_id=visual_task_step_id,
+        )
         if not selected_rows:
             raise RuntimeError("缺少当前视觉初筛 Top 候选，不能抓取候选竞品详情")
         if len(selected_rows) > 6:
@@ -1929,9 +2025,16 @@ class ProductCompetitorCandidateCaptureAction:
             "warnings": warnings,
         }
         if success_count <= 0:
+            error_types = sorted({
+                str(item.get("error_type") or "capture_failed")
+                for item in candidate_results
+                if isinstance(item, dict)
+            })
+            failure_reason = ", ".join(error_types) or "capture_failed"
             step.task_run.summary_json = json_dumps({
                 **result,
                 "status": "candidate_capture_failed",
+                "failure_reason": failure_reason,
             })
             await update_step_progress(
                 db,
@@ -1939,9 +2042,9 @@ class ProductCompetitorCandidateCaptureAction:
                 current=len(selected_rows),
                 total=len(selected_rows),
                 message="候选竞品详情抓取全失败",
-                data={"product_id": product_id, "success_count": success_count, "warnings": warnings},
+                data={"product_id": product_id, "success_count": success_count, "warnings": warnings, "failure_reason": failure_reason},
             )
-            raise RuntimeError("候选竞品详情抓取全失败")
+            raise RuntimeError(f"候选竞品详情抓取全失败: {failure_reason}")
         return result
 
     async def on_step_success(self, db: AsyncSession, step: TaskStep, result: dict[str, Any]) -> None:
@@ -2029,16 +2132,51 @@ class ProductCompetitorCandidateCaptureAction:
             "warnings": warnings,
         })
         await db.commit()
+        try:
+            auto_selection_runs = await create_product_action_runs(
+                db,
+                "product_auto_competitor_selection",
+                [{"product_id": product_id, "created_by": "product_competitor_candidate_capture"}],
+                created_by="product_competitor_candidate_capture",
+                auto_start=True,
+            )
+        except Exception as exc:
+            await db.rollback()
+            message = f"候选详情抓取已完成，但自动选竞品任务创建失败: {type(exc).__name__}: {exc}"
+            await _project_auto_competitor_selection_failed(db, product_id=product_id, message=message)
+            result["status"] = "downstream_failed"
+            result["downstream_error"] = message
+            return
+
+        auto_selection_run_ids = [run.id for run in auto_selection_runs]
+        step.task_run.summary_json = json_dumps({
+            "product_id": product_id,
+            "status": "candidate_capture_done",
+            "next_node": WORKFLOW_NODE_AUTO_SELECT_COMPETITOR,
+            "auto_competitor_selection_task_run_ids": auto_selection_run_ids,
+            "visual_task_run_id": visual_task_run_id,
+            "visual_task_step_id": visual_task_step_id,
+            "selected_count": len(selected_rows),
+            "success_count": success_count,
+            "warnings": warnings,
+        })
+        await db.commit()
         await _best_effort_update_step_progress(
             db,
             step,
             current=len(selected_rows),
             total=len(selected_rows),
-            message="候选竞品详情抓取完成，已进入自动选竞品待处理",
-            data={"product_id": product_id, "success_count": success_count, "warnings": warnings},
+            message="候选竞品详情抓取完成，已提交自动选竞品任务",
+            data={
+                "product_id": product_id,
+                "success_count": success_count,
+                "warnings": warnings,
+                "auto_competitor_selection_task_run_ids": auto_selection_run_ids,
+            },
         )
         result["status"] = "done"
         result["next_node"] = WORKFLOW_NODE_AUTO_SELECT_COMPETITOR
+        result["auto_competitor_selection_task_run_ids"] = auto_selection_run_ids
 
     async def on_step_failure(self, db: AsyncSession, step: TaskStep, error: Exception) -> None:
         product_id = int(_payload_for_step(step).get("product_id") or 0)
@@ -2868,14 +3006,25 @@ async def create_product_action_runs(
         await _lock_product_for_action_payload(db, payload)
         existing = await _existing_active_run(db, action, payload)
         if existing:
+            plan = action.build_plan(payload)
             existing.dedupe_key = existing.dedupe_key or action.dedupe_key(payload)
             existing.correlation_key = existing.correlation_key or action.correlation_key(payload)
             existing.updated_at = now
+            if action_type == "product_competitor_candidate_capture" and payload.get("visual_task_run_id") and payload.get("visual_task_step_id"):
+                existing.payload_json = json_dumps(plan.payload)
+                step_payloads_by_key = {
+                    step_plan.step_key: step_plan.payload
+                    for group_plan in plan.groups
+                    for step_plan in group_plan.steps
+                }
+            else:
+                step_payloads_by_key = {}
             for step in existing.steps:
+                if step.step_key in step_payloads_by_key and step.status in (STEP_STATUS_PENDING, STEP_STATUS_READY):
+                    step.payload_json = json_dumps(step_payloads_by_key[step.step_key])
                 if auto_start and step.status == STEP_STATUS_PENDING:
                     step.status = STEP_STATUS_READY
                     step.updated_at = now
-            plan = action.build_plan(payload)
             existing.payload_json = existing.payload_json or json_dumps(plan.payload)
             await action.reserve(db, payload, existing)
             runs.append(existing)
@@ -2945,6 +3094,8 @@ async def create_product_action_runs(
 
 async def product_action_worker(ctx: TaskContext) -> dict[str, Any]:
     action = action_for(ctx.step.step_type)
+    step_id = int(getattr(ctx.step, "id", 0) or 0)
+    step_type = str(ctx.step.step_type)
     payload = _payload_for_step(ctx.step)
     try:
         result = await action.execute_step(ctx.db, ctx.step, payload)
@@ -2957,7 +3108,19 @@ async def product_action_worker(ctx: TaskContext) -> dict[str, Any]:
         if isinstance(exc, (TaskStepCanceled, TaskStepInterrupted)):
             raise
         await ctx.db.rollback()
-        await action.on_step_failure(ctx.db, ctx.step, exc)
+        try:
+            failure_step = await _reload_step_for_product_action(ctx.db, step_id) if step_id > 0 else ctx.step
+            if failure_step is not None:
+                await action.on_step_failure(ctx.db, failure_step, exc)
+            else:
+                logger.error("Product task failure projection skipped; step missing: step_id=%s type=%s", step_id, step_type)
+        except Exception:
+            await ctx.db.rollback()
+            logger.exception(
+                "Product task failure projection failed; preserving original worker error: step_id=%s type=%s",
+                step_id,
+                step_type,
+            )
         raise
     return result
 

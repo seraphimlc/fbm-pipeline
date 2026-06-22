@@ -150,7 +150,7 @@
 - From: 若命（agentKey: `ruoming`）
 - To: 观止（agentKey: `guanzhi`）
 - Cc: 用户 / 听云（agentKey: `tingyun`） / 镜花（agentKey: `jinghua`）
-- Status: OPEN / READY_TO_START
+- Status: QA_PASS_WITH_SCOPE / COMMITTED_PUSHED_76E67DB
 - Created: 2026-06-22 CST
 - Depends on:
   - `MSG-20260622-073` 听云 `DONE_CLAIMED`
@@ -199,6 +199,259 @@
 - 边界：未发现新增自动触发按钮、A+ 上传、Amazon 导出、Seller Central 或 TikTok 入口。
 - 残余风险：不覆盖 A+ 内容质量、真实出图 worker 全流程质量、A+ 上传、A3 管理页自动补齐或跨进程 DB 唯一约束级防重。
 - Gate meaning：允许若命 scoped commit/push A+ A2；不代表 A+ 上传或外部平台验收。
+
+### MSG-20260622-076 - REQUEST / NEEDS_FIX / AMAZON_MAIN_CHAIN_AFTER_SEARCH_QA_FIXES
+
+- From: 若命（agentKey: `ruoming`）
+- To: 听云（agentKey: `tingyun`）
+- Cc: 用户 / 观止（agentKey: `guanzhi`） / 镜花（agentKey: `jinghua`)
+- Status: OPEN / READY_TO_START
+- Created: 2026-06-22 CST
+- Depends on:
+  - `MSG-20260622-072` 观止 `QA / NEEDS_FIX`
+- Related:
+  - `docs/collaboration/reviews/2026-06-22-amazon-main-chain-after-search-pass-qa.md`
+  - `backend/app/product_tasks/actions.py`
+  - `backend/app/task_runtime/scheduler.py`
+  - `backend/app/api/products.py`
+  - `backend/app/services/amazon_competitor_visual_match.py`
+  - `backend/app/services/amazon_listing_detail.py`
+  - `docs/superpowers/specs/2026-06-21-amazon-auto-flow-to-export-ready-prd.md`
+
+听云收到后直接开始。本任务修复 `MSG-072` 商品主链路 QA 打回项，不提交、不 push。
+
+必须完整修复两个 P1：
+
+1. 视觉初筛失败投影不能崩 runner：
+   - 观止证据显示 VLM TLS/APIConnectionError 后，`ProductCompetitorVisualMatchAction.on_step_failure()` 因 `MissingGreenlet` 读取 `step.payload_json` 崩溃，runner crash，run/step 一度 stale running，product 卡在 `visual_match_competitors/processing`。
+   - 要求：任何 VLM/API/TLS/model failure 都必须稳定投影为 task failed 和 `visual_match_competitors/failed`，workflow error 可读，runner 不 crash，不需要人工 `mark-interrupted` 才恢复。
+   - 同类检查：其它 ProductTaskAction failure hook 是否也存在 async lazy-load/MissingGreenlet 风险；至少检查当前自动主链路相关 action，不要只修一个症状点。
+2. 视觉成功后的正式继续路径：
+   - 观止白盒检查发现 visual success 只到 `capture_competitor_candidates/pending`，当前公开 API/client 没有候选详情抓取和自动选竞品继续入口，默认 Amazon detail adapter 仍未配置。
+   - 要求：明确并落地当前阶段的 sanctioned continuation path。可以是后端 success hook 自动创建/复用候选详情 task，再由候选详情 success 创建/复用自动选竞品 task；也可以是明确公开安全 API/action，但必须能让商品主链路从视觉成功继续向图片分析/Listing 推进。
+   - 如果完整继续路径需要真实 Amazon detail adapter 或外部授权，必须返回结构化 `REQUEST / DESIGN_CHANGE`，列选项和推荐；不要只做局部按钮或假成功。
+
+验证要求：
+
+- `cd backend && python -m compileall -q app`
+- 新增或更新 focused 行为脚本，覆盖 VLM failure 不崩 runner、不留 processing/stale running、product 可重试。
+- 新增或更新行为脚本，覆盖视觉成功后能创建/复用下一 task 或明确阻塞为 typed failure，不能静默停在 pending 无入口。
+- `make test-project-rules`
+- scoped `git diff --check`
+
+输出 `DONE_CLAIMED / AMAZON_MAIN_CHAIN_AFTER_SEARCH_QA_FIXES`，必须列：
+
+- root cause。
+- 失败投影修复文件和同类 failure hook 检查结论。
+- 视觉成功后继续路径的设计选择和实现证据。
+- 验证命令和结果。
+- 是否需要镜花 code review / 观止 QA rerun。
+- 残余风险。
+
+#### DONE_CLAIMED - 听云子 agent（agentKey: `tingyun`）- 2026-06-22 CST
+
+- 结论：`DONE_CLAIMED / AMAZON_MAIN_CHAIN_AFTER_SEARCH_QA_FIXES`。
+- Root cause：ProductTaskAction worker 在 worker exception 后 `rollback()`，随后 failure hook 继续读可能过期的 async ORM `step.payload_json`，触发 `MissingGreenlet` 并替换原始 VLM/API/TLS failure；视觉成功后也缺少从 `capture_competitor_candidates` 自动继续的 sanctioned downstream task 创建。
+- 改动范围：`backend/app/product_tasks/actions.py`、`backend/app/task_runtime/scheduler.py`、`scripts/test_amazon_main_chain_after_search_qa_fixes.py`、`scripts/test_project_rules.py`、`docs/domain-index/product-flow.md`、`docs/domain-index/task-runtime.md`。
+- 修复摘要：worker/scheduler failure path rollback 后重载 step/run/group 并隔离 failure-hook 二次异常；视觉成功自动创建/复用 candidate capture task；candidate capture 成功自动创建/复用 auto competitor selection task；默认 detail adapter 未配置时 typed failed 到 `capture_competitor_candidates/failed`，不静默 pending。
+- 听云验证：`compileall` PASS；focused 脚本 PASS；`make test-project-rules` PASS；scoped `git diff --check` PASS。
+- 残余风险：真实 Amazon detail adapter 仍 fail-closed；当前真实外部链路继续到详情抓取后会 typed failed，完整真实通过仍需后续授权/adapter 实现。
+
+#### RUOMING_REVIEW / VALIDATION_PASS_WAITING_JINGHUA - 若命（agentKey: `ruoming`）- 2026-06-22 CST
+
+若命已复跑并初审通过：
+
+- `cd backend && python -m compileall -q app`: PASS。
+- `cd backend && .venv/bin/python ../scripts/test_amazon_main_chain_after_search_qa_fixes.py`: PASS。
+- `make test-project-rules`: PASS，62 tests。
+- scoped `git diff --check`: PASS。
+
+当前改动触及 task runtime failure projection、ProductTaskAction failure hook、视觉初筛成功 hook、候选详情成功 hook、商品 workflow 自动继续路径和规则测试，必须交镜花 code/runtime/state/data/test/doc review。镜花通过后再交观止 rerun `MSG-072`，不直接 commit/push。
+
+### MSG-20260622-077 - REQUEST / CODE_REVIEW / AMAZON_MAIN_CHAIN_AFTER_SEARCH_QA_FIXES
+
+- From: 若命（agentKey: `ruoming`）
+- To: 镜花（agentKey: `jinghua`）
+- Cc: 用户 / 听云（agentKey: `tingyun`） / 观止（agentKey: `guanzhi`）
+- Status: OPEN / READY_TO_START
+- Created: 2026-06-22 CST
+- Depends on:
+  - `MSG-20260622-076` 听云 `DONE_CLAIMED`
+  - `MSG-20260622-076` 若命 `RUOMING_REVIEW / VALIDATION_PASS_WAITING_JINGHUA`
+- Related:
+  - `backend/app/product_tasks/actions.py`
+  - `backend/app/task_runtime/scheduler.py`
+  - `scripts/test_amazon_main_chain_after_search_qa_fixes.py`
+  - `scripts/test_project_rules.py`
+  - `docs/domain-index/product-flow.md`
+  - `docs/domain-index/task-runtime.md`
+
+镜花收到后直接开始。本任务是 `MSG-076` code/runtime/state/data/test/doc review，不做 QA，不改业务代码，不提交。
+
+Review scope:
+
+- 检查 ProductTaskAction worker 和 scheduler failure path：rollback 后 reload 是否完整，是否真的避免 `MissingGreenlet` / runner crash，是否保留原始 worker error，是否会吞掉必要 failure projection。
+- 检查视觉成功后的 sanctioned continuation path：`ProductCompetitorVisualMatchAction.on_step_success()` 创建/复用 candidate capture，`ProductCompetitorCandidateCaptureAction.on_step_success()` 创建/复用 auto competitor selection，auto selection 后续 image analysis 的状态/任务语义是否一致。
+- 检查 failure/success hook 的事务边界、summary/progress 可追踪性、下游 task 创建失败时的 workflow 投影。
+- 检查候选 current-set fallback 是否会误选旧 run/step，是否破坏 current facts 归属。
+- 检查默认 detail adapter `adapter_not_configured` 是否 typed failed 且不会伪装真实通过。
+- 检查 focused 行为脚本、project rules 和 domain index 是否足够防回归，是否有字符串规则冒充行为测试的问题。
+
+Validation evidence available:
+
+- `cd backend && python -m compileall -q app`: PASS。
+- `cd backend && .venv/bin/python ../scripts/test_amazon_main_chain_after_search_qa_fixes.py`: PASS。
+- `make test-project-rules`: PASS，62 tests。
+- scoped `git diff --check`: PASS。
+
+Output:
+
+- 写 review 报告到 `docs/collaboration/reviews/2026-06-22-amazon-main-chain-after-search-qa-fixes-code-review.md`。
+- inbox 最终由若命合并；镜花不要直接编辑 inbox。
+- 返回 `CODE_REVIEW / PASS_WITH_SCOPE`、`CODE_REVIEW / NEEDS_FIX` 或 `CODE_REVIEW / BLOCKED`。
+- 如果打回，按 P0/P1/P2 列完整修复边界和必要验证；如果通过，明确是否允许进入观止 `MSG-072` QA rerun。
+
+#### CODE_REVIEW / NEEDS_FIX - 镜花子 agent（agentKey: `jinghua`）- 2026-06-22 CST
+
+- 报告：`docs/collaboration/reviews/2026-06-22-amazon-main-chain-after-search-qa-fixes-code-review.md`
+- 结论：`CODE_REVIEW / NEEDS_FIX`，当前不允许进入观止 `MSG-072` QA rerun。
+- P1：同商品已有旧 `product_competitor_visual_match` succeeded run 时，新 visual success hook 在当前 run 尚未被 runtime 刷成 succeeded 前创建 candidate capture；candidate capture validate 会优先取旧 succeeded run，导致误判“缺少当前视觉初筛 Top 候选”，把成功视觉结果投影为 `capture_competitor_candidates/failed`。
+- 完整修复边界：candidate capture 任务必须显式携带并使用当前 `visual_task_run_id / visual_task_step_id`，或保证 helper 不能优先选旧 succeeded run；focused 行为脚本必须补 old visual succeeded + new visual success 的 current-set ownership 回归测试。
+- 镜花验证：基础验证 PASS；额外临时 QA_FIX 复现失败，临时数据已清理。
+
+### MSG-20260622-078 - REQUEST / NEEDS_FIX / CURRENT_VISUAL_SET_OWNERSHIP
+
+- From: 若命（agentKey: `ruoming`）
+- To: 听云（agentKey: `tingyun`）
+- Cc: 用户 / 镜花（agentKey: `jinghua`） / 观止（agentKey: `guanzhi`）
+- Status: OPEN / READY_TO_START
+- Created: 2026-06-22 CST
+- Depends on:
+  - `MSG-20260622-077` 镜花 `CODE_REVIEW / NEEDS_FIX`
+- Related:
+  - `docs/collaboration/reviews/2026-06-22-amazon-main-chain-after-search-qa-fixes-code-review.md`
+  - `backend/app/product_tasks/actions.py`
+  - `scripts/test_amazon_main_chain_after_search_qa_fixes.py`
+  - `scripts/test_project_rules.py`
+
+听云收到后直接开始。本任务修复镜花 P1，不提交、不 push。
+
+目标：
+
+- Candidate capture 不得再通过“最新 succeeded visual run”猜当前集合来承接刚完成的 visual success。
+- `ProductCompetitorVisualMatchAction.on_step_success()` 创建/复用 `product_competitor_candidate_capture` 时，必须把当前 `visual_task_run_id=step.task_run_id`、`visual_task_step_id=step.id` 显式写入 payload/plan/step payload。
+- `ProductCompetitorCandidateCaptureAction.validate()` / `execute_step()` 必须优先使用 payload 中的 `visual_task_run_id / visual_task_step_id` 加载 current selected rows；缺失时才允许走兼容 fallback。
+- focused 脚本必须新增行为用例：同商品存在旧 visual succeeded run，旧 selected 已被新 visual reserve 清理，新 visual success 后 candidate capture 使用新 run/step 创建并执行，不得误取旧 run。
+- Project rules 可补 contract 检查，但不能只靠字符串规则；行为脚本必须覆盖。
+
+验证要求：
+
+- `cd backend && python -m compileall -q app`
+- `cd backend && .venv/bin/python ../scripts/test_amazon_main_chain_after_search_qa_fixes.py`
+- `make test-project-rules`
+- scoped `git diff --check`
+
+输出 `DONE_CLAIMED / CURRENT_VISUAL_SET_OWNERSHIP_FIX`，必须列：
+
+- root cause。
+- 改动文件。
+- payload/plan/validate/execute 如何绑定当前 visual run/step。
+- old succeeded run 回归用例证据。
+- 验证命令结果。
+- 是否需要镜花 rereview。
+
+#### DONE_CLAIMED - 听云子 agent（agentKey: `tingyun`）- 2026-06-22 CST
+
+- 结论：`DONE_CLAIMED / CURRENT_VISUAL_SET_OWNERSHIP_FIX`。
+- Root cause：candidate capture 在没有 payload visual ids 时优先查“最新 succeeded visual run”；新 visual success hook 创建下游 task 时，当前 visual run 尚未被 runtime 汇总为 succeeded，导致同商品旧 succeeded visual run 抢占 current set。
+- 改动范围：`backend/app/product_tasks/actions.py`、`scripts/test_amazon_main_chain_after_search_qa_fixes.py`、`scripts/test_project_rules.py`、`docs/domain-index/product-flow.md`。
+- 修复摘要：visual success 创建 candidate capture 时显式传 `visual_task_run_id=step.task_run_id`、`visual_task_step_id=step.id`；candidate capture `build_plan()` 写入 run/step payload；`validate()` / `execute_step()` 优先使用 payload visual ids，缺失才兼容 fallback；复用 active candidate capture run 时刷新 pending/ready step payload。
+- 回归证据：focused 脚本新增 old visual succeeded + new visual success current-set ownership 用例，验证下游 payload 指向新 run/step，并执行新 current set。
+- 听云验证：`compileall` PASS；focused 脚本 PASS；`make test-project-rules` PASS，62 tests；scoped `git diff --check` PASS。
+- 需要镜花 rereview。
+
+#### RUOMING_REREVIEW / VALIDATION_PASS_WAITING_JINGHUA - 若命（agentKey: `ruoming`）- 2026-06-22 CST
+
+若命已复跑：
+
+- `cd backend && python -m compileall -q app`: PASS。
+- `cd backend && .venv/bin/python ../scripts/test_amazon_main_chain_after_search_qa_fixes.py`: PASS。
+- `make test-project-rules`: PASS，62 tests。
+- scoped `git diff --check`: PASS。
+
+等待镜花对 `MSG-077` P1 做 rereview。通过后再交观止 rerun `MSG-072`；当前不 commit/push。
+
+#### CODE_REVIEW_REREVIEW / PASS_WITH_SCOPE - 镜花子 agent（agentKey: `jinghua`）- 2026-06-22 CST
+
+- 报告：`docs/collaboration/reviews/2026-06-22-amazon-main-chain-after-search-qa-fixes-code-review.md`
+- 结论：`CODE_REVIEW_REREVIEW / PASS_WITH_SCOPE`。
+- 复审结论：上一轮 P1 current visual-set ownership 修复完整；visual success hook 显式传当前 `visual_task_run_id / visual_task_step_id`，candidate capture run/step payload 写入正确，`validate()` / `execute_step()` 优先使用 payload ids，active run 复用只刷新 pending/ready step，不改 running/succeeded 历史。
+- 镜花验证：`compileall` PASS；focused 脚本 PASS；`make test-project-rules` PASS，62 tests；scoped `git diff --check` PASS。
+- Gate meaning：允许进入观止 `MSG-072` QA rerun；不代表 QA 通过，也不授权 commit/push。
+
+### MSG-20260622-079 - REQUEST / QA_RERUN / AMAZON_MAIN_CHAIN_AFTER_SEARCH_QA_FIXES
+
+- From: 若命（agentKey: `ruoming`）
+- To: 观止（agentKey: `guanzhi`）
+- Cc: 用户 / 听云（agentKey: `tingyun`） / 镜花（agentKey: `jinghua`）
+- Status: OPEN / READY_TO_START
+- Created: 2026-06-22 CST
+- Depends on:
+  - `MSG-20260622-076` 听云 `DONE_CLAIMED`
+  - `MSG-20260622-077` 镜花 `CODE_REVIEW / NEEDS_FIX`
+  - `MSG-20260622-078` 听云 `DONE_CLAIMED`
+  - `MSG-20260622-078` 镜花 `CODE_REVIEW_REREVIEW / PASS_WITH_SCOPE`
+- Related:
+  - `docs/collaboration/reviews/2026-06-22-amazon-main-chain-after-search-pass-qa.md`
+  - `docs/collaboration/reviews/2026-06-22-amazon-main-chain-after-search-qa-fixes-code-review.md`
+  - `scripts/test_amazon_main_chain_after_search_qa_fixes.py`
+
+观止收到后直接开始。本任务是 `MSG-072` 商品主链路 after-search QA rerun，不改业务代码、不提交、不 push。
+
+Trigger condition:
+
+- 听云已修复 `MSG-072` 两个 P1，并完成 `MSG-078` current visual-set ownership 返工。
+- 镜花 rereview 已 `PASS_WITH_SCOPE`，允许 QA rerun。
+
+QA scope:
+
+1. 重验 VLM/API/TLS/model failure 不再导致 runner crash/stale running：
+   - 可使用行为脚本、API/task-runtime 事实或安全样本。
+   - 期望：task/run/step failed 可追踪，商品到 `visual_match_competitors/failed`，可重试；不需要人工 `mark-interrupted`。
+2. 重验 visual success 后不再静默停在 `capture_competitor_candidates/pending` 无入口：
+   - 期望：visual success 创建/复用 candidate capture task；默认 detail adapter 未配置时 typed failed 到 `capture_competitor_candidates/failed` 且错误包含 `adapter_not_configured`。
+   - 如果使用 fixture/detail adapter，只能作为受控 continuation 证据，不得包装成真实 Amazon detail 成功。
+3. 关注 old visual succeeded + new visual success current-set ownership：
+   - 期望：candidate capture 使用新 visual run/step payload，不误取旧 succeeded run。
+4. 如环境允许，可继续从当前安全样本观察是否能推进；但真实 Amazon detail adapter 当前仍 fail-closed，不能把外部 adapter 未配置当作本轮代码 P1，除非出现静默 pending、runner crash、状态/任务不可追踪或页面/API 误导。
+
+Forbidden:
+
+- 不写手工 DB 成功，不 mock 成真实 QA PASS。
+- 不触发 Amazon 导出、Seller Central、A+ 上传、TikTok、真实发布、真实 ASIN 覆盖或模板输出。
+- 不把行为脚本成功等同于完整真实外部链路通过。
+
+PASS / NEEDS_FIX / BLOCKED:
+
+- `QA / PASS_WITH_SCOPE`：failure projection 稳定、visual success downstream task creation 可追踪、default detail adapter typed failed、不再出现 stale running / 静默 pending / 误取旧 visual run；残余真实 adapter 未配置风险明确。
+- `QA / NEEDS_FIX`：仍 runner crash、stale running、静默停 pending、状态/任务不一致、错误不可追踪、candidate capture 误取旧 visual run、页面/API 误导。
+- `QA / BLOCKED`：服务、样本、DB、外部依赖不可用，且无法用安全行为脚本或只读事实替代判断。
+
+Output:
+
+- 写 QA 报告到 `docs/collaboration/reviews/2026-06-22-amazon-main-chain-after-search-qa-rerun.md`。
+- inbox 最终由若命合并；观止不要直接编辑 inbox。
+- 返回 `QA / PASS_WITH_SCOPE`、`QA / NEEDS_FIX` 或 `QA / BLOCKED`，列证据、样本、命令/API、允许/禁止副作用和残余风险。
+
+#### QA / PASS_WITH_SCOPE - 观止子 agent（agentKey: `guanzhi`）- 2026-06-22 CST
+
+- 报告：`docs/collaboration/reviews/2026-06-22-amazon-main-chain-after-search-qa-rerun.md`
+- 结论：`QA / PASS_WITH_SCOPE`。
+- 验证证据：`cd backend && .venv/bin/python ../scripts/test_amazon_main_chain_after_search_qa_fixes.py` PASS；`cd backend && python -m compileall -q app` PASS；`make test-project-rules` PASS，62 tests；QA_FIX 临时数据清理检查 PASS；scoped `git diff --check` PASS。
+- 覆盖结论：VLM/API/TLS/model failure 已稳定投影到 task/run/step failed 和 `visual_match_competitors/failed`；visual success 会创建/复用 candidate capture task；默认 detail adapter 未配置时 typed failed 到 `capture_competitor_candidates/failed` 且包含 `adapter_not_configured`；old visual succeeded + new visual success 使用新 run/step payload，未误取旧 run。
+- 副作用：仅临时写入并清理 QA_FIX 测试商品/task/candidate；未触发 Amazon 导出、Seller Central、A+ 上传、TikTok、真实发布、真实 ASIN 覆盖或模板输出。
+- 残余风险：真实 Amazon detail adapter 仍默认未配置；本轮只证明可追踪 typed failure 和受控 fixture continuation，不证明 live Amazon detail 页面访问或最终全真实 `export_ready`。
+- Gate meaning：允许若命 scoped commit/push 本轮 after-search 修复；不代表真实 Amazon detail adapter 已打通。
 
 ### MSG-20260622-072 - REQUEST / QA_CONTINUATION / AMAZON_MAIN_CHAIN_AFTER_SEARCH_PASS
 

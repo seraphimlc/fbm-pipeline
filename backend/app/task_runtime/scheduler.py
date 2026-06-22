@@ -240,6 +240,8 @@ async def _execute_step(step_id: int, worker_id: str) -> bool:
         step = result.scalar_one()
         run = step.task_run
         group = step.task_group
+        run_id = int(step.task_run_id)
+        step_type = str(step.step_type)
         await emit_event(db, step=step, event_type="status", message="开始执行 step")
         run.status = RUN_STATUS_RUNNING
         run.started_at = run.started_at or datetime.now()
@@ -292,7 +294,19 @@ async def _execute_step(step_id: int, worker_id: str) -> bool:
             await emit_event(db, step=step, event_type="status", message=step.error_message)
             await db.commit()
         except Exception as exc:
-            logger.exception("[TaskRuntime] step failed: step_id=%s type=%s", step.id, step.step_type)
+            logger.exception("[TaskRuntime] step failed: step_id=%s type=%s", step_id, step_type)
+            await db.rollback()
+            result = await db.execute(
+                select(TaskStep)
+                .where(TaskStep.id == step_id)
+                .options(selectinload(TaskStep.task_run), selectinload(TaskStep.task_group))
+            )
+            step = result.scalar_one_or_none()
+            if step is None:
+                logger.error("[TaskRuntime] failed step disappeared before status projection: step_id=%s", step_id)
+                return True
+            run = step.task_run
+            group = step.task_group
             now = datetime.now()
             step.status = STEP_STATUS_FAILED
             step.error_message = f"{type(exc).__name__}: {exc}"
@@ -320,12 +334,12 @@ async def _execute_step(step_id: int, worker_id: str) -> bool:
                     step = result.scalar_one()
                     message = f"step 已成功，后续业务投影失败: {type(exc).__name__}: {exc}"
                     success_projection_error = message
-                    logger.exception("[TaskRuntime] step success projection failed: step_id=%s type=%s", step.id, step.step_type)
+                    logger.exception("[TaskRuntime] step success projection failed: step_id=%s type=%s", step_id, step_type)
                     await emit_event(db, step=step, event_type="error", message=message)
                     await db.commit()
-        await _refresh_group_and_run(db, run.id)
+        await _refresh_group_and_run(db, run_id)
         if success_projection_error:
-            run = await db.get(TaskRun, run.id)
+            run = await db.get(TaskRun, run_id)
             if run:
                 now = datetime.now()
                 run.status = RUN_STATUS_PARTIAL_FAILED

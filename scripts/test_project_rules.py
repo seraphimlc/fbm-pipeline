@@ -3792,6 +3792,7 @@ def test_auto_competitor_visual_match_phase_b_contract() -> None:
     models_text = (ROOT / "backend" / "app" / "models" / "models.py").read_text(encoding="utf-8")
     database_text = (ROOT / "backend" / "app" / "database.py").read_text(encoding="utf-8")
     actions_text = (ROOT / "backend" / "app" / "product_tasks" / "actions.py").read_text(encoding="utf-8")
+    scheduler_text = (ROOT / "backend" / "app" / "task_runtime" / "scheduler.py").read_text(encoding="utf-8")
     service_text = (ROOT / "backend" / "app" / "services" / "amazon_competitor_visual_match.py").read_text(encoding="utf-8")
     workflow_text = (ROOT / "backend" / "app" / "product_tasks" / "workflow.py").read_text(encoding="utf-8")
     products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
@@ -3803,6 +3804,8 @@ def test_auto_competitor_visual_match_phase_b_contract() -> None:
     prd_text = (ROOT / "docs" / "superpowers" / "specs" / "2026-06-19-amazon-auto-competitor-selection-prd.md").read_text(encoding="utf-8")
     visual_retry_section = products_text.split('@router.post("/{product_id}/competitor-visual-match/retry"', 1)[1].split('@router.delete("/{product_id}"', 1)[0]
     create_runs_section = actions_text.split("async def create_product_action_runs", 1)[1].split("async def product_action_worker", 1)[0]
+    visual_action_section = actions_text.split("class ProductCompetitorVisualMatchAction", 1)[1].split("async def _latest_successful_competitor_search_ids", 1)[0]
+    product_worker_section = actions_text.split("async def product_action_worker", 1)[1].split("def register_product_task_actions", 1)[0]
 
     for field in (
         "visual_similarity_score",
@@ -3835,6 +3838,14 @@ def test_auto_competitor_visual_match_phase_b_contract() -> None:
         and "clear_current_visual_match(db, product_id" in actions_text
         and "WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES" in actions_text,
         "Phase B 必须通过 ProductTaskAction 实现 reserve/service/success/failure 投影",
+    )
+    assert_true(
+        "_reload_step_for_product_action" in actions_text
+        and "failure_step = await _reload_step_for_product_action(ctx.db, step_id)" in product_worker_section
+        and "Product task failure projection failed; preserving original worker error" in product_worker_section
+        and "result = await db.execute(" in scheduler_text.split("except Exception as exc:", 1)[1].split("await emit_event", 1)[0]
+        and "step_id" in scheduler_text.split("except Exception as exc:", 1)[1].split("await emit_event", 1)[0],
+        "ProductTaskAction worker/scheduler failure path 必须 rollback 后重载 step 并隔离 failure hook 二次异常，防止 MissingGreenlet 崩 runner",
     )
     assert_true(
         "await action.validate(db, payload)" in create_runs_section
@@ -3903,6 +3914,15 @@ def test_auto_competitor_visual_match_phase_b_contract() -> None:
         and "product:{product_id}:competitor_visual_match" in workflow_text
         and "WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES" in workflow_text,
         "workflow 必须提供视觉初筛重试、重搜和任务中心 correlation",
+    )
+    assert_true(
+        '"product_competitor_candidate_capture"' in visual_action_section
+        and '"visual_task_run_id": step.task_run_id' in visual_action_section
+        and '"visual_task_step_id": step.id' in visual_action_section
+        and "candidate_capture_task_run_ids" in visual_action_section
+        and "视觉初筛完成，已提交候选详情抓取任务" in visual_action_section
+        and "_test_new_visual_success_owns_capture_set_when_old_visual_succeeded" in (ROOT / "scripts" / "test_amazon_main_chain_after_search_qa_fixes.py").read_text(encoding="utf-8"),
+        "视觉初筛 success hook 必须带当前 visual run/step 创建/复用候选详情 task，不能停在 pending 或误取旧 succeeded visual run",
     )
     assert_true(
         "retryProductCompetitorVisualMatch" in frontend_api_text
@@ -4074,6 +4094,10 @@ def test_auto_competitor_candidate_capture_and_selection_phase1_contract() -> No
     capture_action_section = actions_text.split("class ProductCompetitorCandidateCaptureAction", 1)[1].split("class ProductAutoCompetitorSelectionAction", 1)[0]
     assert_true(
         "_current_visual_selected_for_capture" in actions_text
+        and "_visual_ids_from_payload(payload)" in capture_action_section
+        and '"visual_task_run_id"] = visual_task_run_id' in capture_action_section
+        and '"visual_task_step_id"] = visual_task_step_id' in capture_action_section
+        and "visual_task_run_id=visual_task_run_id" in capture_action_section
         and "AmazonListingDetailError" in capture_action_section
         and "get_amazon_listing_detail_adapter" in capture_action_section
         and "listing_detail_to_dict" in capture_action_section
@@ -4089,6 +4113,13 @@ def test_auto_competitor_candidate_capture_and_selection_phase1_contract() -> No
         and "row.final_selected" not in capture_action_section
         and "product.competitor_asin" not in capture_action_section,
         "Phase 2A candidate capture 只能写候选详情 current facts，不得写 final 选择或最终竞品 ASIN",
+    )
+    assert_true(
+        '"product_auto_competitor_selection"' in capture_action_section
+        and "auto_competitor_selection_task_run_ids" in capture_action_section
+        and "候选竞品详情抓取完成，已提交自动选竞品任务" in capture_action_section
+        and "adapter_not_configured" in (ROOT / "scripts" / "test_amazon_main_chain_after_search_qa_fixes.py").read_text(encoding="utf-8"),
+        "候选详情 success hook 必须创建/复用自动选竞品 task；默认 detail adapter 阻塞必须有 typed behavior 脚本覆盖",
     )
     selection_action_section = actions_text.split("class ProductAutoCompetitorSelectionAction", 1)[1].split("class ProductImageAnalysisAction", 1)[0]
     assert_true(
