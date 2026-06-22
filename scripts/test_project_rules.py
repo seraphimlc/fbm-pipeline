@@ -5,6 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 import importlib.util
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -583,6 +584,105 @@ def test_product_overview_handles_uninitialized_workflow_bucket() -> None:
         "node_type=\"done\"" in workflow_text
         and "node_type=\"terminal\"" not in workflow_text,
         "flow_done/succeeded 的 node_type 必须使用 PRD 口径 done，不能引入 terminal 等额外语义",
+    )
+
+
+def test_product_detail_uses_workflow_as_primary_display_source() -> None:
+    product_detail_text = (ROOT / "frontend" / "src" / "pages" / "ProductDetail.tsx").read_text(encoding="utf-8")
+    product_flow_index = (ROOT / "docs" / "domain-index" / "product-flow.md").read_text(encoding="utf-8")
+    default_tab_section = product_detail_text.split("const defaultProductDetailTab", 1)[1].split("const ProductDetail", 1)[0]
+    poll_section = product_detail_text.split("// 自动轮询：任务运行中时每3秒刷新", 1)[1].split(
+        "  useEffect(() => {\n    if (!product) return;\n    if (listingImageDraftProductId",
+        1,
+    )[0]
+    run_action_section = product_detail_text.split("const runWorkflowAction", 1)[1].split("const renderWorkflowActionButton", 1)[0]
+    render_action_section = product_detail_text.split("const renderWorkflowActionButton", 1)[1].split("const workflowSecondaryActions", 1)[0]
+    top_action_section = product_detail_text.split("<Button icon={<ReloadOutlined />} onClick={fetchDetail}>刷新</Button>", 1)[1].split('<Popconfirm\n            title="确定删除此商品？"', 1)[0]
+
+    labels_match = re.search(
+        r"const WORKFLOW_ACTION_LABELS:[^{]+{(?P<body>.*?)};\nconst EXECUTABLE_WORKFLOW_ACTIONS",
+        product_detail_text,
+        re.S,
+    )
+    assert_true(labels_match is not None, "ProductDetail 必须集中声明前端已接通的 workflow action label")
+    executable_actions = set(re.findall(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:", labels_match.group("body"), re.M))
+    handled_actions = set(re.findall(r"action === '([^']+)'", run_action_section))
+    assert_true(
+        executable_actions <= handled_actions,
+        f"ProductDetail 可执行 workflow action 必须都有真实 handler，缺失: {sorted(executable_actions - handled_actions)}",
+    )
+
+    assert_true(
+        "const workflow = product.workflow || null" in product_detail_text
+        and "const hasWorkflow = Boolean(workflow)" in product_detail_text,
+        "ProductDetail 必须显式识别 product.workflow，不能只靠旧 status/current_step 推详情页状态",
+    )
+    assert_true(
+        "const workflowPipelineSteps = hasWorkflow ? buildWorkflowPipelineSteps(workflow) : []" in product_detail_text
+        and "const pipelineSteps = hasWorkflow ? workflowPipelineSteps : legacyPipelineSteps" in product_detail_text
+        and "if (hasWorkflow) return workflowStageIndex(workflow)" in product_detail_text,
+        "商品详情 stepper 必须在 workflow 存在时使用 workflow stage/work_status，不得被 legacy stepper/current_step 覆盖",
+    )
+    assert_true(
+        "if (workStatus === 'ready_to_generate') return 6" in product_detail_text
+        and "if (workStatus === 'export_ready' || workStatus === 'exported') return 7" in product_detail_text
+        and "if (workStatus === 'capture_detail' && (workflow?.stage_status === 'succeeded' || directIndex < 3)) return 3" in product_detail_text,
+        "ProductDetail stepper 必须让已推进的 work_status 工作桶覆盖上一节点 succeeded 展示位置",
+    )
+    assert_true(
+        "if (workflow) {" in default_tab_section
+        and "const workflowStage = workflow.stage || workflow.node_key" in default_tab_section
+        and "const workflowWorkStatus = workflow.work_status" in default_tab_section
+        and "['ready_to_generate', 'running', 'export_ready', 'exported'].includes(workflowWorkStatus)" in default_tab_section,
+        "ProductDetail 默认 tab 必须优先依据 workflow stage/node_key/work_status，避免 staged 商品落回旧图片确认页",
+    )
+    assert_true(
+        "const legacyProductIsRunning =" in poll_section
+        and "const isRunning = (product.workflow ? workflowIsRunning : legacyProductIsRunning)" in poll_section,
+        "ProductDetail 轮询条件在 workflow 存在时不能继续混入旧 product.status 运行态推断",
+    )
+    assert_true(
+        "const isReadyToExport = hasWorkflow" in product_detail_text
+        and "['export_ready', 'exported'].includes(workflow?.work_status || '')" in product_detail_text,
+        "商品详情待导出口径必须优先读取 workflow.work_status，不能只看旧 completed/current_step",
+    )
+    assert_true(
+        "{hasWorkflow && (" in product_detail_text
+        and "workflow?.label || workflowWorkStatusMeta?.label" in product_detail_text
+        and "{!hasWorkflow && product.status === 'paused'" in product_detail_text
+        and "{!hasWorkflow && showTopProductError" in product_detail_text,
+        "ProductDetail 顶部状态提示必须 workflow 优先；旧 paused/running/error 提示只能作为 legacy fallback",
+    )
+    assert_true(
+        "EXECUTABLE_WORKFLOW_ACTIONS" in product_detail_text
+        and "const isExecutableWorkflowAction" in product_detail_text
+        and ".filter((action: string) => isExecutableWorkflowAction(action))" in product_detail_text,
+        "ProductDetail 只能渲染当前前端已接通的 workflow action，不能把未知 action 显示成无效按钮",
+    )
+    assert_true(
+        "if (!isExecutableWorkflowAction(action)) return null;" in render_action_section
+        and "{hasWorkflow && renderWorkflowActionButton(workflow?.primary_action, workflow?.primary_action_label, true)}" in top_action_section,
+        "ProductDetail primary workflow action 也必须经过可执行白名单，未知 action 不能显示成假按钮",
+    )
+    for legacy_button_guard in (
+        "{!hasWorkflow && product.status === 'failed'",
+        "{!hasWorkflow && product.status === 'paused'",
+        "{!hasWorkflow && product.status === 'pending_review'",
+        "{!hasWorkflow && canGenerateMissingListing",
+        "{!hasWorkflow && isInterruptedProduct",
+        "{!hasWorkflow && isPipelineRunning",
+        "{!hasWorkflow && canSuspendProduct",
+        "{!hasWorkflow && canRestartProduct",
+    ):
+        assert_true(
+            legacy_button_guard in top_action_section,
+            f"ProductDetail 顶部旧主动作必须只作为无 workflow fallback: {legacy_button_guard}",
+        )
+    assert_true(
+        "ProductDetail.tsx" in product_flow_index
+        and "product.workflow" in product_flow_index
+        and "legacy fallback" in product_flow_index,
+        "ProductDetail workflow 展示事实源变化必须同步 product-flow domain index",
     )
 
 
@@ -4008,6 +4108,7 @@ def main() -> int:
         test_amazon_workflow_t2_service_projection_and_write_rules,
         test_product_work_status_producer_outputs_are_registered,
         test_product_overview_handles_uninitialized_workflow_bucket,
+        test_product_detail_uses_workflow_as_primary_display_source,
         test_amazon_workflow_t3_image_selection_reset_and_initialization_rules,
         test_amazon_workflow_t4_competitor_search_rules,
         test_amazon_workflow_t5_competitor_capture_rules,

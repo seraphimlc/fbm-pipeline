@@ -9,7 +9,7 @@ import {
   CheckOutlined, DragOutlined, CopyOutlined, ExportOutlined,
   PictureOutlined,
 } from '@ant-design/icons';
-import { getProduct, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, generateProductAplus, runProductFromStep, updateProduct, updateProductListingImages, listCategoryOptions } from '../api';
+import { getProduct, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, generateProductAplus, runProductFromStep, updateProduct, updateProductListingImages, listCategoryOptions, retryProductAutoImageSelection, retryProductCompetitorSearch, retryProductCompetitorVisualMatch } from '../api';
 import type { CategoryOption, ProductDetail } from '../api';
 
 const { Title, Text } = Typography;
@@ -18,6 +18,45 @@ const DEFAULT_LISTING_IMAGE_LIMIT = 9;
 
 const APLUS_REGEN_ACTIVE_STATUSES = ['queued', 'planning', 'scripting', 'imaging', 'regen_queued', 'regen_script_running', 'regen_image_running'];
 const APLUS_REGEN_RETRYABLE_STATUSES = ['regen_failed', 'regen_interrupted'];
+const WORK_STATUS_META: Record<string, { label: string; shortLabel: string; color: string }> = {
+  needs_initialization: { label: 'Workflow 待初始化', shortLabel: '待初始化', color: 'default' },
+  auto_select_images: { label: '自动选图中', shortLabel: '自动选图', color: 'processing' },
+  select_images: { label: '待确认商品图片', shortLabel: '确认图片', color: 'cyan' },
+  competitor_searching: { label: '搜索候选竞品中', shortLabel: '搜索中', color: 'processing' },
+  select_competitor: { label: '待搜索/选择竞品', shortLabel: '选竞品', color: 'purple' },
+  capture_detail: { label: '抓取竞品详情中', shortLabel: '抓详情', color: 'processing' },
+  ready_to_generate: { label: '待自动生成 Listing', shortLabel: '待自动生成', color: 'warning' },
+  running: { label: '生成中', shortLabel: '生成中', color: 'processing' },
+  export_ready: { label: '待导出', shortLabel: '待导出', color: 'success' },
+  exported: { label: '已导出可重导', shortLabel: '已导出', color: 'green' },
+  failed: { label: '失败', shortLabel: '失败', color: 'error' },
+};
+const WORKFLOW_STEP_GROUPS = [
+  { key: 'images', title: '图片选择', nodes: ['workflow_uninitialized', 'auto_select_images', 'select_images'] },
+  { key: 'search', title: '搜索竞品', nodes: ['search_competitor'] },
+  { key: 'visual', title: '视觉初筛', nodes: ['visual_match_competitors'] },
+  { key: 'capture', title: '抓取详情', nodes: ['capture_competitor_candidates', 'capture_competitor_detail'] },
+  { key: 'competitor', title: '选择竞品', nodes: ['auto_select_competitor', 'select_competitor'] },
+  { key: 'image_analysis', title: '图片分析', nodes: ['image_analysis'] },
+  { key: 'listing', title: 'Listing文案', nodes: ['listing_generation'] },
+  { key: 'export', title: '待导出', nodes: ['flow_done'] },
+];
+const WORKFLOW_ACTION_LABELS: Record<string, string> = {
+  open_image_review: '确认图片',
+  manual_adjust_images: '手动调图',
+  open_task_center: '任务中心',
+  open_export_center: '导出中心',
+  retry_auto_image_selection: '重试自动选图',
+  start_competitor_search: '开始搜索',
+  retry_competitor_search: '重试 Amazon 搜索',
+  restart_competitor_search: '重新搜索竞品',
+  retry_competitor_visual_match: '重试视觉初筛',
+  retry_image_analysis: '重试图片分析',
+  retry_listing_generation: '重试 Listing',
+  retry: '重试',
+  resume: '继续',
+};
+const EXECUTABLE_WORKFLOW_ACTIONS = new Set(Object.keys(WORKFLOW_ACTION_LABELS));
 const PRODUCT_NON_RUNNING_STATUSES = [
   'created',
   'completed',
@@ -149,8 +188,79 @@ const fileSize = (bytes: number | null | undefined) => {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 };
 const valueText = (value: string | null | undefined) => value || '-';
+const workflowStageIndex = (workflow: any) => {
+  const stage = workflow?.stage || workflow?.node_key;
+  const directIndex = WORKFLOW_STEP_GROUPS.findIndex((group) => group.nodes.includes(stage));
+  const workStatus = workflow?.work_status;
+  if (workStatus === 'ready_to_generate') return 6;
+  if (workStatus === 'export_ready' || workStatus === 'exported') return 7;
+  if (workStatus === 'select_competitor' && (workflow?.stage_status === 'succeeded' || directIndex < 2)) return 4;
+  if (workStatus === 'capture_detail' && (workflow?.stage_status === 'succeeded' || directIndex < 3)) return 3;
+  if (directIndex >= 0) return directIndex;
+  if (workStatus === 'needs_initialization' || workStatus === 'auto_select_images' || workStatus === 'select_images') return 0;
+  if (workStatus === 'competitor_searching') return 1;
+  if (workStatus === 'select_competitor') return 4;
+  if (workStatus === 'capture_detail') return 3;
+  if (workStatus === 'ready_to_generate' || workStatus === 'running') return 6;
+  if (workStatus === 'export_ready' || workStatus === 'exported') return 7;
+  if (workStatus === 'failed') return Math.max(directIndex, 0);
+  return 0;
+};
+const workflowStepStatus = (workflow: any, index: number, currentIndex: number) => {
+  const status = workflow?.stage_status;
+  const workStatus = workflow?.work_status;
+  if (index < currentIndex) return 'finish';
+  if (index > currentIndex) return 'wait';
+  if (status === 'failed') return 'error';
+  if (workStatus === 'exported') return 'finish';
+  return 'process';
+};
+const buildWorkflowPipelineSteps = (workflow: any) => {
+  const currentIndex = workflowStageIndex(workflow);
+  const currentDescription = workflow?.action_reason
+    || WORK_STATUS_META[workflow?.work_status]?.label
+    || workflow?.label;
+  return WORKFLOW_STEP_GROUPS.map((group, index) => {
+    const isCurrent = index === currentIndex;
+    const status = workflowStepStatus(workflow, index, currentIndex);
+    return {
+      title: group.title,
+      description: isCurrent
+        ? (currentDescription || group.title)
+        : status === 'finish'
+          ? '已完成'
+          : '等待前置节点完成',
+      status,
+    };
+  });
+};
+const isExecutableWorkflowAction = (action?: string | null) => Boolean(action && EXECUTABLE_WORKFLOW_ACTIONS.has(action));
 const defaultProductDetailTab = (detail: ProductDetail | null | undefined) => {
   if (!detail) return 'basic';
+
+  const workflow = detail.workflow || null;
+  if (workflow) {
+    const workflowStage = workflow.stage || workflow.node_key;
+    const workflowWorkStatus = workflow.work_status;
+    if (['auto_select_images', 'select_images', 'image_analysis'].includes(workflowStage)) return 'images';
+    if (['needs_initialization', 'auto_select_images', 'select_images'].includes(workflowWorkStatus)) return 'images';
+    if ([
+      'search_competitor',
+      'visual_match_competitors',
+      'capture_competitor_candidates',
+      'capture_competitor_detail',
+      'auto_select_competitor',
+      'select_competitor',
+    ].includes(workflowStage)) return 'competitor';
+    if (['competitor_searching', 'select_competitor', 'capture_detail'].includes(workflowWorkStatus)) return 'competitor';
+    if (['listing_generation', 'flow_done'].includes(workflowStage)) {
+      return detail.aplus?.aplus_status ? 'aplus' : 'listing';
+    }
+    if (['ready_to_generate', 'running', 'export_ready', 'exported'].includes(workflowWorkStatus)) {
+      return detail.aplus?.aplus_status ? 'aplus' : 'listing';
+    }
+    return 'basic';
+  }
 
   const selectedAsin = detail.competitor_asin;
   const step = Number(detail.current_step || 0);
@@ -261,7 +371,10 @@ const ProductDetail: React.FC = () => {
   // 自动轮询：任务运行中时每3秒刷新
   useEffect(() => {
     if (!product) return;
-    const isRunning = !['completed', 'pending_review', 'failed', 'paused', 'created', 'unavailable', 'source_unavailable'].includes(product.status)
+    const workflowIsRunning = product.workflow?.stage_status === 'processing'
+      || ['running', 'competitor_searching'].includes(product.workflow?.work_status || '');
+    const legacyProductIsRunning = !['completed', 'pending_review', 'failed', 'paused', 'created', 'unavailable', 'source_unavailable'].includes(product.status);
+    const isRunning = (product.workflow ? workflowIsRunning : legacyProductIsRunning)
       || APLUS_REGEN_ACTIVE_STATUSES.includes(product.aplus?.aplus_status || '');
     if (isRunning) {
       pollRef.current = setInterval(fetchDetail, 3000);
@@ -269,7 +382,7 @@ const ProductDetail: React.FC = () => {
       if (pollRef.current) clearInterval(pollRef.current);
     }
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [product?.status, product?.aplus?.aplus_status]);
+  }, [product?.status, product?.workflow?.stage_status, product?.workflow?.work_status, product?.aplus?.aplus_status]);
 
   useEffect(() => {
     if (!product) return;
@@ -297,6 +410,9 @@ const ProductDetail: React.FC = () => {
   const aplusStatus = aplus?.aplus_status ? APLUS_STATUS_LABELS[aplus.aplus_status] : null;
   const isAplusRegenerating = APLUS_REGEN_ACTIVE_STATUSES.includes(aplus?.aplus_status || '');
   const canRetryAplusRegeneration = APLUS_REGEN_RETRYABLE_STATUSES.includes(aplus?.aplus_status || '');
+  const workflow = product.workflow || null;
+  const hasWorkflow = Boolean(workflow);
+  const workflowWorkStatusMeta = workflow?.work_status ? WORK_STATUS_META[workflow.work_status] : null;
 
   const handleDelete = async () => {
     setDeleting(true);
@@ -942,6 +1058,69 @@ const ProductDetail: React.FC = () => {
     }
   };
 
+  const openImageReview = () => {
+    navigate(`/products/image-review?product_id=${product.id}`);
+  };
+
+  const runWorkflowAction = async (action?: string | null) => {
+    if (!action || action === 'open_detail') return;
+    if (action === 'open_image_review' || action === 'manual_adjust_images') {
+      openImageReview();
+      return;
+    }
+    if (action === 'open_task_center') {
+      const correlationKey = workflow?.related_correlation_key;
+      navigate(correlationKey ? `/task-runs?correlation_key=${encodeURIComponent(correlationKey)}` : '/task-runs');
+      return;
+    }
+    if (action === 'open_export_center') {
+      navigate('/export-center');
+      return;
+    }
+    setPipelineRetryLoading(true);
+    try {
+      if (action === 'retry_auto_image_selection') {
+        await retryProductAutoImageSelection(product.id);
+      } else if (action === 'start_competitor_search' || action === 'retry_competitor_search' || action === 'restart_competitor_search') {
+        await retryProductCompetitorSearch(product.id);
+      } else if (action === 'retry_competitor_visual_match') {
+        await retryProductCompetitorVisualMatch(product.id);
+      } else if (action === 'retry_image_analysis' || action === 'retry_listing_generation' || action === 'retry') {
+        await retryStep(product.id);
+      } else if (action === 'resume') {
+        await resumePipeline(product.id);
+      } else {
+        return;
+      }
+      message.success(workflow?.primary_action_label ? `已提交：${workflow.primary_action_label}` : '已提交处理');
+      await fetchDetail();
+    } catch (e: any) {
+      message.error(e?.response?.data?.detail || '操作失败');
+    } finally {
+      setPipelineRetryLoading(false);
+    }
+  };
+
+  const renderWorkflowActionButton = (action?: string | null, label?: string | null, primary = false) => {
+    if (!isExecutableWorkflowAction(action)) return null;
+    const icon = action === 'open_task_center' || action === 'resume' ? <PlayCircleOutlined /> : <RedoOutlined />;
+    return (
+      <Button
+        type={primary ? 'primary' : 'default'}
+        icon={icon}
+        loading={pipelineRetryLoading}
+        onClick={() => runWorkflowAction(action)}
+      >
+        {label || WORKFLOW_ACTION_LABELS[action!] || '处理'}
+      </Button>
+    );
+  };
+
+  const workflowSecondaryActions = (workflow?.allowed_actions || [])
+    .filter((action: string) => action && action !== workflow?.primary_action && action !== 'open_detail')
+    .filter((action: string) => isExecutableWorkflowAction(action))
+    .filter((action: string, index: number, actions: string[]) => actions.indexOf(action) === index);
+
   const packageColumns = [
     { title: '外包装商品', dataIndex: 'code', width: 180, render: (v) => v || '-' },
     { title: '数量', dataIndex: 'qty', width: 90, render: (v) => v || '-' },
@@ -1062,10 +1241,13 @@ const ProductDetail: React.FC = () => {
   ];
 
   const stoppedStatuses = ['failed', 'unavailable', 'source_unavailable'];
-  const stepStatus = stoppedStatuses.includes(product.status) ? 'error' : ['completed', 'pending_review'].includes(product.status) ? 'finish' : 'process';
+  const workflowStepStatusValue = workflow?.stage_status === 'failed' ? 'error' : workflow?.stage_status === 'succeeded' ? 'finish' : 'process';
+  const stepStatus = hasWorkflow ? workflowStepStatusValue : stoppedStatuses.includes(product.status) ? 'error' : ['completed', 'pending_review'].includes(product.status) ? 'finish' : 'process';
   const isStopped = stoppedStatuses.includes(product.status);
   const isPaused = product.status === 'paused';
-  const isReadyToExport = product.status === 'completed' && product.current_step >= 6;
+  const isReadyToExport = hasWorkflow
+    ? ['export_ready', 'exported'].includes(workflow?.work_status || '')
+    : product.status === 'completed' && product.current_step >= 6;
   const referenceAsin = product.competitor_asin || '';
   const hasConfirmedSearchImage = Boolean(images?.main_image_path);
   const hasReferenceCompetitor = Boolean(referenceAsin);
@@ -1158,7 +1340,7 @@ const ProductDetail: React.FC = () => {
   });
 
   // 商品详情页展示业务节点，不再展示旧的内部技术 Pipeline。
-  const pipelineSteps = [
+  const legacyPipelineSteps = [
     {
       title: '确认商品图片',
       description: hasConfirmedSearchImage ? `已确认主图和 Listing 图片，已选 ${listingImageCount || 1} 张` : `等待确认主图和 Listing 图片${statusSuffix}`,
@@ -1218,8 +1400,11 @@ const ProductDetail: React.FC = () => {
       active: nodeActiveAt('export'),
     },
   ].map(toWorkflowItem);
+  const workflowPipelineSteps = hasWorkflow ? buildWorkflowPipelineSteps(workflow) : [];
+  const pipelineSteps = hasWorkflow ? workflowPipelineSteps : legacyPipelineSteps;
 
   const currentStepIndex = (() => {
+    if (hasWorkflow) return workflowStageIndex(workflow);
     const activeIndex = pipelineSteps.findIndex((item) => item.status === 'process' || item.status === 'error');
     if (activeIndex >= 0) return activeIndex;
     const firstWaitingIndex = pipelineSteps.findIndex((item) => item.status === 'wait');
@@ -2458,17 +2643,23 @@ const ProductDetail: React.FC = () => {
         </Title>
         <Space>
           <Button icon={<ReloadOutlined />} onClick={fetchDetail}>刷新</Button>
-          {product.status === 'failed' && !isLegacyGigaBrowserCollectError && !isCompetitorSearchFailed && (
+          {hasWorkflow && renderWorkflowActionButton(workflow?.primary_action, workflow?.primary_action_label, true)}
+          {hasWorkflow && workflowSecondaryActions.map((action: string) => (
+            <React.Fragment key={action}>
+              {renderWorkflowActionButton(action, WORKFLOW_ACTION_LABELS[action])}
+            </React.Fragment>
+          ))}
+          {!hasWorkflow && product.status === 'failed' && !isLegacyGigaBrowserCollectError && !isCompetitorSearchFailed && (
             <Button icon={<RedoOutlined />} onClick={async () => { await retryStep(product.id); fetchDetail(); }}>
               重试
             </Button>
           )}
-          {product.status === 'paused' && (
+          {!hasWorkflow && product.status === 'paused' && (
             <Button type="primary" icon={<PlayCircleOutlined />} onClick={async () => { await resumePipeline(product.id); fetchDetail(); }}>
               继续
             </Button>
           )}
-          {product.status === 'pending_review' && (
+          {!hasWorkflow && product.status === 'pending_review' && (
             <Button type="primary" icon={<PlayCircleOutlined />} onClick={async () => { await resumePipeline(product.id); fetchDetail(); }}>
               继续
             </Button>
@@ -2478,22 +2669,22 @@ const ProductDetail: React.FC = () => {
               重试A+重新生图
             </Button>
           )}
-          {canGenerateMissingListing && (
+          {!hasWorkflow && canGenerateMissingListing && (
             <Button type="primary" icon={<PlayCircleOutlined />} loading={listingRegenerateLoading} onClick={regenerateListing}>
               生成Listing
             </Button>
           )}
-          {isInterruptedProduct && (
+          {!hasWorkflow && isInterruptedProduct && (
             <Button type="primary" icon={<RedoOutlined />} loading={pipelineRetryLoading} onClick={retryInterruptedPipeline}>
               重试当前节点
             </Button>
           )}
-          {isPipelineRunning && (
+          {!hasWorkflow && isPipelineRunning && (
             <Button icon={<PauseOutlined />} onClick={async () => { await pausePipeline(product.id); fetchDetail(); }}>
               挂起
             </Button>
           )}
-          {canSuspendProduct && !isPipelineRunning && (
+          {!hasWorkflow && canSuspendProduct && !isPipelineRunning && (
             <Popconfirm
               title="挂起这个商品？"
               description="挂起后不会继续执行后续自动流程，之后可以点继续恢复。"
@@ -2504,7 +2695,7 @@ const ProductDetail: React.FC = () => {
               <Button icon={<PauseOutlined />}>挂起</Button>
             </Popconfirm>
           )}
-          {canRestartProduct && (
+          {!hasWorkflow && canRestartProduct && (
             <Popconfirm
               title="确定重新开始流程？"
               description="会保留已使用图片，清空旧候选竞品、已选竞品、Listing、图片分析、A+ 和生成文件；有主图时会重新搜索候选竞品。"
@@ -2531,7 +2722,7 @@ const ProductDetail: React.FC = () => {
       {/* Pipeline 进度条 */}
       <Card size="small" style={{ marginBottom: 16 }}>
         <Steps
-          current={isReadyToExport ? pipelineSteps.length : currentStepIndex}
+          current={!hasWorkflow && isReadyToExport ? pipelineSteps.length : currentStepIndex}
           status={stepStatus}
           items={pipelineSteps}
           size="small"
@@ -2539,12 +2730,26 @@ const ProductDetail: React.FC = () => {
       </Card>
 
       {/* 状态信息 */}
-      {product.status === 'paused' && (
+      {hasWorkflow && (
+        <Alert
+          type={workflow?.stage_status === 'failed' || workflow?.work_status === 'failed' ? 'error' : workflow?.stage_status === 'processing' || workflow?.work_status === 'running' || workflow?.work_status === 'competitor_searching' ? 'info' : workflow?.stage_status === 'succeeded' || workflow?.work_status === 'export_ready' || workflow?.work_status === 'exported' ? 'success' : 'warning'}
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={(
+            <Space wrap>
+              <span>{workflow?.label || workflowWorkStatusMeta?.label || '当前流程状态'}</span>
+              {workflowWorkStatusMeta && <Tag color={workflow?.color || workflowWorkStatusMeta.color}>{workflowWorkStatusMeta.label}</Tag>}
+            </Space>
+          )}
+          description={workflow?.action_reason || product.current_task_status || null}
+        />
+      )}
+      {!hasWorkflow && product.status === 'paused' && (
         <Card size="small" style={{ marginBottom: 16, borderColor: '#d9d9d9' }}>
           <Text type="secondary">已挂起：不会继续执行后续自动流程，点击继续后从当前步骤恢复。</Text>
         </Card>
       )}
-      {isInterruptedProduct && product.current_task_status && (
+      {!hasWorkflow && isInterruptedProduct && product.current_task_status && (
         <Alert
           type="warning"
           showIcon
@@ -2552,7 +2757,7 @@ const ProductDetail: React.FC = () => {
           message={product.current_task_status}
         />
       )}
-      {isPipelineRunning && product.current_task_status && (
+      {!hasWorkflow && isPipelineRunning && product.current_task_status && (
         <Alert
           type="info"
           showIcon
@@ -2560,12 +2765,12 @@ const ProductDetail: React.FC = () => {
           message={product.current_task_status}
         />
       )}
-      {product.status === 'step5_listing' && /竞品.*抓取中|Listing.*抓取中/i.test(product.error_message || '') && (
+      {!hasWorkflow && product.status === 'step5_listing' && /竞品.*抓取中|Listing.*抓取中/i.test(product.error_message || '') && (
         <Card size="small" style={{ marginBottom: 16, borderColor: '#1677ff' }}>
           <Text type="secondary">{product.error_message}</Text>
         </Card>
       )}
-      {showTopProductError && (
+      {!hasWorkflow && showTopProductError && (
         <Card size="small" style={{ marginBottom: 16, borderColor: '#ff4d4f' }}>
           <Text type="danger">{product.status === 'source_unavailable' ? '原商品下架停止采集：' : '❌ '}{productErrorMessage}</Text>
         </Card>
