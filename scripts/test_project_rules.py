@@ -200,7 +200,22 @@ def test_amazon_workflow_t2_service_projection_and_write_rules() -> None:
         "workflow_uninitialized" in workflow_text
         and "needs_initialization" in workflow_text
         and "商品 workflow 字段为空" in workflow_text,
-        "空 workflow 字段必须投影为显式未初始化/需初始化状态，不能复杂兼容旧 current_step/error_message",
+        "普通空 workflow 字段必须投影为显式未初始化/需初始化状态",
+    )
+    assert_true(
+        "def _legacy_empty_workflow_state(" in workflow_text
+        and "product_status == COMPLETED and catalog_item and getattr(catalog_item, \"confirmed_at\", None)" in workflow_text
+        and "def _legacy_failed_workflow_node(" in workflow_text
+        and "has_image_analysis = bool(images and getattr(images, \"image_analysis\", None))" in workflow_text
+        and "has_listing_content = bool(data and getattr(data, \"listing_title\", None))" in workflow_text
+        and "retry_image_analysis" in workflow_text
+        and "retry_listing_generation" in workflow_text,
+        "Product Workflow Service 必须用 Catalog/Image/Listing 结构化事实只读兼容 E5 前历史空 workflow 投影",
+    )
+    assert_true(
+        "error or \"\"" not in workflow_text
+        and "current_step = int(getattr(product, \"current_step\"" not in workflow_text,
+        "E5 历史空 workflow 兼容不得用 error_message 字符串或 current_step 猜测节点",
     )
     assert_true(
         "node_key: str | None = None" in schemas_text
@@ -228,6 +243,8 @@ from types import SimpleNamespace
 from app.api.products import _product_list_work_status
 from app.product_tasks.workflow import build_product_workflow, set_product_workflow
 from app.models.status import (
+    COMPLETED,
+    FAILED,
     WORKFLOW_NODE_AUTO_SELECT_IMAGES,
     WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
     WORKFLOW_NODE_FLOW_DONE,
@@ -245,6 +262,73 @@ product = SimpleNamespace(id=123, workflow_node=None, workflow_status=None, work
 empty = build_product_workflow(product)
 assert empty["stage"] == "workflow_uninitialized", empty
 assert empty["work_status"] == "needs_initialization", empty
+
+legacy_export_ready = SimpleNamespace(
+    id=124,
+    status=COMPLETED,
+    current_step=0,
+    workflow_node=None,
+    workflow_status=None,
+    workflow_error=None,
+    workflow_updated_at=None,
+    error_message=None,
+    catalog_item=SimpleNamespace(confirmed_at=datetime(2026, 6, 18), exported_at=None, export_task_id=None),
+)
+legacy_export_ready_view = build_product_workflow(legacy_export_ready, catalog_exported=False)
+assert legacy_export_ready_view["stage"] == WORKFLOW_NODE_FLOW_DONE, legacy_export_ready_view
+assert legacy_export_ready_view["stage_status"] == WORKFLOW_STATUS_SUCCEEDED, legacy_export_ready_view
+assert legacy_export_ready_view["work_status"] == "export_ready", legacy_export_ready_view
+assert _product_list_work_status(legacy_export_ready) == "export_ready"
+
+legacy_exported = SimpleNamespace(
+    id=125,
+    status=COMPLETED,
+    current_step=0,
+    workflow_node=None,
+    workflow_status=None,
+    workflow_error=None,
+    workflow_updated_at=None,
+    error_message=None,
+    catalog_item=SimpleNamespace(confirmed_at=datetime(2026, 6, 18), exported_at=datetime(2026, 6, 18), export_task_id=10),
+)
+legacy_exported_view = build_product_workflow(legacy_exported, catalog_exported=True)
+assert legacy_exported_view["stage"] == WORKFLOW_NODE_FLOW_DONE, legacy_exported_view
+assert legacy_exported_view["work_status"] == "exported", legacy_exported_view
+assert _product_list_work_status(legacy_exported) == "exported"
+
+legacy_image_failed = SimpleNamespace(
+    id=126,
+    status=FAILED,
+    current_step=0,
+    workflow_node=None,
+    workflow_status=None,
+    workflow_error=None,
+    workflow_updated_at=None,
+    error_message="historical failure reason for display only",
+    images=SimpleNamespace(image_analysis=None),
+    data=SimpleNamespace(listing_title=None),
+)
+legacy_image_failed_view = build_product_workflow(legacy_image_failed)
+assert legacy_image_failed_view["stage"] == WORKFLOW_NODE_IMAGE_ANALYSIS, legacy_image_failed_view
+assert legacy_image_failed_view["work_status"] == "failed", legacy_image_failed_view
+assert legacy_image_failed_view["primary_action"] == "retry_image_analysis", legacy_image_failed_view
+
+legacy_listing_failed = SimpleNamespace(
+    id=127,
+    status=FAILED,
+    current_step=0,
+    workflow_node=None,
+    workflow_status=None,
+    workflow_error=None,
+    workflow_updated_at=None,
+    error_message="historical failure reason for display only",
+    images=SimpleNamespace(image_analysis="{\"selling_points\": []}"),
+    data=SimpleNamespace(listing_title=None),
+)
+legacy_listing_failed_view = build_product_workflow(legacy_listing_failed)
+assert legacy_listing_failed_view["stage"] == WORKFLOW_NODE_LISTING_GENERATION, legacy_listing_failed_view
+assert legacy_listing_failed_view["work_status"] == "failed", legacy_listing_failed_view
+assert legacy_listing_failed_view["primary_action"] == "retry_listing_generation", legacy_listing_failed_view
 
 now = datetime(2026, 6, 18, 9, 30, 0)
 set_product_workflow(product, node=WORKFLOW_NODE_SEARCH_COMPETITOR, status=WORKFLOW_STATUS_PROCESSING, now=now)
@@ -343,6 +427,103 @@ else:
         capture_output=True,
     )
     assert_true(result.returncode == 0, f"Amazon workflow T2 service 行为验证失败: {result.stderr or result.stdout}")
+
+
+def test_product_work_status_producer_outputs_are_registered() -> None:
+    code = r'''
+from types import SimpleNamespace
+from pathlib import Path
+
+from app.api.products import PRODUCT_LIST_WORK_STATUS_KEYS, WORKBENCH_STATUS_KEYS
+from app.api.schemas import WorkbenchOverview
+from app.models.status import AMAZON_WORKFLOW_NODES, AMAZON_WORKFLOW_STATUSES
+from app.product_tasks.workflow import build_product_workflow
+
+root = Path.cwd().parent
+frontend_api_text = (root / "frontend" / "src" / "api" / "index.ts").read_text(encoding="utf-8")
+product_list_text = (root / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
+frontend_overview_section = frontend_api_text.split("export interface WorkbenchOverview", 1)[1].split("export const", 1)[0]
+work_status_type_section = product_list_text.split("type WorkStatus =", 1)[1].split("type ProductRow", 1)[0]
+work_status_meta_section = product_list_text.split("const WORK_STATUS_META", 1)[1].split("const WORK_STATUS_FILTERS", 1)[0]
+work_status_filter_section = product_list_text.split("const WORK_STATUS_FILTERS", 1)[1].split("const PRIMARY_WORK_STATUS", 1)[0]
+
+supported_statuses = set(WORKBENCH_STATUS_KEYS) | set(PRODUCT_LIST_WORK_STATUS_KEYS)
+overview_fields = set(WorkbenchOverview.model_fields)
+produced_statuses = set()
+
+def product(**overrides):
+    base = dict(
+        id=20260622,
+        status="created",
+        current_step=1,
+        workflow_node=None,
+        workflow_status=None,
+        workflow_error=None,
+        workflow_updated_at=None,
+        error_message="自动竞品搜索 marker",
+        catalog_item=None,
+        images=None,
+        data=None,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+for node in AMAZON_WORKFLOW_NODES:
+    for status in AMAZON_WORKFLOW_STATUSES:
+        state = build_product_workflow(product(workflow_node=node, workflow_status=status))
+        produced_statuses.add(state["work_status"])
+
+produced_statuses.add(build_product_workflow(product())["work_status"])
+produced_statuses.add(build_product_workflow(product(workflow_node="unknown_node", workflow_status="pending"))["work_status"])
+produced_statuses.add(build_product_workflow(product(workflow_node=AMAZON_WORKFLOW_NODES[0], workflow_status="unknown"))["work_status"])
+produced_statuses.add(build_product_workflow(product(status="completed", catalog_item=SimpleNamespace(confirmed_at=1)))["work_status"])
+produced_statuses.add(build_product_workflow(
+    product(status="completed", catalog_item=SimpleNamespace(confirmed_at=1)),
+    catalog_exported=True,
+)["work_status"])
+produced_statuses.add(build_product_workflow(
+    product(status="failed", images=SimpleNamespace(image_analysis=None), data=SimpleNamespace(listing_title=None)),
+)["work_status"])
+produced_statuses.add(build_product_workflow(
+    product(status="failed", images=SimpleNamespace(image_analysis="{}"), data=SimpleNamespace(listing_title=None)),
+)["work_status"])
+
+unknown_statuses = produced_statuses - supported_statuses
+assert not unknown_statuses, (unknown_statuses, produced_statuses, supported_statuses)
+assert "ready_to_search_competitor" not in produced_statuses, produced_statuses
+
+overview_supported_statuses = set(WORKBENCH_STATUS_KEYS) | {"exported"}
+for status in produced_statuses:
+    if status == "exported":
+        assert "export_ready_exported" in overview_fields, overview_fields
+        assert "export_ready_exported?: number" in frontend_overview_section, frontend_overview_section
+    else:
+        assert status in overview_supported_statuses, (status, overview_supported_statuses)
+        assert status in overview_fields, (status, overview_fields)
+        assert f"{status}:" in frontend_overview_section, (status, frontend_overview_section)
+    assert f"| '{status}'" in work_status_type_section, (status, work_status_type_section)
+    assert f"{status}:" in work_status_meta_section, (status, work_status_meta_section)
+    assert f"'{status}'" in work_status_filter_section, (status, work_status_filter_section)
+
+for frontend_section in (
+    frontend_overview_section,
+    work_status_type_section,
+    work_status_meta_section,
+    work_status_filter_section,
+):
+    assert "ready_to_search_competitor" not in frontend_section, frontend_section
+
+auto_select_done = build_product_workflow(product(workflow_node="auto_select_images", workflow_status="succeeded"))
+assert auto_select_done["label"] == "自动选图完成", auto_select_done
+assert auto_select_done["work_status"] == "select_competitor", auto_select_done
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"Product work_status 生产端/消费端闭包验证失败: {result.stderr or result.stdout}")
 
 
 def test_product_overview_handles_uninitialized_workflow_bucket() -> None:
@@ -2839,8 +3020,10 @@ def test_auto_image_selection_phase_b_contract() -> None:
     )
     assert_true(
         "_apply_product_work_status_db_filter(query, count_query, work_status)" in products_text
-        and "if work_status and not db_filtered_work_status:" in products_text,
-        "auto_select_images 列表筛选必须先走 DB 级谓词和 count，不得落入全量加载后的 Python 内存分页",
+        and "if work_status and not db_filtered_work_status:" not in products_text
+        and "matched_items = [" not in products_text
+        and "return query.where(predicate), count_query.where(predicate)" in products_text,
+        "商品列表 work_status 筛选必须全部由 DB 级谓词和 count/page 接管，不得保留 Python 内存过滤分页 fallback",
     )
     assert_true(
         "raise_if_image_selection_reset_protected(product)" in products_text
@@ -2908,20 +3091,57 @@ product.workflow_status = WORKFLOW_STATUS_PROCESSING
 assert _product_workbench_status(product) == "running"
 assert _product_list_work_status(product) == "running"
 
-query, count_query, handled = _apply_product_work_status_db_filter(
+query, count_query = _apply_product_work_status_db_filter(
     select(Product),
     select(func.count(Product.id)),
     "auto_select_images",
 )
-assert handled is True
 compiled_query = str(query.compile(compile_kwargs={"literal_binds": True}))
 compiled_count = str(count_query.compile(compile_kwargs={"literal_binds": True}))
 for sql in (compiled_query, compiled_count):
     assert "workflow_node" in sql and "auto_select_images" in sql, sql
     assert "workflow_status" in sql and "pending" in sql, sql
 
-_, _, handled = _apply_product_work_status_db_filter(select(Product), select(func.count(Product.id)), "select_images")
-assert handled is False
+required_statuses = {
+    "export_ready",
+    "exported",
+    "failed",
+    "auto_select_images",
+    "running",
+    "select_competitor",
+    "capture_detail",
+    "ready_to_generate",
+    "needs_initialization",
+}
+assert required_statuses <= PRODUCT_LIST_WORK_STATUS_KEYS, PRODUCT_LIST_WORK_STATUS_KEYS
+for status in sorted(PRODUCT_LIST_WORK_STATUS_KEYS):
+    status_query, status_count_query = _apply_product_work_status_db_filter(
+        select(Product),
+        select(func.count(Product.id)),
+        status,
+    )
+    status_sql = str(status_query.compile(compile_kwargs={"literal_binds": True}))
+    count_sql = str(status_count_query.compile(compile_kwargs={"literal_binds": True}))
+    assert "WHERE" in status_sql, (status, status_sql)
+    assert "WHERE" in count_sql, (status, count_sql)
+
+select_competitor_query, select_competitor_count = _apply_product_work_status_db_filter(
+    select(Product),
+    select(func.count(Product.id)),
+    "select_competitor",
+)
+for sql in (
+    str(select_competitor_query.compile(compile_kwargs={"literal_binds": True})),
+    str(select_competitor_count.compile(compile_kwargs={"literal_binds": True})),
+):
+    assert "auto_select_images" in sql and "succeeded" in sql, sql
+
+try:
+    _apply_product_work_status_db_filter(select(Product), select(func.count(Product.id)), "not_a_status")
+except ValueError:
+    pass
+else:
+    raise AssertionError("unsupported product list work_status must be rejected before any fallback")
 '''
     result = subprocess.run(
         [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
@@ -3619,6 +3839,7 @@ def main() -> int:
         test_real_asin_export_guard_is_present,
         test_amazon_workflow_t1_fields_and_enums_exist,
         test_amazon_workflow_t2_service_projection_and_write_rules,
+        test_product_work_status_producer_outputs_are_registered,
         test_product_overview_handles_uninitialized_workflow_bucket,
         test_amazon_workflow_t3_image_selection_reset_and_initialization_rules,
         test_amazon_workflow_t4_competitor_search_rules,

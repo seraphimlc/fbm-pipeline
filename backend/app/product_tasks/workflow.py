@@ -9,6 +9,8 @@ from typing import Any
 from app.models.status import (
     AMAZON_WORKFLOW_NODES,
     AMAZON_WORKFLOW_STATUSES,
+    COMPLETED,
+    FAILED,
     WORKFLOW_NODE_AUTO_SELECT_IMAGES,
     WORKFLOW_NODE_AUTO_SELECT_COMPETITOR,
     WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES,
@@ -178,6 +180,10 @@ def build_product_workflow(product: Any, *, catalog_exported: bool | None = None
     error = _compact_error(getattr(product, "workflow_error", None))
 
     if not node or not status:
+        legacy_error = _compact_error(getattr(product, "workflow_error", None) or getattr(product, "error_message", None))
+        legacy_state = _legacy_empty_workflow_state(product, catalog_exported=catalog_exported, error=legacy_error)
+        if legacy_state:
+            return legacy_state
         return _state(
             product,
             stage="workflow_uninitialized",
@@ -262,6 +268,99 @@ def build_product_workflow(product: Any, *, catalog_exported: bool | None = None
     )
 
 
+def _legacy_empty_workflow_state(
+    product: Any,
+    *,
+    catalog_exported: bool | None,
+    error: str | None,
+) -> dict[str, Any] | None:
+    """Project pre-workflow E5 facts without mutating stored workflow fields."""
+    product_status = getattr(product, "status", None)
+    catalog_item = getattr(product, "catalog_item", None)
+
+    if product_status == COMPLETED and catalog_item and getattr(catalog_item, "confirmed_at", None):
+        overrides = _status_overrides(product, WORKFLOW_NODE_FLOW_DONE, WORKFLOW_STATUS_SUCCEEDED)
+        if catalog_exported:
+            overrides = {
+                **overrides,
+                "label": "铺货内容已导出",
+                "work_status": "exported",
+                "primary_action": "open_detail",
+                "primary_action_label": "查看",
+                "allowed_actions": (),
+                "action_reason": "Amazon 主流程已完成，且已有导出记录",
+                "color": "green",
+            }
+        return _state(
+            product,
+            stage=WORKFLOW_NODE_FLOW_DONE,
+            stage_status=WORKFLOW_STATUS_SUCCEEDED,
+            label=overrides.get("label", "铺货内容已生成"),
+            work_status=overrides.get("work_status", "export_ready"),
+            node_key=WORKFLOW_NODE_FLOW_DONE,
+            node_label=WORKFLOW_NODE_VIEWS[WORKFLOW_NODE_FLOW_DONE].label,
+            node_type=WORKFLOW_NODE_VIEWS[WORKFLOW_NODE_FLOW_DONE].node_type,
+            node_status=WORKFLOW_STATUS_SUCCEEDED,
+            primary_action=overrides.get("primary_action", "open_detail"),
+            primary_action_label=overrides.get("primary_action_label", "查看"),
+            allowed_actions=overrides.get("allowed_actions", ()),
+            action_reason=error or overrides.get("action_reason", "Amazon 主流程已完成，导出属于后续阶段"),
+            color=overrides.get("color", "success"),
+        )
+
+    if product_status != FAILED:
+        return None
+
+    node = _legacy_failed_workflow_node(product, error)
+    if not node:
+        return _state(
+            product,
+            stage="workflow_uninitialized",
+            stage_status=WORKFLOW_STATUS_FAILED,
+            label="流程失败",
+            work_status="failed",
+            node_key=None,
+            node_label="未初始化",
+            node_type="uninitialized",
+            node_status=WORKFLOW_STATUS_FAILED,
+            primary_action="open_detail",
+            primary_action_label="查看",
+            allowed_actions=(),
+            action_reason=error or "商品失败，但 workflow 字段为空；请打开详情查看原因",
+            color="error",
+        )
+
+    overrides = _failed_overrides(product, node)
+    return _state(
+        product,
+        stage=node,
+        stage_status=WORKFLOW_STATUS_FAILED,
+        label=overrides.get("label", f"{WORKFLOW_NODE_VIEWS[node].label}失败"),
+        work_status=overrides.get("work_status", "failed"),
+        node_key=node,
+        node_label=WORKFLOW_NODE_VIEWS[node].label,
+        node_type=WORKFLOW_NODE_VIEWS[node].node_type,
+        node_status=WORKFLOW_STATUS_FAILED,
+        primary_action=overrides.get("primary_action", "open_detail"),
+        primary_action_label=overrides.get("primary_action_label", "查看"),
+        allowed_actions=overrides.get("allowed_actions", ()),
+        action_reason=error or overrides.get("action_reason", f"{WORKFLOW_NODE_VIEWS[node].label}失败"),
+        color=overrides.get("color", "error"),
+    )
+
+
+def _legacy_failed_workflow_node(product: Any, error: str | None) -> str | None:
+    images = getattr(product, "images", None)
+    data = getattr(product, "data", None)
+    has_image_analysis = bool(images and getattr(images, "image_analysis", None))
+    has_listing_content = bool(data and getattr(data, "listing_title", None))
+    if not has_image_analysis:
+        return WORKFLOW_NODE_IMAGE_ANALYSIS
+    if not has_listing_content:
+        return WORKFLOW_NODE_LISTING_GENERATION
+    return None
+
+
 def _state(
     product: Any,
     *,
@@ -334,7 +433,7 @@ def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
             "color": "warning",
         }
     if node == WORKFLOW_NODE_AUTO_SELECT_IMAGES and status == WORKFLOW_STATUS_SUCCEEDED:
-        return {"label": "自动选图完成", "work_status": "ready_to_search_competitor", "color": "success"}
+        return {"label": "自动选图完成", "work_status": "select_competitor", "color": "success"}
     if node == WORKFLOW_NODE_SEARCH_COMPETITOR and status == WORKFLOW_STATUS_PROCESSING:
         if not _is_auto_competitor_search(product):
             return {

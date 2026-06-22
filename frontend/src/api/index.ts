@@ -900,6 +900,7 @@ export interface PaginatedGigaInventory {
 
 export interface WorkbenchOverview {
   total_products: number;
+  needs_initialization: number;
   auto_select_images: number;
   select_images: number;
   competitor_searching: number;

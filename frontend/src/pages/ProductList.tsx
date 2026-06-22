@@ -40,6 +40,7 @@ const RUNNING_STATUSES = [
 ];
 
 type WorkStatus =
+  | 'needs_initialization'
   | 'auto_select_images'
   | 'select_images'
   | 'competitor_searching'
@@ -66,6 +67,7 @@ type SkuState = {
 };
 
 const WORK_STATUS_META: Record<WorkStatus, { label: string; shortLabel: string; color: string; action: string }> = {
+  needs_initialization: { label: 'Workflow 待初始化', shortLabel: '待初始化', color: 'default', action: '查看详情' },
   auto_select_images: { label: '自动选图中', shortLabel: '自动选图', color: 'processing', action: '任务中心' },
   select_images: { label: '待确认商品图片', shortLabel: '确认图片', color: 'cyan', action: '去确认图片' },
   competitor_searching: { label: '搜索候选竞品中', shortLabel: '搜索中', color: 'processing', action: '等待搜索' },
@@ -83,6 +85,7 @@ const WORK_STATUS_META: Record<WorkStatus, { label: string; shortLabel: string; 
 
 const WORK_STATUS_FILTERS: Array<'all' | WorkStatus> = [
   'all',
+  'needs_initialization',
   'auto_select_images',
   'select_images',
   'select_competitor',

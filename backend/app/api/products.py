@@ -13,7 +13,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from openpyxl import Workbook, load_workbook
-from sqlalchemy import case, delete, select, func
+from sqlalchemy import case, delete, false, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, selectinload
 from datetime import datetime
@@ -46,8 +46,11 @@ from app.models import (
     UpcPoolItem,
 )
 from app.models.status import (
+    AMAZON_WORKFLOW_NODES,
+    AMAZON_WORKFLOW_STATUSES,
     COMPLETED,
     DUPLICATE_SKIPPED,
+    FAILED,
     PENDING_REVIEW,
     SOURCE_UNAVAILABLE,
     STEP5_DONE,
@@ -57,12 +60,20 @@ from app.models.status import (
     STEP_LABELS,
     STEP_STATUS_MAP,
     WORKFLOW_NODE_AUTO_SELECT_IMAGES,
+    WORKFLOW_NODE_AUTO_SELECT_COMPETITOR,
+    WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES,
+    WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
+    WORKFLOW_NODE_FLOW_DONE,
+    WORKFLOW_NODE_IMAGE_ANALYSIS,
+    WORKFLOW_NODE_LISTING_GENERATION,
     WORKFLOW_NODE_SEARCH_COMPETITOR,
+    WORKFLOW_NODE_SELECT_COMPETITOR,
     WORKFLOW_NODE_SELECT_IMAGES,
     WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS,
     WORKFLOW_STATUS_FAILED,
     WORKFLOW_STATUS_PENDING,
     WORKFLOW_STATUS_PROCESSING,
+    WORKFLOW_STATUS_SUCCEEDED,
 )
 from app.api.schemas import (
     ProductCreate, ProductUpdate, ProductListingImagesUpdate, ProductGigaRefreshRequest, ProductResponse, ProductDetail, ProductImageResponse,
@@ -596,14 +607,232 @@ def _product_list_work_status(product: Product) -> str:
     return _workflow_state(product, catalog_exported=catalog_exported)["work_status"]
 
 
-def _apply_product_work_status_db_filter(query, count_query, work_status: str | None):
-    if work_status != "auto_select_images":
-        return query, count_query, False
-    predicate = (
-        (Product.workflow_node == WORKFLOW_NODE_AUTO_SELECT_IMAGES)
-        & (Product.workflow_status == WORKFLOW_STATUS_PENDING)
+def _catalog_exported_condition():
+    return (CatalogProduct.exported_at.is_not(None)) | (CatalogProduct.export_task_id.is_not(None))
+
+
+def _export_ready_unexported_condition():
+    return (
+        (Product.status == COMPLETED)
+        & (CatalogProduct.confirmed_at.is_not(None))
+        & (~_catalog_exported_condition())
     )
-    return query.where(predicate), count_query.where(predicate), True
+
+
+def _exported_condition():
+    return (
+        (Product.status == COMPLETED)
+        & (CatalogProduct.confirmed_at.is_not(None))
+        & _catalog_exported_condition()
+    )
+
+
+def _failed_work_status_condition():
+    workflow_empty = _workflow_empty_condition()
+    workflow_present = _workflow_present_condition()
+    failed_nodes = (
+        WORKFLOW_NODE_AUTO_SELECT_IMAGES,
+        WORKFLOW_NODE_SELECT_IMAGES,
+        WORKFLOW_NODE_SELECT_COMPETITOR,
+        WORKFLOW_NODE_IMAGE_ANALYSIS,
+        WORKFLOW_NODE_LISTING_GENERATION,
+        WORKFLOW_NODE_FLOW_DONE,
+    )
+    return (
+        (workflow_empty & (Product.status == FAILED))
+        | (
+            workflow_present
+            & (
+                Product.workflow_node.notin_(AMAZON_WORKFLOW_NODES)
+                | Product.workflow_status.notin_(AMAZON_WORKFLOW_STATUSES)
+                | (
+                    (Product.workflow_status == WORKFLOW_STATUS_FAILED)
+                    & Product.workflow_node.in_(failed_nodes)
+                )
+            )
+        )
+    )
+
+
+def _workflow_empty_condition():
+    return (
+        Product.workflow_node.is_(None)
+        | (Product.workflow_node == "")
+        | Product.workflow_status.is_(None)
+        | (Product.workflow_status == "")
+    )
+
+
+def _workflow_present_condition():
+    return (
+        Product.workflow_node.is_not(None)
+        & (Product.workflow_node != "")
+        & Product.workflow_status.is_not(None)
+        & (Product.workflow_status != "")
+    )
+
+
+def _needs_initialization_condition():
+    return (
+        _workflow_empty_condition()
+        & ((Product.status != FAILED) | Product.status.is_(None))
+        & ~((Product.status == COMPLETED) & CatalogProduct.confirmed_at.is_not(None))
+    )
+
+
+def _select_images_condition():
+    return (
+        _workflow_present_condition()
+        & (Product.workflow_node == WORKFLOW_NODE_SELECT_IMAGES)
+        & Product.workflow_status.in_(
+            (WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_PROCESSING, WORKFLOW_STATUS_SUCCEEDED)
+        )
+    )
+
+
+def _competitor_searching_condition():
+    return _workflow_present_condition() & (
+        (
+            (Product.workflow_node == WORKFLOW_NODE_SEARCH_COMPETITOR)
+            & (Product.workflow_status == WORKFLOW_STATUS_PROCESSING)
+        )
+        | (
+            (Product.workflow_node == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS)
+            & (Product.workflow_status == WORKFLOW_STATUS_PROCESSING)
+        )
+    )
+
+
+def _select_competitor_condition():
+    return _workflow_present_condition() & (
+        (
+            (Product.workflow_node == WORKFLOW_NODE_AUTO_SELECT_IMAGES)
+            & (Product.workflow_status == WORKFLOW_STATUS_SUCCEEDED)
+        )
+        | (
+            (Product.workflow_node == WORKFLOW_NODE_SEARCH_COMPETITOR)
+            & Product.workflow_status.in_(
+                (WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_SUCCEEDED, WORKFLOW_STATUS_FAILED)
+            )
+        )
+        | (
+            (Product.workflow_node == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS)
+            & Product.workflow_status.in_((WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_FAILED))
+        )
+        | (
+            (Product.workflow_node == WORKFLOW_NODE_AUTO_SELECT_COMPETITOR)
+            & Product.workflow_status.in_(
+                (WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_PROCESSING, WORKFLOW_STATUS_FAILED)
+            )
+        )
+        | (
+            (Product.workflow_node == WORKFLOW_NODE_SELECT_COMPETITOR)
+            & Product.workflow_status.in_(
+                (WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_PROCESSING, WORKFLOW_STATUS_SUCCEEDED)
+            )
+        )
+        | (
+            (Product.workflow_node == WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL)
+            & (Product.workflow_status == WORKFLOW_STATUS_FAILED)
+        )
+    )
+
+
+def _capture_detail_condition():
+    return _workflow_present_condition() & (
+        (
+            (Product.workflow_node == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS)
+            & (Product.workflow_status == WORKFLOW_STATUS_SUCCEEDED)
+        )
+        | (
+            (Product.workflow_node == WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES)
+            & Product.workflow_status.in_(
+                (WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_PROCESSING, WORKFLOW_STATUS_FAILED)
+            )
+        )
+        | (
+            (Product.workflow_node == WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL)
+            & Product.workflow_status.in_((WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_PROCESSING))
+        )
+    )
+
+
+def _ready_to_generate_condition():
+    return _workflow_present_condition() & (
+        (
+            (Product.workflow_node == WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES)
+            & (Product.workflow_status == WORKFLOW_STATUS_SUCCEEDED)
+        )
+        | (
+            (Product.workflow_node == WORKFLOW_NODE_AUTO_SELECT_COMPETITOR)
+            & (Product.workflow_status == WORKFLOW_STATUS_SUCCEEDED)
+        )
+        | (
+            (Product.workflow_node == WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL)
+            & (Product.workflow_status == WORKFLOW_STATUS_SUCCEEDED)
+        )
+        | (
+            (Product.workflow_node == WORKFLOW_NODE_IMAGE_ANALYSIS)
+            & Product.workflow_status.in_((WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_SUCCEEDED))
+        )
+        | (
+            (Product.workflow_node == WORKFLOW_NODE_LISTING_GENERATION)
+            & (Product.workflow_status == WORKFLOW_STATUS_PENDING)
+        )
+    )
+
+
+def _running_condition():
+    return (
+        _workflow_present_condition()
+        & Product.workflow_node.in_(
+            (
+                WORKFLOW_NODE_AUTO_SELECT_IMAGES,
+                WORKFLOW_NODE_IMAGE_ANALYSIS,
+                WORKFLOW_NODE_LISTING_GENERATION,
+            )
+        )
+        & (Product.workflow_status == WORKFLOW_STATUS_PROCESSING)
+    )
+
+
+def _work_status_condition(work_status: str):
+    if work_status == "needs_initialization":
+        return _needs_initialization_condition(), True
+    if work_status == "auto_select_images":
+        return (
+            (Product.workflow_node == WORKFLOW_NODE_AUTO_SELECT_IMAGES)
+            & (Product.workflow_status == WORKFLOW_STATUS_PENDING)
+        ), False
+    if work_status == "select_images":
+        return _select_images_condition(), False
+    if work_status == "competitor_searching":
+        return _competitor_searching_condition(), False
+    if work_status == "select_competitor":
+        return _select_competitor_condition(), False
+    if work_status == "capture_detail":
+        return _capture_detail_condition(), False
+    if work_status == "ready_to_generate":
+        return _ready_to_generate_condition(), False
+    if work_status == "running":
+        return _running_condition(), False
+    if work_status in {"interrupted", "suspended", "manual_review"}:
+        return false(), False
+    if work_status in {"export_ready", "exported"}:
+        return _export_ready_unexported_condition() if work_status == "export_ready" else _exported_condition(), True
+    if work_status == "failed":
+        return _failed_work_status_condition(), False
+    raise ValueError(f"Unsupported product list work_status: {work_status}")
+
+
+def _apply_product_work_status_db_filter(query, count_query, work_status: str | None):
+    if not work_status:
+        return query, count_query
+    predicate, needs_catalog_join = _work_status_condition(work_status)
+    if needs_catalog_join:
+        query = query.join(CatalogProduct, CatalogProduct.source_product_id == Product.id, isouter=True)
+        count_query = count_query.join(CatalogProduct, CatalogProduct.source_product_id == Product.id, isouter=True)
+    return query.where(predicate), count_query.where(predicate)
 
 
 def _template_risk_from_data(pd: ProductData | None) -> tuple[str | None, int | None]:
@@ -2412,7 +2641,24 @@ async def get_workbench_overview(
             Product.workflow_error,
             Product.workflow_updated_at,
             Product.source_data_source_id,
-        )
+        ),
+        selectinload(Product.catalog_item).load_only(
+            CatalogProduct.id,
+            CatalogProduct.source_product_id,
+            CatalogProduct.confirmed_at,
+            CatalogProduct.exported_at,
+            CatalogProduct.export_task_id,
+        ),
+        selectinload(Product.images).load_only(
+            ProductImage.id,
+            ProductImage.product_id,
+            ProductImage.image_analysis,
+        ),
+        selectinload(Product.data).load_only(
+            ProductData.id,
+            ProductData.product_id,
+            ProductData.listing_title,
+        ),
     )
     if data_source_id:
         product_query = product_query.where(_product_data_source_filter(data_source_id))
@@ -2422,15 +2668,14 @@ async def get_workbench_overview(
     for product in products:
         status_counts[_product_workbench_status(product)] += 1
 
-    exported_condition = (CatalogProduct.exported_at.is_not(None)) | (CatalogProduct.export_task_id.is_not(None))
     export_ready_query = (
         select(
             func.count(Product.id).label("total"),
-            func.coalesce(func.sum(case((exported_condition, 1), else_=0)), 0).label("exported"),
+            func.coalesce(func.sum(case((_catalog_exported_condition(), 1), else_=0)), 0).label("exported"),
         )
         .select_from(Product)
         .join(CatalogProduct, CatalogProduct.source_product_id == Product.id, isouter=True)
-        .where(Product.status == COMPLETED, Product.current_step >= 6)
+        .where(Product.status == COMPLETED, CatalogProduct.confirmed_at.is_not(None))
     )
     if data_source_id:
         export_ready_query = export_ready_query.where(_product_data_source_filter(data_source_id))
@@ -2479,7 +2724,7 @@ async def get_workbench_overview(
         interrupted=status_counts["interrupted"],
         suspended=status_counts["suspended"],
         manual_review=status_counts["manual_review"],
-        export_ready=status_counts["export_ready"],
+        export_ready=export_ready_unexported,
         export_ready_unexported=export_ready_unexported,
         export_ready_exported=export_ready_exported,
         failed=status_counts["failed"],
@@ -2562,6 +2807,12 @@ async def list_products(
                 ProductData.item_code,
                 ProductData.title,
                 ProductData.leaf_category,
+                ProductData.listing_title,
+            ),
+            selectinload(Product.images).load_only(
+                ProductImage.id,
+                ProductImage.product_id,
+                ProductImage.image_analysis,
             ),
             selectinload(Product.aplus).load_only(
                 ProductAplus.id,
@@ -2572,6 +2823,7 @@ async def list_products(
             selectinload(Product.catalog_item).load_only(
                 CatalogProduct.id,
                 CatalogProduct.source_product_id,
+                CatalogProduct.confirmed_at,
                 CatalogProduct.exported_at,
                 CatalogProduct.export_task_id,
             ),
@@ -2634,18 +2886,7 @@ async def list_products(
         query = query.where(Product.created_at <= created_to)
         count_query = count_query.where(Product.created_at <= created_to)
 
-    query, count_query, db_filtered_work_status = _apply_product_work_status_db_filter(query, count_query, work_status)
-
-    if work_status and not db_filtered_work_status:
-        result = await db.execute(query)
-        matched_items = [
-            item for item in result.scalars().unique().all()
-            if _product_list_work_status(item) == work_status
-        ]
-        total = len(matched_items)
-        start = (page - 1) * page_size
-        items = matched_items[start:start + page_size]
-        return PaginatedResponse(items=[_build_list_item(item) for item in items], total=total, page=page, page_size=page_size)
+    query, count_query = _apply_product_work_status_db_filter(query, count_query, work_status)
 
     total_result = await db.execute(count_query)
     total = total_result.scalar() or 0

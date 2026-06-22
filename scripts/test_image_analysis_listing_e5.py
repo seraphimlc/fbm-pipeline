@@ -27,6 +27,7 @@ from app.models.status import (  # noqa: E402
     WORKFLOW_STATUS_PROCESSING,
     WORKFLOW_STATUS_SUCCEEDED,
 )
+from app.product_tasks.workflow import build_product_workflow  # noqa: E402
 from app.product_tasks import actions as product_actions  # noqa: E402
 from app.task_runtime.constants import RUN_STATUS_PENDING, RUN_STATUS_RUNNING, STEP_STATUS_READY, STEP_STATUS_RUNNING  # noqa: E402
 from app.task_runtime.json_utils import json_dumps, json_loads  # noqa: E402
@@ -446,6 +447,79 @@ async def _test_listing_protection_blocks_irreversible_results() -> tuple[list[i
         return product_ids, []
 
 
+async def _test_legacy_empty_workflow_projection_for_e5_list_paths() -> tuple[list[int], list[int]]:
+    product_ids: list[int] = []
+    async with async_session() as session:
+        export_ready = await _make_product(
+            session,
+            "E5_TEST_LEGACY_EXPORT_READY",
+            workflow_node=None,
+            workflow_status=None,
+            status=COMPLETED,
+            current_step=0,
+            confirmed_at=datetime.now(),
+        )
+        product_ids.append(export_ready.id)
+
+        exported = await _make_product(
+            session,
+            "E5_TEST_LEGACY_EXPORTED",
+            workflow_node=None,
+            workflow_status=None,
+            status=COMPLETED,
+            current_step=0,
+            confirmed_at=datetime.now(),
+            catalog_exported=True,
+        )
+        product_ids.append(exported.id)
+
+        failed_image = await _make_product(
+            session,
+            "E5_TEST_LEGACY_IMAGE_FAILED",
+            workflow_node=None,
+            workflow_status=None,
+            status=FAILED,
+            current_step=0,
+            image_analysis=False,
+        )
+        product_ids.append(failed_image.id)
+
+        failed_listing = await _make_product(
+            session,
+            "E5_TEST_LEGACY_LISTING_FAILED",
+            workflow_node=None,
+            workflow_status=None,
+            status=FAILED,
+            current_step=0,
+            image_analysis=True,
+        )
+        failed_listing.data.listing_title = None
+        product_ids.append(failed_listing.id)
+
+        await session.commit()
+
+        export_ready_state = build_product_workflow(export_ready, catalog_exported=False)
+        assert export_ready_state["work_status"] == "export_ready", export_ready_state
+        assert export_ready_state["stage"] == WORKFLOW_NODE_FLOW_DONE, export_ready_state
+        assert export_ready_state["stage_status"] == WORKFLOW_STATUS_SUCCEEDED, export_ready_state
+
+        exported_state = build_product_workflow(exported, catalog_exported=True)
+        assert exported_state["work_status"] == "exported", exported_state
+        assert exported_state["stage"] == WORKFLOW_NODE_FLOW_DONE, exported_state
+
+        failed_image_state = build_product_workflow(failed_image)
+        assert failed_image_state["work_status"] == "failed", failed_image_state
+        assert failed_image_state["stage"] == WORKFLOW_NODE_IMAGE_ANALYSIS, failed_image_state
+        assert failed_image_state["primary_action"] == "retry_image_analysis", failed_image_state
+
+        failed_listing_state = build_product_workflow(failed_listing)
+        assert failed_listing_state["work_status"] == "failed", failed_listing_state
+        assert failed_listing_state["stage"] == WORKFLOW_NODE_LISTING_GENERATION, failed_listing_state
+        assert failed_listing_state["primary_action"] == "retry_listing_generation", failed_listing_state
+
+        return product_ids, []
+
+
 async def main() -> None:
     await run_schema_maintenance()
     _ensure_actions_registered()
@@ -472,6 +546,9 @@ async def main() -> None:
         product_ids.extend(ids)
         run_ids.extend(runs)
         ids, runs = await _test_listing_protection_blocks_irreversible_results()
+        product_ids.extend(ids)
+        run_ids.extend(runs)
+        ids, runs = await _test_legacy_empty_workflow_projection_for_e5_list_paths()
         product_ids.extend(ids)
         run_ids.extend(runs)
         print("E5 image analysis -> listing -> export_ready behavior checks passed")
