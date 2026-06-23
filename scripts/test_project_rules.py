@@ -1163,10 +1163,8 @@ def test_lingxing_listing_sync_t2_contract() -> None:
         "T2 行为脚本必须覆盖真实外部调用开启但缺 store config 时 fail closed，且不调用旧默认店铺 auth fallback",
     )
     assert_true(
-        not (ROOT / "backend" / "app" / "task_runtime" / "lingxing_aplus_publish_workers.py").exists()
-        and "lingxing_aplus_publish" not in task_api_text
-        and "AUTO_LINGXING_APLUS_AFTER_DONE" not in (ROOT / "backend" / "app" / "task_runtime" / "aplus_generate_workers.py").read_text(encoding="utf-8"),
-        "T2 不允许新增 A+ 草稿保存 worker/API 或开启 A+ done 自动发布",
+        "AUTO_LINGXING_APLUS_AFTER_DONE" not in (ROOT / "backend" / "app" / "task_runtime" / "aplus_generate_workers.py").read_text(encoding="utf-8"),
+        "T2/T3 仍不允许开启 A+ done 自动发布",
     )
 
 
@@ -2968,21 +2966,130 @@ def test_lingxing_aplus_publish_t1_data_registry_bootstrap_contract() -> None:
     assert_true(
         (ROOT / "backend" / "app" / "task_planners" / "lingxing_listing_sync.py").is_file()
         and (ROOT / "backend" / "app" / "task_runtime" / "lingxing_listing_sync_workers.py").is_file(),
-        "T2 后允许且要求新增 Lingxing Listing sync planner/worker，但不能新增 A+ 草稿保存 worker",
+        "T2 后允许且要求新增 Lingxing Listing sync planner/worker",
     )
     for forbidden_path in (
-        ROOT / "backend" / "app" / "task_planners" / "lingxing_aplus_publish.py",
         ROOT / "backend" / "app" / "task_planners" / "lingxing_aplus_draft_visibility.py",
         ROOT / "backend" / "app" / "task_planners" / "lingxing_aplus_submit.py",
-        ROOT / "backend" / "app" / "task_runtime" / "lingxing_aplus_publish_workers.py",
     ):
-        assert_true(not forbidden_path.exists(), f"T2 不允许新增 A+ 草稿/可见性/提交 planner/worker: {forbidden_path}")
+        assert_true(not forbidden_path.exists(), f"T3 仍不允许新增 A+ 可见性/提交 planner: {forbidden_path}")
     assert_true(
         "/lingxing-listing-sync" in task_runs_api_text
-        and "lingxing-aplus" not in task_runs_api_text
-        and "lingxing_aplus_publish" not in task_runs_api_text
         and "AUTO_LINGXING_APLUS_AFTER_DONE" not in aplus_generate_worker_text,
-        "T2 只允许新增 Lingxing Listing sync task API，不允许 A+ done 自动触发或 A+ 发布 API",
+        "T3 仍不允许 A+ done 自动触发",
+    )
+
+
+def test_lingxing_aplus_publish_t3_draft_save_contract() -> None:
+    config_text = (ROOT / "backend" / "app" / "config.py").read_text(encoding="utf-8")
+    env_example_text = (ROOT / "backend" / ".env.example").read_text(encoding="utf-8")
+    policy_text = (ROOT / "backend" / "app" / "services" / "lingxing_aplus_publish_policy.py").read_text(encoding="utf-8")
+    client_text = (ROOT / "backend" / "app" / "services" / "lingxing_aplus_publish_client.py").read_text(encoding="utf-8")
+    planner_text = (ROOT / "backend" / "app" / "task_planners" / "lingxing_aplus_publish.py").read_text(encoding="utf-8")
+    worker_text = (ROOT / "backend" / "app" / "task_runtime" / "lingxing_aplus_publish_workers.py").read_text(encoding="utf-8")
+    task_api_text = (ROOT / "backend" / "app" / "api" / "task_runs.py").read_text(encoding="utf-8")
+    schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
+    main_text = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+    display_text = (ROOT / "backend" / "app" / "task_runtime" / "display.py").read_text(encoding="utf-8")
+    aplus_generate_worker_text = (ROOT / "backend" / "app" / "task_runtime" / "aplus_generate_workers.py").read_text(encoding="utf-8")
+    policy_script_text = (ROOT / "scripts" / "test_lingxing_aplus_publish_policy.py").read_text(encoding="utf-8")
+    task_script_text = (ROOT / "scripts" / "test_lingxing_aplus_publish_tasks.py").read_text(encoding="utf-8")
+
+    assert_true(
+        'LINGXING_APLUS_ALLOW_REAL_EXTERNAL_CALLS: bool = False' in config_text
+        and 'LINGXING_APLUS_SUBMIT_FOR_APPROVAL: bool = False' in config_text
+        and "LINGXING_APLUS_ALLOW_REAL_EXTERNAL_CALLS=false" in env_example_text
+        and "LINGXING_APLUS_SUBMIT_FOR_APPROVAL=false" in env_example_text,
+        "T3 配置必须默认禁止真实外部调用和提交审批",
+    )
+    assert_true(
+        "def collect_aplus_publish_assets" in policy_text
+        and "reason_code=\"image_missing\"" in policy_text
+        and "reason_code=\"image_too_small\"" in policy_text
+        and "reason_code=\"product_aplus_not_done\"" in policy_text
+        and "reason_code=\"asin_not_aligned\"" in policy_text
+        and "build_aplus_content_fingerprint" in policy_text
+        and "is_protected_status" in policy_text,
+        "T3 policy service 必须集中本地 A+ 内容/图片校验、typed reason、fingerprint 和 protected 状态判断",
+    )
+    assert_true(
+        "class LingxingAplusDraftSaveClient" in client_text
+        and "if not settings.LINGXING_APLUS_ALLOW_REAL_EXTERNAL_CALLS" in client_text
+        and '"real_external_calls_disabled"' in client_text
+        and "if settings.LINGXING_APLUS_SUBMIT_FOR_APPROVAL" in client_text
+        and '"submit_not_supported_in_t3"' in client_text
+        and "UPLOAD_DESTINATION_URL" in client_text
+        and "APLUS_ADD_URL" in client_text
+        and '"submitFlag": 0' in client_text
+        and "APLUS_EDIT_URL" not in client_text
+        and "draft_visible" not in client_text
+        and "submitted_at" not in client_text,
+        "T3 client 必须默认 fail closed，只支持 uploadDestination + add/save draft，不允许 edit/submit/visibility",
+    )
+    for forbidden in ("start_aplus_upload_batch", "asyncio.create_task", "submitFlag\": 1", "APLUS_EDIT_URL"):
+        assert_true(forbidden not in planner_text and forbidden not in worker_text, f"新 T3 链路不得调用旧 batch runner、裸 create_task 或提交路径: {forbidden}")
+    assert_true(
+        'task_type="lingxing_aplus_publish"' in planner_text
+        and 'step_type="lingxing_aplus_publish_product"' in planner_text
+        and "dedupe_key=dedupe_key" in planner_text
+        and "idempotency_key=dedupe_key" in planner_text
+        and "已有 draft_saved/idHash，停止重复创建草稿" in planner_text
+        and "ACTIVE_RUN_STATUSES" in planner_text,
+        "T3 planner 必须 task-runtime 化，具备 dedupe/idempotency，并在已有 draft_saved/idHash 时停止",
+    )
+    assert_true(
+        "def lingxing_aplus_publish_product" in worker_text
+        and "STATUS_DRAFT_SAVED" in worker_text
+        and '"amazon_draft_visibility": "unconfirmed"' in worker_text
+        and "lingxing_aplus_id_hash" in worker_text
+        and "publish_evidence" in worker_text
+        and "update_aplus_publish_item_evidence" in worker_text
+        and "set_aplus_publish_status" in worker_text
+        and "STATUS_AUTH_REQUIRED" in worker_text
+        and "STATUS_WAITING_LISTING" not in worker_text
+        and "STATUS_DRAFT_VISIBLE" not in worker_text
+        and "STATUS_SUBMITTED" not in worker_text,
+        "T3 worker 必须只写 draft_saved/unconfirmed/idHash/evidence/auth_required，不得写 draft_visible/submitted",
+    )
+    draft_save_failure_branch = worker_text.split("except LingxingAplusDraftSaveClientError as exc:", 1)[1].split(
+        "\n\n    return await _record_success", 1
+    )[0]
+    assert_true(
+        "ctx.step.result_json = json_dumps(failure_payload)" in draft_save_failure_branch
+        and "await ctx.db.commit()" in draft_save_failure_branch
+        and "\n        raise" in draft_save_failure_branch
+        and "return {" not in draft_save_failure_branch,
+        "T3 领星外部保存失败 catch 分支必须先保留 sanitized evidence，再抛给 task runtime 标记 failed/retryable，禁止正常 return 成 succeeded",
+    )
+    assert_true(
+        '"/lingxing-aplus-publish"' in task_api_text
+        and "LingxingAplusPublishRequest" in schemas_text
+        and '"lingxing_aplus_publish": "领星 A+ 草稿保存"' in task_api_text
+        and '"lingxing_aplus_publish_product": "A+ 草稿保存"' in task_api_text
+        and '"lingxing_aplus_publish_product": "A+ 草稿保存"' in display_text
+        and "register_lingxing_aplus_publish_workers()" in main_text,
+        "T3 必须注册安全创建 API、request schema、任务/step label 和 worker",
+    )
+    assert_true(
+        "AUTO_LINGXING_APLUS_AFTER_DONE" not in aplus_generate_worker_text
+        and "create_lingxing_aplus_publish_runs" not in aplus_generate_worker_text,
+        "T3 不允许开启 A+ done 后自动发布或改 A+ generate worker 触发发布",
+    )
+    assert_true(
+        "real client must default fail closed" in policy_script_text
+        and "missing image must be a typed policy reason" in policy_script_text
+        and "undersized image must be a typed policy reason" in policy_script_text
+        and "missing ASIN should return waiting_listing" in task_script_text
+        and "A+ not done should be skipped" in task_script_text
+        and "auth failure must make TaskRun failed for retry" in task_script_text
+        and "api_failed must make TaskRun failed for retry" in task_script_text
+        and "request_failed must make TaskRun failed for retry" in task_script_text
+        and "runtime retry should complete the same TaskRun" in task_script_text
+        and "retry success should create exactly one draft item/idHash" in task_script_text
+        and "duplicate trigger must reuse active task" in task_script_text
+        and "already draft_saved/idHash should stop before creating a publish run" in task_script_text
+        and "T3 must leave Amazon draft visibility unconfirmed" in task_script_text,
+        "T3 行为脚本必须覆盖 config off、missing ASIN、A+ 未 done、auth missing、图片缺失/尺寸不足、成功/外部失败 runtime retry、重复触发和 protected draft_saved",
     )
 
 
@@ -4538,6 +4645,7 @@ def main() -> int:
         test_image_analysis_listing_e5_contract,
         test_aplus_auto_after_export_ready_a1_a2_contract,
         test_lingxing_aplus_publish_t1_data_registry_bootstrap_contract,
+        test_lingxing_aplus_publish_t3_draft_save_contract,
         test_product_action_worker_does_not_project_failure_for_interrupted,
         test_product_action_final_progress_failure_is_best_effort,
         test_auto_image_selection_phase_a_contract,

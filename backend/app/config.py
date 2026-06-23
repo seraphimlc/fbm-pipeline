@@ -79,6 +79,8 @@ class Settings(BaseSettings):
     LINGXING_APLUS_STORE_ID: str = ""
     LINGXING_APLUS_SITE: str = "US"
     LINGXING_LISTING_SYNC_ALLOW_REAL_EXTERNAL_CALLS: bool = False
+    LINGXING_APLUS_ALLOW_REAL_EXTERNAL_CALLS: bool = False
+    LINGXING_APLUS_SUBMIT_FOR_APPROVAL: bool = False
 
     # OSS 图片上传（Step10 Amazon导入表格图片URL）
     OSS_ACCESS_KEY_ID: str = ""

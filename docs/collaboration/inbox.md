@@ -26,6 +26,35 @@
 
 ## Current Action Board
 
+### MSG-20260623-007 - REVIEWED / IMPLEMENT / LINGXING_APLUS_PUBLISH_T3_DRAFT_SAVE
+
+- From: 若命（agentKey: `ruoming`）
+- To: 听云（agentKey: `tingyun`）
+- Cc: 用户 / 镜花（agentKey: `jinghua`） / 观止（agentKey: `guanzhi`）
+- Status: CODE_REVIEW_REREVIEW_PASS_WITH_SCOPE / READY_FOR_SCOPED_COMMIT
+- Created: 2026-06-23 CST
+- Depends on:
+  - commit `cef3c72` / `feat: add Lingxing listing sync task`
+  - `MSG-20260623-006` 镜花 `CODE_REVIEW_REREVIEW / PASS_WITH_SCOPE`
+- Related:
+  - `docs/superpowers/specs/2026-06-23-lingxing-aplus-publish-after-aplus-done-prd.md`
+  - `docs/superpowers/specs/2026-06-23-lingxing-aplus-publish-technical-plan.md`
+  - `docs/collaboration/reviews/2026-06-23-lingxing-aplus-publish-t3-code-review.md`
+  - `backend/app/services/lingxing_aplus_publish_policy.py`
+  - `backend/app/services/lingxing_aplus_publish_client.py`
+  - `backend/app/task_planners/lingxing_aplus_publish.py`
+  - `backend/app/task_runtime/lingxing_aplus_publish_workers.py`
+  - `scripts/test_lingxing_aplus_publish_policy.py`
+  - `scripts/test_lingxing_aplus_publish_tasks.py`
+
+T3 已由听云子 agent 完成并经若命复核、镜花复审通过。范围：新增 `lingxing_aplus_publish` / `lingxing_aplus_publish_product`，只保存领星 A+ 草稿；成功只写 `draft_saved + amazon_draft_visibility=unconfirmed + idHash/evidence`。
+
+- 镜花首审打回 P1：外部保存失败不能正常 return 导致 task step/run succeeded，必须保留业务状态/evidence 后抛回 scheduler。
+- 听云已返工：`auth_required/api_failed/request_failed` 外部失败现在进入 `TaskStep` / `TaskRun` failed/retryable；policy stop 仍结构化完成；runtime retry 复用同一 run/step，成功后只生成一个 draft item/idHash。
+- 若命复跑验证：`compileall`、`test_lingxing_aplus_publish_policy.py`、`test_lingxing_aplus_publish_tasks.py`、`make test-project-rules`、`git diff --check` 均 PASS。
+- 镜花复审：`CODE_REVIEW_REREVIEW / PASS_WITH_SCOPE`，允许若命 scoped commit/push，并允许进入观止真实 Lingxing save QA。
+- 边界：本 PASS 不代表真实 Lingxing QA，不代表 `draft_visible`，不代表 submit approval；T4 draft visibility 和 submit 后续另起任务。
+
 ### MSG-20260623-005 - REQUEST / IMPLEMENT / LINGXING_APLUS_PUBLISH_T2_SELLER_SKU_LISTING_SYNC
 
 - From: 若命（agentKey: `ruoming`）

@@ -11,7 +11,7 @@
 - 导出只生成导入表格和风险提示，不代表平台上架成功。
 - 已有真实 Amazon ASIN 的商品，不允许再次导出 Amazon 导入表格。
 - 改模板、类目映射、Step 10 或导出字段时，必须更新 `docs/template-mapping-change-log.md`。
-- Lingxing A+ 发布 T2 后，Amazon 导出成功路径会把实际写入 Amazon 模板 `sku` 字段的 seller SKU/MSKU 持久化到 `CatalogProduct.amazon_seller_sku` / `Product.amazon_seller_sku`，并在导出 result rows 写 `seller_sku` 证据；这不改变模板字段映射或类目映射本身。
+- Lingxing A+ 发布 T2 后，Amazon 导出成功路径会把实际写入 Amazon 模板 `sku` 字段的 seller SKU/MSKU 持久化到 `CatalogProduct.amazon_seller_sku` / `Product.amazon_seller_sku`，并在导出 result rows 写 `seller_sku` 证据；这不改变模板字段映射或类目映射本身。T3 的 `POST /api/task-runs/lingxing-aplus-publish` 只消费已对齐 ASIN/seller SKU 和本地 A+ done 事实来保存领星草稿，不改变 Amazon 导出模板、类目映射、导出文件或商品主 workflow。
 - 不覆盖真实导出文件、模板文件或已生成素材，除非用户明确要求。
 
 ## 关键入口
@@ -32,6 +32,7 @@
 - 导出中心：`CatalogList.tsx` -> 商品 API/导出任务 -> 任务中心。
 - Amazon 导出：planner -> worker -> `backend/app/pipeline/amazon_export/`。
 - Seller SKU 持久化：`backend/app/pipeline/amazon_export/listing_fill.py` 的 `amazon_seller_sku_for_export()` 与导出 worker 的成功写库路径同源，后续 Lingxing Listing sync 只能以该 seller SKU/MSKU exact match 作为 ASIN 主匹配依据。
+- 领星 A+ 草稿保存 T3：`POST /api/task-runs/lingxing-aplus-publish` -> `backend/app/task_planners/lingxing_aplus_publish.py` -> `backend/app/task_runtime/lingxing_aplus_publish_workers.py`，只写 A+ 发布状态/证据，不生成或修改导出文件。
 - 模板/类目：template mappings -> templates -> Step 10/导出规则层。
 - UPC：导出前按当前 UPC service/model 逻辑定位。
 
@@ -50,6 +51,7 @@
 - 任务中心：`http://localhost:3190/task-runs`
 - 模板映射校验：`make validate-template-mappings`
 - 项目规则校验：`make test-project-rules`
+- 领星 A+ 草稿保存行为脚本：`cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_policy.py`、`cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_tasks.py`
 
 ## 常见定位
 
