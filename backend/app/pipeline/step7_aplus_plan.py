@@ -10,6 +10,12 @@ import json
 import logging
 from datetime import datetime
 
+from app.aplus_publish.module_registry import (
+    APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+    INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE,
+    LINGXING_STANDARD_HEADER_IMAGE_TEXT,
+    semantic_role_for_position,
+)
 from app.config import settings
 from app.database import async_session
 from app.models import Product, ProductData, ProductImage, ProductAplus
@@ -48,12 +54,10 @@ Critical visual planning rules:
 - Anchor every planned A+ image to selling points that are actually visible or supported by its selected reference images.
 - The generated A+ image may change scene, people, light, camera framing, and styling, but the product itself should stay as close as possible to the selected reference images. Do not add, remove, reshape, recolor, retexture, or redesign product parts.
 
-Common A+ module types:
-- Standard Image Header (banner with text overlay)
-- Standard Single Image + Text (side by side)
-- Standard 4 Image / Text (quadrant layout)
-- Standard Comparison Chart
-- Standard Multiple Image + Text
+Supported publish profile:
+- All 5 business story modules must be publishable through Lingxing STANDARD_HEADER_IMAGE_TEXT.
+- Use type "standard_header_image_text" for every module.
+- Use semantic_role to express the business purpose: hero, lifestyle, feature_proof, spec_objection, closing.
 
 Output valid JSON only."""
 
@@ -82,11 +86,11 @@ PLAN_PROMPT = """Design an A+ Content plan for this Amazon product.
 
 ## Requirements
 1. Exactly 5 modules total for standard Amazon A+ content. Do not create 6 or 7 modules.
-2. First module: hero banner/header, but on-image text must not include the brand name
-3. Mix of image+text modules
-4. At least one comparison or spec module
-5. Last module: cross-sell or brand closing
-6. Each module needs: type, headline, key message, image concept
+2. First module: hero/value promise, but on-image text must not include the brand name
+3. Use exactly these semantic roles by position: hero, lifestyle, feature_proof, spec_objection, closing.
+4. Render specs only as a buyer-objection story in the spec_objection module; do not create an unsupported native comparison chart or native spec table.
+5. Last module: confidence, ownership close, or cross-sell context
+6. Each module needs: type="standard_header_image_text", semantic_role, headline, subheading, key message, text_content, image concept
 7. Image concepts must preserve the original product shape, color, module count, cushion proportions, armrests, fabric texture, and low-profile silhouette.
 8. If a scene includes people, specify complete full-body people with natural anatomy and no cropped body parts.
 9. Any planned on-image text must avoid the brand name "{brand}".
@@ -110,7 +114,10 @@ Output JSON:
     "modules": [
     {{
       "position": 1,
-      "type": "standard_image_header",
+      "type": "standard_header_image_text",
+      "semantic_role": "hero",
+      "publish_profile": "standard_header_image_text_v1",
+      "lingxing_content_module_type": "STANDARD_HEADER_IMAGE_TEXT",
       "headline": "...",
       "subheading": "...",
       "key_message": "...",
@@ -263,11 +270,22 @@ def _format_image_diagnostics(pi: ProductImage | None) -> str:
 
 
 def _normalize_module_strategy(module: dict, index: int) -> dict:
+    module["position"] = index
+    module["type"] = INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE
+    module["semantic_role"] = semantic_role_for_position(index)
+    module["publish_profile"] = APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1
+    module["lingxing_content_module_type"] = LINGXING_STANDARD_HEADER_IMAGE_TEXT
+    if not str(module.get("headline") or "").strip():
+        module["headline"] = f"A+ Module {index}"
     module.setdefault("conversion_goal", module.get("key_message") or module.get("headline") or f"Explain A+ module {index}")
     module.setdefault("buyer_objection", "Clarify the buyer doubt addressed by this module.")
     module.setdefault("evidence_source", module.get("reference_strategy") or "Use available product facts and selected reference images.")
     module.setdefault("experience_angle", module.get("image_concept") or module.get("headline") or "Show a realistic ownership or usage experience.")
     module.setdefault("gallery_overlap_avoidance", "Avoid repeating MAIN/gallery specs unless adding deeper usage context.")
+    if not str(module.get("key_message") or "").strip():
+        module["key_message"] = module.get("conversion_goal") or module.get("headline") or f"Explain A+ module {index}"
+    if not str(module.get("text_content") or "").strip():
+        module["text_content"] = module.get("key_message") or module.get("headline") or f"Explain A+ module {index}"
     guardrails = module.get("risk_guardrails")
     if not isinstance(guardrails, list):
         module["risk_guardrails"] = [
@@ -306,37 +324,52 @@ def _fallback_aplus_plan(product: Product, pd: ProductData, pi: ProductImage | N
     modules = [
         {
             "position": 1,
-            "type": "Standard Image Header",
+            "type": INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE,
+            "semantic_role": "hero",
             "headline": title[:90],
+            "subheading": "A clear first look at the product and its primary value.",
             "key_message": f"Introduce the {category} product with a clean hero composition.",
+            "text_content": f"Introduce the {category} product with a clean hero composition and truthful product context.",
             "image_concept": "Use the confirmed product image as the identity anchor, with a simple lifestyle context and conservative copy.",
         },
         {
             "position": 2,
-            "type": "Standard Single Image + Text",
+            "type": INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE,
+            "semantic_role": "lifestyle",
             "headline": "Designed for Everyday Use",
+            "subheading": "Show the product in a realistic usage moment.",
             "key_message": feature_items[0],
+            "text_content": feature_items[0],
             "image_concept": "Show a realistic usage scene that keeps the product shape, color, and visible material faithful to the references.",
         },
         {
             "position": 3,
-            "type": "Standard 4 Image / Text",
+            "type": INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE,
+            "semantic_role": "feature_proof",
             "headline": "Visible Details",
+            "subheading": "Focus on supported construction, finish, or functional details.",
             "key_message": "; ".join(feature_items[1:4]) or feature_items[0],
+            "text_content": "; ".join(feature_items[1:4]) or feature_items[0],
             "image_concept": "Use detail-focused reference images to explain visible construction, finish, or functional parts.",
         },
         {
             "position": 4,
-            "type": "Standard Comparison Chart",
+            "type": INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE,
+            "semantic_role": "spec_objection",
             "headline": "Product Specifications",
+            "subheading": "Answer the buyer's practical fit or setup questions.",
             "key_message": "Present dimensions, material, use case, and included details only when supported by product facts.",
+            "text_content": "Present dimensions, material, use case, and included details only when supported by product facts.",
             "image_concept": "Create a clean specification layout without inventing certifications, safety claims, or unsupported performance claims.",
         },
         {
             "position": 5,
-            "type": "Standard Multiple Image + Text",
+            "type": INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE,
+            "semantic_role": "closing",
             "headline": "Complete the Setup",
+            "subheading": "Close with a practical ownership scene.",
             "key_message": feature_items[-1],
+            "text_content": feature_items[-1],
             "image_concept": "Close with a practical ownership scene that reinforces the most visible selling point from the selected images.",
         },
     ]

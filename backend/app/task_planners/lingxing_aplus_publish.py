@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.models import AplusUploadItem, CatalogProduct, Product, TaskGroup, TaskRun, TaskStep
 from app.services.asin_match_policy import seller_sku_candidate
+from app.services.lingxing_aplus_module_mapper import preflight_validate
 from app.services.lingxing_aplus_publish_policy import build_aplus_content_fingerprint, collect_aplus_publish_assets
 from app.task_runtime.constants import STEP_STATUS_PENDING, STEP_STATUS_READY
 from app.task_runtime.json_utils import json_dumps
@@ -94,11 +95,19 @@ async def create_lingxing_aplus_publish_runs(
             continue
 
         assets_result = collect_aplus_publish_assets(product)
-        fingerprint = (
-            build_aplus_content_fingerprint(product.aplus, assets_result.assets)
-            if assets_result.ok
-            else f"invalid-{assets_result.reason_code or 'assets'}"
-        )
+        if assets_result.ok:
+            module_mapping = preflight_validate(product, assets_result.assets)
+            fingerprint = (
+                build_aplus_content_fingerprint(
+                    product.aplus,
+                    assets_result.assets,
+                    module_mapping_evidence=module_mapping.evidence,
+                )
+                if module_mapping.ok
+                else f"invalid-{module_mapping.reason_code or 'module_mapping'}"
+            )
+        else:
+            fingerprint = f"invalid-{assets_result.reason_code or 'assets'}"
         dedupe_key = _base_dedupe_key(
             product_id=product.id,
             product_aplus_id=getattr(product.aplus, "id", None),

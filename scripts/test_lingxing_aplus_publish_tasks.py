@@ -17,6 +17,10 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from app.database import async_session, run_schema_maintenance  # noqa: E402
+from app.aplus_publish.module_registry import (  # noqa: E402
+    APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+    LINGXING_STANDARD_HEADER_IMAGE_TEXT,
+)
 from app.models import (  # noqa: E402
     AplusUploadBatch,
     AplusUploadItem,
@@ -71,7 +75,7 @@ class FakeDraftSaveClient:
                 "endpoint_family": "lingxing_aplus_add",
                 "idHash": f"FAKE-IDHASH-{request.seller_sku}",
                 "submitFlag": 0,
-                "request_module_count": len(request.assets),
+                "request_module_count": len(request.module_mapping.modules),
             },
         )
 
@@ -137,6 +141,7 @@ async def _make_product(
     aplus_status: str | None = "done",
     upload_status: str | None = "ready_to_upload",
     existing_id_hash: str | None = None,
+    legacy_plan: bool = False,
 ) -> CatalogProduct:
     now = datetime.now()
     sku = seller_sku or f"T3-SKU-{marker}"
@@ -153,7 +158,23 @@ async def _make_product(
         updated_at=now,
     )
     product.data = ProductData(item_code=sku, title=f"T3 fixture {marker}", listing_title=f"T3 fixture {marker}")
-    modules = [{"headline": f"Module {index}"} for index in range(1, 6)]
+    if legacy_plan:
+        modules = [{"position": index, "headline": f"Module {index}", "key_message": f"Key message {index}"} for index in range(1, 6)]
+    else:
+        modules = [
+            {
+                "position": index,
+                "type": "standard_header_image_text",
+                "semantic_role": ["hero", "lifestyle", "feature_proof", "spec_objection", "closing"][index - 1],
+                "publish_profile": APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+                "lingxing_content_module_type": LINGXING_STANDARD_HEADER_IMAGE_TEXT,
+                "headline": f"Module {index}",
+                "subheading": f"Subtitle {index}",
+                "key_message": f"Key message {index}",
+                "text_content": f"Body text {index}",
+            }
+            for index in range(1, 6)
+        ]
     images = [
         {"status": "done", "path": _make_image(tmp / marker / f"aplus_{index:02d}.jpg"), "position": index}
         for index in range(1, 6)
@@ -312,6 +333,21 @@ async def test_prereq_failures_are_structured(tmp: Path) -> None:
     assert_true(skipped_catalog.aplus_upload_status == "skipped", "A+ not done should write skipped")
 
 
+async def test_module_mapping_failure_does_not_call_client(tmp: Path) -> None:
+    async with async_session() as session:
+        legacy = await _make_product(session, tmp, "LEGACY_PLAN", legacy_plan=True, upload_status="not_uploaded")
+        await session.commit()
+
+    calls_before = len(FakeDraftSaveClient.calls)
+    result = await _create_and_run(legacy)
+    refreshed = await _reload_catalog(legacy.id)
+    assert_true(result["status"] == "failed", "legacy plan should fail locally")
+    assert_true(result["reason_code"] == "unsupported_aplus_publish_profile", "legacy plan missing profile should return typed mapper reason")
+    assert_true(refreshed.aplus_upload_status == "failed", "mapping failure should write domain failed")
+    assert_true(len(FakeDraftSaveClient.calls) == calls_before, "mapping failure must not call Lingxing client/auth/upload/add")
+    assert_true(await _count_draft_items(legacy.id) == 0, "mapping failure must not create draft item evidence")
+
+
 async def test_external_failures_mark_runtime_failed_and_retryable(tmp: Path) -> None:
     async with async_session() as session:
         auth = await _make_product(session, tmp, "AUTH")
@@ -433,6 +469,7 @@ async def main() -> None:
             tmp = Path(raw_tmp)
             await test_save_success_writes_draft_saved_only(tmp)
             await test_prereq_failures_are_structured(tmp)
+            await test_module_mapping_failure_does_not_call_client(tmp)
             await test_external_failures_mark_runtime_failed_and_retryable(tmp)
             await test_duplicate_trigger_reuses_active_and_stops_after_draft_saved(tmp)
     finally:

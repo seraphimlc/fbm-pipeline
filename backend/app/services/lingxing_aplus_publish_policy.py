@@ -9,6 +9,10 @@ from typing import Any
 
 from PIL import Image
 
+from app.aplus_publish.module_registry import (
+    STANDARD_HEADER_IMAGE_TEXT_V1,
+    SUPPORTED_APLUS_MODULE_COUNT,
+)
 from app.aplus_publish.status import (
     STATUS_FAILED,
     STATUS_READY_TO_UPLOAD,
@@ -20,9 +24,9 @@ from app.models import CatalogProduct, Product, ProductAplus
 from app.services.asin_match_policy import seller_sku_candidate
 
 
-MIN_APLUS_IMAGE_WIDTH = 970
-MIN_APLUS_IMAGE_HEIGHT = 600
-REQUIRED_APLUS_IMAGE_COUNT = 5
+MIN_APLUS_IMAGE_WIDTH = STANDARD_HEADER_IMAGE_TEXT_V1.image_min_width
+MIN_APLUS_IMAGE_HEIGHT = STANDARD_HEADER_IMAGE_TEXT_V1.image_min_height
+REQUIRED_APLUS_IMAGE_COUNT = SUPPORTED_APLUS_MODULE_COUNT
 
 
 @dataclass(frozen=True)
@@ -157,7 +161,12 @@ def collect_aplus_publish_assets(product: Product) -> AplusPolicyResult:
     return AplusPolicyResult(ok=True, status=STATUS_READY_TO_UPLOAD, assets=assets)
 
 
-def build_aplus_content_fingerprint(product_aplus: ProductAplus | None, assets: list[AplusPublishAsset]) -> str:
+def build_aplus_content_fingerprint(
+    product_aplus: ProductAplus | None,
+    assets: list[AplusPublishAsset],
+    *,
+    module_mapping_evidence: dict[str, Any] | None = None,
+) -> str:
     payload = {
         "product_aplus_id": getattr(product_aplus, "id", None),
         "aplus_status": getattr(product_aplus, "aplus_status", None),
@@ -173,6 +182,9 @@ def build_aplus_content_fingerprint(product_aplus: ProductAplus | None, assets: 
             }
             for asset in assets
         ],
+        "module_mapping_evidence": module_mapping_evidence or {},
+        "aplus_publish_profile": STANDARD_HEADER_IMAGE_TEXT_V1.profile_key,
+        "lingxing_content_module_type": STANDARD_HEADER_IMAGE_TEXT_V1.content_module_type,
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 

@@ -11,6 +11,10 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from app.aplus_publish.module_registry import (
+    APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+    LINGXING_STANDARD_HEADER_IMAGE_TEXT,
+)
 from app.config import settings
 from app.database import async_session
 from app.models import Product, ProductData, ProductImage, ProductAplus
@@ -112,7 +116,7 @@ For each module in the plan, generate a detailed image generation prompt:
 - Except for scene, people, light, room styling, camera framing, and clean A+ graphic layout, keep the product appearance as close as possible to the selected product references.
 - Do not add, remove, or alter product parts, proportions, accessories, mechanisms, labels, packaging, material texture, surface finish, safety features, age cues, or visible construction details unless they are present in the selected references/product facts.
 - For child, baby, pet, medical, electrical, or safety-sensitive products, avoid unsupported certification, age, safety, health, durability, battery, waterproof, or performance claims; show only realistic compliant use supported by product facts and references.
-- Match the module type to Amazon image dimensions
+- Preserve each plan module's publish_profile, lingxing_content_module_type, and semantic_role in the script JSON for traceability.
 - Each prompt should be 100-300 words
 
 Standard output size for this pipeline:
@@ -123,6 +127,9 @@ Output JSON:
   "scripts": [
     {{
       "module_position": 1,
+      "publish_profile": "standard_header_image_text_v1",
+      "lingxing_content_module_type": "STANDARD_HEADER_IMAGE_TEXT",
+      "semantic_role": "hero",
       "prompt": "detailed image generation prompt...",
       "negative_prompt": "what to avoid...",
       "width": {output_width},
@@ -696,6 +703,7 @@ def _module_strategy(module: dict, script: dict | None = None) -> dict:
 def _attach_module_strategy_section(script: dict, module: dict) -> None:
     strategy = _module_strategy(module, script)
     script.update(strategy)
+    _inherit_publish_contract(script, module)
 
     lines = [
         "Module conversion strategy:",
@@ -715,6 +723,13 @@ def _attach_module_strategy_section(script: dict, module: dict) -> None:
     prompt = script.get("prompt") or ""
     if "Module conversion strategy:" not in prompt:
         script["prompt"] = f"{prompt.rstrip()}\n\n{section}".strip()
+
+
+def _inherit_publish_contract(script: dict, module: dict) -> None:
+    script["publish_profile"] = module.get("publish_profile") or APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1
+    script["lingxing_content_module_type"] = module.get("lingxing_content_module_type") or LINGXING_STANDARD_HEADER_IMAGE_TEXT
+    if module.get("semantic_role"):
+        script["semantic_role"] = module.get("semantic_role")
 
 
 def _select_references_for_script(
@@ -1046,6 +1061,9 @@ def _fallback_aplus_scripts(plan: dict, product: Product, pd: ProductData) -> di
         scripts.append(
             {
                 "module_position": idx,
+                "publish_profile": module.get("publish_profile") or APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+                "lingxing_content_module_type": module.get("lingxing_content_module_type") or LINGXING_STANDARD_HEADER_IMAGE_TEXT,
+                "semantic_role": module.get("semantic_role"),
                 "fallback_script": True,
                 "prompt": (
                     f"Create Amazon A+ module {idx} for {title}. Module headline: {headline}. "

@@ -3093,6 +3093,98 @@ def test_lingxing_aplus_publish_t3_draft_save_contract() -> None:
     )
 
 
+def test_lingxing_aplus_module_mapping_m2_contract() -> None:
+    registry_path = ROOT / "backend" / "app" / "aplus_publish" / "module_registry.py"
+    mapper_path = ROOT / "backend" / "app" / "services" / "lingxing_aplus_module_mapper.py"
+    client_path = ROOT / "backend" / "app" / "services" / "lingxing_aplus_publish_client.py"
+    worker_path = ROOT / "backend" / "app" / "task_runtime" / "lingxing_aplus_publish_workers.py"
+    planner_path = ROOT / "backend" / "app" / "task_planners" / "lingxing_aplus_publish.py"
+    step7_path = ROOT / "backend" / "app" / "pipeline" / "step7_aplus_plan.py"
+    step8_path = ROOT / "backend" / "app" / "pipeline" / "step8_aplus_script.py"
+    mapper_script_path = ROOT / "scripts" / "test_lingxing_aplus_module_mapper.py"
+
+    assert_true(registry_path.is_file(), "M2 必须新增 A+ publish module registry")
+    assert_true(mapper_path.is_file(), "M2 必须新增 Lingxing A+ module mapper")
+    registry_text = registry_path.read_text(encoding="utf-8")
+    mapper_text = mapper_path.read_text(encoding="utf-8")
+    client_text = client_path.read_text(encoding="utf-8")
+    worker_text = worker_path.read_text(encoding="utf-8")
+    planner_text = planner_path.read_text(encoding="utf-8")
+    step7_text = step7_path.read_text(encoding="utf-8")
+    step8_text = step8_path.read_text(encoding="utf-8")
+    mapper_script_text = mapper_script_path.read_text(encoding="utf-8")
+
+    assert_true(
+        "APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1" in registry_text
+        and "standard_header_image_text_v1" in registry_text
+        and "LINGXING_STANDARD_HEADER_IMAGE_TEXT" in registry_text
+        and "STANDARD_HEADER_IMAGE_TEXT" in registry_text
+        and "image_min_width=970" in registry_text
+        and "image_min_height=600" in registry_text
+        and "SUPPORTED_POSITIONS = (1, 2, 3, 4, 5)" in registry_text
+        and "FAILURE_UNSUPPORTED_PROFILE" in registry_text
+        and "FAILURE_MODULE_BODY_MISSING" in registry_text,
+        "M2 registry 必须集中支持 profile/type、图片要求、position 和 failure codes",
+    )
+    assert_true(
+        "def preflight_validate(" in mapper_text
+        and "def assemble_payload(" in mapper_text
+        and "body\": {\"textList\": [_text_object(module.body)]}" in mapper_text
+        and "headline\": _text_object(module.headline)" in mapper_text
+        and "headline\": _text_object(module.subheading)" in mapper_text
+        and "FAILURE_UNSUPPORTED_PROFILE" in mapper_text
+        and "FAILURE_UNSUPPORTED_MODULE_TYPE" in mapper_text
+        and "FAILURE_ASSET_POSITION_MISMATCH" in mapper_text,
+        "M2 mapper 必须两阶段校验/组装，并使用 rich-text object list 写标题、副标题、正文",
+    )
+    assert_true(
+        "_module_payload(" not in client_text
+        and "assemble_payload(request.module_mapping, uploaded)" in client_text
+        and '"contentModuleList": content_module_list' in client_text
+        and '"headline": {"value": ""}' not in client_text
+        and '"body": {"textList": []}' not in client_text,
+        "M2 client 不得再从 image+position 硬编码空 payload，必须消费 mapper output",
+    )
+    before_external = worker_text.split('event_type="external_call"', 1)[0]
+    assert_true(
+        "preflight_validate(product, assets_result.assets)" in before_external
+        and "_finish_module_mapping_failed" in before_external
+        and "module_mapping=module_mapping" in worker_text,
+        "M2 worker 必须在 external_call/STATUS_UPLOADING/client 前完成 mapper preflight 并 fail closed",
+    )
+    assert_true(
+        "preflight_validate(product, assets_result.assets)" in planner_text
+        and "module_mapping_evidence=module_mapping.evidence" in planner_text,
+        "M2 planner fingerprint 必须纳入 mapper profile/text evidence",
+    )
+    assert_true(
+        "APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1" in step7_text
+        and "LINGXING_STANDARD_HEADER_IMAGE_TEXT" in step7_text
+        and 'module["type"] = INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE' in step7_text
+        and 'module["publish_profile"] = APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1' in step7_text
+        and 'module["lingxing_content_module_type"] = LINGXING_STANDARD_HEADER_IMAGE_TEXT' in step7_text
+        and "Standard Comparison Chart" not in step7_text
+        and "Standard 4 Image / Text" not in step7_text,
+        "M2 Step7 必须显式产出可发布 profile/type，不再产出未支持原生模块标签",
+    )
+    assert_true(
+        "APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1" in step8_text
+        and "LINGXING_STANDARD_HEADER_IMAGE_TEXT" in step8_text
+        and "def _inherit_publish_contract" in step8_text
+        and 'script["publish_profile"]' in step8_text
+        and 'script["lingxing_content_module_type"]' in step8_text,
+        "M2 Step8 必须继承 publish profile/module type trace fields",
+    )
+    assert_true(
+        "test_valid_plan_assembles_rich_text_payload" in mapper_script_text
+        and "unsupported_aplus_publish_profile" in mapper_script_text
+        and "unsupported_aplus_module_type" in mapper_script_text
+        and "aplus_asset_position_mismatch" in mapper_script_text
+        and "body.textList must be rich-text object list" in mapper_script_text,
+        "M2 mapper 行为脚本必须覆盖 success rich-text payload 和 fail-closed cases",
+    )
+
+
 def test_product_action_worker_does_not_project_failure_for_interrupted() -> None:
     code = r'''
 import asyncio
@@ -4646,6 +4738,7 @@ def main() -> int:
         test_aplus_auto_after_export_ready_a1_a2_contract,
         test_lingxing_aplus_publish_t1_data_registry_bootstrap_contract,
         test_lingxing_aplus_publish_t3_draft_save_contract,
+        test_lingxing_aplus_module_mapping_m2_contract,
         test_product_action_worker_does_not_project_failure_for_interrupted,
         test_product_action_final_progress_failure_is_best_effort,
         test_auto_image_selection_phase_a_contract,

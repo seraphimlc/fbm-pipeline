@@ -17,6 +17,7 @@ from app.aplus_publish.status import (
 from app.models import AplusUploadBatch, AplusUploadItem, CatalogProduct, Product
 from app.services.aplus_publish_state import set_aplus_publish_status, update_aplus_publish_item_evidence
 from app.services.asin_match_policy import seller_sku_candidate
+from app.services.lingxing_aplus_module_mapper import LingxingAplusModuleMappingResult, preflight_validate
 from app.services.lingxing_aplus_publish_client import (
     LingxingAplusDraftSaveClient,
     LingxingAplusDraftSaveClientError,
@@ -110,6 +111,39 @@ async def _finish_prereq_not_met(ctx: TaskContext, catalog: CatalogProduct, deci
         "message": decision.message,
         "protected": decision.protected,
     }
+
+
+async def _finish_module_mapping_failed(
+    ctx: TaskContext,
+    catalog: CatalogProduct,
+    mapping: LingxingAplusModuleMappingResult,
+) -> dict[str, Any]:
+    await set_aplus_publish_status(
+        ctx.db,
+        catalog_product_id=catalog.id,
+        status=STATUS_FAILED,
+        error=mapping.message,
+    )
+    await emit_event(
+        ctx.db,
+        step=ctx.step,
+        event_type="policy",
+        message=mapping.message or mapping.reason_code or "A+ module mapping failed",
+        data={
+            "status": STATUS_FAILED,
+            "reason_code": mapping.reason_code,
+            "evidence": mapping.evidence,
+        },
+    )
+    await update_step_progress(
+        ctx.db,
+        ctx.step,
+        current=1,
+        total=1,
+        message=mapping.message,
+        data={"status": STATUS_FAILED, "reason_code": mapping.reason_code},
+    )
+    return {"status": STATUS_FAILED, "reason_code": mapping.reason_code, "message": mapping.message}
 
 
 async def _record_success(
@@ -282,10 +316,18 @@ async def lingxing_aplus_publish_product(ctx: TaskContext) -> dict[str, Any]:
         )
         return {"status": STATUS_FAILED, "reason_code": assets_result.reason_code, "message": assets_result.message}
 
+    module_mapping = preflight_validate(product, assets_result.assets)
+    if not module_mapping.ok:
+        return await _finish_module_mapping_failed(ctx, catalog, module_mapping)
+
     seller_sku = seller_sku_candidate(catalog).value
     asin = _clean(catalog.amazon_asin) or _clean(product.amazon_asin)
     product_aplus_id = int(getattr(product.aplus, "id", None) or payload.get("product_aplus_id") or 0)
-    fingerprint = build_aplus_content_fingerprint(product.aplus, assets_result.assets)
+    fingerprint = build_aplus_content_fingerprint(
+        product.aplus,
+        assets_result.assets,
+        module_mapping_evidence=module_mapping.evidence,
+    )
     document_name = f"{asin}_{seller_sku}_{product.id}"
     request = LingxingAplusDraftSaveRequest(
         asin=asin,
@@ -297,6 +339,7 @@ async def lingxing_aplus_publish_product(ctx: TaskContext) -> dict[str, Any]:
         product_id=product.id,
         product_aplus_id=product_aplus_id,
         content_fingerprint=fingerprint,
+        module_mapping=module_mapping,
     )
     await set_aplus_publish_status(ctx.db, catalog_product_id=catalog.id, status=STATUS_READY_TO_UPLOAD)
     await emit_event(

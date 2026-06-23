@@ -1,7 +1,7 @@
 # Lingxing A+ Upload Existing Logic
 
 状态：现有代码事实梳理
-更新：2026-06-22
+更新：2026-06-23
 
 本文记录当前项目中“生成 A+ 后，通过领星 ERP 上传/提交到 Amazon A+”的既有能力。它不是新的打通方案；后续如要重新接入主流程或 Web UI，需要另起技术方案并做真实外部链路 QA。
 
@@ -276,8 +276,69 @@ A+ 列表页当前可见：
 - 这次验证只确认领星列表中可见 `草稿` / `已提交` 状态，没有确认 Amazon Seller Central A+ 草稿箱是否同步可见。后续应把“领星草稿已保存”和“Amazon 草稿箱已可见/已同步”拆成两个状态或两个证据。
 - 自动链路默认仍应保存草稿；提交审批只能在显式配置或人工触发下执行。
 
+## 2026-06-23 STANDARD_HEADER_IMAGE_TEXT 非空 payload 结构
+
+M2.0 证据见 `docs/collaboration/reviews/2026-06-23-lingxing-standard-header-image-text-payload.md`。本轮没有点击保存或提交，没有产生新的领星草稿副作用。
+
+确认来源：
+
+- 已登录 Chrome 中的 Lingxing 测试 `editAplus` 页面只读 DOM。
+- 当前页面公开前端 bundle：
+  - `https://static.distributetop.com/erp/js/contentModule-0af405eb.js`
+  - `https://static.distributetop.com/erp/js/asinModule-4c23da27.js`
+
+确认事实：
+
+- `STANDARD_HEADER_IMAGE_TEXT` / “带文字的标准图片标题”模块结构为 `standardHeaderImageText: { headline, block }`。
+- 页面“标题”写入 `standardHeaderImageText.headline.value`。
+- 页面“副标题”写入 `standardHeaderImageText.block.headline.value`。
+- 页面“正文”写入 `standardHeaderImageText.block.body.textList`。
+- `body.textList` 不是 string list，而是 rich-text object list；plain text item 形如：
+
+```json
+[
+  {
+    "value": "正文文本",
+    "decoratorSet": []
+  }
+]
+```
+
+- 富文本样式通过 `decoratorSet` 表达；前端 bundle 中可见 `STYLE_BOLD`、`STYLE_ITALIC`、`STYLE_UNDERLINE`、`LIST_ITEM`、`LIST_ORDERED`、`LIST_UNORDERED`。
+- 保存按钮调用 `confirm(0)`，最终请求体含 `submitFlag=0`；提交按钮调用 `confirm(1)`，最终请求体含 `submitFlag=1`。
+
+## 2026-06-23 T3.5 module mapper 落地口径
+
+新增发布模块事实源和 mapper：
+
+- `backend/app/aplus_publish/module_registry.py`
+  - 首版只支持 `standard_header_image_text_v1` / `STANDARD_HEADER_IMAGE_TEXT`。
+  - 图片要求为至少 `970x600`，支持 position `1..5`，必填字段为 `headline` 和可映射 body。
+  - failure codes 包括 unsupported profile/module type、module count/position、headline/body missing、asset count/position/size mismatch 等。
+- `backend/app/services/lingxing_aplus_module_mapper.py`
+  - `preflight_validate()` 在任何 Lingxing auth、`uploadDestination`、对象存储上传和 `amazon/aplus/add` 前校验 plan/profile/type/headline/body/count/position/local assets。
+  - `assemble_payload()` 只在 preflight PASS 且图片上传成功后注入 `uploadDestinationId` 和 crop data，生成 `contentModuleList`。
+
+当前自动草稿保存 payload 约束：
+
+- `standardHeaderImageText.headline` 和 `standardHeaderImageText.block.headline` 都使用 `{ "value": "...", "decoratorSet": [] }`。
+- `standardHeaderImageText.block.body.textList` 使用 rich-text object list：`[{ "value": "...", "decoratorSet": [] }]`，不得写 string list 或空数组。
+- 新生成 Step7 plan / Step8 script 显式携带 `publish_profile=standard_header_image_text_v1` 和 `lingxing_content_module_type=STANDARD_HEADER_IMAGE_TEXT`。
+- 旧 plan 缺 profile/type 不做静默迁移，发布任务本地 fail closed，不保存半成品草稿。
+
+验证入口：
+
+```bash
+cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_module_mapper.py
+cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_policy.py
+cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_tasks.py
+make test-project-rules
+```
+
+未改变范围：仍不确认 `draft_visible`，不提交审批，不把领星发布状态并入商品主 workflow / `work_status`。真实领星草稿字段可见性仍需后续观止 QA。
+
 ## 快速定位
 
 ```bash
-rg -n "aplus_upload|AplusUpload|aplus-upload|lingxing_response|uploadDestination|amazon/aplus" backend/app frontend/src
+rg -n "aplus_upload|AplusUpload|aplus-upload|lingxing_response|uploadDestination|amazon/aplus|lingxing_aplus_module_mapper|module_registry" backend/app frontend/src
 ```

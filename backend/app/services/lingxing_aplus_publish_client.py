@@ -10,6 +10,11 @@ import httpx
 
 from app.config import settings
 from app.pipeline.chrome_ctrl import chrome_execute_js, chrome_get_cookie_for_domain, chrome_navigate, chrome_workflow
+from app.services.lingxing_aplus_module_mapper import (
+    LingxingAplusModuleMappingResult,
+    alt_text_by_position,
+    assemble_payload,
+)
 from app.services.lingxing_aplus_publish_policy import AplusPublishAsset
 
 
@@ -36,6 +41,7 @@ class LingxingAplusDraftSaveRequest:
     product_id: int
     product_aplus_id: int
     content_fingerprint: str
+    module_mapping: LingxingAplusModuleMappingResult
 
 
 @dataclass(frozen=True)
@@ -129,6 +135,11 @@ async def _get_lingxing_aplus_auth(*, store_id: str) -> dict[str, Any]:
 
 class LingxingAplusDraftSaveClient:
     async def save_draft(self, request: LingxingAplusDraftSaveRequest) -> LingxingAplusDraftSaveResult:
+        if not request.module_mapping.ok:
+            raise LingxingAplusDraftSaveClientError(
+                request.module_mapping.reason_code or "aplus_module_mapping_invalid",
+                request.module_mapping.message or "A+ module mapping preflight failed",
+            )
         if not settings.LINGXING_APLUS_ALLOW_REAL_EXTERNAL_CALLS:
             raise LingxingAplusDraftSaveClientError(
                 "real_external_calls_disabled",
@@ -155,8 +166,18 @@ class LingxingAplusDraftSaveClient:
 
         try:
             async with httpx.AsyncClient(timeout=30, verify=settings.external_http_verify) as client:
-                uploaded = [await self._upload_image(client, auth, asset) for asset in request.assets]
-                response = await self._save_draft(client, auth, request, uploaded)
+                alt_text_map = alt_text_by_position(request.module_mapping)
+                uploaded = [
+                    await self._upload_image(client, auth, asset, alt_text_map.get(asset.position) or asset.alt_text)
+                    for asset in request.assets
+                ]
+                mapped = assemble_payload(request.module_mapping, uploaded)
+                if not mapped.ok:
+                    raise LingxingAplusDraftSaveClientError(
+                        mapped.reason_code or "aplus_module_assembly_failed",
+                        mapped.message or "A+ module payload assembly failed after image upload",
+                    )
+                response = await self._save_draft(client, auth, request, mapped.content_module_list)
         except LingxingAplusDraftSaveClientError:
             raise
         except Exception as exc:
@@ -180,6 +201,7 @@ class LingxingAplusDraftSaveClient:
                 "status_text": status_text,
                 "response": _safe_response_summary(response),
                 "uploaded_image_count": len(uploaded),
+                "module_mapping": mapped.evidence,
             },
         )
 
@@ -188,6 +210,7 @@ class LingxingAplusDraftSaveClient:
         client: httpx.AsyncClient,
         auth: dict[str, Any],
         asset: AplusPublishAsset,
+        alt_text: str,
     ) -> dict[str, Any]:
         content = asset.path.read_bytes()
         response = await client.post(
@@ -223,7 +246,7 @@ class LingxingAplusDraftSaveClient:
             "position": asset.position,
             "file_name": asset.path.name,
             "uploadDestinationId": upload_id,
-            "altText": asset.alt_text,
+            "altText": alt_text,
             "contentType": asset.content_type,
             "width": asset.width,
             "height": asset.height,
@@ -235,7 +258,7 @@ class LingxingAplusDraftSaveClient:
         client: httpx.AsyncClient,
         auth: dict[str, Any],
         request: LingxingAplusDraftSaveRequest,
-        uploaded: list[dict[str, Any]],
+        content_module_list: list[dict[str, Any]],
     ) -> dict[str, Any]:
         payload = {
             "storeId": auth["store_id"],
@@ -244,7 +267,7 @@ class LingxingAplusDraftSaveClient:
                 "contentType": "EBC",
                 "locale": "en-US",
                 "name": request.document_name,
-                "contentModuleList": [_module_payload(item, index) for index, item in enumerate(uploaded, start=1)],
+                "contentModuleList": content_module_list,
             },
             "submitFlag": 0,
         }
@@ -257,32 +280,3 @@ class LingxingAplusDraftSaveClient:
                 data.get("msg") or data.get("message") or "领星 A+ 保存草稿失败",
             )
         return data
-
-
-def _module_payload(image: dict[str, Any], position: int) -> dict[str, Any]:
-    image_data = {
-        "uploadDestinationId": image["uploadDestinationId"],
-        "altText": image["altText"],
-        "imageCropSpecification": {
-            "offset": {
-                "x": {"units": "pixels", "value": 0},
-                "y": {"units": "pixels", "value": 0},
-            },
-            "size": {
-                "height": {"units": "pixels", "value": str(image["height"])},
-                "width": {"units": "pixels", "value": str(image["width"])},
-            },
-        },
-    }
-    return {
-        "contentModuleType": "STANDARD_HEADER_IMAGE_TEXT",
-        "standardHeaderImageText": {
-            "headline": {"value": ""},
-            "block": {
-                "image": image_data,
-                "headline": {"value": ""},
-                "body": {"textList": []},
-            },
-        },
-        "position": position,
-    }

@@ -14,7 +14,12 @@ if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
 from app.config import settings  # noqa: E402
+from app.aplus_publish.module_registry import (  # noqa: E402
+    APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+    LINGXING_STANDARD_HEADER_IMAGE_TEXT,
+)
 from app.models import CatalogProduct, Product, ProductAplus, ProductData  # noqa: E402
+from app.services.lingxing_aplus_module_mapper import preflight_validate  # noqa: E402
 from app.services.lingxing_aplus_publish_client import (  # noqa: E402
     LingxingAplusDraftSaveClient,
     LingxingAplusDraftSaveClientError,
@@ -49,7 +54,17 @@ def _product_with_aplus(tmp: Path, *, image_size: tuple[int, int] = (970, 600), 
     )
     product.data = ProductData(item_code="T3-SKU", title="T3 policy fixture", listing_title="T3 listing title")
     modules = [
-        {"headline": f"Module {index}", "key_message": f"Key message {index}"}
+        {
+            "position": index,
+            "type": "standard_header_image_text",
+            "semantic_role": ["hero", "lifestyle", "feature_proof", "spec_objection", "closing"][index - 1],
+            "publish_profile": APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+            "lingxing_content_module_type": LINGXING_STANDARD_HEADER_IMAGE_TEXT,
+            "headline": f"Module {index}",
+            "subheading": f"Subtitle {index}",
+            "key_message": f"Key message {index}",
+            "text_content": f"Body text {index}",
+        }
         for index in range(1, 6)
     ]
     images = []
@@ -75,8 +90,26 @@ def test_collect_aplus_assets_success_and_fingerprint() -> None:
         assert_true(result.ok, f"expected assets ok, got {result.reason_code}: {result.message}")
         assert_true(len(result.assets) == 5, "draft save must collect exactly 5 A+ images")
         assert_true(result.assets[0].alt_text == "Module 1", "alt text should come from A+ plan module headline")
-        fingerprint = build_aplus_content_fingerprint(product.aplus, result.assets)
+        mapping = preflight_validate(product, result.assets)
+        assert_true(mapping.ok, f"module mapping should pass: {mapping.reason_code}")
+        fingerprint = build_aplus_content_fingerprint(product.aplus, result.assets, module_mapping_evidence=mapping.evidence)
         assert_true(len(fingerprint) == 64, "content fingerprint should be a sha256 hex digest")
+        assert_true(mapping.evidence.get("profile") == APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1, "mapping evidence should record supported publish profile")
+
+
+def test_module_mapping_failures_are_typed_before_client() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        product = _product_with_aplus(Path(raw_tmp))
+        plan = json.loads(product.aplus.aplus_plan)
+        plan["modules"][0].pop("publish_profile")
+        product.aplus.aplus_plan = json.dumps(plan, ensure_ascii=False)
+        assets = collect_aplus_publish_assets(product)
+        assert_true(assets.ok, "asset collection should still pass before semantic mapping")
+        mapping = preflight_validate(product, assets.assets)
+        assert_true(
+            not mapping.ok and mapping.reason_code == "unsupported_aplus_publish_profile",
+            "old plan without publish_profile must fail closed before client/auth/upload",
+        )
 
 
 def test_collect_aplus_assets_typed_missing_and_small_image() -> None:
@@ -123,16 +156,21 @@ async def test_draft_client_fails_closed_before_auth_or_request() -> None:
     settings.LINGXING_APLUS_ALLOW_REAL_EXTERNAL_CALLS = False
     settings.LINGXING_APLUS_SUBMIT_FOR_APPROVAL = True
     try:
+        product = _product_with_aplus(Path(tempfile.mkdtemp()))
+        assets_result = collect_aplus_publish_assets(product)
+        mapping = preflight_validate(product, assets_result.assets)
+        assert_true(mapping.ok, f"test fixture mapping should pass: {mapping.reason_code}")
         request = LingxingAplusDraftSaveRequest(
             asin="B0T3POLICY",
             seller_sku="T3-SKU",
             document_name="T3 policy",
             store_id="17983",
             site="US",
-            assets=[],
+            assets=assets_result.assets,
             product_id=101,
             product_aplus_id=501,
             content_fingerprint="abc",
+            module_mapping=mapping,
         )
         try:
             await LingxingAplusDraftSaveClient().save_draft(request)
@@ -147,6 +185,7 @@ async def test_draft_client_fails_closed_before_auth_or_request() -> None:
 
 async def main() -> None:
     test_collect_aplus_assets_success_and_fingerprint()
+    test_module_mapping_failures_are_typed_before_client()
     test_collect_aplus_assets_typed_missing_and_small_image()
     test_prerequisites_are_typed_and_protected()
     await test_draft_client_fails_closed_before_auth_or_request()
