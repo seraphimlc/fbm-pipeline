@@ -31,7 +31,7 @@
 - From: 若命（agentKey: `ruoming`）
 - To: 观止（agentKey: `guanzhi`）
 - Cc: 用户 / 听云（agentKey: `tingyun`） / 镜花（agentKey: `jinghua`）
-- Status: QA_PASS_WITH_SCOPE / READY_FOR_SCOPED_COMMIT
+- Status: QA_PASS_WITH_SCOPE / COMMITTED_PUSHED_43B7E54
 - Created: 2026-06-23 CST
 - Depends on:
   - `MSG-20260623-011` 镜花 `CODE_REVIEW / PASS_WITH_SCOPE`
@@ -172,7 +172,7 @@
 - From: 若命（agentKey: `ruoming`）
 - To: 听云（agentKey: `tingyun`）
 - Cc: 用户 / 镜花（agentKey: `jinghua`） / 观止（agentKey: `guanzhi`）
-- Status: QA_PASS_WITH_SCOPE / READY_FOR_SCOPED_COMMIT
+- Status: QA_PASS_WITH_SCOPE / COMMITTED_PUSHED_43B7E54
 - Created: 2026-06-23 CST
 - Depends on:
   - `MSG-20260623-008` technical plan rereview `PASS_WITH_CONSTRAINTS`
