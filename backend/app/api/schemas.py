@@ -727,9 +727,12 @@ class ProductResponse(BaseModel):
     gigab2b_product_id: str | None = None
     competitor_asin: str | None = None
     amazon_asin: str | None = None
+    amazon_seller_sku: str | None = None
     asin_sync_status: str | None = None
     asin_synced_at: datetime | None = None
     asin_sync_error: str | None = None
+    asin_match_source: str | None = None
+    asin_match_evidence_json: str | None = None
     amazon_product_status: str | None = None
     amazon_product_status_synced_at: datetime | None = None
     amazon_product_status_error: str | None = None
@@ -968,9 +971,12 @@ class CatalogProductResponse(BaseModel):
     gigab2b_product_id: str | None = None
     competitor_asin: str | None = None
     amazon_asin: str | None = None
+    amazon_seller_sku: str | None = None
     asin_sync_status: str | None = None
     asin_synced_at: datetime | None = None
     asin_sync_error: str | None = None
+    asin_match_source: str | None = None
+    asin_match_evidence_json: str | None = None
     amazon_product_status: str | None = None
     amazon_product_status_synced_at: datetime | None = None
     amazon_product_status_error: str | None = None
@@ -1237,6 +1243,19 @@ class AplusUploadItemResponse(BaseModel):
     status: str
     uploaded_images: str | None = None
     lingxing_response: str | None = None
+    lingxing_aplus_id_hash: str | None = None
+    lingxing_status_text: str | None = None
+    amazon_draft_visibility: str | None = None
+    draft_visible_at: datetime | None = None
+    submitted_at: datetime | None = None
+    publish_evidence_json: str | None = None
+    source_task_run_id: int | None = None
+    source_task_step_id: int | None = None
+    product_aplus_id: int | None = None
+    aplus_content_fingerprint: str | None = None
+    seller_sku_used: str | None = None
+    store_id: str | None = None
+    site: str | None = None
     error_message: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None

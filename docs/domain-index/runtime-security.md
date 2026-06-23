@@ -26,12 +26,14 @@
 - 商品/文件/导出 API：`backend/app/api/products.py`
 - 数据源 API：`backend/app/api/data_sources.py`
 - 外部 HTTP client：`backend/app/services/aplus_upload.py`, `backend/app/pipeline/step9_aplus_image.py`
+- 领星 ERP A+ 上传/发布：`docs/lingxing-aplus-upload.md`、`docs/superpowers/specs/2026-06-23-lingxing-aplus-publish-after-aplus-done-prd.md` 和 `docs/superpowers/specs/2026-06-23-lingxing-aplus-publish-technical-plan.md`；该链路依赖本机 Chrome 登录态、token-bearing HTTP 请求和真实外部网关。T1 仅新增字段、状态 registry、single writer 和 schema/index bootstrap，不触发真实外部调用。
 
 ## 关键流程
 
 - 启动：`scripts/start.sh` -> `python -m app.database` 可重复 schema maintenance -> `backend/app/main.py` lifespan -> DB/runtime 初始化。
 - mutating API：`backend/app/main.py` middleware -> 本机访问/dev token guard -> router -> service/action。
 - TLS 请求：`settings.external_http_verify` -> HTTP client -> 外部服务。
+- 领星 A+ 上传旧链路：本机 Chrome 读取领星 Cookie/localStorage/sessionStorage -> 领星网关 `uploadDestination/add/edit` -> 外部对象存储表单上传 -> Product/Catalog A+ 上传状态回写。新 Lingxing A+ 发布工程线 T1 只有 `backend/app/aplus_publish/status.py`、`backend/app/services/aplus_publish_state.py` 和 `backend/app/database.py` schema/index 维护，不新增外部 HTTP/Chrome 调用入口。
 - 图片代理：`/api/images/{file_path}` -> `settings.image_proxy_roots` -> `Path.relative_to()` 结构化路径校验。
 
 ## 相关文档
@@ -40,6 +42,9 @@
 - `docs/collaboration/reviews/2026-06-17-whole-project-code-audit-rerun.md`
 - `docs/collaboration/reviews/2026-06-17-whole-project-code-review.md`
 - `docs/configuration.md`
+- `docs/lingxing-aplus-upload.md`
+- `docs/superpowers/specs/2026-06-23-lingxing-aplus-publish-after-aplus-done-prd.md`
+- `docs/superpowers/specs/2026-06-23-lingxing-aplus-publish-technical-plan.md`
 - `docs/runbook.md`
 
 ## 验证入口
@@ -55,6 +60,7 @@
 - 远程访问风险：先看 `scripts/start.sh`、`backend/app/main.py` 和 router guard。
 - 启动改库/唤醒任务：先区分本地一键启动脚本和普通 API lifespan；`scripts/start.sh` 会先跑 `python -m app.database` 补齐 schema，`backend/app/main.py` lifespan 仍由 `STARTUP_RUN_*` 开关控制维护、backfill、恢复和 runtime kick，再看 `backend/app/database.py`。
 - TLS verify：先看 `backend/app/config.py`、`aplus_upload.py`、`step9_aplus_image.py`。
+- 领星 A+ 发布风险：先看 `docs/superpowers/specs/2026-06-23-lingxing-aplus-publish-after-aplus-done-prd.md`、`docs/superpowers/specs/2026-06-23-lingxing-aplus-publish-technical-plan.md`、`docs/lingxing-aplus-upload.md` 和 `backend/app/services/aplus_upload.py`；确认 Chrome 登录态、真实外部请求、自动提交审批和 task/runtime 审计边界。
 - 图片代理：先看 `backend/app/main.py` 中 image proxy 路由和允许根目录。
 
 ## 维护规则

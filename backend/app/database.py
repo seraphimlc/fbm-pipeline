@@ -37,6 +37,7 @@ async def init_db():
         await _ensure_mysql_competitor_visual_match_columns(conn)
         await _ensure_mysql_competitor_capture_selection_columns(conn)
         await _ensure_mysql_catalog_export_columns(conn)
+        await _ensure_mysql_lingxing_aplus_publish_columns(conn)
         await _ensure_mysql_task_run_action_columns(conn)
         await _ensure_mysql_longtext_columns(conn)
         await _ensure_mysql_giga_relation_columns(conn)
@@ -115,6 +116,35 @@ async def _ensure_mysql_catalog_export_columns(conn) -> None:
     ):
         if not await _mysql_column_exists(conn, "catalog_products", column_name):
             await conn.execute(text(f"ALTER TABLE `catalog_products` ADD COLUMN `{column_name}` {column_type}"))
+
+
+async def _ensure_mysql_lingxing_aplus_publish_columns(conn) -> None:
+    for table_name in ("products", "catalog_products"):
+        for column_name, column_type in (
+            ("amazon_seller_sku", "VARCHAR(100) NULL"),
+            ("asin_match_source", "VARCHAR(50) NULL"),
+            ("asin_match_evidence_json", "LONGTEXT NULL"),
+        ):
+            if not await _mysql_column_exists(conn, table_name, column_name):
+                await conn.execute(text(f"ALTER TABLE `{table_name}` ADD COLUMN `{column_name}` {column_type}"))
+
+    for column_name, column_type in (
+        ("lingxing_aplus_id_hash", "VARCHAR(100) NULL"),
+        ("lingxing_status_text", "VARCHAR(100) NULL"),
+        ("amazon_draft_visibility", "VARCHAR(30) NOT NULL DEFAULT 'unconfirmed'"),
+        ("draft_visible_at", "DATETIME NULL"),
+        ("submitted_at", "DATETIME NULL"),
+        ("publish_evidence_json", "LONGTEXT NULL"),
+        ("source_task_run_id", "INTEGER NULL"),
+        ("source_task_step_id", "INTEGER NULL"),
+        ("product_aplus_id", "INTEGER NULL"),
+        ("aplus_content_fingerprint", "VARCHAR(100) NULL"),
+        ("seller_sku_used", "VARCHAR(100) NULL"),
+        ("store_id", "VARCHAR(50) NULL"),
+        ("site", "VARCHAR(20) NULL"),
+    ):
+        if not await _mysql_column_exists(conn, "aplus_upload_items", column_name):
+            await conn.execute(text(f"ALTER TABLE `aplus_upload_items` ADD COLUMN `{column_name}` {column_type}"))
 
 
 async def _ensure_mysql_product_data_source_columns(conn) -> None:
@@ -257,6 +287,12 @@ async def _ensure_mysql_hot_path_indexes(conn) -> None:
         ("products", "ix_products_status_step_updated", ("status", "current_step", "updated_at")),
         ("catalog_products", "ix_catalog_confirmed_export_updated", ("confirmed_at", "exported_at", "updated_at")),
         ("catalog_products", "ix_catalog_confirmed_asin_status", ("confirmed_at", "amazon_asin", "asin_sync_status")),
+        ("catalog_products", "ix_catalog_amazon_seller_sku", ("amazon_seller_sku",)),
+        ("catalog_products", "ix_catalog_amazon_asin", ("amazon_asin",)),
+        ("catalog_products", "ix_catalog_aplus_upload_status", ("aplus_upload_status",)),
+        ("aplus_upload_items", "ix_aplus_upload_items_lingxing_id_hash", ("lingxing_aplus_id_hash",)),
+        ("aplus_upload_items", "ix_aplus_upload_items_draft_visibility", ("amazon_draft_visibility",)),
+        ("aplus_upload_items", "ix_aplus_upload_items_product_aplus", ("product_id", "product_aplus_id")),
         ("offline_tasks", "ix_offline_tasks_type_status_id", ("task_type", "status", "id")),
         ("offline_task_steps", "ix_offline_task_steps_task_id", ("task_id", "id")),
         ("task_runs", "ix_task_runs_type_status_id", ("task_type", "status", "id")),

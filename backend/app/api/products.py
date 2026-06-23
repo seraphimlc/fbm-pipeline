@@ -558,9 +558,12 @@ def _build_list_item(product: Product) -> dict:
         "gigab2b_product_id": product.gigab2b_product_id,
         "competitor_asin": product.competitor_asin,
         "amazon_asin": product.amazon_asin,
+        "amazon_seller_sku": product.amazon_seller_sku,
         "asin_sync_status": product.asin_sync_status,
         "asin_synced_at": product.asin_synced_at,
         "asin_sync_error": product.asin_sync_error,
+        "asin_match_source": product.asin_match_source,
+        "asin_match_evidence_json": product.asin_match_evidence_json,
         "amazon_product_status": product.amazon_product_status,
         "amazon_product_status_synced_at": product.amazon_product_status_synced_at,
         "amazon_product_status_error": product.amazon_product_status_error,
@@ -964,9 +967,12 @@ def _sync_catalog_item(product: Product, db: AsyncSession, confirm: bool = False
     item.gigab2b_product_id = product.gigab2b_product_id
     item.competitor_asin = product.competitor_asin
     item.amazon_asin = product.amazon_asin
+    item.amazon_seller_sku = product.amazon_seller_sku
     item.asin_sync_status = product.asin_sync_status
     item.asin_synced_at = product.asin_synced_at
     item.asin_sync_error = product.asin_sync_error
+    item.asin_match_source = product.asin_match_source
+    item.asin_match_evidence_json = product.asin_match_evidence_json
     item.amazon_product_status = product.amazon_product_status
     item.amazon_product_status_synced_at = product.amazon_product_status_synced_at
     item.amazon_product_status_error = product.amazon_product_status_error
@@ -3487,9 +3493,12 @@ async def list_catalog_products(
             Product.gigab2b_product_id,
             Product.competitor_asin,
             Product.amazon_asin,
+            Product.amazon_seller_sku,
             Product.asin_sync_status,
             Product.asin_synced_at,
             Product.asin_sync_error,
+            Product.asin_match_source,
+            Product.asin_match_evidence_json,
             Product.amazon_product_status,
             Product.amazon_product_status_synced_at,
             Product.amazon_product_status_error,

@@ -2744,6 +2744,126 @@ def test_aplus_auto_after_export_ready_a1_a2_contract() -> None:
     )
 
 
+def test_lingxing_aplus_publish_t1_data_registry_bootstrap_contract() -> None:
+    models_text = (ROOT / "backend" / "app" / "models" / "models.py").read_text(encoding="utf-8")
+    database_text = (ROOT / "backend" / "app" / "database.py").read_text(encoding="utf-8")
+    schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
+    frontend_api_text = (ROOT / "frontend" / "src" / "api" / "index.ts").read_text(encoding="utf-8")
+    status_path = ROOT / "backend" / "app" / "aplus_publish" / "status.py"
+    state_path = ROOT / "backend" / "app" / "services" / "aplus_publish_state.py"
+    status_text = status_path.read_text(encoding="utf-8")
+    state_text = state_path.read_text(encoding="utf-8")
+    task_runs_api_text = (ROOT / "backend" / "app" / "api" / "task_runs.py").read_text(encoding="utf-8")
+    aplus_generate_worker_text = (ROOT / "backend" / "app" / "task_runtime" / "aplus_generate_workers.py").read_text(encoding="utf-8")
+
+    for field in (
+        "amazon_seller_sku",
+        "asin_match_source",
+        "asin_match_evidence_json",
+    ):
+        assert_true(f"{field}: Mapped[str | None]" in models_text, f"Product/CatalogProduct ORM 缺少 durable 字段: {field}")
+        assert_true(f'("{field}",' in database_text, f"MySQL schema ensure 必须补齐 Product/CatalogProduct.{field}")
+        assert_true(field in schemas_text and field in frontend_api_text, f"API schema/frontend type 必须暴露 durable 字段: {field}")
+
+    for field in (
+        "lingxing_aplus_id_hash",
+        "lingxing_status_text",
+        "amazon_draft_visibility",
+        "draft_visible_at",
+        "submitted_at",
+        "publish_evidence_json",
+        "source_task_run_id",
+        "source_task_step_id",
+        "product_aplus_id",
+        "aplus_content_fingerprint",
+        "seller_sku_used",
+        "store_id",
+        "site",
+    ):
+        assert_true(field in models_text, f"AplusUploadItem ORM 缺少发布证据字段: {field}")
+        assert_true(f'("{field}",' in database_text, f"MySQL schema ensure 必须补齐 AplusUploadItem.{field}")
+        assert_true(field in schemas_text and field in frontend_api_text, f"API schema/frontend type 必须暴露 AplusUploadItem 证据字段: {field}")
+
+    for index_name in (
+        "ix_catalog_amazon_seller_sku",
+        "ix_catalog_amazon_asin",
+        "ix_catalog_aplus_upload_status",
+        "ix_aplus_upload_items_lingxing_id_hash",
+        "ix_aplus_upload_items_draft_visibility",
+        "ix_aplus_upload_items_product_aplus",
+    ):
+        assert_true(index_name in database_text, f"缺少 Lingxing A+ T1 MySQL 索引 ensure: {index_name}")
+
+    required_statuses = (
+        "not_uploaded",
+        "checking",
+        "waiting_listing",
+        "syncing_listing",
+        "ready_to_upload",
+        "uploading",
+        "draft_saved",
+        "draft_confirming",
+        "draft_visible",
+        "submitted",
+        "failed",
+        "skipped",
+        "auth_required",
+    )
+    for status in required_statuses:
+        assert_true(f'"{status}"' in status_text, f"aplus_publish status registry 缺少状态: {status}")
+    assert_true(
+        "STATUS_REGISTRY" in status_text
+        and "ALL_APLUS_PUBLISH_STATUSES" in status_text
+        and "LEGACY_APLUS_PUBLISH_STATUS_MAP" in status_text
+        and '"pending": STATUS_CHECKING' in status_text
+        and '"running": STATUS_UPLOADING' in status_text
+        and "ITEM_ONLY_LEGACY_STATUSES" in status_text
+        and "UnknownAplusPublishStatus" in status_text,
+        "A+ publish registry 必须包含状态全集、legacy 映射和 unknown/item-only 拒绝策略",
+    )
+
+    assert_true(
+        state_path.is_file()
+        and "CatalogProduct is required as the primary Lingxing A+ publish fact" in state_text
+        and "catalog.aplus_upload_status = normalized_status" in state_text
+        and "product.aplus_upload_status = normalized_status" in state_text
+        and "item.publish_evidence_json" in state_text
+        and "Task runs own execution lifecycle" in state_text
+        and "await db.flush()" in state_text
+        and "await db.commit()" not in state_text,
+        "aplus_publish_state.py 必须作为 Catalog 主事实/Product 镜像/AplusUploadItem 证据的单一写入入口，且不自行提交事务",
+    )
+    for forbidden in (
+        "httpx",
+        "chrome_",
+        "app.pipeline.chrome_ctrl",
+        "task_planners",
+        "kick_task_runtime",
+        "register_worker",
+        "set_product_workflow",
+        "workflow_node =",
+        "workflow_status =",
+    ):
+        assert_true(forbidden not in state_text, f"T1 single writer service 不得触发外部调用、任务调度或商品主 workflow: {forbidden}")
+
+    for forbidden_path in (
+        ROOT / "backend" / "app" / "task_planners" / "lingxing_listing_sync.py",
+        ROOT / "backend" / "app" / "task_planners" / "lingxing_aplus_publish.py",
+        ROOT / "backend" / "app" / "task_planners" / "lingxing_aplus_draft_visibility.py",
+        ROOT / "backend" / "app" / "task_planners" / "lingxing_aplus_submit.py",
+        ROOT / "backend" / "app" / "task_runtime" / "lingxing_listing_sync_workers.py",
+        ROOT / "backend" / "app" / "task_runtime" / "lingxing_aplus_publish_workers.py",
+    ):
+        assert_true(not forbidden_path.exists(), f"T1 不允许新增 Lingxing planner/worker: {forbidden_path}")
+    assert_true(
+        "lingxing-aplus" not in task_runs_api_text
+        and "lingxing_listing_sync" not in task_runs_api_text
+        and "lingxing_aplus_publish" not in task_runs_api_text
+        and "AUTO_LINGXING_APLUS_AFTER_DONE" not in aplus_generate_worker_text,
+        "T1 不允许新增 Lingxing task API 或 A+ done 自动触发",
+    )
+
+
 def test_product_action_worker_does_not_project_failure_for_interrupted() -> None:
     code = r'''
 import asyncio
@@ -4294,6 +4414,7 @@ def main() -> int:
         test_product_action_lifecycle_writes_workflow_fields,
         test_image_analysis_listing_e5_contract,
         test_aplus_auto_after_export_ready_a1_a2_contract,
+        test_lingxing_aplus_publish_t1_data_registry_bootstrap_contract,
         test_product_action_worker_does_not_project_failure_for_interrupted,
         test_product_action_final_progress_failure_is_best_effort,
         test_auto_image_selection_phase_a_contract,
