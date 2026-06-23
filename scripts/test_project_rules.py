@@ -1024,19 +1024,24 @@ def test_catalog_export_creation_keeps_business_reasons_in_task_report() -> None
     )
 
 
-def test_asin_sync_uses_lingxing_product_code_for_upc() -> None:
+def test_asin_sync_uses_seller_sku_first_and_upc_auxiliary_only() -> None:
     asin_sync_py = ROOT / "backend" / "app" / "services" / "asin_sync.py"
     text = asin_sync_py.read_text(encoding="utf-8")
+    build_section = text[text.index("def build_sync_item"): text.index("def build_sync_item") + 900]
     assert_true(
-        'lookup_type = "商品编码" if upc else "MSKU"' in text,
-        "ASIN 同步必须把 UPC 当作领星商品编码查询，只有缺少 UPC 时才用 MSKU 兜底",
+        "seller_sku_candidate(catalog)" in build_section
+        and 'lookup_type = "MSKU" if lookup_code else None' in build_section
+        and "不能用 UPC 作为 ASIN 主匹配键" in build_section
+        and "upc or item_code" not in build_section
+        and 'lookup_type = "商品编码" if upc else "MSKU"' not in text,
+        "ASIN 同步新建 item 必须 seller SKU/MSKU first，不能继续 UPC 优先",
     )
     assert_true(
         'if normalized.upper() == "UPC":' in text
         and 'return "商品编码"' in text
         and 'if normalized.upper() == "SKU":' in text
         and 'return "MSKU"' in text,
-        "ASIN 同步必须兼容旧批次里已保存的 UPC/SKU 查询类型",
+        "ASIN 同步可兼容旧批次里已保存的 UPC/SKU 查询类型，但新生产路径不得 UPC 优先",
     )
     assert_true(
         "lookup = await _lookup_asin(lookup_code, store, lookup_type, auth)" in text,
@@ -1047,7 +1052,121 @@ def test_asin_sync_uses_lingxing_product_code_for_upc() -> None:
         and "listing-api/api/product/showOnline" in text
         and '"amz_product_id"' in text
         and '"msku"' in text,
-        "ASIN 同步必须走领星 Listing API：UPC/商品编码查 amz_product_id，商品 code 查 msku",
+        "ASIN 同步旧兼容入口仍可走领星 Listing API；A+ 发布前置必须由 T2 seller SKU first policy 决定",
+    )
+
+
+def test_lingxing_listing_sync_t2_contract() -> None:
+    listing_fill_text = (ROOT / "backend" / "app" / "pipeline" / "amazon_export" / "listing_fill.py").read_text(encoding="utf-8")
+    products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    catalog_export_worker_text = (ROOT / "backend" / "app" / "task_runtime" / "catalog_export_workers.py").read_text(encoding="utf-8")
+    offline_tasks_text = (ROOT / "backend" / "app" / "services" / "offline_tasks.py").read_text(encoding="utf-8")
+    policy_text = (ROOT / "backend" / "app" / "services" / "asin_match_policy.py").read_text(encoding="utf-8")
+    client_text = (ROOT / "backend" / "app" / "services" / "lingxing_listing_client.py").read_text(encoding="utf-8")
+    planner_text = (ROOT / "backend" / "app" / "task_planners" / "lingxing_listing_sync.py").read_text(encoding="utf-8")
+    worker_text = (ROOT / "backend" / "app" / "task_runtime" / "lingxing_listing_sync_workers.py").read_text(encoding="utf-8")
+    task_api_text = (ROOT / "backend" / "app" / "api" / "task_runs.py").read_text(encoding="utf-8")
+    main_text = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+    display_text = (ROOT / "backend" / "app" / "task_runtime" / "display.py").read_text(encoding="utf-8")
+    config_text = (ROOT / "backend" / "app" / "config.py").read_text(encoding="utf-8")
+    env_example_text = (ROOT / "backend" / ".env.example").read_text(encoding="utf-8")
+    behavior_path = ROOT / "scripts" / "test_lingxing_listing_sync_tasks.py"
+
+    assert_true(
+        "def amazon_seller_sku_for_export" in listing_fill_text
+        and 'fields["sku"]: seller_sku' in listing_fill_text
+        and "amazon_seller_sku_for_export(product, pd)" in products_text
+        and '"Seller SKU": seller_sku' in products_text,
+        "Amazon export 必须从同一个模板填充事实持久化/报告 seller SKU",
+    )
+    assert_true(
+        "item.amazon_seller_sku = seller_sku" in catalog_export_worker_text
+        and "product.amazon_seller_sku = seller_sku" in catalog_export_worker_text
+        and "item.amazon_seller_sku = seller_sku" in offline_tasks_text
+        and "product.amazon_seller_sku = seller_sku" in offline_tasks_text
+        and '"seller_sku": row.get("Seller SKU")' in offline_tasks_text,
+        "新旧导出成功路径必须持久化 Product/Catalog seller SKU，并把 seller_sku 写入 result rows",
+    )
+    assert_true(
+        "def seller_sku_candidate" in policy_text
+        and "ASIN_MATCH_SOURCE_SELLER_SKU" in policy_text
+        and "ASIN_MATCH_SOURCE_PRODUCT_SELLER_SKU_MIRROR" in policy_text
+        and "Product/Catalog amazon_seller_sku 不一致" in policy_text
+        and "catalog.exported_at" not in policy_text[policy_text.index("def seller_sku_candidate"): policy_text.index("def _market_matches")]
+        and "upc_auxiliary_only" in policy_text
+        and "ASIN_MATCH_SOURCE_ASIN_CONFLICT" in policy_text
+        and "def local_asin_values" in policy_text
+        and "local_product_catalog_asin_conflict" in policy_text
+        and '"catalog"' in policy_text
+        and '"product"' in policy_text
+        and "wrong_store_or_site" in policy_text
+        and "not_sellable" in policy_text
+        and "multiple_seller_sku_rows" in policy_text,
+        "asin_match_policy 必须集中 seller SKU first、Product mirror 修复、UPC auxiliary、Product/Catalog ASIN 冲突、冲突/多匹配/错店铺站点/不可售策略，且不能用 exported_at-only item_code 冒充 seller SKU",
+    )
+    assert_true(
+        "LINGXING_LISTING_SYNC_ALLOW_REAL_EXTERNAL_CALLS" in config_text
+        and 'LINGXING_APLUS_STORE_NAME: str = ""' in config_text
+        and 'LINGXING_APLUS_STORE_ID: str = ""' in config_text
+        and "LINGXING_APLUS_STORE_NAME=Andy店-US" not in env_example_text
+        and "LINGXING_APLUS_STORE_ID=17983" not in env_example_text
+        and "if not settings.LINGXING_LISTING_SYNC_ALLOW_REAL_EXTERNAL_CALLS" in client_text
+        and '"real_external_calls_disabled"' in client_text
+        and '"store_config_required"' in client_text
+        and "requires explicit store_name and store_id" in client_text
+        and '"Cookie"' not in worker_text
+        and '"auth-token"' not in worker_text,
+        "Lingxing Listing client 必须默认 fail closed，真实外部调用必须显式配置 store_name/store_id，worker event 不得记录 cookie/token/header",
+    )
+    assert_true(
+        'task_type="lingxing_listing_sync"' in planner_text
+        and 'step_type="lingxing_listing_sync_product"' in planner_text
+        and "dedupe_key=dedupe_key" in planner_text
+        and "correlation_key=f\"product:{catalog.source_product_id}:lingxing_aplus_publish\"" in planner_text
+        and "idempotency_key=dedupe_key" in planner_text,
+        "Lingxing Listing sync planner 必须 task-runtime 化并具备 dedupe/correlation/idempotency",
+    )
+    assert_true(
+        "def lingxing_listing_sync_product" in worker_text
+        and "decide_asin_match" in worker_text
+        and "catalog.amazon_asin = decision.asin" in worker_text
+        and "product.amazon_asin = decision.asin" in worker_text
+        and "catalog.asin_match_evidence_json" in worker_text
+        and "STATUS_READY_TO_UPLOAD" in worker_text
+        and "STATUS_WAITING_LISTING" in worker_text,
+        "Lingxing Listing sync worker 必须写 Catalog/Product ASIN 匹配事实和 A+ 前置状态",
+    )
+    assert_true(
+        '"/lingxing-listing-sync"' in task_api_text
+        and '"lingxing_listing_sync": "领星 Listing / ASIN 同步"' in task_api_text
+        and '"lingxing_listing_sync_product": "Listing / ASIN 对齐"' in task_api_text
+        and "register_lingxing_listing_sync_workers()" in main_text
+        and '"lingxing_listing_sync_product": "Listing / ASIN 对齐"' in display_text,
+        "T2 必须注册 API、worker 和任务中心 label",
+    )
+    assert_true(
+        behavior_path.is_file()
+        and "UPC auxiliary hit must not satisfy seller SKU match" in behavior_path.read_text(encoding="utf-8")
+        and "active duplicate trigger must reuse the same dedupe run" in behavior_path.read_text(encoding="utf-8"),
+        "T2 必须有行为脚本覆盖 UPC auxiliary-only 和重复触发幂等",
+    )
+    assert_true(
+        "Product-only ASIN conflict should be blocked" in behavior_path.read_text(encoding="utf-8")
+        and "Catalog-only ASIN conflict should be blocked" in behavior_path.read_text(encoding="utf-8")
+        and "Product/Catalog local ASIN mismatch should be blocked before choosing one" in behavior_path.read_text(encoding="utf-8")
+        and "exported_at-only old record must not use item_code as trusted seller SKU" in behavior_path.read_text(encoding="utf-8"),
+        "T2 行为脚本必须覆盖 Product-only/Catalog-only/Product-Catalog 本地 ASIN 冲突和 exported_at-only 旧记录不能用 item_code 写 ASIN",
+    )
+    assert_true(
+        "store_config_required must fail before old auth default fallback is called" in behavior_path.read_text(encoding="utf-8")
+        and "missing store config should raise typed store_config_required" in behavior_path.read_text(encoding="utf-8"),
+        "T2 行为脚本必须覆盖真实外部调用开启但缺 store config 时 fail closed，且不调用旧默认店铺 auth fallback",
+    )
+    assert_true(
+        not (ROOT / "backend" / "app" / "task_runtime" / "lingxing_aplus_publish_workers.py").exists()
+        and "lingxing_aplus_publish" not in task_api_text
+        and "AUTO_LINGXING_APLUS_AFTER_DONE" not in (ROOT / "backend" / "app" / "task_runtime" / "aplus_generate_workers.py").read_text(encoding="utf-8"),
+        "T2 不允许新增 A+ 草稿保存 worker/API 或开启 A+ done 自动发布",
     )
 
 
@@ -2846,21 +2965,24 @@ def test_lingxing_aplus_publish_t1_data_registry_bootstrap_contract() -> None:
     ):
         assert_true(forbidden not in state_text, f"T1 single writer service 不得触发外部调用、任务调度或商品主 workflow: {forbidden}")
 
+    assert_true(
+        (ROOT / "backend" / "app" / "task_planners" / "lingxing_listing_sync.py").is_file()
+        and (ROOT / "backend" / "app" / "task_runtime" / "lingxing_listing_sync_workers.py").is_file(),
+        "T2 后允许且要求新增 Lingxing Listing sync planner/worker，但不能新增 A+ 草稿保存 worker",
+    )
     for forbidden_path in (
-        ROOT / "backend" / "app" / "task_planners" / "lingxing_listing_sync.py",
         ROOT / "backend" / "app" / "task_planners" / "lingxing_aplus_publish.py",
         ROOT / "backend" / "app" / "task_planners" / "lingxing_aplus_draft_visibility.py",
         ROOT / "backend" / "app" / "task_planners" / "lingxing_aplus_submit.py",
-        ROOT / "backend" / "app" / "task_runtime" / "lingxing_listing_sync_workers.py",
         ROOT / "backend" / "app" / "task_runtime" / "lingxing_aplus_publish_workers.py",
     ):
-        assert_true(not forbidden_path.exists(), f"T1 不允许新增 Lingxing planner/worker: {forbidden_path}")
+        assert_true(not forbidden_path.exists(), f"T2 不允许新增 A+ 草稿/可见性/提交 planner/worker: {forbidden_path}")
     assert_true(
-        "lingxing-aplus" not in task_runs_api_text
-        and "lingxing_listing_sync" not in task_runs_api_text
+        "/lingxing-listing-sync" in task_runs_api_text
+        and "lingxing-aplus" not in task_runs_api_text
         and "lingxing_aplus_publish" not in task_runs_api_text
         and "AUTO_LINGXING_APLUS_AFTER_DONE" not in aplus_generate_worker_text,
-        "T1 不允许新增 Lingxing task API 或 A+ done 自动触发",
+        "T2 只允许新增 Lingxing Listing sync task API，不允许 A+ done 自动触发或 A+ 发布 API",
     )
 
 
@@ -4382,7 +4504,8 @@ def main() -> int:
         test_product_detail_get_is_readonly_for_material_videos,
         test_inventory_update_template_exports_stock_only_by_sku,
         test_catalog_export_creation_keeps_business_reasons_in_task_report,
-        test_asin_sync_uses_lingxing_product_code_for_upc,
+        test_asin_sync_uses_seller_sku_first_and_upc_auxiliary_only,
+        test_lingxing_listing_sync_t2_contract,
         test_step10_keeps_sofa_dimensions_and_avoids_inventory_conflict,
         test_step1_collects_product_dimensions_and_numeric_packages,
         test_step10_sums_multi_package_dimensions,

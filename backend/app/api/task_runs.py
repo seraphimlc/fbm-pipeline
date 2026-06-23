@@ -10,6 +10,7 @@ from sqlalchemy.orm import selectinload
 
 from app.api.schemas import (
     AplusGenerateRequest,
+    LingxingListingSyncRequest,
     OfflineTaskCatalogExportRequest,
     OfflineTaskGigaDynamicSyncRequest,
     OfflineTaskGigaPullRequest,
@@ -27,6 +28,7 @@ from app.task_planners.aplus_generate import create_aplus_generate_runs
 from app.task_planners.catalog_export import create_catalog_export_runs
 from app.task_planners.giga_dynamic_sync import create_giga_dynamic_sync_runs
 from app.task_planners.giga_pull import create_giga_pull_runs
+from app.task_planners.lingxing_listing_sync import create_lingxing_listing_sync_runs
 from app.task_runtime.constants import (
     RUN_STATUS_CANCELED,
     RUN_STATUS_FAILED,
@@ -61,6 +63,7 @@ TASK_TYPE_LABELS = {
     "product_listing_generation": "Listing 生成",
     "catalog_export": "导出文件",
     "aplus_generate": "A+生成",
+    "lingxing_listing_sync": "领星 Listing / ASIN 同步",
     "giga_inventory_sync": "GIGA 库存同步",
     "giga_price_sync": "GIGA 价格同步",
     "product_bulk_advance": "批量提交生成任务",
@@ -79,6 +82,7 @@ STEP_TYPE_LABELS = {
     "product_listing_generation": "Listing 生成",
     "catalog_export_template": "导出文件",
     "aplus_generate_product": "A+生成",
+    "lingxing_listing_sync_product": "Listing / ASIN 对齐",
     "giga_inventory_sync": "库存同步",
     "giga_price_sync": "价格同步",
     "product_bulk_advance_product": "提交商品生成任务",
@@ -630,6 +634,25 @@ async def create_aplus_generate_task_runs(
             db,
             body.catalog_product_ids,
             force=body.force,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    runs = await _reload_created_runs_for_response(db, runs)
+    return TaskRunBatchQueuedResponse(runs=[_run_response(run) for run in runs], errors=errors)
+
+
+@router.post("/lingxing-listing-sync", response_model=TaskRunBatchQueuedResponse)
+async def create_lingxing_listing_sync_task_runs(
+    body: LingxingListingSyncRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        runs, errors = await create_lingxing_listing_sync_runs(
+            db,
+            body.catalog_product_ids,
+            store_name=body.store_name,
+            store_id=body.store_id,
+            site=body.site,
         )
     except ValueError as exc:
         raise HTTPException(400, str(exc))

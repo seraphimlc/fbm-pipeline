@@ -68,6 +68,7 @@ STEP_TYPE_LABELS = {
     "product_listing_generation": "Listing 生成",
     "catalog_export_template": "导出文件",
     "aplus_generate_product": "A+生成",
+    "lingxing_listing_sync_product": "Listing / ASIN 对齐",
     "giga_inventory_sync": "库存同步",
     "giga_price_sync": "价格同步",
     "product_bulk_advance_product": "提交商品生成任务",

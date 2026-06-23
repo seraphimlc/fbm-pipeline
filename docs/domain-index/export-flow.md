@@ -11,6 +11,7 @@
 - 导出只生成导入表格和风险提示，不代表平台上架成功。
 - 已有真实 Amazon ASIN 的商品，不允许再次导出 Amazon 导入表格。
 - 改模板、类目映射、Step 10 或导出字段时，必须更新 `docs/template-mapping-change-log.md`。
+- Lingxing A+ 发布 T2 后，Amazon 导出成功路径会把实际写入 Amazon 模板 `sku` 字段的 seller SKU/MSKU 持久化到 `CatalogProduct.amazon_seller_sku` / `Product.amazon_seller_sku`，并在导出 result rows 写 `seller_sku` 证据；这不改变模板字段映射或类目映射本身。
 - 不覆盖真实导出文件、模板文件或已生成素材，除非用户明确要求。
 
 ## 关键入口
@@ -30,6 +31,7 @@
 
 - 导出中心：`CatalogList.tsx` -> 商品 API/导出任务 -> 任务中心。
 - Amazon 导出：planner -> worker -> `backend/app/pipeline/amazon_export/`。
+- Seller SKU 持久化：`backend/app/pipeline/amazon_export/listing_fill.py` 的 `amazon_seller_sku_for_export()` 与导出 worker 的成功写库路径同源，后续 Lingxing Listing sync 只能以该 seller SKU/MSKU exact match 作为 ASIN 主匹配依据。
 - 模板/类目：template mappings -> templates -> Step 10/导出规则层。
 - UPC：导出前按当前 UPC service/model 逻辑定位。
 

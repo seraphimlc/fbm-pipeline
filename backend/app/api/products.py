@@ -45,6 +45,7 @@ from app.models import (
     TaskStep,
     UpcPoolItem,
 )
+from app.pipeline.amazon_export.listing_fill import amazon_seller_sku_for_export
 from app.models.status import (
     AMAZON_WORKFLOW_NODES,
     AMAZON_WORKFLOW_STATUSES,
@@ -911,7 +912,7 @@ def _build_amazon_export_preview(product: Product) -> dict | None:
             "product_weight": fields.get("item_weight_value"),
         },
         "offer": {
-            "sku": pd.item_code,
+            "sku": amazon_seller_sku_for_export(product, pd),
             "brand": product.brand,
             "fulfillment_channel": "Fulfillment by Merchant (Default)",
             "shipping_template": _shipping_template_preview(product, pd, mapping),
@@ -3984,10 +3985,12 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
     for item in catalog_items:
         product = products_by_id.get(item.source_product_id)
         pd = product.data if product else None
+        seller_sku = amazon_seller_sku_for_export(product, pd) if product and pd else None
         base_report = {
             "商品资料ID": item.id,
             "商品ID": product.id if product else item.source_product_id,
             "商品Code": pd.item_code if pd else item.item_code,
+            "Seller SKU": seller_sku,
             "类目": (pd.leaf_category if pd else None) or item.leaf_category or "未分类",
         }
         if not product or not pd:
@@ -4073,10 +4076,12 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                     pd = product.data
                     catalog = catalog_by_source_id.get(product.id)
                     row_number = DATA_ROW + offset
+                    seller_sku = amazon_seller_sku_for_export(product, pd) if pd else None
                     report_base = {
                         "商品资料ID": catalog.id if catalog else None,
                         "商品ID": product.id,
                         "商品Code": pd.item_code if pd else None,
+                        "Seller SKU": seller_sku,
                         "类目": category,
                         "模板文件": str(template_path),
                         "导出文件": export_name,
@@ -4479,7 +4484,7 @@ async def clear_catalog_asin(catalog_id: int, db: AsyncSession = Depends(get_db)
 
 @router.post("/catalog/asin-sync", response_model=AsinSyncBatchResponse)
 async def create_asin_sync_batch(body: AsinSyncCreateRequest, db: AsyncSession = Depends(get_db)):
-    """为选中的商品资料创建 ASIN 同步批次，并在后台按 UPC/商品编码或 MSKU 查询领星 Listing。"""
+    """为选中的商品资料创建 legacy ASIN 同步批次，新建 item 按 seller SKU/MSKU 查询领星 Listing。"""
     result = await db.execute(
         select(CatalogProduct)
         .options(selectinload(CatalogProduct.source_product).selectinload(Product.data))

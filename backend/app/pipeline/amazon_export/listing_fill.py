@@ -5,6 +5,13 @@ from app.pipeline.amazon_export.context import AmazonExportContext
 from app.pipeline.search_terms import normalize_search_terms
 
 
+def amazon_seller_sku_for_export(product, product_data) -> str | None:
+    """Return the exact seller SKU/MSKU value written to Amazon template sku."""
+
+    value = getattr(product_data, "item_code", None)
+    return str(value).strip() if value is not None and str(value).strip() else None
+
+
 def apply_listing_fill(ctx: AmazonExportContext) -> None:
     from app.pipeline import step10_amazon_template as legacy
 
@@ -15,8 +22,9 @@ def apply_listing_fill(ctx: AmazonExportContext) -> None:
     if not product.upc:
         ctx.warnings.append("缺少 UPC，Product Id Type/Product Id 暂未填写；生成前应先从 UPC 池绑定。")
 
+    seller_sku = amazon_seller_sku_for_export(product, pd)
     ctx.fill.update({
-        fields["sku"]: pd.item_code,
+        fields["sku"]: seller_sku,
         fields["title"]: pd.listing_title,
         fields["brand"]: product.brand,
         fields["product_id_type"]: "UPC" if product.upc else None,

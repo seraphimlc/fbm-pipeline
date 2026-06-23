@@ -1215,6 +1215,13 @@ class AplusGenerateRequest(BaseModel):
     force: bool = False
 
 
+class LingxingListingSyncRequest(BaseModel):
+    catalog_product_ids: list[int] = Field(..., min_length=1, max_length=1000)
+    store_name: str | None = Field(default=None, max_length=100)
+    store_id: str | None = Field(default=None, max_length=50)
+    site: str | None = Field(default=None, max_length=20)
+
+
 class AplusUploadBatchResponse(BaseModel):
     id: int
     store: str = "Andy店-US"

@@ -27,6 +27,7 @@ from app.task_runtime.aplus_generate_workers import register_aplus_generate_work
 from app.task_runtime.catalog_export_workers import register_catalog_export_workers
 from app.task_runtime.giga_dynamic_sync_workers import register_giga_dynamic_sync_workers
 from app.task_runtime.giga_pull_workers import register_giga_pull_workers
+from app.task_runtime.lingxing_listing_sync_workers import register_lingxing_listing_sync_workers
 from app.task_runtime.product_bulk_advance_workers import register_product_bulk_advance_workers
 from app.product_tasks.actions import backfill_product_action_task_run_keys, register_product_task_actions
 
@@ -77,6 +78,7 @@ async def lifespan(app: FastAPI):
     register_product_bulk_advance_workers()
     register_catalog_export_workers()
     register_aplus_generate_workers()
+    register_lingxing_listing_sync_workers()
     if settings.STARTUP_RUN_DB_MAINTENANCE:
         await init_db()
     else:

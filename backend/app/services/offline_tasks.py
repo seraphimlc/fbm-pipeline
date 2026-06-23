@@ -102,6 +102,7 @@ def _catalog_export_result_rows(report_rows: list[dict]) -> list[dict]:
             "catalog_id": row.get("商品资料ID"),
             "product_id": row.get("商品ID"),
             "item_code": row.get("商品Code"),
+            "seller_sku": row.get("Seller SKU") or row.get("seller_sku"),
             "category": row.get("类目"),
             "status": _catalog_export_row_status(row),
             "reason": row.get("原因"),
@@ -1133,12 +1134,24 @@ async def _run_catalog_export_step(db: AsyncSession, step: OfflineTaskStep) -> N
             for row in report_rows
             if row.get("状态") == "已导出" and row.get("商品ID") is not None
         }
+        exported_seller_sku_by_source_id = {
+            int(row.get("商品ID")): str(row.get("Seller SKU") or "").strip()
+            for row in report_rows
+            if row.get("状态") == "已导出" and row.get("商品ID") is not None and str(row.get("Seller SKU") or "").strip()
+        }
         exported_at = datetime.now()
         for item in catalog_items:
             if item.source_product_id in exported_source_ids:
+                seller_sku = exported_seller_sku_by_source_id.get(item.source_product_id)
                 item.exported_at = exported_at
                 item.export_task_id = step.task_id
                 item.export_file_path = str(uploaded.get("url") or target_path)
+                if seller_sku:
+                    item.amazon_seller_sku = seller_sku
+                    product = await db.get(Product, item.source_product_id)
+                    if product:
+                        product.amazon_seller_sku = seller_sku
+                        product.updated_at = exported_at
                 item.updated_at = exported_at
         result_payload = _catalog_export_result_payload(
             category=category,

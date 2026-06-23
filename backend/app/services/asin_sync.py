@@ -14,6 +14,12 @@ from sqlalchemy.orm import selectinload
 from app.database import async_session
 from app.models import AsinSyncBatch, AsinSyncItem, CatalogProduct, Product
 from app.pipeline.chrome_ctrl import chrome_execute_js, chrome_get_cookie_for_domain, chrome_navigate, chrome_workflow
+from app.services.asin_match_policy import (
+    ASIN_MATCH_SOURCE_COMPAT_ITEM_CODE,
+    ASIN_MATCH_SOURCE_SELLER_SKU,
+    json_dumps,
+    seller_sku_candidate,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +228,22 @@ async def _finish_item(
                 continue
             target.asin_sync_status = sync_status
             target.asin_sync_error = error
+            target.asin_match_source = (
+                ASIN_MATCH_SOURCE_SELLER_SKU
+                if item.lookup_type == "MSKU" and item.lookup_code == getattr(target, "amazon_seller_sku", None)
+                else ASIN_MATCH_SOURCE_COMPAT_ITEM_CODE
+                if item.lookup_type == "MSKU"
+                else "legacy_upc_auxiliary"
+            )
+            target.asin_match_evidence_json = json_dumps({
+                "source": "legacy_asin_sync_batch",
+                "lookup_type": item.lookup_type,
+                "lookup_code": item.lookup_code,
+                "matched_code": matched_code,
+                "status": status,
+                "error": error,
+                "upc_is_auxiliary_only": item.lookup_type == "商品编码",
+            })
             target.amazon_product_status_error = error
             if asin:
                 target.amazon_asin = asin
@@ -443,16 +465,14 @@ async def _lookup_asin(
 
 
 def build_sync_item(catalog: CatalogProduct) -> AsinSyncItem:
-    product = catalog.source_product
-    item_code = product.data.item_code if product and product.data else catalog.item_code
-    upc = (catalog.upc or (product.upc if product else None) or "").strip()
-    lookup_code = (upc or item_code or "").strip()
-    lookup_type = "商品编码" if upc else "MSKU"
+    candidate = seller_sku_candidate(catalog)
+    lookup_code = (candidate.value or "").strip()
+    lookup_type = "MSKU" if lookup_code else None
     return AsinSyncItem(
         catalog_product_id=catalog.id,
         product_id=catalog.source_product_id,
         lookup_code=lookup_code or None,
         lookup_type=lookup_type,
         status="pending" if lookup_code else "skipped",
-        error_message=None if lookup_code else "缺少 ASIN、UPC/商品编码或 SKU，无法查询",
+        error_message=None if lookup_code else "缺少 Amazon seller SKU/MSKU，不能用 UPC 作为 ASIN 主匹配键",
     )
