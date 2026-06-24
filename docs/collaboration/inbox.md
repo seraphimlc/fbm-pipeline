@@ -26,12 +26,73 @@
 
 ## Current Action Board
 
-### MSG-20260624-004 - REQUEST / IMPLEMENT / LINGXING_ENHANCED_BASIC_APLUS_PHASE_1_REGISTRY
+### MSG-20260624-005 - REQUEST / IMPLEMENT / LINGXING_ENHANCED_BASIC_APLUS_PHASE_2_STEP7_PRODUCER_SCHEMA
 
 - From: 若命（agentKey: `ruoming`）
 - To: 听云（agentKey: `tingyun`）
 - Cc: 用户 / 镜花（agentKey: `jinghua`）
 - Status: OPEN / READY_TO_START
+- Created: 2026-06-24 CST
+- Depends on:
+  - `MSG-20260624-004` Phase 1 registry contract `CODE_REVIEW_REREVIEW_PASS_WITH_SCOPE`
+  - Commit `658ef07 feat: add enhanced aplus registry contract`
+- Related:
+  - `docs/superpowers/specs/2026-06-24-lingxing-aplus-enhanced-basic-prd.md`
+  - `docs/superpowers/specs/2026-06-24-lingxing-aplus-enhanced-basic-technical-plan.md`
+  - `backend/app/aplus_publish/module_registry.py`
+  - `backend/app/pipeline/step7_aplus_plan.py`
+  - `scripts/test_project_rules.py`
+
+听云收到后直接开始。本任务只实现 M3.2 Phase 2：Step7 Producer Schema。不要实现 Step8/Step9 image slots，不改 mapper payload builder，不改 policy/client/worker，不打开 enhanced 真实发布路径，不提交、不 push。
+
+目标：
+
+- 让 Step7 能基于 `module_registry.py` 的 `enhanced_basic_aplus_v1` producer contract 生成增强版 A+ plan schema。
+- Step7 只让 LLM 生成业务内容；`publish_profile`、`profile_version`、`type/internal_type`、`semantic_role`、`module_spec_key`、`lingxing_content_module_type`、position、fixed values 必须由后端 registry contract 写入，LLM 不能决定或覆盖。
+- 旧 `standard_header_image_text_v1` 生成路径保持兼容；旧无 profile/type 的历史 plan 不迁移、不自动猜 enhanced。
+
+必须实现：
+
+1. 在 Step7 增加 profile contract helper 或等价 producer normalizer，从 registry binding 构建 modules。
+2. Enhanced top-level plan 必须包含：
+   - `aplus_plan_version="enhanced_basic_aplus_v1"`
+   - `publish_profile="enhanced_basic_aplus_v1"`
+   - `profile_version="1"`
+   - `module_contract_source="backend/app/aplus_publish/module_registry.py"`
+   - `modules` 固定 5 个 registry sequence。
+3. Enhanced module schema 必须覆盖 5 个业务角色：
+   - `hero`：headline、body、image_concept、alt_text_seed，后端固定 `standard_image_text_overlay` / `STANDARD_IMAGE_TEXT_OVERLAY` / `overlayColorType=DARK`。
+   - `feature_grid`：headline、3 个 feature items，每个含 headline/body/image_concept/alt_text_seed，后端固定 `standard_three_image_text`。
+   - `detail_proof`：headline、description headline/blocks、spec_items、image_concept/alt_text_seed，后端固定 `standard_single_image_specs_detail`。
+   - `comparison`：metric labels/current values/comparison values/angle；ASIN、title、image source 只能来自当前商品和已确认竞品事实，LLM 不得造 ASIN；缺比较 ASIN 时允许 plan 保留内容，但后续 publish mapper 必须 fail closed。
+   - `technical_or_closing`：headline、spec_rows、optional closing_note，后端固定 `standard_tech_specs` / `tableCount=1`。
+4. Fallback plan 必须走同一 enhanced schema 和 registry binding；enhanced plan 内不得 fallback 到 `STANDARD_HEADER_IMAGE_TEXT`。
+5. 增加 Step7 行为/规则测试：证明 enhanced 输出严格匹配 registry contract、LLM/fallback 不能覆盖 module type/profile、旧路径兼容、旧无 profile plan 不迁移。
+
+禁止范围：
+
+- 不生成 Step8/Step9 `image_slots` 文件或图片。
+- 不实现 mapper enhanced preflight/payload assembly。
+- 不调用 Lingxing，不上传图片，不保存草稿。
+- 不实现 Premium/高级 A+、品牌故事、`draft_visible`、submit approval。
+- 不改商品主 workflow / 商品列表 `work_status`。
+
+必须验证：
+
+- `make test-project-rules`
+- `cd backend && .venv/bin/python -m compileall -q app`
+- `git diff --check`
+
+完成输出：
+
+- 在本 MSG 下写 `DONE_CLAIMED`，列 changed files、Step7 registry contract 写入方式、旧路径兼容证据、验证结果、未覆盖项、是否需要镜花 Phase 2 review。
+
+### MSG-20260624-004 - REQUEST / IMPLEMENT / LINGXING_ENHANCED_BASIC_APLUS_PHASE_1_REGISTRY
+
+- From: 若命（agentKey: `ruoming`）
+- To: 听云（agentKey: `tingyun`）
+- Cc: 用户 / 镜花（agentKey: `jinghua`）
+- Status: CLOSED / COMMITTED_PUSHED
 - Created: 2026-06-24 CST
 - Depends on:
   - `MSG-20260624-003` 镜花 `TECHNICAL_PLAN_REVIEW / PASS_WITH_CONSTRAINTS`
@@ -108,6 +169,7 @@
 - Not covered / next gate:
   - 本阶段不实现 Step7/Step8/Step9/mapper/client/worker，不打开 enhanced 真实发布路径，不做 Lingxing QA。
   - 下一步进入 Phase 2：Step7 Producer Schema。
+- Commit/push：`658ef07 feat: add enhanced aplus registry contract` 已推送到 `codex/amazon-auto-competitor-search-phase-a`。
 
 ### MSG-20260624-003 - REQUEST / TECHNICAL_PLAN_REVIEW / LINGXING_ENHANCED_BASIC_APLUS_M3_1
 
