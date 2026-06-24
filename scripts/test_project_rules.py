@@ -3185,6 +3185,168 @@ def test_lingxing_aplus_module_mapping_m2_contract() -> None:
     )
 
 
+def test_lingxing_aplus_enhanced_basic_registry_phase1_contract() -> None:
+    from app.aplus_publish.module_registry import (
+        APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+        APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+        AplusProfileModuleBinding,
+        AplusProfileSpec,
+        AplusRegistryContractError,
+        ENHANCED_BASIC_APLUS_PAYLOAD_EVIDENCE,
+        FAILURE_ALT_TEXT_MISSING,
+        FAILURE_COMPARISON_COLUMN_ASIN_INVALID,
+        FAILURE_COMPARISON_COLUMN_ASIN_MISSING,
+        FAILURE_COMPARISON_COLUMN_COUNT_INVALID,
+        FAILURE_IMAGE_SLOT_DIMENSION_INVALID,
+        FAILURE_IMAGE_SLOT_DUPLICATE,
+        FAILURE_IMAGE_SLOT_MISSING,
+        FAILURE_IMAGE_SLOT_UNEXPECTED,
+        FAILURE_MODULE_SEMANTIC_ROLE_MISMATCH,
+        FAILURE_MODULE_SPEC_UNREGISTERED,
+        FAILURE_PAYLOAD_BUILDER_MISSING,
+        FAILURE_PROFILE_MODULE_SEQUENCE_MISMATCH,
+        FAILURE_SPEC_ROWS_INVALID,
+        FAILURE_TEXT_FIELD_MISSING,
+        LINGXING_STANDARD_COMPARISON_TABLE,
+        LINGXING_STANDARD_HEADER_IMAGE_TEXT,
+        LINGXING_STANDARD_IMAGE_TEXT_OVERLAY,
+        LINGXING_STANDARD_SINGLE_IMAGE_SPECS_DETAIL,
+        LINGXING_STANDARD_TECH_SPECS,
+        LINGXING_STANDARD_THREE_IMAGE_TEXT,
+        MAPPER_FAILURE_CODES,
+        PROFILE_SPECS_BY_KEY,
+        get_module_spec_for_binding,
+        get_profile_spec,
+        get_publish_profile_spec,
+        producer_contract_for_profile,
+        required_image_slots,
+        validate_profile_contract,
+    )
+
+    profile = get_profile_spec(APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1)
+    assert_true(profile is not None, "M3.2 Phase 1 必须注册 enhanced_basic_aplus_v1 profile")
+    assert_true(profile.profile_version == "1" and profile.tier == "basic", "增强版首版必须仍是 basic A+ profile")
+    assert_true(
+        [(binding.position, binding.semantic_role, binding.module_spec_key) for binding in profile.module_sequence]
+        == [
+            (1, "hero", "image_text_overlay_dark"),
+            (2, "feature_grid", "three_image_text"),
+            (3, "detail_proof", "single_image_specs_detail"),
+            (4, "comparison", "comparison_table"),
+            (5, "technical_or_closing", "tech_specs"),
+        ],
+        "增强版 profile sequence 必须固定为 5 个业务角色和 module spec binding",
+    )
+
+    expected_types = [
+        LINGXING_STANDARD_IMAGE_TEXT_OVERLAY,
+        LINGXING_STANDARD_THREE_IMAGE_TEXT,
+        LINGXING_STANDARD_SINGLE_IMAGE_SPECS_DETAIL,
+        LINGXING_STANDARD_COMPARISON_TABLE,
+        LINGXING_STANDARD_TECH_SPECS,
+    ]
+    bound_specs = [
+        get_module_spec_for_binding(APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1, binding.position, expected_types[index])
+        for index, binding in enumerate(profile.module_sequence)
+    ]
+    assert_true([spec.content_module_type for spec in bound_specs if spec] == expected_types, "增强版每个 binding 必须能按 profile/position/type 查到 module spec")
+    assert_true(bound_specs[0].fixed_values == {"overlayColorType": "DARK"}, "hero 必须固定使用深文本覆盖 DARK")
+    assert_true(all(spec.payload_evidence == ENHANCED_BASIC_APLUS_PAYLOAD_EVIDENCE for spec in bound_specs), "增强版 module specs 必须指向 M3.0 payload evidence")
+
+    slot_shapes = {
+        item.slot.slot_id: (item.position, item.semantic_role, item.slot.crop_width, item.slot.crop_height)
+        for item in required_image_slots(APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1)
+    }
+    assert_true(
+        slot_shapes
+        == {
+            "hero.image": (1, "hero", 970, 300),
+            "feature_1.image": (2, "feature_grid", 300, 300),
+            "feature_2.image": (2, "feature_grid", 300, 300),
+            "feature_3.image": (2, "feature_grid", 300, 300),
+            "detail.image": (3, "detail_proof", 300, 300),
+            "comparison.column_1.image": (4, "comparison", 150, 300),
+            "comparison.column_2.image": (4, "comparison", 150, 300),
+        },
+        "增强版 required image slots 必须为 7 个，且尺寸按 M3.0 evidence 固定",
+    )
+
+    contract = producer_contract_for_profile(APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1)
+    modules = {module.semantic_role: module for module in contract.modules}
+    assert_true(modules["technical_or_closing"].required_image_slots == (), "technical_or_closing/tech specs 不得要求图片")
+    assert_true(modules["comparison"].comparison.min_columns == 2 and modules["comparison"].comparison.max_columns == 2, "comparison V1 必须固定两列")
+    assert_true(modules["comparison"].comparison.asin_required, "comparison columns 必须要求 ASIN")
+    assert_true(modules["comparison"].comparison.min_metric_rows == 3, "comparison 必须要求至少 3 行指标")
+    assert_true(modules["technical_or_closing"].spec_table.min_rows == 4, "tech specs 必须要求至少 4 行")
+    assert_true(modules["technical_or_closing"].spec_table.table_count_values == (1, 2), "tech specs tableCount 必须限制为 1 或 2")
+
+    legacy = get_publish_profile_spec(APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1)
+    assert_true(legacy is not None and legacy.content_module_type == LINGXING_STANDARD_HEADER_IMAGE_TEXT, "旧 M2 publish profile API 必须保持兼容")
+    assert_true(get_profile_spec("unknown_profile") is None, "未知 registry profile lookup 必须返回 None")
+    assert_true(get_module_spec_for_binding(APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1, 1, LINGXING_STANDARD_HEADER_IMAGE_TEXT) is None, "增强版不得把旧 STANDARD_HEADER_IMAGE_TEXT 当作 hero binding")
+
+    required_failure_codes = {
+        FAILURE_PROFILE_MODULE_SEQUENCE_MISMATCH,
+        FAILURE_MODULE_SEMANTIC_ROLE_MISMATCH,
+        FAILURE_MODULE_SPEC_UNREGISTERED,
+        FAILURE_IMAGE_SLOT_MISSING,
+        FAILURE_IMAGE_SLOT_DUPLICATE,
+        FAILURE_IMAGE_SLOT_UNEXPECTED,
+        FAILURE_IMAGE_SLOT_DIMENSION_INVALID,
+        FAILURE_ALT_TEXT_MISSING,
+        FAILURE_TEXT_FIELD_MISSING,
+        FAILURE_COMPARISON_COLUMN_COUNT_INVALID,
+        FAILURE_COMPARISON_COLUMN_ASIN_MISSING,
+        FAILURE_COMPARISON_COLUMN_ASIN_INVALID,
+        FAILURE_SPEC_ROWS_INVALID,
+        FAILURE_PAYLOAD_BUILDER_MISSING,
+    }
+    missing_failure_codes = required_failure_codes - set(MAPPER_FAILURE_CODES)
+    assert_true(not missing_failure_codes, f"增强版 registry failure codes 未完整进入 MAPPER_FAILURE_CODES: {sorted(missing_failure_codes)}")
+
+    missing_spec_key = "project_rule_missing_module_spec_profile"
+    PROFILE_SPECS_BY_KEY[missing_spec_key] = AplusProfileSpec(
+        profile_key=missing_spec_key,
+        profile_version="test",
+        tier="basic",
+        module_count=1,
+        module_sequence=(
+            AplusProfileModuleBinding(1, "hero", "missing_module_type", "missing_module_spec"),
+        ),
+        payload_evidence="test",
+    )
+    try:
+        try:
+            producer_contract_for_profile(missing_spec_key)
+        except AplusRegistryContractError as exc:
+            assert_true(exc.reason_code == FAILURE_MODULE_SPEC_UNREGISTERED, "profile binding 指向未注册 module spec 时必须显式 fail closed")
+        else:
+            raise AssertionError("profile binding 指向未注册 module spec 时不得返回截断 contract")
+    finally:
+        PROFILE_SPECS_BY_KEY.pop(missing_spec_key, None)
+
+    mismatch_key = "project_rule_module_count_mismatch_profile"
+    PROFILE_SPECS_BY_KEY[mismatch_key] = AplusProfileSpec(
+        profile_key=mismatch_key,
+        profile_version="test",
+        tier="basic",
+        module_count=2,
+        module_sequence=(
+            AplusProfileModuleBinding(1, "hero", "standard_header_image_text", "standard_header_image_text"),
+        ),
+        payload_evidence="test",
+    )
+    try:
+        try:
+            validate_profile_contract(mismatch_key)
+        except AplusRegistryContractError as exc:
+            assert_true(exc.reason_code == FAILURE_PROFILE_MODULE_SEQUENCE_MISMATCH, "profile module_count 与 sequence 不一致时必须显式 fail closed")
+        else:
+            raise AssertionError("profile module_count 与 sequence 不一致时不得被视为可用 contract")
+    finally:
+        PROFILE_SPECS_BY_KEY.pop(mismatch_key, None)
+
+
 def test_product_action_worker_does_not_project_failure_for_interrupted() -> None:
     code = r'''
 import asyncio
@@ -4739,6 +4901,7 @@ def main() -> int:
         test_lingxing_aplus_publish_t1_data_registry_bootstrap_contract,
         test_lingxing_aplus_publish_t3_draft_save_contract,
         test_lingxing_aplus_module_mapping_m2_contract,
+        test_lingxing_aplus_enhanced_basic_registry_phase1_contract,
         test_product_action_worker_does_not_project_failure_for_interrupted,
         test_product_action_final_progress_failure_is_best_effort,
         test_auto_image_selection_phase_a_contract,
