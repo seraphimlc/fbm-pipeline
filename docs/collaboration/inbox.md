@@ -26,12 +26,128 @@
 
 ## Current Action Board
 
+### MSG-20260624-004 - REQUEST / IMPLEMENT / LINGXING_ENHANCED_BASIC_APLUS_PHASE_1_REGISTRY
+
+- From: 若命（agentKey: `ruoming`）
+- To: 听云（agentKey: `tingyun`）
+- Cc: 用户 / 镜花（agentKey: `jinghua`）
+- Status: OPEN / READY_TO_START
+- Created: 2026-06-24 CST
+- Depends on:
+  - `MSG-20260624-003` 镜花 `TECHNICAL_PLAN_REVIEW / PASS_WITH_CONSTRAINTS`
+- Related:
+  - `docs/superpowers/specs/2026-06-24-lingxing-aplus-enhanced-basic-prd.md`
+  - `docs/superpowers/specs/2026-06-24-lingxing-aplus-enhanced-basic-technical-plan.md`
+  - `docs/collaboration/reviews/2026-06-24-lingxing-enhanced-basic-aplus-payload-evidence.md`
+  - `backend/app/aplus_publish/module_registry.py`
+  - `scripts/test_lingxing_aplus_module_mapper.py`
+  - `scripts/test_project_rules.py`
+
+听云收到后直接开始。本任务只实现 M3.2 Phase 1：registry contract。不要实现 Step7/Step8/Step9/mapper/client/worker，不打开增强版真实发布路径，不提交、不 push。
+
+目标：
+
+- 把 `enhanced_basic_aplus_v1` 作为 registry-backed profile 的事实源建起来。
+- 只做 registry 抽象、增强版 module specs、failure codes 和 registry-level tests/project rules。
+- 保持旧 `standard_header_image_text_v1` API 兼容，不破坏 M2 mapper/tests。
+
+必须实现：
+
+1. 在 `backend/app/aplus_publish/module_registry.py` 新增增强版 profile 常量、module type 常量、slot/text/table/comparison dataclass 或等价结构。
+2. 增强版 profile 固定 5 个 binding：
+   - `hero` -> `STANDARD_IMAGE_TEXT_OVERLAY` + `overlayColorType=DARK`
+   - `feature_grid` -> `STANDARD_THREE_IMAGE_TEXT`
+   - `detail_proof` -> `STANDARD_SINGLE_IMAGE_SPECS_DETAIL`
+   - `comparison` -> `STANDARD_COMPARISON_TABLE`
+   - `technical_or_closing` -> `STANDARD_TECH_SPECS`
+3. 明确 7 个 required image slots：hero 1、feature 3、detail 1、comparison 2、tech specs 0；尺寸分别按 M3.0 evidence。
+4. 增加文本、富文本、comparison、tech spec 行数/长度约束和 payload evidence file path。
+5. 增加必要 failure codes，但不得在本阶段接 mapper 逻辑。
+6. 提供 helper：profile lookup、module spec lookup、required image slots、profile producer contract 或等价 API。
+7. 测试必须证明 registry profile sequence、image slots、module specs、old profile compatibility，而不是只扫字符串。
+
+禁止范围：
+
+- 不改 Step7/Step8/Step9 输出。
+- 不改 mapper payload builder。
+- 不改 policy/client/worker 外部调用逻辑。
+- 不把 enhanced profile 作为默认用户路径打开。
+- 不实现 Premium/高级 A+、品牌故事、`draft_visible`、submit approval。
+- 不改商品主 workflow / 商品列表 `work_status`。
+
+必须验证：
+
+- `cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_module_mapper.py`
+- `make test-project-rules`
+- `cd backend && .venv/bin/python -m compileall -q app`
+- `git diff --check`
+
+完成输出：
+
+- 在本 MSG 下写 `DONE_CLAIMED`，列 changed files、registry API、验证结果、未覆盖项、是否需要镜花 Phase 1 review。
+
+### MSG-20260624-003 - REQUEST / TECHNICAL_PLAN_REVIEW / LINGXING_ENHANCED_BASIC_APLUS_M3_1
+
+- From: 若命（agentKey: `ruoming`）
+- To: 镜花（agentKey: `jinghua`）
+- Cc: 用户 / 听云（agentKey: `tingyun`） / 观止（agentKey: `guanzhi`）
+- Status: TECHNICAL_PLAN_REVIEW_PASS_WITH_CONSTRAINTS / READY_FOR_PHASE_1
+- Created: 2026-06-24 CST
+- Depends on:
+  - `MSG-20260624-002` M3.1 technical plan `DONE_CLAIMED`
+- Related:
+  - `docs/superpowers/specs/2026-06-24-lingxing-aplus-enhanced-basic-prd.md`
+  - `docs/superpowers/specs/2026-06-24-lingxing-aplus-enhanced-basic-technical-plan.md`
+  - `docs/collaboration/reviews/2026-06-24-lingxing-enhanced-basic-aplus-payload-evidence.md`
+  - `docs/lingxing-aplus-upload.md`
+  - `backend/app/aplus_publish/module_registry.py`
+  - `backend/app/services/lingxing_aplus_module_mapper.py`
+  - `backend/app/pipeline/step7_aplus_plan.py`
+  - `backend/app/pipeline/step8_aplus_script.py`
+  - `backend/app/pipeline/step9_aplus_image.py`
+  - `backend/app/services/lingxing_aplus_publish_policy.py`
+  - `backend/app/services/lingxing_aplus_publish_client.py`
+  - `backend/app/task_planners/lingxing_aplus_publish.py`
+  - `backend/app/task_runtime/lingxing_aplus_publish_workers.py`
+
+镜花收到后直接开始。本任务是 M3.1 technical plan review，不做 QA、不改代码、不提交。
+
+重点审查：
+
+1. 架构边界是否正确：enhanced profile 是否作为 registry-backed profile，而不是在 mapper/client/Step7 里散写字符串。
+2. Step7/Step8/Step9 是否能从旧“5 张 970x600”正确演进到增强版 5 模块 + 7 image slots + no-image tech specs；旧 profile 是否不回归。
+3. Comparison 模块是否处理了第二列 ASIN/图片来源风险；缺 ASIN/图片是否明确 fail closed，不 fallback，不造假。
+4. Mapper two-phase 边界是否保持：所有 profile/type/text/table/image slot/alt/comparison/spec 校验必须在 Lingxing auth、uploadDestination、对象存储上传和 add 前完成。
+5. Client/worker/task lifecycle 是否仍 draft-save-only：`submitFlag=0`、`draft_saved + amazon_draft_visibility=unconfirmed`，不进入 `draft_visible` / submit。
+6. 跨层语义契约是否闭合：registry、Step7 producer、Step8/Step9 asset manifest、policy asset collector、mapper builders、client upload map、tests/project rules/docs 是否互相约束。
+7. 测试策略是否足够证明行为：不要只扫字符串；要有 registry/import fixture、payload subtree、fail-closed、旧路径兼容和 task lifecycle tests。
+8. 实施阶段是否可 review、可验证、可提交；是否存在阶段拆分过大、边界不清或会导致半成品进入真实外部调用的问题。
+
+禁止范围：
+
+- 不要求实现 Premium/高级 A+、品牌故事、`draft_visible`、submit approval、Amazon Seller Central 可见性。
+- 不把普通增强模块失败降级到 `STANDARD_HEADER_IMAGE_TEXT`。
+- 不把 A+ 发布状态并入商品主 workflow / 商品列表 `work_status`。
+
+输出要求：
+
+- 返回 `TECHNICAL_PLAN_REVIEW / PASS_WITH_CONSTRAINTS`、`TECHNICAL_PLAN_REVIEW / NEEDS_FIX` 或 `TECHNICAL_PLAN_REVIEW / BLOCKED`。
+- 如通过，明确是否允许进入 M3.2 implementation，以及哪些阶段需要再次 code review。
+- 如打回，按 P0/P1/P2 写完整修复边界和必要验证。
+
+#### TECHNICAL_PLAN_REVIEW / PASS_WITH_CONSTRAINTS - 镜花子 agent（agentKey: `jinghua`）- 2026-06-24 CST
+
+- 结论：`TECHNICAL_PLAN_REVIEW / PASS_WITH_CONSTRAINTS`。允许进入 M3.2 implementation；不代表实现通过、不代表 QA PASS、不授权 commit/push。
+- Passed checks：方案把 `enhanced_basic_aplus_v1` 设计为 registry-backed profile；覆盖 Step7/8/9、mapper two-phase、slot assets、draft-save-only lifecycle、旧 profile 兼容和测试闭包；comparison 缺第二 ASIN/图片明确 typed fail closed，不降级、不造假。
+- 约束：Phase 2/3 半成品阶段不能把 enhanced profile 作为默认用户路径打开；comparison 数据来源实现必须写成具体字段/模型来源并证明缺失本地失败；project rules 必须升级为 registry/import fixture 闭包，不停留在字符串扫描。
+- Required rereviews：Phase 1 registry contract 需轻量 code/architecture review；Phase 3 Step8/Step9 slot assets 需 review；Phase 4 policy+mapper 必须 review；Phase 5 planner/worker/client lifecycle 必须 review；Phase 6 docs/project-rules closure 需 review 后才能交 M3.3 真实 Lingxing QA。
+
 ### MSG-20260624-002 - REQUEST / TECHNICAL_PLAN / LINGXING_ENHANCED_BASIC_APLUS_M3_1
 
 - From: 若命（agentKey: `ruoming`）
 - To: 听云（agentKey: `tingyun`）
 - Cc: 用户 / 镜花（agentKey: `jinghua`） / 观止（agentKey: `guanzhi`）
-- Status: OPEN / READY_TO_START
+- Status: DONE_CLAIMED / WAITING_JINGHUA_TECHNICAL_PLAN_REVIEW
 - Created: 2026-06-24 CST
 - Depends on:
   - `MSG-20260624-001` M3.0 payload evidence `DONE_CLAIMED`
@@ -90,6 +206,14 @@
 - 新增技术方案文件：`docs/superpowers/specs/2026-06-24-lingxing-aplus-enhanced-basic-technical-plan.md`
 - inbox 只写短 `TECHNICAL_PLAN / DONE_CLAIMED` 摘要和文件路径。
 - 如发现 M3.0 evidence 不足以设计某个模块，写 `REQUEST / DESIGN_CHANGE`，不要硬设计。
+
+#### TECHNICAL_PLAN / DONE_CLAIMED - 听云子 agent（agentKey: `tingyun`）- 2026-06-24 CST
+
+- 技术方案文件：`docs/superpowers/specs/2026-06-24-lingxing-aplus-enhanced-basic-technical-plan.md`
+- 结论：`TECHNICAL_PLAN / DONE_CLAIMED`。只新增技术方案文档，未编码，未提交，未 push。
+- 覆盖范围：registry/profile/module spec/image slot/text/table/failure/evidence、Step7/Step8/Step9 schema、mapper preflight/assemble、多尺寸资产策略、draft-save-only lifecycle、旧路径兼容、跨层语义契约、测试/project rules、文档索引和分阶段实施 gate。
+- 关键设计：增强版首版为 5 个模块、7 个 image slots；comparison 第二列 ASIN/图片缺失时 typed fail closed；`technical_or_closing` 使用 no-image `STANDARD_TECH_SPECS`；旧 `standard_header_image_text_v1` 路径保持兼容且不静默升级。
+- 若命 gate：方案可进入镜花 technical plan review；未通过镜花 review 前不允许实现。
 
 ### MSG-20260624-001 - REQUEST / EVIDENCE / LINGXING_ENHANCED_BASIC_APLUS_MODULE_PAYLOADS_M3_0
 
