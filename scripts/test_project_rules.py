@@ -3561,6 +3561,272 @@ assert aplus_publish_profile_for_plan({"modules": [{"type": "standard_header_ima
     assert_true(result.returncode == 0, f"Step7 enhanced producer schema 行为验证失败: {result.stderr or result.stdout}")
 
 
+def test_lingxing_aplus_step8_step9_phase3_slot_assets() -> None:
+    step8_text = (ROOT / "backend" / "app" / "pipeline" / "step8_aplus_script.py").read_text(encoding="utf-8")
+    step9_text = (ROOT / "backend" / "app" / "pipeline" / "step9_aplus_image.py").read_text(encoding="utf-8")
+    assert_true(
+        "required_image_slots(" in step8_text
+        and "producer_contract_for_profile(" in step8_text
+        and "normalize_aplus_scripts_for_plan" in step8_text,
+        "Step8 enhanced slot schema 必须从 module_registry required image slot contract 构建，不能散落硬编码",
+    )
+    assert_true(
+        "image_slots" in step9_text
+        and "enhanced_image_slot_work_items" in step9_text
+        and "script.get(\"target_width\")" in step9_text
+        and "script.get(\"target_height\")" in step9_text,
+        "Step9 enhanced path 必须遍历 scripts[*].image_slots[*] 并使用 slot target_width/target_height",
+    )
+    code = r'''
+from app.aplus_publish.module_registry import (
+    APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+    APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+    LINGXING_STANDARD_HEADER_IMAGE_TEXT,
+    required_image_slots,
+)
+from app.pipeline.step8_aplus_script import normalize_aplus_scripts_for_plan
+from app.pipeline.step9_aplus_image import enhanced_image_slot_work_items
+
+enhanced_plan = {
+    "aplus_plan_version": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+    "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+    "profile_version": "1",
+    "modules": [
+        {
+            "position": 1,
+            "semantic_role": "hero",
+            "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+            "profile_version": "1",
+            "type": "standard_image_text_overlay",
+            "internal_type": "standard_image_text_overlay",
+            "module_spec_key": "image_text_overlay_dark",
+            "lingxing_content_module_type": "STANDARD_IMAGE_TEXT_OVERLAY",
+            "payload_key": "standardImageTextOverlay",
+            "headline": "Hero headline",
+            "body": "Hero body",
+            "image_concept": "Hero concept",
+            "alt_text_seed": "Hero alt",
+        },
+        {
+            "position": 2,
+            "semantic_role": "feature_grid",
+            "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+            "profile_version": "1",
+            "type": "standard_three_image_text",
+            "internal_type": "standard_three_image_text",
+            "module_spec_key": "three_image_text",
+            "lingxing_content_module_type": "STANDARD_THREE_IMAGE_TEXT",
+            "payload_key": "standardThreeImageText",
+            "headline": "Feature grid",
+            "features": [
+                {"slot": "feature_1", "headline": "F1", "body": "B1", "image_concept": "C1", "alt_text_seed": "A1"},
+                {"slot": "feature_2", "headline": "F2", "body": "B2", "image_concept": "C2", "alt_text_seed": "A2"},
+                {"slot": "feature_3", "headline": "F3", "body": "B3", "image_concept": "C3", "alt_text_seed": "A3"},
+            ],
+        },
+        {
+            "position": 3,
+            "semantic_role": "detail_proof",
+            "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+            "profile_version": "1",
+            "type": "standard_single_image_specs_detail",
+            "internal_type": "standard_single_image_specs_detail",
+            "module_spec_key": "single_image_specs_detail",
+            "lingxing_content_module_type": "STANDARD_SINGLE_IMAGE_SPECS_DETAIL",
+            "payload_key": "standardSingleImageSpecsDetail",
+            "headline": "Detail proof",
+            "image_concept": "Detail concept",
+            "alt_text_seed": "Detail alt",
+            "spec_items": [{"label": "Material", "value": "Fabric"}],
+        },
+        {
+            "position": 4,
+            "semantic_role": "comparison",
+            "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+            "profile_version": "1",
+            "type": "standard_comparison_table",
+            "internal_type": "standard_comparison_table",
+            "module_spec_key": "comparison_table",
+            "lingxing_content_module_type": "STANDARD_COMPARISON_TABLE",
+            "payload_key": "standardComparisonTable",
+            "headline": "Comparison",
+            "comparison_angle": "Compare practical facts",
+            "product_columns": [
+                {"column_key": "current_product", "asin": "B0CURRENT1", "title": "Current", "image_source": "/current.jpg"},
+                {"column_key": "comparison_product", "asin": "B0COMPET01", "title": "Competitor", "image_source": "https://example.com/competitor.jpg"},
+            ],
+        },
+        {
+            "position": 5,
+            "semantic_role": "technical_or_closing",
+            "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+            "profile_version": "1",
+            "type": "standard_tech_specs",
+            "internal_type": "standard_tech_specs",
+            "module_spec_key": "tech_specs",
+            "lingxing_content_module_type": "STANDARD_TECH_SPECS",
+            "payload_key": "standardTechSpecs",
+            "headline": "Specs",
+            "spec_rows": [{"label": "Size", "description": "Compact"}],
+            "tableCount": 1,
+        },
+    ],
+}
+raw_scripts = {
+    "summary": "raw enhanced scripts",
+    "scripts": [
+        {"module_position": index, "prompt": f"Prompt {index}", "negative_prompt": "avoid", "width": 1940, "height": 1200}
+        for index in range(1, 6)
+    ],
+}
+normalized = normalize_aplus_scripts_for_plan(raw_scripts, enhanced_plan)
+assert normalized["publish_profile"] == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+assert normalized["aplus_plan_version"] == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+assert normalized["profile_version"] == "1"
+scripts = normalized["scripts"]
+assert len(scripts) == 5
+
+expected_slots = {
+    item.slot.slot_id: (item.position, item.semantic_role, item.slot.crop_width, item.slot.crop_height)
+    for item in required_image_slots(APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1)
+}
+actual_slots = {}
+for script in scripts:
+    assert script["publish_profile"] == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+    assert "width" not in script and "height" not in script
+    for slot in script["image_slots"]:
+        assert slot["slot_id"]
+        assert slot["publish_profile"] == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+        assert slot["module_position"] == script["module_position"]
+        assert slot["semantic_role"] == script["semantic_role"]
+        assert slot["module_spec_key"] == script["module_spec_key"]
+        assert slot["lingxing_content_module_type"] == script["lingxing_content_module_type"]
+        assert "1940" not in slot["prompt"] and "1200" not in slot["prompt"]
+        actual_slots[slot["slot_id"]] = (
+            slot["module_position"],
+            slot["semantic_role"],
+            slot["target_width"],
+            slot["target_height"],
+        )
+assert sum(len(script["image_slots"]) for script in scripts) == 7
+assert [len(script["image_slots"]) for script in scripts] == [1, 3, 1, 2, 0]
+assert actual_slots == expected_slots, (actual_slots, expected_slots)
+
+work_items = enhanced_image_slot_work_items(normalized)
+assert len(work_items) == 7
+assert [(item["target_width"], item["target_height"]) for item in work_items] == [
+    (970, 300),
+    (300, 300),
+    (300, 300),
+    (300, 300),
+    (300, 300),
+    (150, 300),
+    (150, 300),
+]
+for item in work_items:
+    assert item["asset_slot_id"]
+    assert item["slot_id"]
+    assert item["payload_slot"]
+    assert item["module_position"] in (1, 2, 3, 4)
+    assert item["publish_profile"] == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+    assert item["module_spec_key"]
+    assert item["lingxing_content_module_type"]
+    assert item["target_width"] > 0 and item["target_height"] > 0
+
+version_only_plan = dict(enhanced_plan)
+version_only_plan.pop("publish_profile", None)
+version_only_plan["aplus_plan_version"] = APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+version_only = normalize_aplus_scripts_for_plan(raw_scripts, version_only_plan)
+assert version_only["publish_profile"] == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+assert sum(len(script["image_slots"]) for script in version_only["scripts"]) == 7
+assert all("width" not in script and "height" not in script for script in version_only["scripts"])
+assert [(item["target_width"], item["target_height"]) for item in enhanced_image_slot_work_items(version_only)] == [
+    (970, 300),
+    (300, 300),
+    (300, 300),
+    (300, 300),
+    (300, 300),
+    (150, 300),
+    (150, 300),
+]
+
+profile_only_plan = dict(enhanced_plan)
+profile_only_plan.pop("publish_profile", None)
+profile_only_plan.pop("aplus_plan_version", None)
+profile_only_plan["profile"] = APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+profile_only = normalize_aplus_scripts_for_plan(raw_scripts, profile_only_plan)
+assert sum(len(script["image_slots"]) for script in profile_only["scripts"]) == 7
+
+legacy_plan = {
+    "publish_profile": APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+    "modules": [
+        {"position": index, "semantic_role": "hero", "publish_profile": APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1}
+        for index in range(1, 6)
+    ],
+}
+legacy = normalize_aplus_scripts_for_plan(
+    {"scripts": [{"module_position": index, "prompt": "legacy"} for index in range(1, 6)]},
+    legacy_plan,
+)
+assert len(legacy["scripts"]) == 5
+assert all(script["width"] > 0 and script["height"] > 0 for script in legacy["scripts"])
+assert all("image_slots" not in script for script in legacy["scripts"])
+assert enhanced_image_slot_work_items(legacy) == []
+assert legacy["scripts"][0]["publish_profile"] == APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1
+assert legacy["scripts"][0]["lingxing_content_module_type"] == LINGXING_STANDARD_HEADER_IMAGE_TEXT
+
+legacy_without_profile = normalize_aplus_scripts_for_plan(
+    {"scripts": [{"module_position": index, "prompt": "legacy"} for index in range(1, 6)]},
+    {"modules": [{"position": index, "headline": f"Legacy {index}"} for index in range(1, 6)]},
+)
+assert len(legacy_without_profile["scripts"]) == 5
+assert all(script["width"] > 0 and script["height"] > 0 for script in legacy_without_profile["scripts"])
+assert all("image_slots" not in script for script in legacy_without_profile["scripts"])
+assert enhanced_image_slot_work_items(legacy_without_profile) == []
+
+invalid_missing_slots = {
+    "aplus_plan_version": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+    "scripts": [{"module_position": index, "prompt": "bad"} for index in range(1, 6)],
+}
+for invalid in (
+    invalid_missing_slots,
+    {"profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1, "scripts": invalid_missing_slots["scripts"]},
+    {
+        "publish_profile": APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+        "aplus_plan_version": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+        "scripts": invalid_missing_slots["scripts"],
+    },
+    {**invalid_missing_slots, "scripts": [{**script, "image_slots": []} for script in invalid_missing_slots["scripts"]]},
+    {
+        **normalized,
+        "scripts": [
+            {
+                **script,
+                "image_slots": [
+                    {key: value for key, value in slot.items() if key not in {"target_width", "target_height"}}
+                    for slot in script["image_slots"]
+                ],
+            }
+            for script in normalized["scripts"]
+        ],
+    },
+):
+    try:
+        enhanced_image_slot_work_items(invalid)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("enhanced scripts with missing/empty/invalid image_slots must fail closed")
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"Step8/Step9 enhanced slot assets 行为验证失败: {result.stderr or result.stdout}")
+
+
 def test_product_action_worker_does_not_project_failure_for_interrupted() -> None:
     code = r'''
 import asyncio
@@ -5117,6 +5383,7 @@ def main() -> int:
         test_lingxing_aplus_module_mapping_m2_contract,
         test_lingxing_aplus_enhanced_basic_registry_phase1_contract,
         test_lingxing_aplus_step7_enhanced_phase2_producer_schema,
+        test_lingxing_aplus_step8_step9_phase3_slot_assets,
         test_product_action_worker_does_not_project_failure_for_interrupted,
         test_product_action_final_progress_failure_is_best_effort,
         test_auto_image_selection_phase_a_contract,

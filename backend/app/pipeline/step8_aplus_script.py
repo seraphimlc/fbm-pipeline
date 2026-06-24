@@ -7,13 +7,17 @@
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 from app.aplus_publish.module_registry import (
+    APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
     APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
     LINGXING_STANDARD_HEADER_IMAGE_TEXT,
+    producer_contract_for_profile,
+    required_image_slots,
 )
 from app.config import settings
 from app.database import async_session
@@ -1046,6 +1050,256 @@ def _normalize_script_count_and_size(scripts_data: dict) -> dict:
     return scripts_data
 
 
+def _plan_publish_profile(plan: dict | None) -> str:
+    if not isinstance(plan, dict):
+        return APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1
+    for value in (
+        plan.get("publish_profile"),
+        plan.get("aplus_plan_version"),
+        plan.get("profile"),
+    ):
+        if str(value or "").strip() == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1:
+            return APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+    modules = plan.get("modules")
+    if isinstance(modules, list):
+        for module in modules:
+            if (
+                isinstance(module, dict)
+                and str(module.get("publish_profile") or "").strip() == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+            ):
+                return APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+    return APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1
+
+
+def _modules_by_position(plan: dict | None) -> dict[int, dict]:
+    modules = plan.get("modules") if isinstance(plan, dict) else []
+    if not isinstance(modules, list):
+        return {}
+    result: dict[int, dict] = {}
+    for index, module in enumerate(modules, 1):
+        if not isinstance(module, dict):
+            continue
+        try:
+            position = int(module.get("position") or module.get("module_position") or index)
+        except (TypeError, ValueError):
+            position = index
+        result[position] = module
+    return result
+
+
+def _scripts_by_position(scripts_data: dict) -> dict[int, dict]:
+    scripts = scripts_data.get("scripts") if isinstance(scripts_data, dict) else []
+    if not isinstance(scripts, list):
+        return {}
+    result: dict[int, dict] = {}
+    for index, script in enumerate(scripts, 1):
+        if not isinstance(script, dict):
+            continue
+        try:
+            position = int(script.get("module_position") or script.get("position") or index)
+        except (TypeError, ValueError):
+            position = index
+        result[position] = script
+    return result
+
+
+def _strip_global_size_assumptions(prompt: str | None) -> str:
+    cleaned = str(prompt or "").strip()
+    if not cleaned:
+        return ""
+    width = re.escape(str(settings.APLUS_IMAGE_WIDTH))
+    height = re.escape(str(settings.APLUS_IMAGE_HEIGHT))
+    cleaned = re.sub(
+        rf"Output size requirement:\s*exactly\s*{width}\s*x\s*{height}\s*pixels\.?",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(rf"\b{width}\s*x\s*{height}\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _payload_slot(payload_path: tuple[str, ...] | list[str] | tuple[object, ...]) -> str:
+    return ".".join(str(part) for part in payload_path)
+
+
+def _asset_slot_id(position: int, slot_id: str) -> str:
+    return f"m{position}_{slot_id.replace('.', '_')}"
+
+
+def _slot_business_context(module: dict, slot_id: str) -> str:
+    context: list[str] = []
+    if module.get("headline"):
+        context.append(f"Module headline: {module.get('headline')}")
+    for key in ("image_concept", "conversion_goal", "buyer_objection", "evidence_source", "experience_angle"):
+        if module.get(key):
+            context.append(f"{key}: {module.get(key)}")
+
+    if slot_id.startswith("feature_") and isinstance(module.get("features"), list):
+        feature_key = slot_id.split(".", 1)[0]
+        feature = next(
+            (item for item in module["features"] if isinstance(item, dict) and item.get("slot") == feature_key),
+            None,
+        )
+        if feature:
+            context.append(f"Feature slot content: {json.dumps(feature, ensure_ascii=False)}")
+    elif slot_id.startswith("comparison.") and isinstance(module.get("product_columns"), list):
+        column_index = "1" if "column_1" in slot_id else "2" if "column_2" in slot_id else ""
+        try:
+            column = module["product_columns"][int(column_index) - 1] if column_index else None
+        except (TypeError, ValueError, IndexError):
+            column = None
+        if isinstance(column, dict):
+            safe_column = {
+                key: value
+                for key, value in column.items()
+                if key in {"column_key", "asin", "title", "image_source", "alt_text_seed"}
+            }
+            context.append(f"Comparison column content: {json.dumps(safe_column, ensure_ascii=False)}")
+
+    return "\n".join(str(item) for item in context if item)
+
+
+def _enhanced_slot_prompt(base_prompt: str, module: dict, slot_id: str, payload_slot: str, width: int, height: int) -> str:
+    cleaned = _strip_global_size_assumptions(base_prompt)
+    if not cleaned:
+        cleaned = (
+            module.get("image_concept")
+            or module.get("conversion_goal")
+            or module.get("headline")
+            or "Create a focused Amazon A+ module asset using only supported product facts and selected references."
+        )
+    context = _slot_business_context(module, slot_id)
+    parts = [
+        cleaned,
+        context,
+        (
+            f"Generate the image asset for A+ slot '{slot_id}' at payload path '{payload_slot}'. "
+            f"Output size requirement: exactly {width} x {height} pixels. "
+            "Use this slot's module role and factual content only; do not create assets for other slots in the module."
+        ),
+    ]
+    return "\n\n".join(part.strip() for part in parts if str(part).strip())
+
+
+def _normalize_enhanced_scripts_for_plan(scripts_data: dict, plan: dict) -> dict:
+    contract = producer_contract_for_profile(APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1)
+    if contract is None:
+        raise RuntimeError("Enhanced basic A+ producer contract is not registered")
+
+    raw_by_position = _scripts_by_position(scripts_data)
+    module_by_position = _modules_by_position(plan)
+    slots_by_position: dict[int, list] = {}
+    for slot_spec in required_image_slots(contract.profile_key):
+        slots_by_position.setdefault(slot_spec.position, []).append(slot_spec)
+
+    fixed_keys = {
+        "position",
+        "module_position",
+        "publish_profile",
+        "profile_version",
+        "type",
+        "internal_type",
+        "semantic_role",
+        "module_spec_key",
+        "lingxing_content_module_type",
+        "payload_key",
+        "image_slots",
+        "width",
+        "height",
+    }
+
+    normalized_scripts: list[dict] = []
+    for module_contract in contract.modules:
+        raw = raw_by_position.get(module_contract.position, {})
+        module = module_by_position.get(module_contract.position, {})
+        script = {key: value for key, value in raw.items() if key not in fixed_keys}
+        script.update(
+            {
+                "module_position": module_contract.position,
+                "publish_profile": contract.profile_key,
+                "profile_version": contract.profile_version,
+                "type": module_contract.internal_type,
+                "internal_type": module_contract.internal_type,
+                "semantic_role": module_contract.semantic_role,
+                "module_spec_key": module_contract.module_spec_key,
+                "lingxing_content_module_type": module_contract.lingxing_content_module_type,
+                "payload_key": module_contract.payload_key,
+            }
+        )
+        if module.get("headline") and not script.get("headline"):
+            script["headline"] = module.get("headline")
+        if module.get("alt_text_seed") and not script.get("alt_text"):
+            script["alt_text"] = module.get("alt_text_seed")
+
+        module_slots: list[dict] = []
+        contract_slot_ids = set(module_contract.required_image_slots)
+        for slot_spec in slots_by_position.get(module_contract.position, []):
+            if slot_spec.slot.slot_id not in contract_slot_ids:
+                continue
+            payload_slot = _payload_slot(slot_spec.slot.payload_path)
+            target_width = slot_spec.slot.crop_width
+            target_height = slot_spec.slot.crop_height
+            module_slots.append(
+                {
+                    "asset_slot_id": _asset_slot_id(module_contract.position, slot_spec.slot.slot_id),
+                    "slot_id": slot_spec.slot.slot_id,
+                    "payload_slot": payload_slot,
+                    "payload_path": list(slot_spec.slot.payload_path),
+                    "publish_profile": contract.profile_key,
+                    "profile_version": contract.profile_version,
+                    "module_position": module_contract.position,
+                    "semantic_role": module_contract.semantic_role,
+                    "module_spec_key": module_contract.module_spec_key,
+                    "lingxing_content_module_type": module_contract.lingxing_content_module_type,
+                    "target_width": target_width,
+                    "target_height": target_height,
+                    "min_width": slot_spec.slot.min_width,
+                    "min_height": slot_spec.slot.min_height,
+                    "prompt": _enhanced_slot_prompt(
+                        raw.get("prompt") or script.get("prompt") or "",
+                        module,
+                        slot_spec.slot.slot_id,
+                        payload_slot,
+                        target_width,
+                        target_height,
+                    ),
+                    "negative_prompt": raw.get("negative_prompt") or script.get("negative_prompt"),
+                    "style": raw.get("style") or script.get("style") or "photography",
+                    "alt_text": module.get("alt_text_seed") or script.get("alt_text"),
+                }
+            )
+        script["image_slots"] = module_slots
+        if script.get("prompt"):
+            script["prompt"] = _strip_global_size_assumptions(script.get("prompt"))
+        normalized_scripts.append(script)
+
+    return {
+        **{key: value for key, value in scripts_data.items() if key != "scripts"},
+        "aplus_plan_version": plan.get("aplus_plan_version") or contract.profile_key,
+        "publish_profile": contract.profile_key,
+        "profile_version": contract.profile_version,
+        "module_contract_source": "module_registry.producer_contract_for_profile",
+        "scripts": normalized_scripts,
+    }
+
+
+def normalize_aplus_scripts_for_plan(scripts_data: dict, plan: dict) -> dict:
+    if not isinstance(scripts_data, dict):
+        scripts_data = {"scripts": []}
+    if _plan_publish_profile(plan) == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1:
+        return _normalize_enhanced_scripts_for_plan(scripts_data, plan)
+
+    normalized = _normalize_script_count_and_size(scripts_data)
+    for script in normalized.get("scripts", []):
+        if not isinstance(script, dict):
+            continue
+        script["publish_profile"] = APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1
+        script["lingxing_content_module_type"] = LINGXING_STANDARD_HEADER_IMAGE_TEXT
+    return normalized
+
+
 def _fallback_aplus_scripts(plan: dict, product: Product, pd: ProductData) -> dict:
     modules = plan.get("modules") if isinstance(plan.get("modules"), list) else []
     title = pd.listing_title or pd.title or "Product"
@@ -1099,13 +1353,14 @@ def _fallback_aplus_scripts(plan: dict, product: Product, pd: ProductData) -> di
                 ],
             }
         )
-    return {
+    scripts_data = {
         "scripts": scripts,
         "summary": "A+脚本由保底逻辑生成：LLM连接超时，已按A+规划生成可继续出图的结构化脚本；如需更高质量，可重跑A+脚本。",
         "fallback": True,
         "fallback_reason": "LLM timeout while generating A+ scripts",
         "llm_model": settings.LLM_MODEL,
     }
+    return normalize_aplus_scripts_for_plan(scripts_data, plan)
 
 
 async def run_aplus_script(product_id: int) -> dict:
@@ -1209,7 +1464,7 @@ async def run_aplus_script(product_id: int) -> dict:
                 raise RuntimeError(f"A+脚本JSON解析失败: {e}")
 
         brand = product.brand or settings.DEFAULT_BRAND
-        scripts_data = _normalize_script_count_and_size(scripts_data)
+        scripts_data = normalize_aplus_scripts_for_plan(scripts_data, plan)
         scripts_data = _attach_reference_images(scripts_data, product, plan, brand)
         scripts_data = _sanitize_scripts(scripts_data, brand)
 
@@ -1356,6 +1611,9 @@ async def regenerate_aplus_module_script(product_id: int, module_position: int, 
             scripts_data = json.loads(pa.aplus_scripts)
         except json.JSONDecodeError:
             raise ValueError("A+规划或脚本数据损坏")
+
+        if _plan_publish_profile(plan) == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1:
+            raise ValueError("Enhanced basic A+ uses slot-level scripts; module-level script regeneration is not supported in Phase 3")
 
         modules = plan.get("modules", []) if isinstance(plan, dict) else []
         scripts = scripts_data.get("scripts", []) if isinstance(scripts_data, dict) else []

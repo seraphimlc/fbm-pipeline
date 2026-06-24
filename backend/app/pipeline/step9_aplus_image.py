@@ -21,6 +21,10 @@ from urllib.parse import unquote, urlparse
 import httpx
 from PIL import Image, ImageDraw, ImageFont
 
+from app.aplus_publish.module_registry import (
+    APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+    required_image_slots,
+)
 from app.config import settings
 from app.database import async_session
 from app.models import Product, ProductAplus
@@ -167,6 +171,156 @@ def _encode_jpeg_under_limit(image: Image.Image) -> tuple[bytes, int]:
 
 def _module_output_path(output_dir: Path, position: int) -> Path:
     return output_dir / f"aplus_{position:02d}.jpg"
+
+
+def _safe_asset_name(value: str | None) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or "").strip())
+    cleaned = cleaned.strip("._-")
+    return cleaned or "slot"
+
+
+def _slot_output_path(output_dir: Path, work_item: dict) -> Path:
+    position = int(work_item.get("module_position") or work_item.get("position") or 0)
+    asset_slot_id = _safe_asset_name(work_item.get("asset_slot_id") or work_item.get("slot_id"))
+    return output_dir / f"aplus_{position:02d}_{asset_slot_id}.jpg"
+
+
+def _image_result_metadata(script: dict) -> dict:
+    metadata_keys = (
+        "asset_slot_id",
+        "slot_id",
+        "payload_slot",
+        "payload_path",
+        "publish_profile",
+        "profile_version",
+        "module_position",
+        "semantic_role",
+        "module_spec_key",
+        "lingxing_content_module_type",
+        "target_width",
+        "target_height",
+        "min_width",
+        "min_height",
+        "alt_text",
+        "content_type",
+    )
+    return {key: script.get(key) for key in metadata_keys if script.get(key) is not None}
+
+
+def _scripts_publish_profile(scripts_data: dict | None) -> str | None:
+    if not isinstance(scripts_data, dict):
+        return None
+    first_text: str | None = None
+    for value in (
+        scripts_data.get("publish_profile"),
+        scripts_data.get("aplus_plan_version"),
+        scripts_data.get("profile"),
+    ):
+        text = str(value or "").strip()
+        if text == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1:
+            return text
+        first_text = first_text or text or None
+    scripts = scripts_data.get("scripts")
+    if isinstance(scripts, list):
+        for script in scripts:
+            if not isinstance(script, dict):
+                continue
+            text = str(script.get("publish_profile") or "").strip()
+            if text == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1:
+                return text
+            first_text = first_text or text or None
+    return first_text
+
+
+def _is_enhanced_scripts_data(scripts_data: dict | None) -> bool:
+    return _scripts_publish_profile(scripts_data) == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+
+
+def _required_slot_manifest_value(slot: dict, key: str) -> object:
+    value = slot.get(key)
+    if value in (None, ""):
+        raise ValueError(f"Enhanced A+ image slot missing required field: {key}")
+    return value
+
+
+def _positive_int_slot_value(slot: dict, key: str) -> int:
+    value = _required_slot_manifest_value(slot, key)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"Enhanced A+ image slot field must be an integer: {key}") from exc
+    if parsed <= 0:
+        raise ValueError(f"Enhanced A+ image slot field must be positive: {key}")
+    return parsed
+
+
+def enhanced_image_slot_work_items(scripts_data: dict) -> list[dict]:
+    if not isinstance(scripts_data, dict):
+        return []
+    if not _is_enhanced_scripts_data(scripts_data):
+        return []
+    scripts = scripts_data.get("scripts")
+    if not isinstance(scripts, list):
+        raise ValueError("Enhanced A+ scripts must contain a scripts list")
+
+    expected_slots = {
+        (item.position, item.slot.slot_id): item
+        for item in required_image_slots(APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1)
+    }
+    actual_slots: dict[tuple[int, str], dict] = {}
+    work_items: list[dict] = []
+    for script_index, script in enumerate(scripts, 1):
+        if not isinstance(script, dict):
+            raise ValueError("Enhanced A+ scripts must contain module script objects")
+        slots = script.get("image_slots")
+        if not isinstance(slots, list):
+            raise ValueError("Enhanced A+ module script missing image_slots list")
+        module_position = int(script.get("module_position") or script.get("position") or script_index)
+        for slot_index, slot in enumerate(slots, 1):
+            if not isinstance(slot, dict):
+                raise ValueError("Enhanced A+ image_slots entries must be objects")
+            slot_id = str(_required_slot_manifest_value(slot, "slot_id")).strip()
+            slot_module_position = _positive_int_slot_value(slot, "module_position")
+            if slot_module_position != module_position:
+                raise ValueError("Enhanced A+ image slot module_position must match parent script")
+            target_width = _positive_int_slot_value(slot, "target_width")
+            target_height = _positive_int_slot_value(slot, "target_height")
+            _required_slot_manifest_value(slot, "asset_slot_id")
+            _required_slot_manifest_value(slot, "payload_slot")
+            _required_slot_manifest_value(slot, "publish_profile")
+            _required_slot_manifest_value(slot, "semantic_role")
+            _required_slot_manifest_value(slot, "module_spec_key")
+            _required_slot_manifest_value(slot, "lingxing_content_module_type")
+            expected = expected_slots.get((slot_module_position, slot_id))
+            if expected is None:
+                raise ValueError(f"Enhanced A+ image slot is not in registry contract: {slot_module_position}:{slot_id}")
+            if target_width != expected.slot.crop_width or target_height != expected.slot.crop_height:
+                raise ValueError(f"Enhanced A+ image slot dimension mismatch: {slot_module_position}:{slot_id}")
+            slot_key = (slot_module_position, slot_id)
+            if slot_key in actual_slots:
+                raise ValueError(f"Enhanced A+ image slot duplicated: {slot_module_position}:{slot_id}")
+            actual_slots[slot_key] = slot
+            item = {
+                "position": module_position,
+                "module_position": module_position,
+                "slot_order": slot_index,
+                "prompt": slot.get("prompt") or script.get("prompt") or "",
+                "negative_prompt": slot.get("negative_prompt") or script.get("negative_prompt"),
+                "reference_images": slot.get("reference_images") or script.get("reference_images") or [],
+                "style": slot.get("style") or script.get("style"),
+                "content_type": "enhanced_basic_aplus_slot_image",
+                **_image_result_metadata(script),
+                **slot,
+            }
+            item["module_position"] = module_position
+            item["position"] = module_position
+            item["slot_order"] = slot_index
+            work_items.append(item)
+    if set(actual_slots) != set(expected_slots):
+        missing = sorted(set(expected_slots) - set(actual_slots))
+        extra = sorted(set(actual_slots) - set(expected_slots))
+        raise ValueError(f"Enhanced A+ image slots do not match registry contract: missing={missing}, extra={extra}")
+    return work_items
 
 
 def _should_overwrite_existing() -> bool:
@@ -559,11 +713,11 @@ def _save_exact_size_image(img_bytes: bytes, raw_path: Path, final_path: Path, w
     }
 
 
-def _upload_generated_image_to_oss(output_path: Path, product_key: str, position: int) -> dict:
+def _upload_generated_image_to_oss(output_path: Path, product_key: str, position: int, asset_key: str | None = None) -> dict:
     if not oss_configured():
         raise RuntimeError("OSS 未配置，A+生成图无法上传到OSS。")
     try:
-        result = upload_private_image(output_path, product_key, f"aplus_{position:02d}")
+        result = upload_private_image(output_path, product_key, asset_key or f"aplus_{position:02d}")
     except Exception as exc:
         logger.warning(f"[Step9] A+生成图上传OSS失败: position={position}, path={output_path}, error={exc}")
         raise RuntimeError(f"A+生成图上传OSS失败: {type(exc).__name__}: {exc}") from exc
@@ -653,11 +807,14 @@ async def _generate_single_image(
     """
     async with semaphore:
         image_started = time.monotonic()
-        width = settings.APLUS_IMAGE_WIDTH
-        height = settings.APLUS_IMAGE_HEIGHT
-        prompt = _sanitize_generation_prompt(script.get("prompt", ""), brand, script.get("negative_prompt"))
+        width = int(script.get("target_width") or script.get("width") or settings.APLUS_IMAGE_WIDTH)
+        height = int(script.get("target_height") or script.get("height") or settings.APLUS_IMAGE_HEIGHT)
+        prompt = _sanitize_generation_prompt(script.get("prompt", ""), brand, script.get("negative_prompt"), width, height)
         position = script.get("module_position", 0)
         ref_sources = _reference_image_sources(script)
+        asset_key = None
+        if script.get("asset_slot_id"):
+            asset_key = f"aplus_{_safe_asset_name(script.get('asset_slot_id'))}"
 
         try:
             logger.info(
@@ -671,7 +828,7 @@ async def _generate_single_image(
             img_bytes = image_payload["bytes"]
             raw_path = output_path.with_name(f"{output_path.stem}_raw{_image_extension(img_bytes)}")
             size_info = _save_exact_size_image(img_bytes, raw_path, output_path, width, height)
-            oss_info = _upload_generated_image_to_oss(output_path, product_key, position)
+            oss_info = _upload_generated_image_to_oss(output_path, product_key, position, asset_key)
             display_url = oss_info.get("oss_url")
             if not display_url:
                 raise RuntimeError("A+生成图已上传OSS，但未返回可用URL")
@@ -694,6 +851,7 @@ async def _generate_single_image(
                 "target_height": height,
                 "reference_count": len(ref_sources),
                 "reference_paths": ref_sources,
+                **_image_result_metadata(script),
                 **oss_info,
                 **size_info,
             }
@@ -701,17 +859,25 @@ async def _generate_single_image(
         except Exception as e:
             error_msg = f"{type(e).__name__}: {str(e)}"
             logger.error(f"[Step9] 模块 {position} 生成失败: {error_msg}, 耗时={time.monotonic() - image_started:.1f}s")
-            return {"position": position, "status": "failed", "error": error_msg}
+            return {"position": position, "status": "failed", "error": error_msg, **_image_result_metadata(script)}
 
 
-def _sanitize_generation_prompt(prompt: str, brand: str | None, negative_prompt: str | None = None) -> str:
+def _sanitize_generation_prompt(
+    prompt: str,
+    brand: str | None,
+    negative_prompt: str | None = None,
+    width: int | None = None,
+    height: int | None = None,
+) -> str:
     cleaned = re.sub(
         r"Output size requirement:\s*exactly\s*\d+\s*x\s*\d+\s*pixels\.?",
         "",
         prompt or "",
         flags=re.IGNORECASE,
     ).strip()
-    size_rule = f"Output size requirement: exactly {settings.APLUS_IMAGE_WIDTH} x {settings.APLUS_IMAGE_HEIGHT} pixels."
+    target_width = width or settings.APLUS_IMAGE_WIDTH
+    target_height = height or settings.APLUS_IMAGE_HEIGHT
+    size_rule = f"Output size requirement: exactly {target_width} x {target_height} pixels."
     required = (
         f"{size_rule} "
         "Use the uploaded reference images as product identity anchors. "
@@ -783,6 +949,68 @@ async def run_aplus_image(product_id: int) -> dict:
 
         # 并发控制
         semaphore = asyncio.Semaphore(settings.APLUS_CONCURRENCY)
+
+        enhanced_profile = _is_enhanced_scripts_data(scripts_data)
+        if enhanced_profile:
+            if scripts_data.get("fallback"):
+                raise RuntimeError("A+脚本是降级兜底结果，不能进入 A+出图，请先重跑 A+脚本。")
+            enhanced_work_items = enhanced_image_slot_work_items(scripts_data)
+            tasks = [
+                _generate_single_image(
+                    work_item,
+                    _slot_output_path(output_dir, work_item),
+                    semaphore,
+                    product_key,
+                    product.brand or settings.DEFAULT_BRAND,
+                )
+                for work_item in enhanced_work_items
+            ]
+            logger.info(
+                f"[Step9] 开始生成 {len(tasks)} 张 enhanced A+ slot 图片，"
+                f"覆盖策略={settings.APLUS_IMAGE_OVERWRITE_POLICY}, 并发数={settings.APLUS_CONCURRENCY}"
+            )
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            image_results = []
+            success_count = 0
+            for r in results:
+                if isinstance(r, Exception):
+                    image_results.append({"status": "failed", "error": str(r)})
+                    continue
+                image_results.append(r)
+                if r.get("status") == "done":
+                    success_count += 1
+
+            image_results.sort(key=lambda item: (item.get("module_position") or item.get("position") or 0, item.get("slot_order") or 0))
+            expected_count = len(enhanced_work_items)
+            pa.aplus_images = json.dumps(image_results, ensure_ascii=False)
+            pa.aplus_image_count = success_count
+            pa.aplus_status = "done" if success_count == expected_count else "partial"
+            pa.generated_at = datetime.now()
+            await db.commit()
+
+            logger.info(
+                f"[Step9] Enhanced A+ slot 出图完成: {success_count}/{expected_count} 成功, "
+                f"目录={output_dir}, 耗时={time.monotonic() - step_started:.1f}s"
+            )
+            if success_count < expected_count:
+                errors = [
+                    f"{item.get('asset_slot_id') or item.get('position')}: {item.get('error')}"
+                    for item in image_results
+                    if item.get("status") != "done"
+                ]
+                raise RuntimeError(
+                    f"Enhanced A+ slot 出图未全部成功: {success_count}/{expected_count}. "
+                    + " | ".join(errors[:7])
+                )
+            return {
+                "total": expected_count,
+                "success": success_count,
+                "skipped": 0,
+                "generated": len(tasks),
+                "results": image_results,
+                "output_dir": str(output_dir),
+            }
         
         # 默认只生成缺失/失败图片，避免重复消耗生图费用。
         tasks = []
@@ -877,6 +1105,9 @@ async def regenerate_aplus_module_image(product_id: int, module_position: int) -
             scripts_data = json.loads(pa.aplus_scripts)
         except json.JSONDecodeError:
             raise ValueError("A+脚本数据损坏")
+
+        if enhanced_image_slot_work_items(scripts_data):
+            raise ValueError("Enhanced basic A+ uses slot-level image assets; module-level image regeneration is not supported in Phase 3")
 
         scripts = scripts_data.get("scripts", [])
         if not isinstance(scripts, list) or not scripts:

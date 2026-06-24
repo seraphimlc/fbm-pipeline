@@ -26,6 +26,184 @@
 
 ## Current Action Board
 
+### MSG-20260624-007 - REQUEST / FIX / LINGXING_ENHANCED_BASIC_APLUS_PHASE_3_REVIEW_FIX
+
+- From: 若命（agentKey: `ruoming`）
+- To: 听云（agentKey: `tingyun`）
+- Cc: 用户 / 镜花（agentKey: `jinghua`）
+- Status: OPEN / READY_TO_START
+- Created: 2026-06-24 CST
+- Depends on:
+  - `MSG-20260624-006` Phase 3 `DONE_CLAIMED / RUOMING_VALIDATION_PASS_WAITING_JINGHUA`
+  - 镜花 Phase 3 review：`CODE_REVIEW / NEEDS_FIX`
+- Related:
+  - `backend/app/pipeline/step7_aplus_plan.py`
+  - `backend/app/pipeline/step8_aplus_script.py`
+  - `backend/app/pipeline/step9_aplus_image.py`
+  - `scripts/test_project_rules.py`
+
+听云收到后直接开始。本任务只修复镜花 Phase 3 review 打回项，不扩大到 mapper/client/worker/真实发布，不提交、不 push。
+
+必须修复：
+
+1. Step8 enhanced profile resolution 必须与 Step7 语义对齐。
+   - Step8 不能只看 `plan.publish_profile`。
+   - `publish_profile`、`aplus_plan_version`、`profile` 任一明确等于 `enhanced_basic_aplus_v1` 时，都必须进入 enhanced slot normalizer。
+   - 旧无 profile plan 仍走 legacy flat path，不能自动猜 enhanced。
+2. Step9 enhanced profile 检测必须独立于 `enhanced_image_slot_work_items()` 非空结果。
+   - `publish_profile` / `aplus_plan_version` / `profile` 明确为 `enhanced_basic_aplus_v1` 时，必须按 enhanced schema 处理。
+   - enhanced scripts 缺失 `image_slots`、slot 为空、slot 字段缺 `target_width/target_height`、slot manifest 非法时必须 fail closed，不能落回旧 `scripts[:5]` flat path。
+3. 补 project rules / focused behavior tests：
+   - version-only enhanced plan 在 Step8 必须产出 nested `image_slots`，不得产出 legacy flat `1940x1200`。
+   - 旧无 profile legacy plan 仍保持 flat path。
+   - enhanced scripts 缺失/空 `image_slots` 时 Step9 必须 fail closed，不得返回旧 path work。
+   - existing happy path 仍验证 7 个 slots、尺寸、manifest metadata、旧路径兼容。
+4. 保持 Phase 3 其它边界：
+   - 不实现 slot-level regeneration。
+   - 不实现 enhanced existing-image reuse，除非它是修复 fail-closed 必需的一小段配套逻辑；如要做，必须先在 `DONE_CLAIMED` 写清原因和影响面。
+
+禁止范围：
+
+- 不改 enhanced mapper payload assembly。
+- 不调用 Lingxing，不上传图片，不保存草稿，不 submit。
+- 不改 Lingxing policy/client/worker。
+- 不改商品 workflow/work_status/任务中心/列表筛选/overview。
+- 不做真实页面 QA。
+
+必须验证：
+
+- `make test-project-rules`
+- `cd backend && .venv/bin/python -m compileall -q app`
+- `git diff --check`
+
+完成输出：
+
+- 在本 MSG 下写 `DONE_CLAIMED`，列 changed files、两个 P1 如何修复、补了哪些负向测试、验证结果、未覆盖项、是否需要镜花复审。
+
+#### DONE_CLAIMED / RUOMING_VALIDATION_PASS_WAITING_JINGHUA_REREVIEW - 听云子 agent / 若命 - 2026-06-24 CST
+
+- 结论：镜花 Phase 3 review 两个 P1 已返工，若命本地复核验证通过；进入镜花复审前不允许 commit/push。
+- Summary:
+  - `docs/collaboration/summaries/2026-06-24-lingxing-enhanced-basic-aplus-phase3-step8-step9.md`
+- Changed files:
+  - `backend/app/pipeline/step8_aplus_script.py`
+  - `backend/app/pipeline/step9_aplus_image.py`
+  - `scripts/test_project_rules.py`
+  - `docs/collaboration/inbox.md`
+  - `docs/collaboration/summaries/2026-06-24-lingxing-enhanced-basic-aplus-phase3-step8-step9.md`
+- P1 修复：
+  - Step8 profile resolution 已对齐 Step7 语义：`publish_profile`、`aplus_plan_version`、`profile` 任一显式为 `enhanced_basic_aplus_v1` 都进入 enhanced slot normalizer；旧无 profile plan 仍走 legacy flat path。
+  - Step9 不再用 `enhanced_image_slot_work_items()` 非空决定是否 enhanced；先识别 enhanced profile，再校验 slot schema。缺 `image_slots`、空 slots、缺尺寸、未知/重复/尺寸不符 slot 均 fail closed，不落回旧 `scripts[:5]`。
+- 补充测试：
+  - version-only enhanced、profile-only enhanced、legacy no-profile、malformed enhanced fail-closed、happy 7-slot manifest。
+- 若命复跑验证：
+  - `make test-project-rules` PASS，69 tests。
+  - `cd backend && .venv/bin/python -m compileall -q app` PASS。
+  - `git diff --check -- backend/app/pipeline/step8_aplus_script.py backend/app/pipeline/step9_aplus_image.py scripts/test_project_rules.py docs/collaboration/inbox.md docs/collaboration/summaries/2026-06-24-lingxing-enhanced-basic-aplus-phase3-step8-step9.md` PASS。
+- 未覆盖：
+  - 未实现 slot-level regeneration、enhanced existing-image reuse、mapper payload assembly、Lingxing client/worker/policy、真实上传/草稿/submit、页面 QA。
+
+#### CODE_REVIEW_REREVIEW / PASS_WITH_SCOPE - 镜花子 agent - 2026-06-24 CST
+
+- 结论：两个 prior P1 已闭合，无 P0/P1/P2 findings；允许若命 scoped commit/push Phase 3。
+- Evidence checked:
+  - Step8 已通过 `publish_profile` / `aplus_plan_version` / `profile` 三种显式 enhanced trigger 进入 enhanced normalizer；旧 no-profile legacy 仍走 flat path。
+  - Step8 enhanced module scripts / `image_slots` 仍来自 `producer_contract_for_profile()` / `required_image_slots()` registry contract。
+  - Step9 enhanced profile detection 独立于 work item count；在 legacy `scripts[:5]` 前先进入 enhanced branch。
+  - Step9 malformed enhanced scripts 对 missing scripts、missing/empty `image_slots`、重复/未知 slot、缺字段、尺寸不符均 fail closed。
+  - 测试覆盖 version-only enhanced、profile-only enhanced、legacy no-profile、malformed enhanced fail-closed、happy 7-slot metadata。
+  - 禁止范围未突破：未改 mapper、Lingxing policy/client/worker、workflow/work_status、draft save/submit。
+- Validation:
+  - `make test-project-rules` PASS，69 tests。
+  - `cd backend && .venv/bin/python -m compileall -q app` PASS。
+  - scoped `git diff --check` PASS。
+- Gate meaning:
+  - 允许若命 scoped commit/push `MSG-20260624-006/007` Phase 3 文件。
+  - 不代表 mapper payload assembly、真实 Lingxing 上传/草稿保存/submit、浏览器/用户 QA、enhanced existing-image reuse 或 slot-level regeneration 已完成。
+
+### MSG-20260624-006 - REQUEST / IMPLEMENT / LINGXING_ENHANCED_BASIC_APLUS_PHASE_3_STEP8_STEP9_SLOT_ASSETS
+
+- From: 若命（agentKey: `ruoming`）
+- To: 听云（agentKey: `tingyun`）
+- Cc: 用户 / 镜花（agentKey: `jinghua`）
+- Status: OPEN / READY_TO_START
+- Created: 2026-06-24 CST
+- Depends on:
+  - `MSG-20260624-005` Phase 2 Step7 Producer Schema `CODE_REVIEW_REREVIEW_PASS_WITH_SCOPE`
+  - Commit `0f2f077 feat: add enhanced aplus step7 producer`
+- Related:
+  - `docs/superpowers/specs/2026-06-24-lingxing-aplus-enhanced-basic-prd.md`
+  - `docs/superpowers/specs/2026-06-24-lingxing-aplus-enhanced-basic-technical-plan.md`
+  - `backend/app/aplus_publish/module_registry.py`
+  - `backend/app/pipeline/step8_aplus_script.py`
+  - `backend/app/pipeline/step9_aplus_image.py`
+  - `scripts/test_project_rules.py`
+
+听云收到后直接开始。本任务只实现 M3.2 Phase 3：Step8/Step9 Slot Assets。不要改 mapper enhanced preflight/payload builder，不改 Lingxing policy/client/worker，不改商品主 workflow/work_status，不打开 enhanced 真实发布、上传、草稿保存或 submit 路径，不提交、不 push。
+
+目标：
+
+- 让 enhanced Step8 从 registry required image slots 生成模块级 scripts 和嵌套 `image_slots`，而不是旧的 5 张 flat image scripts。
+- 让 enhanced Step9 按 `scripts[*].image_slots[*]` 生成 slot 级图片资产，使用每个 slot 的 `target_width/target_height`，不能沿用全局 `1940x1200` 假设。
+- 保持旧 `standard_header_image_text_v1` flat 5-image path 兼容；旧 plan、旧 script、旧 image 输出不迁移、不自动猜 enhanced。
+
+必须实现：
+
+1. Step8 enhanced 路径识别 `publish_profile="enhanced_basic_aplus_v1"` / `aplus_plan_version="enhanced_basic_aplus_v1"` 后，输出 5 个 module scripts，并在需要图片的模块内生成嵌套 `image_slots`。
+2. `image_slots` 必须来自 `module_registry.py` 的 required image slot contract，不能在 Step8 另写一份散落 slot 定义。
+3. Enhanced slot 数量和尺寸必须符合 registry：
+   - hero：1 个，`970x300`
+   - feature_grid：3 个，`300x300`
+   - detail_proof：1 个，`300x300`
+   - comparison：2 个，`150x300`
+   - technical_or_closing：0 个
+4. Step9 enhanced 路径必须遍历 `scripts[*].image_slots[*]`，输出 7 个 slot image manifest，并写回 `ProductAplus.aplus_images` 的 slot manifest；`aplus_image_count=7`。
+5. Enhanced slot manifest 至少要能追溯 profile、module、slot、尺寸、生成文件路径/证据；不能只保留 flat filename list。
+6. 旧 flat path 继续使用旧行为，不被 enhanced schema 破坏。
+7. 增加 project rules / focused tests，证明 enhanced slot 来源、数量、尺寸、Step9 遍历方式、旧路径兼容，并防止 global `1940x1200` 假设泄漏到 enhanced path。
+
+禁止范围：
+
+- 不改 `backend/app/aplus_publish/module_mapper.py` 或任何 enhanced mapper payload assembly。
+- 不调用 Lingxing，不上传图片，不保存草稿，不 submit。
+- 不实现 Premium/高级 A+、品牌故事、ASIN sync、领星前置拉品。
+- 不改商品主流程、任务中心、商品列表筛选或 overview。
+- 不做真实页面 QA；本阶段只做代码和本地规则验证。
+
+必须验证：
+
+- `make test-project-rules`
+- `cd backend && .venv/bin/python -m compileall -q app`
+- `git diff --check`
+
+完成输出：
+
+- 在本 MSG 下写 `DONE_CLAIMED`，列 changed files、enhanced Step8 slot contract 接入点、Step9 manifest 写入格式、旧路径兼容证据、验证结果、未覆盖项、是否需要镜花 Phase 3 review。
+
+#### DONE_CLAIMED / RUOMING_VALIDATION_PASS_WAITING_JINGHUA - 听云子 agent / 若命 - 2026-06-24 CST
+
+- 结论：Phase 3 Step8/Step9 Slot Assets 已由听云完成，若命本地复核验证通过；进入镜花 Phase 3 code/design review 前，不允许 commit/push，不代表 mapper/client/worker 或真实 Lingxing QA 已完成。
+- Summary:
+  - `docs/collaboration/summaries/2026-06-24-lingxing-enhanced-basic-aplus-phase3-step8-step9.md`
+- Changed files:
+  - `backend/app/pipeline/step8_aplus_script.py`
+  - `backend/app/pipeline/step9_aplus_image.py`
+  - `scripts/test_project_rules.py`
+  - `docs/collaboration/inbox.md`
+- 关键实现：
+  - Step8 新增 registry-backed enhanced normalizer，只在显式 `publish_profile=enhanced_basic_aplus_v1` 时启用。
+  - Step8 enhanced 通过 `producer_contract_for_profile()` / `required_image_slots()` 生成 5 个 module scripts 和 nested `image_slots`，slot 数量/尺寸来自 registry contract。
+  - Step9 enhanced 通过 `enhanced_image_slot_work_items()` 遍历 `scripts[*].image_slots[*]`，按 slot `target_width/target_height` 生成 7 个 slot manifest。
+  - `ProductAplus.aplus_images` enhanced 路径保存 slot manifest，包含 profile/module/slot/payload/尺寸/path/url/status/reference 等追溯字段；7/7 成功时 `aplus_status=done`。
+  - 旧 `standard_header_image_text_v1` flat 5-image path 保持兼容；旧无 enhanced profile 的 plan 不迁移、不自动猜 enhanced。
+- 若命复跑验证：
+  - `make test-project-rules` PASS，69 tests。
+  - `cd backend && .venv/bin/python -m compileall -q app` PASS。
+  - `git diff --check -- backend/app/pipeline/step8_aplus_script.py backend/app/pipeline/step9_aplus_image.py scripts/test_project_rules.py docs/collaboration/inbox.md` PASS。
+- 未覆盖 / 待审查：
+  - 未实现 enhanced mapper payload assembly、Lingxing 上传/草稿保存/submit、policy/client/worker、真实图片生成或页面 QA。
+  - enhanced existing-image reuse 与 slot-level regeneration 目前未实现，需镜花判断本阶段是否可接受或必须新建后续任务。
+
 ### MSG-20260624-005 - REQUEST / IMPLEMENT / LINGXING_ENHANCED_BASIC_APLUS_PHASE_2_STEP7_PRODUCER_SCHEMA
 
 - From: 若命（agentKey: `ruoming`）
