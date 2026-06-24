@@ -340,6 +340,7 @@ make test-project-rules
 ## 2026-06-24 增强版普通 A+ 与高级 A+ 调研
 
 增强版普通 A+ PRD：`docs/superpowers/specs/2026-06-24-lingxing-aplus-enhanced-basic-prd.md`。
+M3.0 payload evidence：`docs/collaboration/reviews/2026-06-24-lingxing-enhanced-basic-aplus-payload-evidence.md`。
 
 领星官方帮助中心 `A+商品描述`（`https://www.lingxing.com/help/article/APlusContent`）显示：
 
@@ -354,6 +355,26 @@ make test-project-rules
 - 可以继续做 `enhanced_basic_aplus_v1`：在普通 A+ 范围内支持更丰富的标准模块组合，例如图片覆盖、多图文、规格明细、比较图、技术规格等。
 - 不应在本轮实现真正 Premium A+ / 高级 A+ 创建、编辑、提交或可见性验证。
 - Premium A+ 后续如要推进，必须单独确认账号/品牌权限、领星 UI/API 是否开放创建或编辑、Amazon 侧能力和真实 payload，不能复用普通 A+ 假设。
+
+本轮从 Lingxing 公开前端 bundle 确认的增强版普通 A+ 目标模块事实：
+
+- `标准图片和浅文本覆盖` / `标准图片和深文本覆盖`：`STANDARD_IMAGE_TEXT_OVERLAY`，1 张 970x300 图片，字段为 `standardImageTextOverlay.overlayColorType`、`block.image`、`block.headline`、`block.body.textList`。
+- `标准三个图片和文本`：`STANDARD_THREE_IMAGE_TEXT`，3 张 300x300 图片，字段为 `standardThreeImageText.headline` 和 `block1..3.{image,headline,body.textList}`。
+- `标准四个图片和文本`：`STANDARD_FOUR_IMAGE_TEXT`，4 张 220x220 图片，字段为 `standardFourImageText.headline` 和 `block1..4.{image,headline,body.textList}`。
+- `标准单一图片和规格详细信息`：`STANDARD_SINGLE_IMAGE_SPECS_DETAIL`，1 张 300x300 图片，字段包含 `image`、描述块、规格标题、`specificationListBlock.block.textList` 和 `specificationTextBlock.body.textList`。
+- `标准单一图片和标注`：`STANDARD_SINGLE_IMAGE_HIGHLIGHTS`，1 张 300x300 图片，字段包含 `image`、`textBlock1..3` 和 `bulletedListBlock.block.textList`。
+- `标准比较图`：`STANDARD_COMPARISON_TABLE`，每列 1 张 150x300 图片，最多 6 列；前 2 列 image/title/ASIN/首个 metric 和第一条 metric label 为前端必填。
+- `标准技术规格`：`STANDARD_TECH_SPECS`，无图片，字段为 `headline`、`tableCount` 和 `specificationList[*].label/description`；前 4 条规格行为前端必填。
+- `标准文本`：`STANDARD_TEXT`，无图片，字段为 `headline` 和必填 `body.textList`。
+- `标准商品描述文本`：`STANDARD_PRODUCT_DESCRIPTION`，无图片，字段为必填 `body.textList`。
+
+通用 payload 事实：
+
+- 保存按钮调用 `confirm(0)`，最终请求体含 `submitFlag=0`；提交按钮调用 `confirm(1)`，最终请求体含 `submitFlag=1`。
+- 图片对象统一包含 `uploadDestinationId`、`altText`、`imageCropSpecification.offset` 和 `imageCropSpecification.size`；`altText` 在图片弹窗中必填，最长 100。
+- 富文本正文统一使用 rich-text object list：`body.textList = [{ "value": "...", "decoratorSet": [] }]`，不是 string list。
+- 前端会在保存前校验必填字段并清洗空值；增强版自动链路仍必须在 mapper preflight 中 fail closed，不能依赖服务端接受空字段，也不能 fallback 到 `STANDARD_HEADER_IMAGE_TEXT`。
+- 本轮未点击保存/提交、未调用 `amazon/aplus/add` / `edit`、未上传图片，没有产生新的 Lingxing 草稿副作用。
 
 ## 快速定位
 

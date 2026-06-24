@@ -26,12 +26,77 @@
 
 ## Current Action Board
 
-### MSG-20260624-001 - REQUEST / EVIDENCE / LINGXING_ENHANCED_BASIC_APLUS_MODULE_PAYLOADS_M3_0
+### MSG-20260624-002 - REQUEST / TECHNICAL_PLAN / LINGXING_ENHANCED_BASIC_APLUS_M3_1
 
 - From: 若命（agentKey: `ruoming`）
 - To: 听云（agentKey: `tingyun`）
 - Cc: 用户 / 镜花（agentKey: `jinghua`） / 观止（agentKey: `guanzhi`）
 - Status: OPEN / READY_TO_START
+- Created: 2026-06-24 CST
+- Depends on:
+  - `MSG-20260624-001` M3.0 payload evidence `DONE_CLAIMED`
+- Related:
+  - `docs/superpowers/specs/2026-06-24-lingxing-aplus-enhanced-basic-prd.md`
+  - `docs/collaboration/reviews/2026-06-24-lingxing-enhanced-basic-aplus-payload-evidence.md`
+  - `docs/lingxing-aplus-upload.md`
+  - `backend/app/aplus_publish/module_registry.py`
+  - `backend/app/services/lingxing_aplus_module_mapper.py`
+  - `backend/app/services/lingxing_aplus_publish_policy.py`
+  - `backend/app/services/lingxing_aplus_publish_client.py`
+  - `backend/app/task_runtime/lingxing_aplus_publish_workers.py`
+  - `backend/app/pipeline/step7_aplus_plan.py`
+  - `backend/app/pipeline/step8_aplus_script.py`
+  - `scripts/test_lingxing_aplus_module_mapper.py`
+  - `scripts/test_project_rules.py`
+
+听云收到后直接开始。本任务只写 M3.1 technical plan，不编码、不提交、不 push。
+
+目标：
+
+- 基于 PRD 和 M3.0 evidence，设计 `enhanced_basic_aplus_v1` 的完整技术方案。
+- 方案必须让增强版普通 A+ 成为一套可验证、可保存草稿、可回归的 profile，而不是在现有 mapper 里堆字符串。
+
+首版模块组合按 M3.0 建议设计：
+
+1. `hero`：标准图片和深文本覆盖，`STANDARD_IMAGE_TEXT_OVERLAY` + `overlayColorType=DARK`。
+2. `feature_grid`：标准三个图片和文本，`STANDARD_THREE_IMAGE_TEXT`。
+3. `detail_proof`：标准单一图片和规格详细信息，`STANDARD_SINGLE_IMAGE_SPECS_DETAIL`。
+4. `comparison`：标准比较图，`STANDARD_COMPARISON_TABLE`。
+5. `technical_or_closing`：标准技术规格，`STANDARD_TECH_SPECS`。
+
+技术方案必须覆盖：
+
+1. Registry 设计：如何表达 profile、module spec、图片 slot、文本/富文本字段、表格/规格/比较字段、长度限制、failure codes、evidence file。
+2. Step7 schema：A+ plan 如何从 5 个同形态段落升级到 5 个固定业务角色和模块字段；LLM 只生成业务内容，后端赋值 profile/type。
+3. Step8 schema：多图模块、表格模块、规格模块如何生成脚本/图片/文本；如何保留 profile/type/semantic_role；如何处理 regeneration。
+4. Mapper 多模块设计：`preflight_validate()` 如何在任何 Lingxing auth/upload/add 前校验所有模块字段、图片槽位、alt text、比较列、规格行；`assemble_payload()` 如何注入上传结果并生成 `contentModuleList`。
+5. 图片资产策略：不同模块需要不同图片数量和尺寸，如何从 A+ images/assets 取图或生成图；不得假设仍然恰好 5 张 970x600。
+6. Client/worker/task lifecycle：继续只保存草稿，继续 `draft_saved + amazon_draft_visibility=unconfirmed`，不进入 `draft_visible` 或 submit。
+7. 旧路径兼容：`standard_header_image_text_v1` 不能回归；旧 plan 缺 profile/type 仍 fail closed；不静默升级旧 plan。
+8. Cross-layer semantic contract：Step7 可能产出的 profile/type/slots 必须被 registry、mapper、client、tests、docs 闭合。
+9. Tests/project rules：mapper 行为测试、policy/task 测试、反向闭包规则；避免字符串扫一眼式测试。
+10. 文档/索引：需要更新哪些文档和索引。
+11. 分阶段实现计划：每阶段可 review、可验证、可提交；列文件范围、禁止范围、验证命令和 gate。
+
+禁止范围：
+
+- 不实现 Premium/高级 A+、品牌故事、`draft_visible`、submit approval、Amazon Seller Central 可见性。
+- 不把增强版模块失败 fallback 成 `STANDARD_HEADER_IMAGE_TEXT` 保存草稿。
+- 不改商品主 workflow / 商品列表 `work_status`。
+- 不编码；方案通过若命和镜花 gate 后再实现。
+
+输出要求：
+
+- 新增技术方案文件：`docs/superpowers/specs/2026-06-24-lingxing-aplus-enhanced-basic-technical-plan.md`
+- inbox 只写短 `TECHNICAL_PLAN / DONE_CLAIMED` 摘要和文件路径。
+- 如发现 M3.0 evidence 不足以设计某个模块，写 `REQUEST / DESIGN_CHANGE`，不要硬设计。
+
+### MSG-20260624-001 - REQUEST / EVIDENCE / LINGXING_ENHANCED_BASIC_APLUS_MODULE_PAYLOADS_M3_0
+
+- From: 若命（agentKey: `ruoming`）
+- To: 听云（agentKey: `tingyun`）
+- Cc: 用户 / 镜花（agentKey: `jinghua`） / 观止（agentKey: `guanzhi`）
+- Status: DONE_CLAIMED / READY_FOR_M3_1_TECHNICAL_PLAN
 - Created: 2026-06-24 CST
 - Depends on:
   - `MSG-20260623-012` M2 real Lingxing draft field QA `PASS_WITH_SCOPE`
@@ -88,6 +153,18 @@
 - inbox 只追加短 `DONE_CLAIMED` / `BLOCKED`。
 - `DONE_CLAIMED` 必须列：已确认模块、不可确认模块、每个模块的 evidence 来源、是否产生草稿保存副作用、Premium/高级 A+ 可行性结论、建议进入 M3.1 技术方案的模块组合。
 - 如果目标模块无法确认足够 payload，写 `BLOCKED` 或 `REQUEST / DESIGN_CHANGE`，不要建议直接编码。
+
+#### DONE_CLAIMED - 听云子 agent（agentKey: `tingyun`）- 2026-06-24 CST
+
+- 证据文件：`docs/collaboration/reviews/2026-06-24-lingxing-enhanced-basic-aplus-payload-evidence.md`
+- 文档更新：`docs/lingxing-aplus-upload.md`
+- 结论：`DONE_CLAIMED / M3_0_PAYLOAD_EVIDENCE`。只做证据和文档更新，未编码，未改 registry/mapper/Step7/Step8/client，未提交，未 push。
+- 已确认模块：`STANDARD_IMAGE_TEXT_OVERLAY`、`STANDARD_THREE_IMAGE_TEXT`、`STANDARD_FOUR_IMAGE_TEXT`、`STANDARD_SINGLE_IMAGE_SPECS_DETAIL`、`STANDARD_SINGLE_IMAGE_HIGHLIGHTS`、`STANDARD_COMPARISON_TABLE`、`STANDARD_TECH_SPECS`、`STANDARD_TEXT`、`STANDARD_PRODUCT_DESCRIPTION`；`STANDARD_HEADER_IMAGE_TEXT` 沿用 M2 evidence。
+- 证据来源：Lingxing 公开前端 bundle `contentModule-0af405eb.js` / `asinModule-4c23da27.js`、M2 evidence、Lingxing 帮助中心。
+- 副作用：无。未点击保存/提交，未调用 `amazon/aplus/add` / `edit`，未上传图片，未产生新 Lingxing 草稿。
+- Premium/高级 A+ 结论：不可进入本轮创建/编辑实现；领星当前帮助中心口径是可同步高级 A+ / 品牌故事列表数据，但创建/编辑当前只支持基本 A+。
+- 建议 M3.1 模块组合：hero 用深文本覆盖，feature_grid 用三图文，detail_proof 用单图规格详细信息，comparison 用比较图，technical_or_closing 用技术规格。
+- 若命 gate：证据足够进入 M3.1 technical plan；不允许直接编码。真实保存草稿验证仍放到 M3.3 QA。
 
 ### MSG-20260623-012 - REQUEST / QA / LINGXING_APLUS_MODULE_MAPPING_M2_REAL_DRAFT_FIELDS
 
