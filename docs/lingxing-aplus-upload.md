@@ -337,6 +337,24 @@ make test-project-rules
 
 未改变范围：仍不确认 `draft_visible`，不提交审批，不把领星发布状态并入商品主 workflow / `work_status`。真实领星草稿字段可见性仍需后续观止 QA。
 
+## 2026-06-24 增强版普通 A+ 与高级 A+ 调研
+
+增强版普通 A+ PRD：`docs/superpowers/specs/2026-06-24-lingxing-aplus-enhanced-basic-prd.md`。
+
+领星官方帮助中心 `A+商品描述`（`https://www.lingxing.com/help/article/APlusContent`）显示：
+
+- A+ 列表筛选支持 `A+类型`，类型包括基本 A+、高级 A+、品牌故事。
+- 同步能力可拉取店铺全部 A+ 数据，包括基本 A+、高级 A+、品牌故事。
+- 创建能力当前受限于基本 A+：帮助中心“创建基本A+”章节说明，由于亚马逊接口限制，目前只支持创建基本 A+。
+- 高级 A+ 和品牌故事当前不支持查看详情；常见问题也说明目前只支持编辑基本 A+。
+- 领星创建基本 A+ 时支持 17 种普通/标准内容模块。
+
+当前产品结论：
+
+- 可以继续做 `enhanced_basic_aplus_v1`：在普通 A+ 范围内支持更丰富的标准模块组合，例如图片覆盖、多图文、规格明细、比较图、技术规格等。
+- 不应在本轮实现真正 Premium A+ / 高级 A+ 创建、编辑、提交或可见性验证。
+- Premium A+ 后续如要推进，必须单独确认账号/品牌权限、领星 UI/API 是否开放创建或编辑、Amazon 侧能力和真实 payload，不能复用普通 A+ 假设。
+
 ## 快速定位
 
 ```bash

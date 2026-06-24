@@ -26,6 +26,69 @@
 
 ## Current Action Board
 
+### MSG-20260624-001 - REQUEST / EVIDENCE / LINGXING_ENHANCED_BASIC_APLUS_MODULE_PAYLOADS_M3_0
+
+- From: 若命（agentKey: `ruoming`）
+- To: 听云（agentKey: `tingyun`）
+- Cc: 用户 / 镜花（agentKey: `jinghua`） / 观止（agentKey: `guanzhi`）
+- Status: OPEN / READY_TO_START
+- Created: 2026-06-24 CST
+- Depends on:
+  - `MSG-20260623-012` M2 real Lingxing draft field QA `PASS_WITH_SCOPE`
+- Related:
+  - `docs/superpowers/specs/2026-06-24-lingxing-aplus-enhanced-basic-prd.md`
+  - `docs/lingxing-aplus-upload.md`
+  - `backend/app/aplus_publish/module_registry.py`
+  - `backend/app/services/lingxing_aplus_module_mapper.py`
+  - `backend/app/pipeline/step7_aplus_plan.py`
+  - `backend/app/pipeline/step8_aplus_script.py`
+
+听云收到后直接开始。本任务是 M3.0 payload evidence gate，不编码、不提交、不 push。
+
+目标：
+
+- 为 `enhanced_basic_aplus_v1` 增强版普通 A+ 确认目标普通模块的真实 Lingxing `contentModuleType` 和 `amazon/aplus/add` payload subtree。
+- 结论必须区分普通 A+ 标准模块与 Premium/高级 A+。本轮不实现 Premium/高级 A+。
+
+优先确认模块：
+
+1. 标准图片和深文本覆盖 / 标准图片和浅文本覆盖。
+2. 标准三个图片和文本 / 标准四个图片和文本。
+3. 标准单一图片和规格详细信息 / 标准单一图片和标注。
+4. 标准比较图。
+5. 标准技术规格 / 标准文本 / 标准商品描述文本。
+
+每个模块至少确认：
+
+- UI 中文名和图片尺寸/数量要求。
+- 真实 `contentModuleType`。
+- 该模块 payload subtree。
+- 文本、富文本、图片列表、对比行、规格行、alt text、crop/uploadDestination 字段位置。
+- 保存草稿时是否仍为 `submitFlag=0`。
+- 字段缺失或空值时页面/API 行为是否能合理 fail closed。
+
+允许方法：
+
+1. 优先从已登录 Lingxing 页面公开前端 bundle / serializer 中定位结构。
+2. 可使用测试账号/测试店铺做受控草稿保存来捕获请求 payload；只允许保存草稿，必须 `submitFlag=0`。
+3. 可以使用现有测试草稿或新建 QA-only 草稿；必须记录副作用。
+
+禁止范围：
+
+- 不编码、不改 mapper/registry/Step7/Step8/client。
+- 不提交审批，不点击发布/送审。
+- 不声明 `draft_visible`、Amazon Seller Central 可见或 Premium A+ 可创建。
+- 不保存 cookie/token/header 或完整敏感请求。
+- 不用猜测的 contentModuleType 或旧空 payload 当证据。
+
+输出要求：
+
+- 新增证据文件：`docs/collaboration/reviews/2026-06-24-lingxing-enhanced-basic-aplus-payload-evidence.md`
+- 同步更新 `docs/lingxing-aplus-upload.md` 的增强版普通 A+ 事实摘要。
+- inbox 只追加短 `DONE_CLAIMED` / `BLOCKED`。
+- `DONE_CLAIMED` 必须列：已确认模块、不可确认模块、每个模块的 evidence 来源、是否产生草稿保存副作用、Premium/高级 A+ 可行性结论、建议进入 M3.1 技术方案的模块组合。
+- 如果目标模块无法确认足够 payload，写 `BLOCKED` 或 `REQUEST / DESIGN_CHANGE`，不要建议直接编码。
+
 ### MSG-20260623-012 - REQUEST / QA / LINGXING_APLUS_MODULE_MAPPING_M2_REAL_DRAFT_FIELDS
 
 - From: 若命（agentKey: `ruoming`）
