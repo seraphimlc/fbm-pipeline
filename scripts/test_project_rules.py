@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import ast
 import subprocess
 import sys
 from pathlib import Path
@@ -3347,6 +3348,219 @@ def test_lingxing_aplus_enhanced_basic_registry_phase1_contract() -> None:
         PROFILE_SPECS_BY_KEY.pop(mismatch_key, None)
 
 
+def test_lingxing_aplus_step7_enhanced_phase2_producer_schema() -> None:
+    step7_text = (ROOT / "backend" / "app" / "pipeline" / "step7_aplus_plan.py").read_text()
+    step7_ast = ast.parse(step7_text)
+    run_aplus_plan_node = next(
+        node for node in step7_ast.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "run_aplus_plan"
+    )
+    run_aplus_plan_source = ast.get_source_segment(step7_text, run_aplus_plan_node) or ""
+    assert_true(
+        'Use exactly these semantic roles by position: hero, lifestyle, feature_proof, spec_objection, closing.' in step7_text
+        and "feature_grid, detail_proof, comparison, technical_or_closing" not in step7_text.split("PLAN_PROMPT = ", 1)[1].split("def _format_reference_candidates", 1)[0],
+        "Step7 默认 prompt 必须保持旧 standard_header_image_text_v1 语义，不能在旧默认链路要求 enhanced roles",
+    )
+    assert_true(
+        "len(plan.get('modules') or [])" in run_aplus_plan_source,
+        "Step7 run_aplus_plan 完成日志必须从最终 plan 读取模块数量",
+    )
+    assert_true(
+        "profile_key=DEFAULT_APLUS_PUBLISH_PROFILE" in run_aplus_plan_source
+        and "plan = fallback_aplus_plan(product, pd, pi, selling_points)" in run_aplus_plan_source
+        and "APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1" not in run_aplus_plan_source,
+        "Step7 run_aplus_plan 默认链路不得显式选择 enhanced profile，必须通过 DEFAULT profile selector",
+    )
+    code = r'''
+import json
+from types import SimpleNamespace
+
+from app.aplus_publish.module_registry import (
+    APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+    APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+    LINGXING_STANDARD_HEADER_IMAGE_TEXT,
+    producer_contract_for_profile,
+)
+from app.pipeline.step7_aplus_plan import (
+    APLUS_MODULE_CONTRACT_SOURCE,
+    DEFAULT_APLUS_PUBLISH_PROFILE,
+    aplus_publish_profile_for_plan,
+    build_aplus_plan_from_business_content,
+    fallback_aplus_plan,
+)
+
+product = SimpleNamespace(
+    id=2026062405,
+    brand="Vindhvisk",
+    amazon_asin="B0CURRENT1",
+    competitor_asin="B0COMPET01",
+)
+product_data = SimpleNamespace(
+    listing_title="Modular Sofa with Storage Chaise",
+    title="Modular Sofa",
+    leaf_category="Sofas",
+    amazon_category="Furniture",
+    suggested_price="499.99",
+    features='["storage chaise", "soft fabric", "modular layout", "easy care"]',
+    listing_primary_keyword="modular sofa",
+    gigab2b_raw_snapshot="{}",
+)
+product_image = SimpleNamespace(
+    main_image_path="/images/current-main.jpg",
+    gallery_images='[{"path": "/images/current-side.jpg"}]',
+    image_analysis=None,
+)
+malicious_llm_plan = {
+    "aplus_plan_version": APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+    "publish_profile": APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+    "profile_version": "999",
+    "modules": [
+        {
+            "position": 99,
+            "semantic_role": "wrong_role",
+            "type": "standard_header_image_text",
+            "publish_profile": APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+            "lingxing_content_module_type": LINGXING_STANDARD_HEADER_IMAGE_TEXT,
+            "module_spec_key": "wrong_spec",
+            "headline": f"Headline {idx}",
+            "body": f"Body {idx}",
+            "image_concept": f"Image concept {idx}",
+            "alt_text_seed": f"Alt {idx}",
+            "comparison_asin": "B0FAKE999",
+        }
+        for idx in range(1, 6)
+    ],
+}
+
+default_plan = build_aplus_plan_from_business_content(
+    malicious_llm_plan,
+    product=product,
+    product_data=product_data,
+    product_image=product_image,
+    selling_points=["storage chaise", "soft fabric"],
+)
+assert DEFAULT_APLUS_PUBLISH_PROFILE == APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1
+assert default_plan["modules"][0]["publish_profile"] == APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1
+assert default_plan["modules"][0]["lingxing_content_module_type"] == LINGXING_STANDARD_HEADER_IMAGE_TEXT
+
+default_fallback = fallback_aplus_plan(product, product_data, product_image, ["storage chaise"])
+assert default_fallback["modules"][0]["publish_profile"] == APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1
+assert default_fallback["modules"][0]["lingxing_content_module_type"] == LINGXING_STANDARD_HEADER_IMAGE_TEXT
+assert [module["semantic_role"] for module in default_fallback["modules"]] == ["hero", "lifestyle", "feature_proof", "spec_objection", "closing"]
+
+plan = build_aplus_plan_from_business_content(
+    malicious_llm_plan,
+    product=product,
+    product_data=product_data,
+    product_image=product_image,
+    selling_points=["storage chaise", "soft fabric"],
+    profile_key=APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+)
+contract = producer_contract_for_profile(APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1)
+
+assert plan["aplus_plan_version"] == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+assert plan["publish_profile"] == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+assert plan["profile_version"] == contract.profile_version == "1"
+assert plan["module_contract_source"] == APLUS_MODULE_CONTRACT_SOURCE
+assert len(plan["modules"]) == contract.module_count == 5
+
+for module, expected in zip(plan["modules"], contract.modules, strict=True):
+    assert module["position"] == expected.position
+    assert module["semantic_role"] == expected.semantic_role
+    assert module["type"] == expected.internal_type
+    assert module["internal_type"] == expected.internal_type
+    assert module["publish_profile"] == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+    assert module["profile_version"] == "1"
+    assert module["module_spec_key"] == expected.module_spec_key
+    assert module["lingxing_content_module_type"] == expected.lingxing_content_module_type
+    assert module["payload_key"] == expected.payload_key
+
+modules = {module["semantic_role"]: module for module in plan["modules"]}
+assert modules["hero"]["overlayColorType"] == "DARK"
+assert modules["feature_grid"]["feature_slots"] == ["feature_1", "feature_2", "feature_3"]
+assert len(modules["feature_grid"]["features"]) == 3
+assert 3 <= len(modules["detail_proof"]["spec_items"]) <= 6
+assert 3 <= len(modules["comparison"]["metric_row_labels"]) <= 6
+assert modules["comparison"]["product_columns"][0]["asin"] == "B0CURRENT1"
+assert modules["comparison"]["product_columns"][1]["asin"] == "B0COMPET01"
+assert modules["comparison"]["product_columns"][1]["title"] is None
+assert modules["comparison"]["product_columns"][1]["image_source"] is None
+assert "B0FAKE999" not in json.dumps(plan, ensure_ascii=False)
+assert modules["technical_or_closing"]["tableCount"] == 1
+assert 4 <= len(modules["technical_or_closing"]["spec_rows"]) <= 10
+
+matched_data = SimpleNamespace(**product_data.__dict__)
+matched_data.gigab2b_raw_snapshot = json.dumps({
+    "selected_competitor": {
+        "asin": "B0COMPET01",
+        "title": "Real matched competitor sofa",
+        "image_url": "https://images.example/competitor.jpg",
+    }
+})
+matched_plan = build_aplus_plan_from_business_content(
+    malicious_llm_plan,
+    product=product,
+    product_data=matched_data,
+    product_image=product_image,
+    selling_points=["storage chaise", "soft fabric"],
+    profile_key=APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+)
+matched_column = {module["semantic_role"]: module for module in matched_plan["modules"]}["comparison"]["product_columns"][1]
+assert matched_column["title"] == "Real matched competitor sofa"
+assert matched_column["image_source"] == "https://images.example/competitor.jpg"
+assert matched_column["title_source"] == "product_data.gigab2b_raw_snapshot.selected_competitor.title"
+assert matched_column["image_source_field"] == "product_data.gigab2b_raw_snapshot.selected_competitor.image_url"
+
+mismatched_data = SimpleNamespace(**product_data.__dict__)
+mismatched_data.gigab2b_raw_snapshot = json.dumps({
+    "selected_competitor": {
+        "asin": "B0OTHER001",
+        "title": "Wrong competitor",
+        "image_url": "https://images.example/wrong.jpg",
+    }
+})
+mismatched_plan = build_aplus_plan_from_business_content(
+    malicious_llm_plan,
+    product=product,
+    product_data=mismatched_data,
+    product_image=product_image,
+    selling_points=["storage chaise", "soft fabric"],
+    profile_key=APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+)
+mismatched_column = {module["semantic_role"]: module for module in mismatched_plan["modules"]}["comparison"]["product_columns"][1]
+assert mismatched_column["title"] is None
+assert mismatched_column["image_source"] is None
+
+fallback = fallback_aplus_plan(
+    product,
+    matched_data,
+    product_image,
+    ["storage chaise"],
+    profile_key=APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+)
+assert fallback["publish_profile"] == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+assert LINGXING_STANDARD_HEADER_IMAGE_TEXT not in json.dumps(fallback, ensure_ascii=False)
+
+legacy = build_aplus_plan_from_business_content(
+    {"modules": [{"headline": "Legacy", "text_content": "Legacy body"} for _ in range(5)]},
+    product=product,
+    product_data=product_data,
+    product_image=product_image,
+    selling_points=[],
+    profile_key=APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+)
+assert legacy["modules"][0]["publish_profile"] == APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1
+assert legacy["modules"][0]["lingxing_content_module_type"] == LINGXING_STANDARD_HEADER_IMAGE_TEXT
+assert aplus_publish_profile_for_plan({"modules": [{"type": "standard_header_image_text", "headline": "old"}]}) is None
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"Step7 enhanced producer schema 行为验证失败: {result.stderr or result.stdout}")
+
+
 def test_product_action_worker_does_not_project_failure_for_interrupted() -> None:
     code = r'''
 import asyncio
@@ -4902,6 +5116,7 @@ def main() -> int:
         test_lingxing_aplus_publish_t3_draft_save_contract,
         test_lingxing_aplus_module_mapping_m2_contract,
         test_lingxing_aplus_enhanced_basic_registry_phase1_contract,
+        test_lingxing_aplus_step7_enhanced_phase2_producer_schema,
         test_product_action_worker_does_not_project_failure_for_interrupted,
         test_product_action_final_progress_failure_is_best_effort,
         test_auto_image_selection_phase_a_contract,

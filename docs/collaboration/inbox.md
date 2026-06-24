@@ -87,6 +87,28 @@
 
 - 在本 MSG 下写 `DONE_CLAIMED`，列 changed files、Step7 registry contract 写入方式、旧路径兼容证据、验证结果、未覆盖项、是否需要镜花 Phase 2 review。
 
+#### DONE_CLAIMED / CODE_REVIEW_REREVIEW_PASS - 听云/若命/镜花子 agent - 2026-06-24 CST
+
+- 结论：`DONE_CLAIMED / CODE_REVIEW_REREVIEW_PASS_WITH_SCOPE`。Phase 2 Step7 Producer Schema 已完成，允许若命 scoped commit/push；不代表 Step8/Step9/mapper/client/worker 已支持 enhanced，不代表 Lingxing QA PASS。
+- Changed files:
+  - `backend/app/pipeline/step7_aplus_plan.py`
+  - `scripts/test_project_rules.py`
+- 关键实现：
+  - 新增 registry-backed enhanced producer helper，可显式 `profile_key=enhanced_basic_aplus_v1` 生成 5 个 enhanced modules，并由后端写入 profile/version/type/internal_type/semantic_role/module_spec_key/contentModuleType/payload_key/fixed values。
+  - 默认 `run_aplus_plan()` / 默认 fallback / 默认 build helper 仍走 `standard_header_image_text_v1`，避免 Phase 2 半成品 enhanced plan 自动进入旧 Step8/Step9/mapper。
+  - comparison 竞品 title/image 只从 `ProductData.gigab2b_raw_snapshot.selected_competitor` 且 ASIN 匹配时读取；缺事实或不匹配时保留 `None`，不造 title/image。
+  - 旧无 profile/type plan 不迁移、不自动猜 enhanced。
+- Review:
+  - 镜花首审：`CODE_REVIEW / NEEDS_FIX`，P1 为默认 enhanced 泄漏到旧编排、comparison title 伪事实；P2 为旧 `len(modules)` 回归测试过脆。
+  - 返工后镜花复审：`CODE_REVIEW_REREVIEW / PASS_WITH_SCOPE`。
+- Validation:
+  - `make test-project-rules` PASS，68 tests；第一次遇到既有 `test_task_runtime_autostart` 时序抖动，新增 Step7 测试已 PASS，立即复跑整体 PASS。
+  - `cd backend && .venv/bin/python -m compileall -q app` PASS。
+  - `git diff --check -- backend/app/pipeline/step7_aplus_plan.py scripts/test_project_rules.py` PASS。
+- Not covered / next gate:
+  - 未改 Step8/Step9 image slots、mapper enhanced preflight/payload builder、policy/client/worker、商品 workflow/work_status。
+  - 下一步进入 Phase 3：Step8/Step9 Slot Assets。
+
 ### MSG-20260624-004 - REQUEST / IMPLEMENT / LINGXING_ENHANCED_BASIC_APLUS_PHASE_1_REGISTRY
 
 - From: 若命（agentKey: `ruoming`）

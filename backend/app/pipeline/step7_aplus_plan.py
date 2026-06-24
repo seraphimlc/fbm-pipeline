@@ -8,12 +8,15 @@
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime
 
 from app.aplus_publish.module_registry import (
+    APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
     APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
     INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE,
     LINGXING_STANDARD_HEADER_IMAGE_TEXT,
+    producer_contract_for_profile,
     semantic_role_for_position,
 )
 from app.config import settings
@@ -23,6 +26,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 logger = logging.getLogger(__name__)
+
+APLUS_MODULE_CONTRACT_SOURCE = "backend/app/aplus_publish/module_registry.py"
+DEFAULT_APLUS_PUBLISH_PROFILE = APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1
+_ASIN_RE = re.compile(r"^[A-Z0-9]{10}$")
 
 
 def _is_transient_llm_error(exc: Exception) -> bool:
@@ -269,6 +276,531 @@ def _format_image_diagnostics(pi: ProductImage | None) -> str:
     return json.dumps(summary, ensure_ascii=False, indent=2)
 
 
+def _compact_text(value, fallback: str = "") -> str:
+    text = str(value or "").strip()
+    if not text:
+        text = fallback
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _trim_text(value, max_length: int, fallback: str = "") -> str:
+    text = _compact_text(value, fallback)
+    if len(text) <= max_length:
+        return text
+    return text[: max(0, max_length - 3)].rstrip() + "..."
+
+
+def _as_list(value) -> list:
+    if isinstance(value, list):
+        return value
+    if value is None:
+        return []
+    return [value]
+
+
+def _feature_items_from_product_data(pd: ProductData, selling_points: list) -> list[str]:
+    feature_items: list[str] = []
+    if getattr(pd, "features", None):
+        try:
+            parsed_features = json.loads(pd.features)
+            if isinstance(parsed_features, list):
+                feature_items = [_compact_text(item) for item in parsed_features if _compact_text(item)]
+            elif parsed_features:
+                feature_items = [_compact_text(parsed_features)]
+        except Exception:
+            feature_items = [_compact_text(pd.features)]
+    if not feature_items and selling_points:
+        feature_items = [_compact_text(item) for item in selling_points if _compact_text(item)]
+    if not feature_items:
+        feature_items = [
+            "Clear product identity from the selected reference images.",
+            "Visible material and construction details buyers can verify.",
+            "Practical ownership context grounded in available product facts.",
+        ]
+    while len(feature_items) < 3:
+        feature_items.append(feature_items[-1])
+    return feature_items
+
+
+def _module_candidates_by_role(raw_modules: list) -> dict[str, dict]:
+    by_role: dict[str, dict] = {}
+    for module in raw_modules:
+        if not isinstance(module, dict):
+            continue
+        role = _compact_text(module.get("semantic_role"))
+        if role and role not in by_role:
+            by_role[role] = module
+    return by_role
+
+
+def _raw_module_for_contract(raw_modules: list, modules_by_role: dict[str, dict], contract_module) -> dict:
+    role_match = modules_by_role.get(contract_module.semantic_role)
+    if role_match is not None:
+        return role_match
+    for module in raw_modules:
+        if not isinstance(module, dict):
+            continue
+        try:
+            if int(module.get("position")) == contract_module.position:
+                return module
+        except Exception:
+            continue
+    index = contract_module.position - 1
+    if 0 <= index < len(raw_modules) and isinstance(raw_modules[index], dict):
+        return raw_modules[index]
+    return {}
+
+
+def _conversion_fields(raw: dict, fallback_headline: str) -> dict:
+    return {
+        "conversion_goal": _trim_text(
+            raw.get("conversion_goal") or raw.get("key_message"),
+            300,
+            f"Help buyers understand {fallback_headline}.",
+        ),
+        "buyer_objection": _trim_text(
+            raw.get("buyer_objection"),
+            300,
+            "Clarify a practical buyer concern with supported product evidence.",
+        ),
+        "evidence_source": _trim_text(
+            raw.get("evidence_source") or raw.get("reference_strategy"),
+            300,
+            "Use available product facts, listing claims, and selected reference images.",
+        ),
+        "experience_angle": _trim_text(
+            raw.get("experience_angle") or raw.get("image_concept"),
+            300,
+            "Show a realistic ownership or usage moment without unsupported claims.",
+        ),
+        "gallery_overlap_avoidance": _trim_text(
+            raw.get("gallery_overlap_avoidance"),
+            300,
+            "Avoid repeating MAIN/gallery images unless A+ adds deeper usage context.",
+        ),
+        "risk_guardrails": _string_list(
+            raw.get("risk_guardrails"),
+            [
+                "Keep claims truthful and supported by product facts or visible reference images.",
+                "Preserve product identity, color, material, scale, proportions, and visible construction.",
+            ],
+            min_items=2,
+            max_items=6,
+            max_length=220,
+        ),
+        "visual_do_not_claim": _string_list(
+            raw.get("visual_do_not_claim"),
+            [
+                "Do not show unsupported accessories, functions, certifications, safety claims, or material changes.",
+            ],
+            min_items=1,
+            max_items=6,
+            max_length=220,
+        ),
+    }
+
+
+def _string_list(value, fallback: list[str], *, min_items: int, max_items: int, max_length: int) -> list[str]:
+    items = [_trim_text(item, max_length) for item in _as_list(value) if _compact_text(item)]
+    if not items:
+        items = list(fallback)
+    while len(items) < min_items:
+        items.append(fallback[min(len(items), len(fallback) - 1)])
+    return items[:max_items]
+
+
+def _dict_list(value) -> list[dict]:
+    return [item for item in _as_list(value) if isinstance(item, dict)]
+
+
+def _normalize_asin(value) -> str | None:
+    asin = _compact_text(value).upper()
+    if _ASIN_RE.match(asin):
+        return asin
+    return None
+
+
+def _json_dict_from_text(value) -> dict:
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _product_title(pd: ProductData) -> str:
+    return _trim_text(getattr(pd, "listing_title", None) or getattr(pd, "title", None), 80, "Current product")
+
+
+def _selected_competitor_fact(pd: ProductData, comparison_asin: str | None) -> dict:
+    if not comparison_asin:
+        return {}
+    snapshot = _json_dict_from_text(getattr(pd, "gigab2b_raw_snapshot", None))
+    selected = snapshot.get("selected_competitor")
+    if not isinstance(selected, dict):
+        return {}
+    selected_asin = _normalize_asin(selected.get("asin"))
+    if selected_asin != comparison_asin:
+        return {}
+    return selected
+
+
+def _comparison_product_columns(product: Product, pd: ProductData, pi: ProductImage | None) -> list[dict]:
+    current_asin = _normalize_asin(getattr(product, "amazon_asin", None))
+    comparison_asin = _normalize_asin(getattr(product, "competitor_asin", None))
+    selected_competitor = _selected_competitor_fact(pd, comparison_asin)
+    comparison_title = _trim_text(selected_competitor.get("title"), 80) if selected_competitor else ""
+    comparison_image = _compact_text(
+        selected_competitor.get("image_url")
+        or selected_competitor.get("main_image_url")
+        or selected_competitor.get("image")
+    ) if selected_competitor else ""
+    return [
+        {
+            "column_key": "current_product",
+            "asin": current_asin,
+            "asin_source": "products.amazon_asin" if current_asin else None,
+            "title": _product_title(pd),
+            "title_source": "product_data.listing_title_or_title",
+            "image_source": getattr(pi, "main_image_path", None) if pi else None,
+            "image_source_field": "product_images.main_image_path" if pi and getattr(pi, "main_image_path", None) else None,
+        },
+        {
+            "column_key": "comparison_product",
+            "asin": comparison_asin,
+            "asin_source": "products.competitor_asin" if comparison_asin else None,
+            "title": comparison_title or None,
+            "title_source": "product_data.gigab2b_raw_snapshot.selected_competitor.title" if comparison_title else None,
+            "image_source": comparison_image or None,
+            "image_source_field": "product_data.gigab2b_raw_snapshot.selected_competitor.image_url" if comparison_image else None,
+        },
+    ]
+
+
+def _base_enhanced_module(contract_module, profile_version: str) -> dict:
+    module = {
+        "position": contract_module.position,
+        "type": contract_module.internal_type,
+        "internal_type": contract_module.internal_type,
+        "semantic_role": contract_module.semantic_role,
+        "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+        "profile_version": profile_version,
+        "module_spec_key": contract_module.module_spec_key,
+        "lingxing_content_module_type": contract_module.lingxing_content_module_type,
+        "payload_key": contract_module.payload_key,
+        "required_image_slots": list(contract_module.required_image_slots),
+    }
+    module.update(dict(contract_module.fixed_values))
+    return module
+
+
+def _build_hero_module(raw: dict, contract_module, profile_version: str, pd: ProductData) -> dict:
+    headline = _trim_text(raw.get("headline"), 70, _product_title(pd))
+    module = _base_enhanced_module(contract_module, profile_version)
+    module.update(
+        {
+            "headline": headline,
+            "body": _trim_text(raw.get("body") or raw.get("text_content") or raw.get("key_message"), 300, "Introduce the product with a clear, truthful value promise."),
+            "image_concept": _trim_text(raw.get("image_concept"), 500, "Use the confirmed product image as the identity anchor in a clean Amazon A+ hero scene."),
+            "alt_text_seed": _trim_text(raw.get("alt_text_seed") or raw.get("headline"), 100, headline),
+        }
+    )
+    module.update(_conversion_fields(raw, headline))
+    return module
+
+
+def _feature_from_raw(raw_feature: dict, fallback_text: str, index: int) -> dict:
+    headline = _trim_text(raw_feature.get("headline"), 160, f"Feature {index}")
+    return {
+        "slot": f"feature_{index}",
+        "headline": headline,
+        "body": _trim_text(raw_feature.get("body") or raw_feature.get("text_content"), 1000, fallback_text),
+        "image_concept": _trim_text(raw_feature.get("image_concept"), 500, f"Show supported product detail for {headline}."),
+        "alt_text_seed": _trim_text(raw_feature.get("alt_text_seed") or headline, 100, headline),
+    }
+
+
+def _build_feature_grid_module(raw: dict, contract_module, profile_version: str, pd: ProductData, selling_points: list) -> dict:
+    product_features = _feature_items_from_product_data(pd, selling_points)
+    raw_features = _dict_list(raw.get("features"))
+    features: list[dict] = []
+    for index in range(1, 4):
+        raw_feature = raw_features[index - 1] if index - 1 < len(raw_features) else {}
+        fallback_text = product_features[(index - 1) % len(product_features)]
+        features.append(_feature_from_raw(raw_feature, fallback_text, index))
+    module = _base_enhanced_module(contract_module, profile_version)
+    module.update(
+        {
+            "headline": _trim_text(raw.get("headline"), 200, "Built Around Everyday Use"),
+            "features": features,
+            "feature_slots": ["feature_1", "feature_2", "feature_3"],
+        }
+    )
+    return module
+
+
+def _description_blocks(raw: dict, headline: str) -> list[dict]:
+    raw_blocks = _dict_list(raw.get("description_blocks"))
+    blocks: list[dict] = []
+    for index in range(1, 3):
+        raw_block = raw_blocks[index - 1] if index - 1 < len(raw_blocks) else {}
+        blocks.append(
+            {
+                "headline": _trim_text(raw_block.get("headline"), 200, headline if index == 1 else "More Product Context"),
+                "body": _trim_text(raw_block.get("body") or raw_block.get("text_content"), 400, "Explain the product benefit using only supported facts."),
+            }
+        )
+    return blocks
+
+
+def _spec_items(raw_value, fallback_features: list[str], *, min_items: int, max_items: int) -> list[dict]:
+    items: list[dict] = []
+    for index, raw_item in enumerate(_as_list(raw_value), 1):
+        if isinstance(raw_item, dict):
+            label = raw_item.get("label") or raw_item.get("name") or raw_item.get("headline")
+            value = raw_item.get("value") or raw_item.get("description") or raw_item.get("body")
+        else:
+            label = f"Detail {index}"
+            value = raw_item
+        if _compact_text(value):
+            items.append(
+                {
+                    "label": _trim_text(label, 200, f"Detail {index}"),
+                    "value": _trim_text(value, 400, fallback_features[(index - 1) % len(fallback_features)]),
+                }
+            )
+    index = len(items) + 1
+    while len(items) < min_items:
+        fallback = fallback_features[(index - 1) % len(fallback_features)]
+        items.append({"label": _trim_text(f"Detail {index}", 200), "value": _trim_text(fallback, 400)})
+        index += 1
+    return items[:max_items]
+
+
+def _build_detail_proof_module(raw: dict, contract_module, profile_version: str, pd: ProductData, selling_points: list) -> dict:
+    feature_items = _feature_items_from_product_data(pd, selling_points)
+    headline = _trim_text(raw.get("headline"), 200, "Details That Support Daily Use")
+    module = _base_enhanced_module(contract_module, profile_version)
+    module.update(
+        {
+            "headline": headline,
+            "description_headline": _trim_text(raw.get("description_headline"), 160, "Product details"),
+            "description_blocks": _description_blocks(raw, headline),
+            "spec_items": _spec_items(raw.get("spec_items"), feature_items, min_items=3, max_items=6),
+            "spec_note": _trim_text(raw.get("spec_note"), 400, "Specifications should stay grounded in available product facts."),
+            "image_concept": _trim_text(raw.get("image_concept"), 500, "Use a detail-focused product reference to support material, construction, or fit claims."),
+            "alt_text_seed": _trim_text(raw.get("alt_text_seed") or headline, 100, headline),
+        }
+    )
+    return module
+
+
+def _metric_labels(raw: dict, feature_items: list[str]) -> list[str]:
+    labels = _string_list(
+        raw.get("metric_row_labels"),
+        [f"Attribute {index}" for index in range(1, 4)],
+        min_items=3,
+        max_items=6,
+        max_length=100,
+    )
+    if raw.get("metric_row_labels"):
+        return labels
+    return [_trim_text(item.split(":")[0], 100, f"Attribute {index}") for index, item in enumerate(feature_items[:3], 1)]
+
+
+def _metric_values(raw_value, labels: list[str], fallback_prefix: str) -> list[str]:
+    values = [_trim_text(item, 250) for item in _as_list(raw_value) if _compact_text(item)]
+    while len(values) < len(labels):
+        values.append(f"{fallback_prefix} {labels[len(values)]}")
+    return values[: len(labels)]
+
+
+def _build_comparison_module(raw: dict, contract_module, profile_version: str, product: Product, pd: ProductData, pi: ProductImage | None, selling_points: list) -> dict:
+    feature_items = _feature_items_from_product_data(pd, selling_points)
+    labels = _metric_labels(raw, feature_items)
+    module = _base_enhanced_module(contract_module, profile_version)
+    module.update(
+        {
+            "headline": _trim_text(raw.get("headline"), 160, "Compare the Details That Matter"),
+            "metric_row_labels": labels,
+            "current_product_metric_values": _metric_values(raw.get("current_product_metric_values"), labels, "Current product"),
+            "comparison_product_metric_values": _metric_values(raw.get("comparison_product_metric_values"), labels, "Comparison product"),
+            "comparison_angle": _trim_text(raw.get("comparison_angle"), 300, "Compare practical buying criteria without inventing ASINs or unsupported claims."),
+            "product_columns": _comparison_product_columns(product, pd, pi),
+        }
+    )
+    return module
+
+
+def _spec_rows(raw_value, feature_items: list[str], *, min_items: int, max_items: int) -> list[dict]:
+    rows: list[dict] = []
+    for index, raw_item in enumerate(_as_list(raw_value), 1):
+        if isinstance(raw_item, dict):
+            label = raw_item.get("label") or raw_item.get("name") or raw_item.get("headline")
+            description = raw_item.get("description") or raw_item.get("value") or raw_item.get("body")
+        else:
+            label = f"Spec {index}"
+            description = raw_item
+        if _compact_text(description):
+            rows.append(
+                {
+                    "label": _trim_text(label, 30, f"Spec {index}"),
+                    "description": _trim_text(description, 500, feature_items[(index - 1) % len(feature_items)]),
+                }
+            )
+    index = len(rows) + 1
+    while len(rows) < min_items:
+        rows.append(
+            {
+                "label": _trim_text(f"Spec {index}", 30),
+                "description": _trim_text(feature_items[(index - 1) % len(feature_items)], 500),
+            }
+        )
+        index += 1
+    return rows[:max_items]
+
+
+def _build_technical_or_closing_module(raw: dict, contract_module, profile_version: str, pd: ProductData, selling_points: list) -> dict:
+    feature_items = _feature_items_from_product_data(pd, selling_points)
+    module = _base_enhanced_module(contract_module, profile_version)
+    module.update(
+        {
+            "headline": _trim_text(raw.get("headline"), 80, "Product Specs"),
+            "spec_rows": _spec_rows(raw.get("spec_rows"), feature_items, min_items=4, max_items=10),
+            "closing_note": _trim_text(raw.get("closing_note"), 300, ""),
+            "tableCount": 1,
+        }
+    )
+    return module
+
+
+def _build_enhanced_module(raw: dict, contract_module, profile_version: str, product: Product, pd: ProductData, pi: ProductImage | None, selling_points: list) -> dict:
+    if contract_module.semantic_role == "hero":
+        return _build_hero_module(raw, contract_module, profile_version, pd)
+    if contract_module.semantic_role == "feature_grid":
+        return _build_feature_grid_module(raw, contract_module, profile_version, pd, selling_points)
+    if contract_module.semantic_role == "detail_proof":
+        return _build_detail_proof_module(raw, contract_module, profile_version, pd, selling_points)
+    if contract_module.semantic_role == "comparison":
+        return _build_comparison_module(raw, contract_module, profile_version, product, pd, pi, selling_points)
+    if contract_module.semantic_role == "technical_or_closing":
+        return _build_technical_or_closing_module(raw, contract_module, profile_version, pd, selling_points)
+    raise ValueError(f"Unsupported enhanced A+ semantic role: {contract_module.semantic_role}")
+
+
+def aplus_publish_profile_for_plan(plan: dict | None) -> str | None:
+    if not isinstance(plan, dict):
+        return None
+    for value in (
+        plan.get("publish_profile"),
+        plan.get("aplus_plan_version"),
+        plan.get("profile"),
+    ):
+        text = _compact_text(value)
+        if text:
+            return text
+    modules = plan.get("modules")
+    if isinstance(modules, list):
+        for module in modules:
+            if not isinstance(module, dict):
+                continue
+            text = _compact_text(module.get("publish_profile"))
+            if text:
+                return text
+    return None
+
+
+def _build_enhanced_basic_aplus_plan(raw_plan: dict, *, product: Product, product_data: ProductData, product_image: ProductImage | None, selling_points: list) -> dict:
+    contract = producer_contract_for_profile(APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1)
+    if contract is None:
+        raise ValueError("enhanced_basic_aplus_v1 producer contract is not registered")
+    raw_modules = raw_plan.get("modules") if isinstance(raw_plan.get("modules"), list) else []
+    modules_by_role = _module_candidates_by_role(raw_modules)
+    modules = [
+        _build_enhanced_module(
+            _raw_module_for_contract(raw_modules, modules_by_role, contract_module),
+            contract_module,
+            contract.profile_version,
+            product,
+            product_data,
+            product_image,
+            selling_points,
+        )
+        for contract_module in contract.modules
+    ]
+    plan = {
+        "aplus_plan_version": contract.profile_key,
+        "publish_profile": contract.profile_key,
+        "profile_version": contract.profile_version,
+        "module_contract_source": APLUS_MODULE_CONTRACT_SOURCE,
+        "modules": modules,
+        "plan_summary": _trim_text(raw_plan.get("plan_summary"), 500, "Enhanced basic A+ plan generated from business content and registry contract."),
+        "tone": _trim_text(raw_plan.get("tone"), 80, "professional"),
+        "color_palette": _string_list(raw_plan.get("color_palette"), ["#FFFFFF", "#111827", "#2563EB"], min_items=2, max_items=5, max_length=20),
+        "target_audience": _trim_text(raw_plan.get("target_audience"), 200, "Amazon shoppers evaluating product fit, quality, and ownership context."),
+    }
+    for optional_key in ("fallback", "fallback_reason", "llm_model", "reference_candidate_count"):
+        if optional_key in raw_plan:
+            plan[optional_key] = raw_plan[optional_key]
+    return plan
+
+
+def _build_standard_header_image_text_plan(raw_plan: dict) -> dict:
+    raw_modules = raw_plan.get("modules") if isinstance(raw_plan.get("modules"), list) else []
+    modules: list[dict] = []
+    for index in range(1, 6):
+        raw_module = raw_modules[index - 1] if index - 1 < len(raw_modules) and isinstance(raw_modules[index - 1], dict) else {}
+        module = dict(raw_module)
+        _normalize_module_strategy(module, index)
+        modules.append(module)
+    plan = dict(raw_plan)
+    plan["modules"] = modules
+    return plan
+
+
+def build_aplus_plan_from_business_content(
+    raw_plan: dict,
+    *,
+    product: Product,
+    product_data: ProductData,
+    product_image: ProductImage | None,
+    selling_points: list,
+    profile_key: str = DEFAULT_APLUS_PUBLISH_PROFILE,
+) -> dict:
+    if profile_key == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1:
+        return _build_enhanced_basic_aplus_plan(
+            raw_plan if isinstance(raw_plan, dict) else {},
+            product=product,
+            product_data=product_data,
+            product_image=product_image,
+            selling_points=selling_points,
+        )
+    if profile_key == APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1:
+        return _build_standard_header_image_text_plan(raw_plan if isinstance(raw_plan, dict) else {})
+    raise ValueError(f"Unsupported A+ publish profile for Step7 producer: {profile_key}")
+
+
+def _reference_candidate_count(pi: ProductImage | None) -> int:
+    if not pi:
+        return 0
+    reference_paths = [pi.main_image_path] if pi.main_image_path else []
+    if pi.gallery_images:
+        try:
+            parsed_gallery = json.loads(pi.gallery_images)
+            if isinstance(parsed_gallery, list):
+                reference_paths.extend(
+                    item.get("path") if isinstance(item, dict) else item
+                    for item in parsed_gallery
+                )
+        except Exception:
+            pass
+    return len({str(path) for path in reference_paths if path})
+
+
 def _normalize_module_strategy(module: dict, index: int) -> dict:
     module["position"] = index
     module["type"] = INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE
@@ -300,105 +832,167 @@ def _normalize_module_strategy(module: dict, index: int) -> dict:
     return module
 
 
-def _fallback_aplus_plan(product: Product, pd: ProductData, pi: ProductImage | None, selling_points: list) -> dict:
+def fallback_aplus_plan(
+    product: Product,
+    pd: ProductData,
+    pi: ProductImage | None,
+    selling_points: list,
+    *,
+    profile_key: str = DEFAULT_APLUS_PUBLISH_PROFILE,
+) -> dict:
     title = pd.listing_title or pd.title or "Product"
     category = pd.leaf_category or pd.amazon_category or "General"
-    feature_items: list[str] = []
-    if pd.features:
-        try:
-            parsed_features = json.loads(pd.features)
-            if isinstance(parsed_features, list):
-                feature_items = [str(item) for item in parsed_features if item][:5]
-            else:
-                feature_items = [str(parsed_features)]
-        except Exception:
-            feature_items = [str(pd.features)]
-    if not feature_items and selling_points:
-        feature_items = [str(item) for item in selling_points[:5] if item]
-    if not feature_items:
-        feature_items = [
-            "Show the product clearly from the selected main image.",
-            "Highlight visible details and usage context without unsupported claims.",
+    feature_items = _feature_items_from_product_data(pd, selling_points)
+    if profile_key == APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1:
+        modules = [
+            {
+                "position": 1,
+                "type": INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE,
+                "semantic_role": "hero",
+                "headline": title[:90],
+                "subheading": "A clear first look at the product and its primary value.",
+                "key_message": f"Introduce the {category} product with a clean hero composition.",
+                "text_content": f"Introduce the {category} product with a clean hero composition and truthful product context.",
+                "image_concept": "Use the confirmed product image as the identity anchor, with a simple lifestyle context and conservative copy.",
+            },
+            {
+                "position": 2,
+                "type": INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE,
+                "semantic_role": "lifestyle",
+                "headline": "Designed for Everyday Use",
+                "subheading": "Show the product in a realistic usage moment.",
+                "key_message": feature_items[0],
+                "text_content": feature_items[0],
+                "image_concept": "Show a realistic usage scene that keeps the product shape, color, and visible material faithful to the references.",
+            },
+            {
+                "position": 3,
+                "type": INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE,
+                "semantic_role": "feature_proof",
+                "headline": "Visible Details",
+                "subheading": "Focus on supported construction, finish, or functional details.",
+                "key_message": "; ".join(feature_items[1:4]) or feature_items[0],
+                "text_content": "; ".join(feature_items[1:4]) or feature_items[0],
+                "image_concept": "Use detail-focused reference images to explain visible construction, finish, or functional parts.",
+            },
+            {
+                "position": 4,
+                "type": INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE,
+                "semantic_role": "spec_objection",
+                "headline": "Product Specifications",
+                "subheading": "Answer the buyer's practical fit or setup questions.",
+                "key_message": "Present dimensions, material, use case, and included details only when supported by product facts.",
+                "text_content": "Present dimensions, material, use case, and included details only when supported by product facts.",
+                "image_concept": "Create a clean specification layout without inventing certifications, safety claims, or unsupported performance claims.",
+            },
+            {
+                "position": 5,
+                "type": INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE,
+                "semantic_role": "closing",
+                "headline": "Complete the Setup",
+                "subheading": "Close with a practical ownership scene.",
+                "key_message": feature_items[-1],
+                "text_content": feature_items[-1],
+                "image_concept": "Close with a practical ownership scene that reinforces the most visible selling point from the selected images.",
+            },
         ]
+        for idx, module in enumerate(modules, 1):
+            _normalize_module_strategy(module, idx)
+        return {
+            "modules": modules,
+            "plan_summary": "A+规划由保底逻辑生成：LLM连接超时，已先生成可继续执行的结构化草案；如需更高质量，可重跑A+规划。",
+            "tone": "professional",
+            "color_palette": ["#FFFFFF", "#111827", "#2563EB"],
+            "fallback": True,
+            "fallback_reason": "LLM timeout while generating A+ plan",
+            "llm_model": settings.LLM_MODEL,
+            "reference_candidate_count": _reference_candidate_count(pi),
+        }
 
-    modules = [
-        {
-            "position": 1,
-            "type": INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE,
-            "semantic_role": "hero",
-            "headline": title[:90],
-            "subheading": "A clear first look at the product and its primary value.",
-            "key_message": f"Introduce the {category} product with a clean hero composition.",
-            "text_content": f"Introduce the {category} product with a clean hero composition and truthful product context.",
-            "image_concept": "Use the confirmed product image as the identity anchor, with a simple lifestyle context and conservative copy.",
-        },
-        {
-            "position": 2,
-            "type": INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE,
-            "semantic_role": "lifestyle",
-            "headline": "Designed for Everyday Use",
-            "subheading": "Show the product in a realistic usage moment.",
-            "key_message": feature_items[0],
-            "text_content": feature_items[0],
-            "image_concept": "Show a realistic usage scene that keeps the product shape, color, and visible material faithful to the references.",
-        },
-        {
-            "position": 3,
-            "type": INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE,
-            "semantic_role": "feature_proof",
-            "headline": "Visible Details",
-            "subheading": "Focus on supported construction, finish, or functional details.",
-            "key_message": "; ".join(feature_items[1:4]) or feature_items[0],
-            "text_content": "; ".join(feature_items[1:4]) or feature_items[0],
-            "image_concept": "Use detail-focused reference images to explain visible construction, finish, or functional parts.",
-        },
-        {
-            "position": 4,
-            "type": INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE,
-            "semantic_role": "spec_objection",
-            "headline": "Product Specifications",
-            "subheading": "Answer the buyer's practical fit or setup questions.",
-            "key_message": "Present dimensions, material, use case, and included details only when supported by product facts.",
-            "text_content": "Present dimensions, material, use case, and included details only when supported by product facts.",
-            "image_concept": "Create a clean specification layout without inventing certifications, safety claims, or unsupported performance claims.",
-        },
-        {
-            "position": 5,
-            "type": INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE,
-            "semantic_role": "closing",
-            "headline": "Complete the Setup",
-            "subheading": "Close with a practical ownership scene.",
-            "key_message": feature_items[-1],
-            "text_content": feature_items[-1],
-            "image_concept": "Close with a practical ownership scene that reinforces the most visible selling point from the selected images.",
-        },
-    ]
-    for idx, module in enumerate(modules, 1):
-        _normalize_module_strategy(module, idx)
-    reference_candidate_count = 0
-    if pi:
-        reference_paths = [pi.main_image_path] if pi.main_image_path else []
-        if pi.gallery_images:
-            try:
-                parsed_gallery = json.loads(pi.gallery_images)
-                if isinstance(parsed_gallery, list):
-                    reference_paths.extend(
-                        item.get("path") if isinstance(item, dict) else item
-                        for item in parsed_gallery
-                    )
-            except Exception:
-                pass
-        reference_candidate_count = len({str(path) for path in reference_paths if path})
-    return {
-        "modules": modules,
-        "plan_summary": "A+规划由保底逻辑生成：LLM连接超时，已先生成可继续执行的结构化草案；如需更高质量，可重跑A+规划。",
+    raw_plan = {
+        "plan_summary": "A+ planning was generated by fallback logic after the LLM did not return usable content.",
         "tone": "professional",
         "color_palette": ["#FFFFFF", "#111827", "#2563EB"],
+        "target_audience": "Amazon shoppers comparing product fit, material, and ownership context.",
+        "modules": [
+            {
+                "semantic_role": "hero",
+                "headline": title,
+                "body": f"Introduce the {category} product with a clean hero composition and truthful product context.",
+                "image_concept": "Use the confirmed product image as the identity anchor, with a simple lifestyle context and conservative copy.",
+                "alt_text_seed": title,
+            },
+            {
+                "semantic_role": "feature_grid",
+                "headline": "Designed for Everyday Use",
+                "features": [
+                    {
+                        "headline": f"Feature {index}",
+                        "body": feature_items[(index - 1) % len(feature_items)],
+                        "image_concept": "Show a realistic product detail grounded in selected references.",
+                        "alt_text_seed": feature_items[(index - 1) % len(feature_items)],
+                    }
+                    for index in range(1, 4)
+                ],
+            },
+            {
+                "semantic_role": "detail_proof",
+                "headline": "Details You Can Verify",
+                "description_headline": "Product details",
+                "description_blocks": [
+                    {
+                        "headline": "Visible construction",
+                        "body": "Use reference-backed details to explain material, fit, construction, or usage context.",
+                    },
+                    {
+                        "headline": "Buyer context",
+                        "body": "Keep specs conservative and do not introduce unsupported certifications or performance claims.",
+                    },
+                ],
+                "spec_items": [{"label": f"Detail {index}", "value": item} for index, item in enumerate(feature_items[:6], 1)],
+                "image_concept": "Use detail-focused reference images to explain visible construction, finish, or functional parts.",
+                "alt_text_seed": "Product detail view",
+            },
+            {
+                "semantic_role": "comparison",
+                "headline": "Compare the Practical Details",
+                "metric_row_labels": ["Product type", "Material context", "Use case"],
+                "current_product_metric_values": [
+                    category,
+                    feature_items[0],
+                    "Grounded in current product facts and selected reference images.",
+                ],
+                "comparison_product_metric_values": [
+                    "Comparison product fact required",
+                    "Comparison product fact required",
+                    "Comparison product fact required",
+                ],
+                "comparison_angle": "Compare only backend-sourced ASIN columns and conservative buyer criteria.",
+            },
+            {
+                "semantic_role": "technical_or_closing",
+                "headline": "Product Specs",
+                "spec_rows": [{"label": f"Spec {index}", "description": item} for index, item in enumerate((feature_items * 4)[:4], 1)],
+                "closing_note": "Use this section to answer final fit and ownership questions.",
+            },
+        ],
         "fallback": True,
         "fallback_reason": "LLM timeout while generating A+ plan",
         "llm_model": settings.LLM_MODEL,
-        "reference_candidate_count": reference_candidate_count,
     }
+    raw_plan["reference_candidate_count"] = _reference_candidate_count(pi)
+    return build_aplus_plan_from_business_content(
+        raw_plan,
+        product=product,
+        product_data=pd,
+        product_image=pi,
+        selling_points=selling_points,
+        profile_key=profile_key,
+    )
+
+
+def _fallback_aplus_plan(product: Product, pd: ProductData, pi: ProductImage | None, selling_points: list) -> dict:
+    return fallback_aplus_plan(product, pd, pi, selling_points)
 
 
 async def run_aplus_plan(product_id: int) -> dict:
@@ -460,6 +1054,7 @@ async def run_aplus_plan(product_id: int) -> dict:
 
         logger.info(f"[Step7] 调用LLM生成A+规划: {pd.title}")
         response = None
+        plan = None
         last_transient_error: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
@@ -479,9 +1074,13 @@ async def run_aplus_plan(product_id: int) -> dict:
                     raise
                 last_transient_error = exc
                 if attempt >= max_attempts:
-                    raise RuntimeError(
-                        f"A+规划LLM连接连续失败，未生成真实规划，请稍后重跑: {type(exc).__name__}: {exc}"
-                    ) from exc
+                    logger.warning(
+                        "[Step7] A+规划LLM连接连续失败，使用 fallback plan: error=%s: %s",
+                        type(exc).__name__,
+                        exc,
+                    )
+                    plan = fallback_aplus_plan(product, pd, pi, selling_points)
+                    break
                 wait_seconds = attempt * 5
                 logger.warning(
                     "[Step7] A+规划LLM连接异常，准备重试: attempt=%s/%s, wait=%ss, error=%s: %s",
@@ -492,33 +1091,30 @@ async def run_aplus_plan(product_id: int) -> dict:
                     exc,
                 )
                 await asyncio.sleep(wait_seconds)
-        if response is None:
+        if response is None and plan is None:
             if last_transient_error:
                 raise RuntimeError(
                     f"A+规划未生成真实结果，请重跑: {type(last_transient_error).__name__}: {last_transient_error}"
                 ) from last_transient_error
             raise RuntimeError("A+规划未生成真实结果，请重跑")
-        else:
+        elif plan is None:
             content = response.choices[0].message.content
             if not content:
                 raise RuntimeError("LLM 返回空结果")
 
             try:
-                plan = json.loads(content)
+                raw_plan = json.loads(content)
             except json.JSONDecodeError as e:
                 raise RuntimeError(f"A+规划JSON解析失败: {e}")
 
-        modules = plan.get("modules", [])
-        if not isinstance(modules, list) or len(modules) < 5:
-            raise RuntimeError(f"A+规划模块数量不足: {len(modules) if isinstance(modules, list) else 0}/5")
-        if len(modules) > 5:
-            logger.info(f"[Step7] A+规划返回 {len(modules)} 个模块，普通A+仅保留前5个")
-            modules = modules[:5]
-        for idx, module in enumerate(modules, 1):
-            if isinstance(module, dict):
-                module["position"] = idx
-                _normalize_module_strategy(module, idx)
-        plan["modules"] = modules
+            plan = build_aplus_plan_from_business_content(
+                raw_plan,
+                product=product,
+                product_data=pd,
+                product_image=pi,
+                selling_points=selling_points,
+                profile_key=DEFAULT_APLUS_PUBLISH_PROFILE,
+            )
 
         # 确保 ProductAplus 记录存在
         pa = product.aplus
@@ -532,5 +1128,5 @@ async def run_aplus_plan(product_id: int) -> dict:
         pa.llm_model = settings.LLM_MODEL
         await db.commit()
 
-        logger.info(f"[Step7] A+规划完成: {len(modules)} 个模块, 风格={plan.get('tone')}")
+        logger.info(f"[Step7] A+规划完成: {len(plan.get('modules') or [])} 个模块, 风格={plan.get('tone')}")
         return plan
