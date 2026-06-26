@@ -3827,6 +3827,325 @@ for invalid in (
     assert_true(result.returncode == 0, f"Step8/Step9 enhanced slot assets 行为验证失败: {result.stderr or result.stdout}")
 
 
+def test_aplus_fallback_script_and_provider_resize_metadata_behaviour() -> None:
+    step8_text = (ROOT / "backend" / "app" / "pipeline" / "step8_aplus_script.py").read_text(encoding="utf-8")
+    step9_text = (ROOT / "backend" / "app" / "pipeline" / "step9_aplus_image.py").read_text(encoding="utf-8")
+    assert_true(
+        "last_transient_error" in step8_text
+        and "_fallback_aplus_scripts(plan, product, pd)" in step8_text
+        and "A+脚本LLM连接连续失败，使用保底脚本继续" in step8_text,
+        "Step8 transient LLM 连续失败后必须调用 fallback scripts 继续链路，不得回退为直接 raise",
+    )
+    assert_true(
+        "script_fallback" in step9_text
+        and "script_fallback_reason" in step9_text
+        and "script_source" in step9_text
+        and "_with_script_source_metadata(scripts_data, script)" in step9_text
+        and "_with_script_source_metadata(scripts_data, work_item)" in step9_text,
+        "Step9 legacy/enhanced image manifest 必须持久化 fallback script 来源元数据",
+    )
+    assert_true(
+        "provider_raw_width" in step9_text
+        and "provider_raw_height" in step9_text
+        and "_provider_image_metadata(image_payload, size_info)" in step9_text,
+        "Step9 最终 image manifest 必须持久化 provider raw size 与 upscaled_from_provider",
+    )
+    code = r'''
+import asyncio
+import json
+import tempfile
+from io import BytesIO
+from pathlib import Path
+from types import SimpleNamespace
+
+from PIL import Image
+
+import app.pipeline.step8_aplus_script as step8
+import app.pipeline.step9_aplus_image as step9
+from app.aplus_publish.module_registry import (
+    APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+    APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+    LINGXING_STANDARD_HEADER_IMAGE_TEXT,
+    required_image_slots,
+)
+
+
+class FakeExecuteResult:
+    def __init__(self, product):
+        self.product = product
+
+    def scalar_one_or_none(self):
+        return self.product
+
+
+class FakeSession:
+    def __init__(self, product):
+        self.product = product
+        self.commit_count = 0
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    async def execute(self, query):
+        return FakeExecuteResult(self.product)
+
+    async def commit(self):
+        self.commit_count += 1
+
+
+class TimeoutCompletions:
+    def __init__(self):
+        self.calls = 0
+
+    async def create(self, **kwargs):
+        self.calls += 1
+        raise TimeoutError("connection timeout while generating scripts")
+
+
+class TimeoutClient:
+    def __init__(self):
+        self.completions = TimeoutCompletions()
+        self.chat = SimpleNamespace(completions=self.completions)
+
+    def with_options(self, **kwargs):
+        return self
+
+
+def standard_plan():
+    return {
+        "publish_profile": APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+        "modules": [
+            {
+                "position": index,
+                "headline": f"Headline {index}",
+                "key_message": f"Message {index}",
+                "image_concept": f"Concept {index}",
+                "semantic_role": "hero" if index == 1 else "lifestyle",
+                "publish_profile": APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+                "lingxing_content_module_type": LINGXING_STANDARD_HEADER_IMAGE_TEXT,
+            }
+            for index in range(1, 6)
+        ],
+    }
+
+
+async def exercise_step8_fallback():
+    client = TimeoutClient()
+    pa = SimpleNamespace(aplus_plan=json.dumps(standard_plan()), aplus_scripts=None, aplus_scripts_summary=None, scripted_at=None)
+    product = SimpleNamespace(
+        id=2026062601,
+        brand="Brand",
+        data=SimpleNamespace(
+            listing_title="Fallback Test Product",
+            title="Fallback Product",
+            leaf_category="General",
+            color="black",
+            material="steel",
+        ),
+        images=SimpleNamespace(main_image_path=None, image_analysis=None),
+        aplus=pa,
+    )
+    fake_settings = SimpleNamespace(
+        APLUS_IMAGE_WIDTH=1940,
+        APLUS_IMAGE_HEIGHT=1200,
+        LLM_MODEL="fake-llm",
+        DEFAULT_BRAND="Brand",
+        get_llm_client=lambda: client,
+    )
+    original_session = step8.async_session
+    original_settings = step8.settings
+    original_sleep = step8.asyncio.sleep
+
+    async def no_sleep(seconds):
+        return None
+
+    try:
+        step8.async_session = lambda: FakeSession(product)
+        step8.settings = fake_settings
+        step8.asyncio.sleep = no_sleep
+        result = await step8.run_aplus_script(product.id)
+    finally:
+        step8.async_session = original_session
+        step8.settings = original_settings
+        step8.asyncio.sleep = original_sleep
+
+    assert client.completions.calls == 2, client.completions.calls
+    assert result["fallback"] is True
+    assert result["fallback_reason"]
+    assert len(result["scripts"]) == 5
+    assert all(script["fallback_script"] is True for script in result["scripts"])
+    persisted = json.loads(pa.aplus_scripts)
+    assert persisted["fallback"] is True
+    assert persisted["scripts"][0]["fallback_script"] is True
+
+
+def image_bytes(width, height):
+    buffer = BytesIO()
+    Image.new("RGB", (width, height), "#ffffff").save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+async def fake_reference_generation(prompt, ref_sources, width, height):
+    raw_width = min(width, 970)
+    raw_height = min(height, 600)
+    payload = {"bytes": image_bytes(raw_width, raw_height), "provider_source": "fake-provider"}
+    return step9._ensure_provider_image_large_enough(payload, width, height, "fake-provider")
+
+
+def fake_upload(output_path, product_key, position, asset_key=None):
+    return {
+        "oss_status": "uploaded",
+        "oss_url": f"https://oss.example/{product_key}/{asset_key or position}.jpg",
+        "oss_object_key": f"{product_key}/{asset_key or position}.jpg",
+        "oss_expires_seconds": 3600,
+    }
+
+
+def fallback_legacy_scripts():
+    return {
+        "fallback": True,
+        "fallback_reason": "LLM timeout while generating A+ scripts",
+        "scripts": [
+            {
+                "module_position": 1,
+                "fallback_script": True,
+                "prompt": "Create a fallback legacy A+ image",
+                "width": 1940,
+                "height": 1200,
+                "reference_images": [{"path": "/tmp/reference-a.jpg"}],
+            }
+        ],
+    }
+
+
+def fallback_enhanced_scripts():
+    slots_by_position = {}
+    for item in required_image_slots(APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1):
+        slots_by_position.setdefault(item.position, []).append(item)
+    scripts = []
+    for position in range(1, 6):
+        scripts.append(
+            {
+                "module_position": position,
+                "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+                "semantic_role": f"role_{position}",
+                "module_spec_key": f"spec_{position}",
+                "lingxing_content_module_type": "STANDARD_TEST",
+                "prompt": f"Create enhanced module {position}",
+                "fallback_script": True,
+                "reference_images": [{"path": "/tmp/reference-enhanced.jpg"}],
+                "image_slots": [
+                    {
+                        "asset_slot_id": f"module_{slot.position}_{slot.slot.slot_id}",
+                        "slot_id": slot.slot.slot_id,
+                        "payload_slot": slot.slot.slot_id,
+                        "payload_path": list(slot.slot.payload_path),
+                        "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+                        "module_position": slot.position,
+                        "semantic_role": f"role_{position}",
+                        "module_spec_key": f"spec_{position}",
+                        "lingxing_content_module_type": "STANDARD_TEST",
+                        "target_width": slot.slot.crop_width,
+                        "target_height": slot.slot.crop_height,
+                        "prompt": f"Create slot {slot.slot.slot_id}",
+                        "reference_images": [{"path": "/tmp/reference-enhanced.jpg"}],
+                    }
+                    for slot in slots_by_position.get(position, [])
+                ],
+            }
+        )
+    return {
+        "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+        "fallback": True,
+        "fallback_reason": "LLM timeout while generating enhanced A+ scripts",
+        "scripts": scripts,
+    }
+
+
+async def exercise_step9_manifest(scripts_data):
+    with tempfile.TemporaryDirectory() as tmpdir:
+        pa = SimpleNamespace(
+            aplus_scripts=json.dumps(scripts_data),
+            aplus_images=None,
+            aplus_image_count=0,
+            aplus_status=None,
+            generated_at=None,
+        )
+        product = SimpleNamespace(
+            id=2026062602,
+            brand="Brand",
+            data=SimpleNamespace(material_dir=tmpdir, item_code="SKU-FALLBACK"),
+            aplus=pa,
+        )
+        fake_settings = SimpleNamespace(
+            APLUS_IMAGE_WIDTH=1940,
+            APLUS_IMAGE_HEIGHT=1200,
+            APLUS_IMAGE_OVERWRITE_POLICY="overwrite_all",
+            APLUS_CONCURRENCY=3,
+            APLUS_IMAGE_MAX_BYTES=2_000_000,
+            APLUS_IMAGE_JPEG_QUALITY=90,
+            APLUS_IMAGE_MIN_JPEG_QUALITY=70,
+            GPT_IMAGE_MODEL="fake-image-model",
+            DEFAULT_BRAND="Brand",
+            gpt_image_api_provider="fake",
+        )
+        original_session = step9.async_session
+        original_settings = step9.settings
+        original_generation = step9._submit_reference_generation
+        original_upload = step9._upload_generated_image_to_oss
+        try:
+            step9.async_session = lambda: FakeSession(product)
+            step9.settings = fake_settings
+            step9._submit_reference_generation = fake_reference_generation
+            step9._upload_generated_image_to_oss = fake_upload
+            result = await step9.run_aplus_image(product.id)
+        finally:
+            step9.async_session = original_session
+            step9.settings = original_settings
+            step9._submit_reference_generation = original_generation
+            step9._upload_generated_image_to_oss = original_upload
+
+        manifest = json.loads(pa.aplus_images)
+        assert result["success"] == len(manifest)
+        assert all(item["status"] == "done" for item in manifest)
+        assert all(item["script_fallback"] is True for item in manifest)
+        assert all(item["script_source"] == "fallback_script" for item in manifest)
+        assert all(item["script_fallback_reason"] for item in manifest)
+        assert all("provider_raw_width" in item and "provider_raw_height" in item for item in manifest)
+        return manifest
+
+
+async def main():
+    await exercise_step8_fallback()
+
+    legacy_manifest = await exercise_step9_manifest(fallback_legacy_scripts())
+    legacy_item = legacy_manifest[0]
+    assert legacy_item["provider_raw_width"] == 970
+    assert legacy_item["provider_raw_height"] == 600
+    assert legacy_item["width"] == 1940
+    assert legacy_item["height"] == 1200
+    assert legacy_item["upscaled_from_provider"] is True
+
+    enhanced_manifest = await exercise_step9_manifest(fallback_enhanced_scripts())
+    assert len(enhanced_manifest) == len(required_image_slots(APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1))
+    assert all(item["asset_slot_id"] for item in enhanced_manifest)
+    assert all(item["script_fallback"] is True for item in enhanced_manifest)
+
+
+asyncio.run(main())
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"A+ fallback/provider resize metadata 行为验证失败: {result.stderr or result.stdout}")
+
+
 def test_product_action_worker_does_not_project_failure_for_interrupted() -> None:
     code = r'''
 import asyncio
@@ -5384,6 +5703,7 @@ def main() -> int:
         test_lingxing_aplus_enhanced_basic_registry_phase1_contract,
         test_lingxing_aplus_step7_enhanced_phase2_producer_schema,
         test_lingxing_aplus_step8_step9_phase3_slot_assets,
+        test_aplus_fallback_script_and_provider_resize_metadata_behaviour,
         test_product_action_worker_does_not_project_failure_for_interrupted,
         test_product_action_final_progress_failure_is_best_effort,
         test_auto_image_selection_phase_a_contract,
