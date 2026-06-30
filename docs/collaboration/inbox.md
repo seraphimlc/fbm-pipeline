@@ -26,12 +26,74 @@
 
 ## Current Action Board
 
+### MSG-20260630-001 - REQUEST / QA / APLUS_FALLBACK_RESIZE_ARTIFACT_EVIDENCE
+
+- From: 若命（agentKey: `ruoming`）
+- To: 观止（agentKey: `guanzhi`）
+- Cc: 用户 / 镜花（agentKey: `jinghua`） / 听云（agentKey: `tingyun`）
+- Status: CLOSED / QA_PASS_WITH_SCOPE
+- Created: 2026-06-30 CST
+- Depends on:
+  - `838e5f7 fix: preserve aplus fallback image evidence`
+  - `MSG-20260626-002` 镜花 `CODE_REVIEW_REREVIEW / PASS_WITH_SCOPE`
+- Related:
+  - `backend/app/pipeline/step8_aplus_script.py`
+  - `backend/app/pipeline/step9_aplus_image.py`
+  - `scripts/test_project_rules.py`
+  - `docs/collaboration/summaries/2026-06-24-w808p415447-aplus-lingxing-status.md`
+  - `docs/collaboration/summaries/2026-06-26-aplus-fallback-resize-fix.md`
+
+观止收到后直接做只读 QA。目标是验收本轮 A+ fallback scripts / provider resize 证据链是否足以支持后续真实链路试用；不触发新任务、不重新生成图片、不保存草稿、不 submit、不访问/操作真实 Lingxing 或 Amazon。
+
+样本与前置事实：
+
+- 样本商品：`Product 104` / SKU `W808P415447` / ASIN `B0H6JGDHCW`。
+- 旧真实产物总结：`docs/collaboration/summaries/2026-06-24-w808p415447-aplus-lingxing-status.md`。
+- 注意：W808P415447 是 2026-06-24 生成的旧产物，早于 `838e5f7`；不能要求该旧 DB manifest 已包含 `script_source` / `script_fallback` / `provider_raw_width` 新字段。
+- 本轮新字段的可复跑证据来源是 `scripts/test_project_rules.py::test_aplus_fallback_script_and_provider_resize_metadata_behaviour` 和代码事实；真实重新生成后的 DB manifest 仍需后续新样本确认。
+
+必须验证：
+
+1. 旧真实样本事实是否自洽。
+   - 本地 A+ 图片目录是否存在，5 张 final 图片和 raw 图片尺寸是否与总结一致。
+   - `ProductAplus.aplus_status` / 图片数量 / `AplusUploadItem` / `CatalogProduct.aplus_upload_status` 是否与总结一致（只读 DB；如 DB 环境不可用，写 `BLOCKED` 或 evidence gap）。
+   - `submitFlag=0`、`amazon_draft_visibility=unconfirmed`、未 submit 的边界是否有证据。
+2. 新修复后的证据链是否可 QA。
+   - 代码/测试证据是否能证明未来 Step9 manifest 会保留 `script_source`、`script_fallback`、`script_fallback_reason`、`provider_raw_width`、`provider_raw_height`、`upscaled_from_provider`。
+   - `make test-project-rules` 或 focused project rule 是否可复跑并 PASS。
+3. 判断本轮是否可以给 `ARTIFACT_QA / PASS_WITH_SCOPE`。
+   - PASS 只能表示：旧产物事实可追溯 + 新 metadata 行为有可复跑证据 + 未发现会把降级产物冒充普通产物的证据链缺口。
+   - PASS 不代表：Amazon 草稿箱可见、Lingxing/Amazon 真实外部验收、submit、图片业务审美、人工作品质量最终确认。
+
+禁止范围：
+
+- 不触发 Step7/Step8/Step9 重跑。
+- 不触发 Lingxing A+ save/publish task。
+- 不访问或操作真实外部平台。
+- 不修改 DB、图片、任务状态、产物文件或代码。
+- 不把 2026-06-24 旧样本当作 `838e5f7` 新字段真实落库证明。
+
+输出要求：
+
+- 写 QA 报告到 `docs/collaboration/reviews/2026-06-30-aplus-fallback-resize-artifact-qa.md`。
+- 在本 MSG 下追加短 `QA / PASS_WITH_SCOPE`、`QA / NEEDS_FIX` 或 `QA / BLOCKED`。
+- 报告必须列测试矩阵、样本、命令/只读查询/文件证据、未覆盖项、允许/禁止副作用、Gate meaning。
+
+#### QA / PASS_WITH_SCOPE - 观止（agentKey: `guanzhi`）- 2026-06-30 CST
+
+- 结论：`ARTIFACT_QA / PASS_WITH_SCOPE`。
+- QA 报告：`docs/collaboration/reviews/2026-06-30-aplus-fallback-resize-artifact-qa.md`。
+- 证据摘要：旧样本 Product `104` / SKU `W808P415447` / ASIN `B0H6JGDHCW` 的本地 5 张 final 图均为 `1940x1200`，5 张 raw 图均为 `1595x986`；只读 MySQL 查询显示 `ProductAplus.aplus_status=done`、`aplus_image_count=5`、`CatalogProduct 8.aplus_upload_status=draft_saved`、`AplusUploadItem 46.status=success`、`amazon_draft_visibility=unconfirmed`、publish evidence `submitFlag=0`，TaskRun `1329/1330` 均为 `succeeded`，且 step `1336` 有 `restored_audit_record=true` 审计事件。
+- 新修复证据：代码确认 Step9 legacy/enhanced/regenerate 路径注入 `script_source` / `script_fallback` / `script_fallback_reason`，并将 provider raw size / `upscaled_from_provider` 合入最终 image result；focused project rule `test_aplus_fallback_script_and_provider_resize_metadata_behaviour` PASS。
+- 范围说明：旧样本早于 `838e5f7`，不要求旧 DB manifest 已有新字段；本 PASS 不代表 Amazon 草稿箱可见、真实外部验收、submit、图片审美或新样本真实落库已确认。
+- 验证备注：`make test-project-rules` 中目标 A+ metadata rule 已打印 PASS，但全量命令随后在无关 `test_task_runtime_autostart_runner_lifecycle_behaviour` 失败（`('running', 'succeeded')`）；本轮以 focused rule PASS 支撑 A+ metadata QA，task runtime 失败不纳入本 gate。
+
 ### MSG-20260626-002 - REQUEST / FIX / APLUS_FALLBACK_SCRIPT_AND_PROVIDER_RESIZE_REVIEW_FIX
 
 - From: 若命（agentKey: `ruoming`）
 - To: 听云（agentKey: `tingyun`）
 - Cc: 用户 / 镜花（agentKey: `jinghua`） / 观止（agentKey: `guanzhi`）
-- Status: OPEN / READY_TO_START
+- Status: CLOSED / COMMITTED_PUSHED
 - Created: 2026-06-26 CST
 - Depends on:
   - `MSG-20260626-001` 镜花 `CODE_REVIEW / NEEDS_FIX`
@@ -154,7 +216,7 @@
 - From: 若命（agentKey: `ruoming`）
 - To: 镜花（agentKey: `jinghua`）
 - Cc: 用户 / 听云（agentKey: `tingyun`） / 观止（agentKey: `guanzhi`）
-- Status: OPEN / READY_TO_START
+- Status: CLOSED / SUPERSEDED_BY_MSG_20260626_002_AND_COMMITTED
 - Created: 2026-06-26 CST
 - Depends on:
   - `147aa9c feat: add enhanced aplus slot assets` 已提交并推送
