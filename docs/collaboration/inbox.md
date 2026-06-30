@@ -150,6 +150,30 @@ QA 目标：
   - `LINGXING_APLUS_STORE_ID` and site/store confirmation.
   - One safe enhanced sample with `enhanced_basic_aplus_v1`, 7 image slots, comparison rows, tech spec rows, seller SKU and synced ASIN.
 
+#### RUOMING_UNBLOCK_PRECHECK / SAMPLE_PREP_DRY_RUN_ADDED - 若命（agentKey: `ruoming`）- 2026-06-30 CST
+
+- 结论：已补本地 enhanced QA 样本准备工具，但未写库、未生成样本、未触发外部调用；`MSG-20260630-005` 仍保持 `QA_BLOCKED / WAITING_FOR_UNBLOCK_INPUT`。
+- Added:
+  - `scripts/prepare_lingxing_enhanced_aplus_qa_sample.py`
+  - 默认 dry-run，只列候选；写入本地 `ProductAplus` 和 7 张 slot 图片必须显式 `--catalog-product-id <id> --write`；覆盖已有 A+ plan/images 还必须显式 `--overwrite-aplus`。
+  - 脚本不导入 real draft-save client，不创建 `lingxing_aplus_publish` task，不 kick runtime，不调用 Lingxing/Chrome/Amazon。
+- Current dry-run:
+  - Command: `cd backend && .venv/bin/python ../scripts/prepare_lingxing_enhanced_aplus_qa_sample.py`
+  - Result: exit `0`, `status=DRY_RUN`, `external_side_effects=none`。
+  - Candidate `catalog_product_id=8` / `product_id=104`: has seller SKU, synced ASIN, current ASIN and comparison ASIN, but blocked by `existing_non_enhanced_aplus_plan`; preparing it would require explicit overwrite.
+  - Candidate `catalog_product_id=1337` / `product_id=1472`: missing comparison ASIN and has existing non-enhanced A+ plan.
+  - Candidate `catalog_product_id=1300` / `product_id=1435`: missing comparison ASIN and has existing non-enhanced A+ plan.
+- Guardrails:
+  - Project rule updated: sample prep must remain dry-run by default, require `--write` for DB changes, require `--overwrite-aplus` before replacing existing A+ content, and never trigger external calls or publish tasks.
+  - Project/domain/security indexes updated with the sample-prep command and local-only boundary.
+- Possible next command after explicit operator decision:
+  - `cd backend && .venv/bin/python ../scripts/prepare_lingxing_enhanced_aplus_qa_sample.py --catalog-product-id 8 --write --overwrite-aplus`
+  - Then rerun readiness: `cd backend && .venv/bin/python ../scripts/check_lingxing_enhanced_aplus_qa_readiness.py --catalog-product-id 8`
+- Still needed for real QA after sample readiness:
+  - Effective Chrome Lingxing login state.
+  - `LINGXING_APLUS_ALLOW_REAL_EXTERNAL_CALLS=true`.
+  - `LINGXING_APLUS_STORE_ID` and site/store confirmation.
+
 ### MSG-20260630-004 - REQUEST / IMPLEMENT / LINGXING_ENHANCED_BASIC_APLUS_PHASE_6_DOCS_RULES
 
 - From: 若命（agentKey: `ruoming`）

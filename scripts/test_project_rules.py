@@ -3347,6 +3347,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
 
 def test_lingxing_aplus_enhanced_m3_3_readiness_is_readonly() -> None:
     script_path = ROOT / "scripts" / "check_lingxing_enhanced_aplus_qa_readiness.py"
+    prepare_script_path = ROOT / "scripts" / "prepare_lingxing_enhanced_aplus_qa_sample.py"
     project_index = (ROOT / "docs" / "project-index.md").read_text(encoding="utf-8")
     task_runtime_index = (ROOT / "docs" / "domain-index" / "task-runtime.md").read_text(encoding="utf-8")
     runtime_security_index = (ROOT / "docs" / "domain-index" / "runtime-security.md").read_text(encoding="utf-8")
@@ -3378,11 +3379,33 @@ def test_lingxing_aplus_enhanced_m3_3_readiness_is_readonly() -> None:
     )
     assert_true(
         "check_lingxing_enhanced_aplus_qa_readiness.py" in project_index
+        and "prepare_lingxing_enhanced_aplus_qa_sample.py" in project_index
         and "check_lingxing_enhanced_aplus_qa_readiness.py" in task_runtime_index
+        and "prepare_lingxing_enhanced_aplus_qa_sample.py" in task_runtime_index
         and "check_lingxing_enhanced_aplus_qa_readiness.py" in runtime_security_index
+        and "prepare_lingxing_enhanced_aplus_qa_sample.py" in runtime_security_index
         and "不触发 Lingxing/Chrome/Amazon" in task_runtime_index
         and "不调用 Lingxing auth" in runtime_security_index,
-        "M3.3 readiness 入口必须写入 project/domain/security index，并明确不是真实 QA 或外部调用",
+        "M3.3 readiness/sample 入口必须写入 project/domain/security index，并明确不是真实 QA 或外部调用",
+    )
+    assert_true(prepare_script_path.is_file(), "M3.3 必须提供默认 dry-run 的 enhanced QA 样本准备脚本")
+    prepare_text = prepare_script_path.read_text(encoding="utf-8")
+    assert_true(
+        "parser.add_argument(\"--write\", action=\"store_true\"" in prepare_text
+        and "parser.add_argument(\"--overwrite-aplus\", action=\"store_true\"" in prepare_text
+        and "\"DRY_RUN\"" in prepare_text
+        and "write_required_for_db_changes" in prepare_text,
+        "M3.3 样本准备脚本默认必须 dry-run，写库和覆盖 A+ 内容必须显式开关",
+    )
+    assert_true(
+        "LingxingAplusDraftSaveClient" not in prepare_text
+        and ".save_draft(" not in prepare_text
+        and "create_lingxing_aplus_publish_runs" not in prepare_text
+        and "kick_task_runtime" not in prepare_text
+        and "httpx.AsyncClient" not in prepare_text
+        and "uploadDestination" not in prepare_text
+        and "amazon/aplus/add" not in prepare_text,
+        "M3.3 样本准备脚本只能写本地 ProductAplus/图片，不得触发 Lingxing/Chrome/Amazon 外部副作用或发布 task",
     )
 
 
