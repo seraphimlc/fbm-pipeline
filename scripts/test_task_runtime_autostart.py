@@ -68,22 +68,34 @@ async def _assert_ready_step_is_claimed_and_executed_without_wake() -> None:
     run_id = await _create_ready_probe_run()
     try:
         scheduler.kick_task_runtime()
-        deadline = asyncio.get_running_loop().time() + 3.0
-        final_status: tuple[str, str | None] | None = None
-        while asyncio.get_running_loop().time() < deadline:
-            async with async_session() as db:
-                result = await db.execute(
-                    select(TaskRun.status, TaskStep.status)
-                    .join(TaskStep, TaskStep.task_run_id == TaskRun.id)
-                    .where(TaskRun.id == run_id)
-                )
-                final_status = result.first()
-            if final_status and final_status[0] == RUN_STATUS_SUCCEEDED and final_status[1] == STEP_STATUS_SUCCEEDED:
-                break
-            await asyncio.sleep(0.05)
+        await _wait_for_runner_idle()
+        async with async_session() as db:
+            result = await db.execute(
+                select(TaskRun.status, TaskStep.status)
+                .join(TaskStep, TaskStep.task_run_id == TaskRun.id)
+                .where(TaskRun.id == run_id)
+            )
+            final_status = result.first()
         assert final_status and tuple(final_status) == (RUN_STATUS_SUCCEEDED, STEP_STATUS_SUCCEEDED), final_status
     finally:
         await _cleanup_probe_runs()
+
+
+async def _wait_for_runner_idle() -> None:
+    deadline = asyncio.get_running_loop().time() + 3.0
+    while asyncio.get_running_loop().time() < deadline:
+        task = scheduler._runner_task
+        handle = scheduler._runner_handle
+        if task:
+            await task
+            await asyncio.sleep(0)
+            return
+        if not handle or handle.cancelled():
+            await asyncio.sleep(0)
+            if not scheduler._runner_task:
+                return
+        await asyncio.sleep(0.05)
+    raise AssertionError("task runtime runner did not become idle")
 
 
 async def _probe_worker(ctx: TaskContext) -> dict:

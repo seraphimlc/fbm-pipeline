@@ -26,12 +26,193 @@
 
 ## Current Action Board
 
-### MSG-20260630-003 - REQUEST / IMPLEMENT / LINGXING_ENHANCED_BASIC_APLUS_PHASE_5_LIFECYCLE
+### MSG-20260630-004 - REQUEST / IMPLEMENT / LINGXING_ENHANCED_BASIC_APLUS_PHASE_6_DOCS_RULES
 
 - From: 若命（agentKey: `ruoming`）
 - To: 听云（agentKey: `tingyun`）
 - Cc: 用户 / 镜花（agentKey: `jinghua`） / 观止（agentKey: `guanzhi`）
 - Status: CODE_REVIEW_PASS_WITH_SCOPE / READY_FOR_SCOPED_COMMIT
+- Created: 2026-06-30 CST
+- Depends on:
+  - `67b5c33 feat: wire enhanced aplus draft lifecycle`
+  - `docs/superpowers/specs/2026-06-24-lingxing-aplus-enhanced-basic-technical-plan.md` Phase 6
+- Related:
+  - `docs/lingxing-aplus-upload.md`
+  - `docs/domain-index/product-flow.md`
+  - `docs/domain-index/task-runtime.md`
+  - `docs/domain-index/runtime-security.md`
+  - `docs/project-index.md`
+  - `scripts/test_project_rules.py`
+  - `scripts/test_task_runtime_autostart.py`
+
+听云收到后直接执行。任务是 Phase 6：Docs and Index Closure。把 enhanced basic A+ 当前实现闭环写入文档/索引，并补 registry/helper-based 反向闭包 project rules；不改业务代码，不做真实 Lingxing QA，不提交、不 push。
+
+目标：
+
+- 文档能准确说明 `enhanced_basic_aplus_v1` 的 profile、模块、slot、fail-closed、draft-save-only 生命周期和非目标。
+- domain/project index 能把后续问题路由到 registry、Step7/8/9、policy、mapper、client、planner、worker 和验证命令。
+- project rules 增加反向闭包：Step7/Step8/Step9/mapper/policy/client/task tests 不只是字符串扫描，还要从 registry/helper 事实证明 enhanced profile 生产端和消费端闭合。
+
+执行范围：
+
+1. `docs/lingxing-aplus-upload.md`
+   - 增加 enhanced profile payload/slot policy 摘要。
+   - 保留 Premium/高级 A+、`draft_visible`、submit、Amazon Seller Central visibility 非目标。
+2. `docs/domain-index/product-flow.md`
+   - 更新 T3.5/M3 段落：从单一旧 profile 改为 registry-backed legacy + enhanced profiles。
+   - 明确 enhanced 仍不并入商品主 workflow/work_status。
+3. `docs/domain-index/task-runtime.md`
+   - 更新 task runtime 行为和验证入口：enhanced profile 仍 draft-save-only。
+4. `docs/domain-index/runtime-security.md`
+   - 因 Phase 5 client/worker external-call boundary 已变更，补充 multi-slot upload 仍默认 fail closed、仍 draft-save-only。
+5. `docs/project-index.md`
+   - 只在 core entry 或验证入口需要更新时修改；否则在 `DONE_CLAIMED` 说明不更新原因。
+6. `scripts/test_project_rules.py`
+   - 增加 registry/helper-based reverse closure project rules，优先 import `module_registry`、policy/mapper helpers 或行为脚本入口，不要只靠字符串存在。
+   - 覆盖：enhanced profile required slots、Step8/Step9 slot manifest、policy asset collection、mapper assembly、client slot upload map、task behavior tests/project-rule links。
+
+禁止范围：
+
+- 不改业务代码、API、worker/planner/client 行为。
+- 不触发真实 Lingxing/Amazon，不保存真实草稿，不 submit。
+- 不实现 M3.3 real QA，不声明真实 draft field visibility。
+- 不改 Product workflow/work_status、任务中心、列表筛选、overview。
+- 不改 unrelated collaboration docs、QA playbook、角色文件、`frontend/tsconfig.tsbuildinfo`、`tmp/`。
+
+必须验证：
+
+- `cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_module_mapper.py`
+- `cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_policy.py`
+- `cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_tasks.py`
+- `make test-project-rules`
+- `make backend-compile`
+- `git diff --check`
+
+完成输出：
+
+- 在本 MSG 下追加 `DONE_CLAIMED`。
+- 列 changed files、文档/索引更新点、reverse closure rules 证明方式、验证结果、未覆盖项、是否需要镜花 review。
+- 明确下一步是否可交 M3.3 real Lingxing QA handoff。
+
+#### DONE_CLAIMED - 听云（agentKey: `tingyun`） - 2026-06-30 CST
+
+- Changed files:
+  - `docs/lingxing-aplus-upload.md`
+  - `docs/domain-index/product-flow.md`
+  - `docs/domain-index/task-runtime.md`
+  - `docs/domain-index/runtime-security.md`
+  - `docs/project-index.md`
+  - `scripts/test_project_rules.py`
+  - `docs/collaboration/inbox.md`（仅追加本 DONE_CLAIMED）
+- 文档 / 索引更新:
+  - `docs/lingxing-aplus-upload.md`: 新增 `enhanced_basic_aplus_v1` 当前实现口径，写明 basic tier、5 个普通 A+ 标准模块、7 个 required image slots、Step7/8/9 slot manifest、policy/mapper fail-closed、client slot-map assembly、draft-save-only 生命周期和 Premium/高级 A+、`draft_visible`、submit、Amazon Seller Central visibility 非目标。
+  - `docs/domain-index/product-flow.md`: T3.5/M3 从单一旧 profile 更新为 registry-backed legacy `standard_header_image_text_v1` + enhanced `enhanced_basic_aplus_v1`，补 registry、Step7/8/9、policy、mapper、client、planner、worker 定位，并明确不并入商品主 workflow / `work_status`。
+  - `docs/domain-index/task-runtime.md`: 补 enhanced task runtime 口径、验证入口、外部调用前 fail-closed、draft-save-only，说明行为验证不能代表 `draft_visible` / submitted / Amazon 草稿可见。
+  - `docs/domain-index/runtime-security.md`: 补 multi-slot upload 仍默认真实外部调用关闭、仍 draft-save-only、仍不 edit/submit/sync visibility，task event 只留 sanitized slot/idHash 摘要。
+  - `docs/project-index.md`: 增加 Lingxing A+ profile/module/slot 常用验证入口；core entry 已有 registry/helper/client/worker 路由，本轮只补验证入口。
+- Reverse closure rules / proof method:
+  - 新增 `test_lingxing_aplus_enhanced_phase6_reverse_closure_contract()` 并接入 `make test-project-rules`。
+  - 证明方式优先 import/调用 helper：`producer_contract_for_profile()`、`required_image_slots()`、`build_aplus_plan_from_business_content()`、`normalize_aplus_scripts_for_plan()`、`enhanced_image_slot_work_items()`、`collect_aplus_publish_assets()`、`preflight_validate()`、`assemble_payload()`、client `_uploaded_slot_map()`。
+  - 覆盖闭包：registry required slots -> Step7 enhanced plan -> Step8 script slot manifest -> Step9 work items -> policy asset collection -> mapper enhanced preflight + payload assembly -> client slot upload map handoff。
+  - Task behavior linkage：project rule 还检查 `scripts/test_lingxing_aplus_publish_tasks.py` 中 enhanced preflight-before-external-call、mapping fail closed、slot upload map、draft-save-only 行为测试名称和关键断言仍存在。
+  - 边界说明：真实 client 保存/外部失败 runtime 细节继续由 `scripts/test_lingxing_aplus_publish_tasks.py` 的 fake-client/slot-recording 行为脚本覆盖；project rule 本身不触发真实 Lingxing，不做真实 draft save。
+- Verification:
+  - `cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_module_mapper.py` -> PASS, exit 0.
+  - `cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_policy.py` -> PASS, exit 0.
+  - `cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_tasks.py` -> PASS, exit 0. 中间 fake `auth_required` / `api_failed` / `request_failed` 栈为脚本故意覆盖 runtime failed/retryable 分支。
+  - `make test-project-rules` -> PASS, `OK: 72 project rule test(s)`，含新增 Phase 6 reverse closure rule。
+  - `make backend-compile` -> PASS.
+  - `git diff --check` -> PASS.
+- Not covered / non-goals:
+  - 未改业务代码、API、worker/planner/client 行为、前端、Product workflow/work_status、任务中心、列表筛选或 overview。
+  - 未触发真实 Lingxing/Amazon，未保存真实草稿，未 submit，未做 M3.3 real QA。
+  - 未声明真实 Lingxing 草稿字段可见、Amazon Seller Central 草稿可见或 `draft_visible`。
+  - 未处理 unrelated dirty collaboration docs、QA playbook、role files、`frontend/tsconfig.tsbuildinfo`、`tmp/`。
+- 镜花 review: 需要。Phase 6 gate 建议镜花审 project rule 反向闭包和文档边界，再由若命收口。
+- M3.3 handoff: 本轮产物可作为 M3.3 real Lingxing QA handoff 输入；但应在若命 + 镜花 approve 后，再交观止做真实 Lingxing 草稿字段/模块可见性 QA。
+
+#### RUOMING_REVIEW / VALIDATION_PASS_WAITING_JINGHUA - 若命（agentKey: `ruoming`）- 2026-06-30 CST
+
+- 结论：若命本地复核通过，允许进入镜花 Phase 6 docs/project-rule closure review；不允许 commit/push。
+- Summary:
+  - `docs/collaboration/summaries/2026-06-30-lingxing-enhanced-aplus-phase6-docs-rules.md`
+- 若命复核范围:
+  - 核对 `docs/lingxing-aplus-upload.md`、`docs/domain-index/product-flow.md`、`docs/domain-index/task-runtime.md`、`docs/domain-index/runtime-security.md`、`docs/project-index.md`、`scripts/test_project_rules.py` diff。
+  - 确认未改业务代码、API、worker/planner/client 行为、前端、Product workflow/work_status、任务中心 UI、列表筛选或 overview。
+  - 确认新增 project rule 通过 registry/helper 构造 Step7 -> Step8 -> Step9 -> policy -> mapper -> client slot map 闭包，不只是字符串扫描。
+  - 确认文档边界仍是 draft-save-only，不声明真实 Lingxing 字段可见、`draft_visible`、submit 或 Amazon Seller Central visibility。
+- 若命复跑验证:
+  - `cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_module_mapper.py` PASS。
+  - `cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_policy.py` PASS。
+  - `cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_tasks.py` PASS。脚本中的 auth/api/request stack traces 是预期 runtime retry 验证输出。
+  - `make test-project-rules` PASS，72 tests。
+  - `make backend-compile` PASS。
+  - scoped `git diff --check` PASS。
+- Gate meaning:
+  - 可以派镜花 review Phase 6 docs/index/project-rule closure。
+  - 不代表 M3.3 真实 Lingxing QA PASS，不代表真实草稿保存、`draft_visible` 或 submit。
+
+#### CODE_REVIEW / PASS_WITH_SCOPE - 镜花子 agent（agentKey: `jinghua`）- 2026-06-30 CST
+
+- 结论：`CODE_REVIEW / PASS_WITH_SCOPE`。Blocking findings: none。允许若命对 reviewed files 做 Phase 6 scoped commit/push。
+- Review scope:
+  - 仅审 `MSG-20260630-004` Phase 6 docs/rules 文件、inbox 和 summary 证据。
+  - 未审 unrelated dirty collaboration docs、role files、QA playbooks、frontend cache、`tmp/` 或 untracked historical docs。
+- Key evidence:
+  - `docs/lingxing-aplus-upload.md:381-404` 准确说明 `enhanced_basic_aplus_v1` 是 basic tier、5 modules、7 slots、fail-closed、draft-save-only，并排除 Premium/高级 A+、`draft_visible`、submit 和 Seller Central visibility。
+  - `docs/domain-index/product-flow.md:32` / `:111`、`docs/domain-index/task-runtime.md:19` / `:81-82`、`docs/domain-index/runtime-security.md:29` / `:36` / `:63`、`docs/project-index.md:25` / `:48` 覆盖路由。
+  - `scripts/test_project_rules.py:3151-3345` 通过 registry/Step7/Step8/Step9/policy/mapper/client helper 构造 enhanced plan、slot work items、本地 slot images、asset collection、mapper preflight/assembly 和 uploaded slot map，不是单纯字符串扫描。
+  - Scoped diff 只含 Phase 6 文件；未改业务代码、API、worker/planner/client 行为、前端、Product workflow/work_status、任务中心、列表筛选或 overview。
+- Commands:
+  - `cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_module_mapper.py` PASS。
+  - `cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_policy.py` PASS。
+  - `cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_tasks.py` PASS；fake auth/api/request traces 是预期行为。
+  - `make test-project-rules` PASS，72 tests。
+  - `make backend-compile` PASS。
+  - scoped `git diff --check` PASS。
+- Residual risks:
+  - 不覆盖 M3.3 真实 Lingxing QA、真实草稿保存、`draft_visible`、submit 或 Amazon Seller Central visibility。
+  - 不认可本 scope 外的 unrelated dirty files。
+
+#### CODE_REVIEW / PASS_WITH_SCOPE - 镜花子 agent（agentKey: `jinghua`）- 2026-06-30 CST
+
+- 结论：`CODE_REVIEW / PASS_WITH_SCOPE`。Blocking findings: none。允许若命把 `scripts/test_task_runtime_autostart.py` 的测试稳定性补丁纳入当前 Phase 6 scoped commit/push。
+- Review scope:
+  - 只审 `scripts/test_task_runtime_autostart.py` 当前 diff，以及它被 `scripts/test_project_rules.py` 的 `test_task_runtime_autostart_runner_lifecycle_behaviour` 调用验证的关系。
+  - 未审业务代码、Phase 6 主体、其它 dirty files，未改文件。
+- Evidence:
+  - 补丁没有放宽最终断言，仍要求 `TaskRun.status == succeeded` 且 `TaskStep.status == succeeded`。
+  - 变化只是从轮询中间 DB 状态改为先等待 runner lifecycle idle，再读最终状态，覆盖原失败里的 runner refresh 中间态。
+  - 等待逻辑与 scheduler 生命周期一致：`kick_task_runtime()` 先设置 `_runner_handle`，随后创建 `_runner_task`，完成回调会清空 `_runner_task`。
+- Commands:
+  - `cd backend && .venv/bin/python ../scripts/test_task_runtime_autostart.py` PASS。
+  - `make test-project-rules` PASS，72 tests。
+- Residual risk:
+  - `_wait_for_runner_idle()` 依赖 scheduler 私有状态 `_runner_task/_runner_handle`；作为 runner lifecycle 专项测试可接受，若 scheduler 以后重构 lifecycle 字段，测试需同步更新。
+
+#### RUOMING_FINAL_VALIDATION / READY_FOR_COMMIT - 若命（agentKey: `ruoming`）- 2026-06-30 CST
+
+- 结论：Phase 6 docs/index/project-rule closure + autostart test stabilization 已通过 required gates，允许 scoped commit/push。
+- Final verification:
+  - `cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_module_mapper.py` PASS。
+  - `cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_policy.py` PASS。
+  - `cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_tasks.py` PASS；fake auth/api/request stack traces 是预期 retry/failure 分支输出。
+  - `cd backend && .venv/bin/python ../scripts/test_task_runtime_autostart.py` PASS。
+  - `make test-project-rules` PASS，72 tests。
+  - `make backend-compile` PASS。
+  - scoped `git diff --check` PASS。
+- Commit scope:
+  - Include only Phase 6 docs/rules/summary/inbox files plus `scripts/test_task_runtime_autostart.py` wait-condition stabilization.
+  - Exclude unrelated dirty collaboration docs, role files, QA playbooks, frontend cache, `tmp/`, and historical untracked docs.
+- Boundary:
+  - 不代表 M3.3 真实 Lingxing QA PASS，不代表真实草稿保存、`draft_visible`、submit 或 Amazon Seller Central visibility。
+
+### MSG-20260630-003 - REQUEST / IMPLEMENT / LINGXING_ENHANCED_BASIC_APLUS_PHASE_5_LIFECYCLE
+
+- From: 若命（agentKey: `ruoming`）
+- To: 听云（agentKey: `tingyun`）
+- Cc: 用户 / 镜花（agentKey: `jinghua`） / 观止（agentKey: `guanzhi`）
+- Status: CLOSED / COMMITTED_PUSHED
 - Created: 2026-06-30 CST
 - Depends on:
   - `457a1ba feat: add enhanced aplus policy mapper`
@@ -185,6 +366,17 @@
 - 残余风险:
   - 未验证真实 Lingxing/Amazon 行为。
   - Phase 6 docs/index closure 仍在本 gate 范围外。
+
+#### CLOSED / COMMITTED_PUSHED - 若命（agentKey: `ruoming`）- 2026-06-30 CST
+
+- Commit: `67b5c33 feat: wire enhanced aplus draft lifecycle`
+- Pushed branch: `codex/amazon-auto-competitor-search-phase-a`
+- Final verification:
+  - `cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_tasks.py` PASS。
+  - `make test-project-rules` PASS，71 tests。
+  - `make backend-compile` PASS。
+  - Phase 5 scoped `git diff --check` PASS。
+- Boundary: Phase 5 closed only for planner/worker/client lifecycle. Phase 6 docs/project-rules closure and M3.3 real Lingxing QA remain open.
 
 ### MSG-20260630-002 - REQUEST / IMPLEMENT / LINGXING_ENHANCED_BASIC_APLUS_PHASE_4_POLICY_MAPPER
 

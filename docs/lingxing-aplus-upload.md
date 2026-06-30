@@ -376,8 +376,44 @@ M3.0 payload evidence：`docs/collaboration/reviews/2026-06-24-lingxing-enhanced
 - 前端会在保存前校验必填字段并清洗空值；增强版自动链路仍必须在 mapper preflight 中 fail closed，不能依赖服务端接受空字段，也不能 fallback 到 `STANDARD_HEADER_IMAGE_TEXT`。
 - 本轮未点击保存/提交、未调用 `amazon/aplus/add` / `edit`、未上传图片，没有产生新的 Lingxing 草稿副作用。
 
+## 2026-06-30 enhanced_basic_aplus_v1 当前实现口径
+
+`enhanced_basic_aplus_v1` 已作为 registry-backed 普通 A+ 发布 profile 落地，事实源为 `backend/app/aplus_publish/module_registry.py`。它仍是 `tier=basic`，不是 Premium/高级 A+、品牌故事或 Amazon Seller Central 自动编辑链路。
+
+Profile 固定 5 个模块：
+
+1. `hero` -> `STANDARD_IMAGE_TEXT_OVERLAY`，深色文本覆盖，1 个 `hero.image` slot，970x300。
+2. `feature_grid` -> `STANDARD_THREE_IMAGE_TEXT`，3 个 `feature_1.image` / `feature_2.image` / `feature_3.image` slot，均 300x300。
+3. `detail_proof` -> `STANDARD_SINGLE_IMAGE_SPECS_DETAIL`，1 个 `detail.image` slot，300x300。
+4. `comparison` -> `STANDARD_COMPARISON_TABLE`，2 个 `comparison.column_1.image` / `comparison.column_2.image` slot，均 150x300；首版固定两列，并要求 ASIN 与比较指标。
+5. `technical_or_closing` -> `STANDARD_TECH_SPECS`，无图片 slot；要求技术规格表文本。
+
+Slot / payload policy：
+
+- Step7 只有在显式传入 `profile_key=enhanced_basic_aplus_v1` 时才生成 enhanced profile；默认 A+ 生成仍是旧 `standard_header_image_text_v1`，不静默迁移旧 plan。
+- Step8 通过 `producer_contract_for_profile()` / `required_image_slots()` 生成 `scripts[*].image_slots[*]` manifest，写入 `asset_slot_id`、`slot_id`、`payload_slot`、`target_width`、`target_height`、`module_spec_key` 和 Lingxing module type。
+- Step9 只在 scripts data 明确为 enhanced profile 时遍历 `image_slots` 生成 7 张 slot image；slot manifest 缺失、重复、尺寸不匹配或不在 registry 中会 fail closed。
+- 发布 policy 只收集 registry 要求的 7 个 done/local slot assets；缺 slot、重复 slot、意外 slot、尺寸不符、缺 `asset_slot_id`、缺/过长 alt text 或 payload_slot 不一致均本地 fail closed。
+- mapper preflight 在任何 Lingxing auth、`uploadDestination`、对象存储上传和 `amazon/aplus/add` 前校验 profile、模块顺序、semantic role、module spec、文本字段、比较图、规格表和 slot assets；assemble 阶段按 `asset_slot_id` slot map 注入 `uploadDestinationId`。
+
+生命周期和非目标：
+
+- 当前 `lingxing_aplus_publish` task 仍只保存草稿，成功只写 `draft_saved`、`lingxing_aplus_id_hash`/record key、sanitized evidence 和 `amazon_draft_visibility=unconfirmed`。
+- 默认 `LINGXING_APLUS_ALLOW_REAL_EXTERNAL_CALLS=false`，真实外部调用 fail closed；即使显式开启，也不支持 submit/edit/draft visibility sync。
+- 不确认 `draft_visible`，不声明 Amazon Seller Central A+ 草稿箱可见，不自动提交审批，不写 `submitted`，不并入商品主 workflow / 商品列表 `work_status`，不启用 A+ done 自动触发。
+- M3.3 前只能把本地 preflight、payload assembly、slot upload map 和 draft-save-only task 行为视为已验证；真实 Lingxing 字段可见性和 Amazon 草稿可见性必须由后续观止 QA 在真实账号中确认。
+
+验证入口：
+
+```bash
+cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_module_mapper.py
+cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_policy.py
+cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_tasks.py
+make test-project-rules
+```
+
 ## 快速定位
 
 ```bash
-rg -n "aplus_upload|AplusUpload|aplus-upload|lingxing_response|uploadDestination|amazon/aplus|lingxing_aplus_module_mapper|module_registry" backend/app frontend/src
+rg -n "aplus_upload|AplusUpload|aplus-upload|lingxing_response|uploadDestination|amazon/aplus|lingxing_aplus_module_mapper|module_registry|enhanced_basic_aplus_v1|asset_slot_id" backend/app frontend/src
 ```

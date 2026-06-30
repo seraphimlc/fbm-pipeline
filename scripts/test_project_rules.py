@@ -3148,6 +3148,203 @@ def test_lingxing_aplus_enhanced_phase5_lifecycle_contract() -> None:
     )
 
 
+def test_lingxing_aplus_enhanced_phase6_reverse_closure_contract() -> None:
+    client_text = (ROOT / "backend" / "app" / "services" / "lingxing_aplus_publish_client.py").read_text(encoding="utf-8")
+    task_script_text = (ROOT / "scripts" / "test_lingxing_aplus_publish_tasks.py").read_text(encoding="utf-8")
+
+    assert_true(
+        "def _uploaded_slot_map" in client_text
+        and "uploaded_for_assembly = list(_uploaded_slot_map(uploaded).values()) or uploaded" in client_text
+        and "assemble_payload(request.module_mapping, uploaded_for_assembly)" in client_text,
+        "Phase 6 reverse closure requires client handoff to mapper through slot-keyed upload map",
+    )
+    assert_true(
+        "test_enhanced_success_preflights_before_external_call_and_stays_draft_only" in task_script_text
+        and "test_enhanced_mapping_failure_stays_before_external_call_and_client" in task_script_text
+        and "test_real_client_enhanced_uploads_by_slot_and_assembles_mapper_payload" in task_script_text
+        and "enhanced evidence must stay draft-save-only" in task_script_text,
+        "Phase 6 project rule must stay linked to enhanced task behavior tests for lifecycle/external-call boundaries",
+    )
+
+    code = r'''
+import json
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+
+from PIL import Image
+
+from app.aplus_publish.module_registry import (
+    APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+    producer_contract_for_profile,
+    required_image_slots,
+)
+from app.pipeline.step7_aplus_plan import build_aplus_plan_from_business_content
+from app.pipeline.step8_aplus_script import normalize_aplus_scripts_for_plan
+from app.pipeline.step9_aplus_image import enhanced_image_slot_work_items
+from app.services.lingxing_aplus_module_mapper import assemble_payload, preflight_validate
+from app.services.lingxing_aplus_publish_client import _uploaded_slot_map
+from app.services.lingxing_aplus_publish_policy import collect_aplus_publish_assets
+
+contract = producer_contract_for_profile(APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1)
+assert contract is not None
+assert contract.module_count == 5
+assert [module.semantic_role for module in contract.modules] == [
+    "hero",
+    "feature_grid",
+    "detail_proof",
+    "comparison",
+    "technical_or_closing",
+]
+
+registry_slots = required_image_slots(APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1)
+expected_slots = {
+    item.slot.slot_id: (item.position, item.semantic_role, item.slot.crop_width, item.slot.crop_height)
+    for item in registry_slots
+}
+assert expected_slots == {
+    "hero.image": (1, "hero", 970, 300),
+    "feature_1.image": (2, "feature_grid", 300, 300),
+    "feature_2.image": (2, "feature_grid", 300, 300),
+    "feature_3.image": (2, "feature_grid", 300, 300),
+    "detail.image": (3, "detail_proof", 300, 300),
+    "comparison.column_1.image": (4, "comparison", 150, 300),
+    "comparison.column_2.image": (4, "comparison", 150, 300),
+}
+
+product = SimpleNamespace(id=2026063004, brand="Brand", amazon_asin="B0CURRENT1", competitor_asin="B0COMPET01")
+product_data = SimpleNamespace(
+    listing_title="Modular Sofa",
+    title="Sofa",
+    leaf_category="Sofas",
+    amazon_category="Furniture",
+    suggested_price="499.99",
+    features='["storage", "fabric", "modular", "easy care"]',
+    listing_primary_keyword="modular sofa",
+    gigab2b_raw_snapshot=json.dumps(
+        {
+            "selected_competitor": {
+                "asin": "B0COMPET01",
+                "title": "Comparison Sofa",
+                "image_url": "https://example.com/comparison.jpg",
+            }
+        }
+    ),
+)
+product_image = SimpleNamespace(main_image_path=None, gallery_images="[]", image_analysis=None)
+raw_plan = {
+    "modules": [
+        {
+            "headline": f"Headline {index}",
+            "body": f"Body {index}",
+            "text_content": f"Text {index}",
+            "image_concept": f"Concept {index}",
+            "key_message": f"Key {index}",
+        }
+        for index in range(1, 6)
+    ]
+}
+plan = build_aplus_plan_from_business_content(
+    raw_plan,
+    product=product,
+    product_data=product_data,
+    product_image=product_image,
+    selling_points=["storage", "fabric", "modular", "easy care"],
+    profile_key=APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+)
+modules = {module["semantic_role"]: module for module in plan["modules"]}
+modules["detail_proof"]["specification_headline"] = "Key details"
+modules["detail_proof"]["specification_list_headline"] = "Specifications"
+modules["technical_or_closing"]["spec_rows"] = [
+    {"label": f"Spec {index}", "description": f"Description {index}"}
+    for index in range(1, 5)
+]
+
+scripts = normalize_aplus_scripts_for_plan(
+    {"scripts": [{"module_position": index, "prompt": f"Prompt {index}", "negative_prompt": "avoid"} for index in range(1, 6)]},
+    plan,
+)
+work_items = enhanced_image_slot_work_items(scripts)
+actual_slots = {
+    item["slot_id"]: (item["module_position"], item["semantic_role"], item["target_width"], item["target_height"])
+    for item in work_items
+}
+assert actual_slots == expected_slots, (actual_slots, expected_slots)
+assert len(work_items) == len(registry_slots) == 7
+for item in work_items:
+    for key in (
+        "asset_slot_id",
+        "slot_id",
+        "payload_slot",
+        "publish_profile",
+        "semantic_role",
+        "module_spec_key",
+        "lingxing_content_module_type",
+        "target_width",
+        "target_height",
+    ):
+        assert item.get(key), (key, item)
+    assert item["publish_profile"] == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+
+with tempfile.TemporaryDirectory() as tmpdir:
+    image_manifest = []
+    for item in work_items:
+        path = Path(tmpdir) / f"{item['asset_slot_id']}.jpg"
+        Image.new("RGB", (item["target_width"], item["target_height"]), "white").save(path, format="JPEG")
+        image_manifest.append(
+            {
+                **item,
+                "path": str(path),
+                "status": "done",
+                "width": item["target_width"],
+                "height": item["target_height"],
+                "alt_text": item.get("alt_text") or f"Alt text for {item['slot_id']}",
+            }
+        )
+
+    product.aplus = SimpleNamespace(aplus_plan=json.dumps(plan), aplus_images=json.dumps(image_manifest))
+    assets_result = collect_aplus_publish_assets(product)
+    assert assets_result.ok, assets_result
+    assert assets_result.evidence["publish_profile"] == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+    assert assets_result.evidence["required_slot_count"] == len(registry_slots)
+    assert {asset.slot_id for asset in assets_result.assets} == set(expected_slots)
+    assert all(asset.asset_slot_id and asset.payload_slot and asset.target_width and asset.target_height for asset in assets_result.assets)
+
+    mapping = preflight_validate(product, assets_result.assets)
+    assert mapping.ok, mapping
+    assert mapping.evidence["profile"] == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+    assert mapping.evidence["module_count"] == contract.module_count
+    assert mapping.evidence["required_image_slot_count"] == len(registry_slots)
+    assert mapping.evidence["content_module_types"] == [module.lingxing_content_module_type for module in contract.modules]
+
+    uploaded = [
+        {
+            "asset_slot_id": asset.asset_slot_id,
+            "slot_id": asset.slot_id,
+            "payload_slot": asset.payload_slot,
+            "uploadDestinationId": f"UPLOAD-{asset.asset_slot_id}",
+            "altText": asset.alt_text,
+        }
+        for asset in assets_result.assets
+    ]
+    uploaded_by_slot = _uploaded_slot_map(uploaded)
+    assert set(uploaded_by_slot) == {asset.asset_slot_id for asset in assets_result.assets}
+
+    assembled = assemble_payload(mapping, list(uploaded_by_slot.values()))
+    assert assembled.ok, assembled
+    assert len(assembled.content_module_list) == contract.module_count
+    assert assembled.evidence["payload_builder_profile"] == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
+    assert assembled.evidence["uploaded_asset_slot_ids"] == sorted(uploaded_by_slot)
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"Enhanced A+ Phase 6 reverse closure 行为验证失败: {result.stderr or result.stdout}")
+
+
 def test_lingxing_aplus_module_mapping_m2_contract() -> None:
     registry_path = ROOT / "backend" / "app" / "aplus_publish" / "module_registry.py"
     mapper_path = ROOT / "backend" / "app" / "services" / "lingxing_aplus_module_mapper.py"
@@ -5755,6 +5952,7 @@ def main() -> int:
         test_lingxing_aplus_publish_t1_data_registry_bootstrap_contract,
         test_lingxing_aplus_publish_t3_draft_save_contract,
         test_lingxing_aplus_enhanced_phase5_lifecycle_contract,
+        test_lingxing_aplus_enhanced_phase6_reverse_closure_contract,
         test_lingxing_aplus_module_mapping_m2_contract,
         test_lingxing_aplus_enhanced_basic_registry_phase1_contract,
         test_lingxing_aplus_step7_enhanced_phase2_producer_schema,

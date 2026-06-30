@@ -45,6 +45,7 @@
 - 后端健康检查：`GET /api/health`
 - 任务中心列表：`GET /api/task-runs`
 - 领星 A+ 草稿保存任务：`POST /api/task-runs/lingxing-aplus-publish`
+- 领星 A+ profile/module/slot 验证：`cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_module_mapper.py`、`cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_policy.py`、`cd backend && .venv/bin/python ../scripts/test_lingxing_aplus_publish_tasks.py`、`make test-project-rules`
 - 商品列表：`GET /api/products`
 - 商品总览：`GET /api/products/overview?data_source_id=<id>`
 - 图片分析到 Listing 待导出行为脚本：`cd backend && .venv/bin/python ../scripts/test_image_analysis_listing_e5.py`
