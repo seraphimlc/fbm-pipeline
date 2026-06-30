@@ -3345,6 +3345,47 @@ with tempfile.TemporaryDirectory() as tmpdir:
     assert_true(result.returncode == 0, f"Enhanced A+ Phase 6 reverse closure 行为验证失败: {result.stderr or result.stdout}")
 
 
+def test_lingxing_aplus_enhanced_m3_3_readiness_is_readonly() -> None:
+    script_path = ROOT / "scripts" / "check_lingxing_enhanced_aplus_qa_readiness.py"
+    project_index = (ROOT / "docs" / "project-index.md").read_text(encoding="utf-8")
+    task_runtime_index = (ROOT / "docs" / "domain-index" / "task-runtime.md").read_text(encoding="utf-8")
+    runtime_security_index = (ROOT / "docs" / "domain-index" / "runtime-security.md").read_text(encoding="utf-8")
+
+    assert_true(script_path.is_file(), "M3.3 必须提供只读 readiness 脚本，避免真实 QA 前置条件靠手工猜")
+    script_text = script_path.read_text(encoding="utf-8")
+    assert_true(
+        "evaluate_aplus_publish_prerequisites" in script_text
+        and "collect_aplus_publish_assets" in script_text
+        and "preflight_validate" in script_text
+        and "APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1" in script_text,
+        "M3.3 readiness 脚本必须复用 policy/asset/mapper/profile 事实源",
+    )
+    assert_true(
+        "LingxingAplusDraftSaveClient" not in script_text
+        and ".save_draft(" not in script_text
+        and "create_lingxing_aplus_publish_runs" not in script_text
+        and "kick_task_runtime" not in script_text
+        and "httpx.AsyncClient" not in script_text
+        and "uploadDestination" not in script_text
+        and "amazon/aplus/add" not in script_text,
+        "M3.3 readiness 脚本必须只读，不得触发 Lingxing/Chrome/Amazon 外部副作用或创建发布 task",
+    )
+    assert_true(
+        '"external_side_effects": "none"' in script_text
+        and "EXIT_BLOCKED = 2" in script_text
+        and "EXIT_SAMPLE_NEEDS_FIX = 3" in script_text,
+        "M3.3 readiness 脚本必须明确外部副作用为 none，并用退出码区分 blocker/sample failure",
+    )
+    assert_true(
+        "check_lingxing_enhanced_aplus_qa_readiness.py" in project_index
+        and "check_lingxing_enhanced_aplus_qa_readiness.py" in task_runtime_index
+        and "check_lingxing_enhanced_aplus_qa_readiness.py" in runtime_security_index
+        and "不触发 Lingxing/Chrome/Amazon" in task_runtime_index
+        and "不调用 Lingxing auth" in runtime_security_index,
+        "M3.3 readiness 入口必须写入 project/domain/security index，并明确不是真实 QA 或外部调用",
+    )
+
+
 def test_lingxing_aplus_module_mapping_m2_contract() -> None:
     registry_path = ROOT / "backend" / "app" / "aplus_publish" / "module_registry.py"
     mapper_path = ROOT / "backend" / "app" / "services" / "lingxing_aplus_module_mapper.py"
@@ -5953,6 +5994,7 @@ def main() -> int:
         test_lingxing_aplus_publish_t3_draft_save_contract,
         test_lingxing_aplus_enhanced_phase5_lifecycle_contract,
         test_lingxing_aplus_enhanced_phase6_reverse_closure_contract,
+        test_lingxing_aplus_enhanced_m3_3_readiness_is_readonly,
         test_lingxing_aplus_module_mapping_m2_contract,
         test_lingxing_aplus_enhanced_basic_registry_phase1_contract,
         test_lingxing_aplus_step7_enhanced_phase2_producer_schema,

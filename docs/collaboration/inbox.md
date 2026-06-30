@@ -129,6 +129,27 @@ QA 目标：
   - 指定一个可安全保存 enhanced A+ 草稿的 CatalogProduct/ProductAplus/ASIN/SKU 样本，且样本已具备 `enhanced_basic_aplus_v1`、7 个 image slots、comparison rows 和 tech spec rows 的本地前置数据。
 - Residual risk: 本轮没有验证真实领星编辑器中的模块中文名、顺序、字段可见性、7 个图片 slot、comparison rows 或 tech spec rows；不代表 `PASS_WITH_SCOPE`、不代表 `draft_visible`、不代表 submit、也不代表 Amazon Seller Central 可见。
 
+#### RUOMING_UNBLOCK_PRECHECK / READYNESS_SCRIPT_ADDED - 若命（agentKey: `ruoming`）- 2026-06-30 CST
+
+- 结论：在不触发真实 Lingxing/Chrome/Amazon 的前提下，已补 M3.3 QA 前置 readiness 检查入口；`MSG-20260630-005` 仍保持 `QA_BLOCKED / WAITING_FOR_UNBLOCK_INPUT`。
+- Added:
+  - `scripts/check_lingxing_enhanced_aplus_qa_readiness.py`
+  - 只读检查真实外呼配置、`submitFlag` 安全配置、store/site、enhanced 候选样本、policy prerequisites、slot asset collection 和 mapper preflight。
+  - 输出脱敏 JSON；退出码：`0` ready，`2` blocked，`3` sample local needs fix。
+- Current run:
+  - Command: `cd backend && .venv/bin/python ../scripts/check_lingxing_enhanced_aplus_qa_readiness.py`
+  - Result: exit `2`, `status=BLOCKED`, `external_side_effects=none`。
+  - Env blockers: `LINGXING_APLUS_ALLOW_REAL_EXTERNAL_CALLS` is false; `LINGXING_APLUS_STORE_ID` missing。
+  - Sample blockers: no `enhanced_basic_aplus_v1` CatalogProduct candidate found。
+- Guardrails:
+  - Project rule added: readiness script must reuse policy/asset/mapper/profile facts, must not import real draft-save client, must not call `save_draft`, create publish tasks, kick runtime, `httpx.AsyncClient`, `uploadDestination`, or `amazon/aplus/add`.
+  - Project/domain/security indexes updated with the readiness command and no-external-side-effect boundary.
+- Still needed for real QA:
+  - Effective Chrome Lingxing login state.
+  - `LINGXING_APLUS_ALLOW_REAL_EXTERNAL_CALLS=true`.
+  - `LINGXING_APLUS_STORE_ID` and site/store confirmation.
+  - One safe enhanced sample with `enhanced_basic_aplus_v1`, 7 image slots, comparison rows, tech spec rows, seller SKU and synced ASIN.
+
 ### MSG-20260630-004 - REQUEST / IMPLEMENT / LINGXING_ENHANCED_BASIC_APLUS_PHASE_6_DOCS_RULES
 
 - From: 若命（agentKey: `ruoming`）
