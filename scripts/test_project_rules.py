@@ -3094,6 +3094,60 @@ def test_lingxing_aplus_publish_t3_draft_save_contract() -> None:
     )
 
 
+def test_lingxing_aplus_enhanced_phase5_lifecycle_contract() -> None:
+    client_text = (ROOT / "backend" / "app" / "services" / "lingxing_aplus_publish_client.py").read_text(encoding="utf-8")
+    planner_text = (ROOT / "backend" / "app" / "task_planners" / "lingxing_aplus_publish.py").read_text(encoding="utf-8")
+    worker_text = (ROOT / "backend" / "app" / "task_runtime" / "lingxing_aplus_publish_workers.py").read_text(encoding="utf-8")
+    task_script_text = (ROOT / "scripts" / "test_lingxing_aplus_publish_tasks.py").read_text(encoding="utf-8")
+
+    assert_true(
+        '"aplus_content_evidence": content_evidence' in planner_text
+        and '"aplus_publish_profile": content_evidence.get("aplus_publish_profile")' in planner_text
+        and '"asset_slot_ids": asset_evidence.get("asset_slot_ids")' in planner_text
+        and "module_mapping_evidence=module_mapping.evidence" in planner_text,
+        "Phase 5 planner 必须保存 profile-aware content evidence，并继续把 mapper evidence 纳入 fingerprint",
+    )
+    before_external = worker_text.split('event_type="external_call"', 1)[0]
+    before_uploading = worker_text.split("status=STATUS_UPLOADING", 1)[0]
+    assert_true(
+        "_emit_preflight_passed" in before_external
+        and "preflight_validate(product, assets_result.assets)" in before_external
+        and "_finish_module_mapping_failed" in before_external
+        and "collect_aplus_publish_assets(product)" in before_external
+        and "draft_save_client_factory().save_draft(request)" not in before_external
+        and "preflight_validate(product, assets_result.assets)" in before_uploading,
+        "Phase 5 worker 必须在 external_call/STATUS_UPLOADING/client 前完成 profile-aware asset collection 和 mapper preflight",
+    )
+    assert_true(
+        "asset_slot_id" in client_text
+        and "slot_id" in client_text
+        and "payload_slot" in client_text
+        and "module_position" in client_text
+        and "def _uploaded_slot_map" in client_text
+        and "uploaded_for_assembly = list(_uploaded_slot_map(uploaded).values()) or uploaded" in client_text
+        and "assemble_payload(request.module_mapping, uploaded_for_assembly)" in client_text
+        and "_asset_alt_text(asset, alt_text_map)" in client_text,
+        "Phase 5 client 必须按 enhanced asset_slot_id/payload_slot 上传并把 slot-keyed upload map 交给 mapper assembly，同时保留 legacy fallback",
+    )
+    assert_true(
+        "test_enhanced_success_preflights_before_external_call_and_stays_draft_only" in task_script_text
+        and "test_enhanced_mapping_failure_stays_before_external_call_and_client" in task_script_text
+        and "test_real_client_enhanced_uploads_by_slot_and_assembles_mapper_payload" in task_script_text
+        and "enhanced mapper preflight evidence must be emitted before external_call" in task_script_text
+        and "enhanced mapping failure must not call fake/real client" in task_script_text
+        and "feature grid payload must be assembled from slot-keyed uploads, not legacy position fallback" in task_script_text
+        and "enhanced evidence must stay draft-save-only" in task_script_text,
+        "Phase 5 行为脚本必须覆盖 enhanced preflight 顺序、mapping fail closed、slot upload map 和 draft-save-only 成功边界",
+    )
+    assert_true(
+        "STATUS_DRAFT_VISIBLE" not in worker_text
+        and "STATUS_SUBMITTED" not in worker_text
+        and "submitFlag\": 1" not in client_text
+        and "APLUS_EDIT_URL" not in client_text,
+        "Phase 5 不得引入 draft_visible、submit、edit 或提交审批路径",
+    )
+
+
 def test_lingxing_aplus_module_mapping_m2_contract() -> None:
     registry_path = ROOT / "backend" / "app" / "aplus_publish" / "module_registry.py"
     mapper_path = ROOT / "backend" / "app" / "services" / "lingxing_aplus_module_mapper.py"
@@ -3140,7 +3194,8 @@ def test_lingxing_aplus_module_mapping_m2_contract() -> None:
     )
     assert_true(
         "_module_payload(" not in client_text
-        and "assemble_payload(request.module_mapping, uploaded)" in client_text
+        and "uploaded_for_assembly" in client_text
+        and "assemble_payload(request.module_mapping, uploaded_for_assembly)" in client_text
         and '"contentModuleList": content_module_list' in client_text
         and '"headline": {"value": ""}' not in client_text
         and '"body": {"textList": []}' not in client_text,
@@ -5699,6 +5754,7 @@ def main() -> int:
         test_aplus_auto_after_export_ready_a1_a2_contract,
         test_lingxing_aplus_publish_t1_data_registry_bootstrap_contract,
         test_lingxing_aplus_publish_t3_draft_save_contract,
+        test_lingxing_aplus_enhanced_phase5_lifecycle_contract,
         test_lingxing_aplus_module_mapping_m2_contract,
         test_lingxing_aplus_enhanced_basic_registry_phase1_contract,
         test_lingxing_aplus_step7_enhanced_phase2_producer_schema,

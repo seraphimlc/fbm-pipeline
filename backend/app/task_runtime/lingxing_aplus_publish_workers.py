@@ -146,6 +146,32 @@ async def _finish_module_mapping_failed(
     return {"status": STATUS_FAILED, "reason_code": mapping.reason_code, "message": mapping.message}
 
 
+async def _emit_preflight_passed(
+    ctx: TaskContext,
+    *,
+    assets_result,
+    module_mapping: LingxingAplusModuleMappingResult,
+) -> None:
+    await emit_event(
+        ctx.db,
+        step=ctx.step,
+        event_type="policy",
+        message="A+ module mapping preflight passed before Lingxing external call",
+        data={
+            "status": STATUS_READY_TO_UPLOAD,
+            "profile": module_mapping.evidence.get("profile") or assets_result.evidence.get("publish_profile"),
+            "module_count": module_mapping.evidence.get("module_count"),
+            "content_module_types": module_mapping.evidence.get("content_module_types")
+            or ([module_mapping.evidence.get("content_module_type")] if module_mapping.evidence.get("content_module_type") else []),
+            "asset_slot_ids": assets_result.evidence.get("asset_slot_ids") or module_mapping.evidence.get("asset_slot_ids") or [],
+            "slot_ids": assets_result.evidence.get("slot_ids") or [],
+            "required_image_slot_count": module_mapping.evidence.get("required_image_slot_count")
+            or assets_result.evidence.get("required_slot_count"),
+            "external_call_started": False,
+        },
+    )
+
+
 async def _record_success(
     ctx: TaskContext,
     *,
@@ -319,6 +345,7 @@ async def lingxing_aplus_publish_product(ctx: TaskContext) -> dict[str, Any]:
     module_mapping = preflight_validate(product, assets_result.assets)
     if not module_mapping.ok:
         return await _finish_module_mapping_failed(ctx, catalog, module_mapping)
+    await _emit_preflight_passed(ctx, assets_result=assets_result, module_mapping=module_mapping)
 
     seller_sku = seller_sku_candidate(catalog).value
     asin = _clean(catalog.amazon_asin) or _clean(product.amazon_asin)

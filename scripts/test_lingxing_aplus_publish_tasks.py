@@ -18,8 +18,15 @@ if str(BACKEND) not in sys.path:
 
 from app.database import async_session, run_schema_maintenance  # noqa: E402
 from app.aplus_publish.module_registry import (  # noqa: E402
+    APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
     APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
+    LINGXING_STANDARD_COMPARISON_TABLE,
     LINGXING_STANDARD_HEADER_IMAGE_TEXT,
+    LINGXING_STANDARD_IMAGE_TEXT_OVERLAY,
+    LINGXING_STANDARD_SINGLE_IMAGE_SPECS_DETAIL,
+    LINGXING_STANDARD_TECH_SPECS,
+    LINGXING_STANDARD_THREE_IMAGE_TEXT,
+    required_image_slots,
 )
 from app.models import (  # noqa: E402
     AplusUploadBatch,
@@ -34,10 +41,13 @@ from app.models import (  # noqa: E402
     TaskStepEvent,
 )
 from app.services.lingxing_aplus_publish_client import (  # noqa: E402
+    LingxingAplusDraftSaveClient,
     LingxingAplusDraftSaveClientError,
     LingxingAplusDraftSaveRequest,
     LingxingAplusDraftSaveResult,
 )
+from app.services import lingxing_aplus_publish_client as client_mod  # noqa: E402
+from app.config import settings  # noqa: E402
 from app.task_planners.lingxing_aplus_publish import create_lingxing_aplus_publish_runs  # noqa: E402
 from app.task_runtime import lingxing_aplus_publish_workers as worker_mod  # noqa: E402
 from app.task_runtime import scheduler  # noqa: E402
@@ -91,6 +101,117 @@ def _make_image(path: Path, size: tuple[int, int] = (970, 600)) -> str:
     return str(path)
 
 
+def _enhanced_modules() -> list[dict]:
+    return [
+        {
+            "position": 1,
+            "type": "standard_image_text_overlay",
+            "semantic_role": "hero",
+            "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+            "profile_version": "1",
+            "module_spec_key": "image_text_overlay_dark",
+            "lingxing_content_module_type": LINGXING_STANDARD_IMAGE_TEXT_OVERLAY,
+            "headline": "Quiet power for daily use",
+            "body": "A focused hero message with a strong product promise.",
+        },
+        {
+            "position": 2,
+            "type": "standard_three_image_text",
+            "semantic_role": "feature_grid",
+            "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+            "profile_version": "1",
+            "module_spec_key": "three_image_text",
+            "lingxing_content_module_type": LINGXING_STANDARD_THREE_IMAGE_TEXT,
+            "headline": "Three reasons it fits the routine",
+            "features": [
+                {"headline": "Fast setup", "body": "Ready quickly without extra tools."},
+                {"headline": "Stable build", "body": "Designed for repeatable daily handling."},
+                {"headline": "Easy care", "body": "Simple surfaces make cleanup straightforward."},
+            ],
+        },
+        {
+            "position": 3,
+            "type": "standard_single_image_specs_detail",
+            "semantic_role": "detail_proof",
+            "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+            "profile_version": "1",
+            "module_spec_key": "single_image_specs_detail",
+            "lingxing_content_module_type": LINGXING_STANDARD_SINGLE_IMAGE_SPECS_DETAIL,
+            "headline": "Details you can check",
+            "description_headline": "Built for practical use",
+            "description_blocks": [
+                {"headline": "Material focus", "body": "The detail view highlights the finish and contact points."},
+                {"headline": "Use case", "body": "Helpful where compact storage and reliable use matter."},
+            ],
+            "specification_headline": "Detail summary",
+            "specification_list_headline": "What to notice",
+            "spec_items": [
+                {"label": "Finish", "value": "Smooth, easy-care surface"},
+                {"label": "Handling", "value": "Balanced shape for repeat use"},
+                {"label": "Storage", "value": "Compact profile for shelves"},
+            ],
+            "specification_text_headline": "Design note",
+            "spec_note": "Confirm final claims against source product facts before publishing.",
+        },
+        {
+            "position": 4,
+            "type": "standard_comparison_table",
+            "semantic_role": "comparison",
+            "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+            "profile_version": "1",
+            "module_spec_key": "comparison_table",
+            "lingxing_content_module_type": LINGXING_STANDARD_COMPARISON_TABLE,
+            "metric_row_labels": ["Setup", "Material", "Care"],
+            "current_product_metric_values": ["Tool-free", "Reinforced", "Wipe clean"],
+            "comparison_product_metric_values": ["Requires extras", "Basic", "Hand wash"],
+            "product_columns": [
+                {"column_key": "current_product", "asin": "B0ABCDEF12", "title": "Current product", "highlight": True},
+                {"column_key": "comparison_product", "asin": "B0ZZZZZZ99", "title": "Common alternative", "highlight": False},
+            ],
+        },
+        {
+            "position": 5,
+            "type": "standard_tech_specs",
+            "semantic_role": "technical_or_closing",
+            "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+            "profile_version": "1",
+            "module_spec_key": "tech_specs",
+            "lingxing_content_module_type": LINGXING_STANDARD_TECH_SPECS,
+            "headline": "Technical specs",
+            "tableCount": 1,
+            "spec_rows": [
+                {"label": "Use", "description": "Everyday indoor routines"},
+                {"label": "Care", "description": "Wipe clean as needed"},
+                {"label": "Fit", "description": "Compact storage profile"},
+                {"label": "Pack", "description": "Ships as one ready-to-use item"},
+            ],
+        },
+    ]
+
+
+def _enhanced_images(tmp: Path, marker: str) -> list[dict]:
+    images: list[dict] = []
+    for profile_slot in required_image_slots(APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1):
+        slot = profile_slot.slot
+        asset_slot_id = f"m{profile_slot.position}_{slot.slot_id.replace('.', '_')}"
+        images.append(
+            {
+                "status": "done",
+                "path": _make_image(tmp / marker / f"{asset_slot_id}.jpg", (slot.crop_width, slot.crop_height)),
+                "position": profile_slot.position,
+                "module_position": profile_slot.position,
+                "asset_slot_id": asset_slot_id,
+                "slot_id": slot.slot_id,
+                "semantic_role": profile_slot.semantic_role,
+                "payload_slot": ".".join(slot.payload_path),
+                "target_width": slot.crop_width,
+                "target_height": slot.crop_height,
+                "alt_text": f"Alt text for {slot.slot_id}",
+            }
+        )
+    return images
+
+
 async def _cleanup() -> None:
     async with async_session() as session:
         product_ids = list(
@@ -142,6 +263,8 @@ async def _make_product(
     upload_status: str | None = "ready_to_upload",
     existing_id_hash: str | None = None,
     legacy_plan: bool = False,
+    enhanced_plan: bool = False,
+    enhanced_missing_last_slot: bool = False,
 ) -> CatalogProduct:
     now = datetime.now()
     sku = seller_sku or f"T3-SKU-{marker}"
@@ -158,7 +281,9 @@ async def _make_product(
         updated_at=now,
     )
     product.data = ProductData(item_code=sku, title=f"T3 fixture {marker}", listing_title=f"T3 fixture {marker}")
-    if legacy_plan:
+    if enhanced_plan:
+        modules = _enhanced_modules()
+    elif legacy_plan:
         modules = [{"position": index, "headline": f"Module {index}", "key_message": f"Key message {index}"} for index in range(1, 6)]
     else:
         modules = [
@@ -175,15 +300,27 @@ async def _make_product(
             }
             for index in range(1, 6)
         ]
-    images = [
-        {"status": "done", "path": _make_image(tmp / marker / f"aplus_{index:02d}.jpg"), "position": index}
-        for index in range(1, 6)
-    ]
+    if enhanced_plan:
+        images = _enhanced_images(tmp, marker)
+        if enhanced_missing_last_slot:
+            images = images[:-1]
+        plan = {
+            "aplus_plan_version": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+            "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+            "profile_version": "1",
+            "modules": modules,
+        }
+    else:
+        images = [
+            {"status": "done", "path": _make_image(tmp / marker / f"aplus_{index:02d}.jpg"), "position": index}
+            for index in range(1, 6)
+        ]
+        plan = {"modules": modules}
     product.aplus = ProductAplus(
         aplus_status=aplus_status,
-        aplus_plan=json.dumps({"modules": modules}, ensure_ascii=False),
+        aplus_plan=json.dumps(plan, ensure_ascii=False),
         aplus_images=json.dumps(images, ensure_ascii=False),
-        aplus_image_count=5,
+        aplus_image_count=len(images),
     )
     product.catalog_item = CatalogProduct(
         gigab2b_url=product.gigab2b_url,
@@ -294,6 +431,64 @@ async def _reload_catalog(catalog_id: int) -> CatalogProduct:
         ).scalar_one()
 
 
+async def _task_events_for_catalog(catalog_id: int) -> list[TaskStepEvent]:
+    async with async_session() as session:
+        step = (
+            await session.execute(
+                select(TaskStep)
+                .where(TaskStep.payload_json.like(f'%"catalog_product_id": {catalog_id}%'))
+                .order_by(TaskStep.id.desc())
+                .limit(1)
+            )
+        ).scalar_one()
+        return list(
+            (
+                await session.execute(
+                    select(TaskStepEvent)
+                    .where(TaskStepEvent.task_step_id == step.id)
+                    .order_by(TaskStepEvent.id.asc())
+                )
+            ).scalars().all()
+        )
+
+
+async def _task_payload_for_catalog(catalog_id: int) -> dict:
+    async with async_session() as session:
+        step = (
+            await session.execute(
+                select(TaskStep)
+                .where(TaskStep.payload_json.like(f'%"catalog_product_id": {catalog_id}%'))
+                .order_by(TaskStep.id.desc())
+                .limit(1)
+            )
+        ).scalar_one()
+        return json.loads(step.payload_json or "{}")
+
+
+class SlotRecordingDraftSaveClient(LingxingAplusDraftSaveClient):
+    uploaded: list[dict] = []
+    content_module_list: list[dict] = []
+
+    async def _upload_image(self, client, auth, asset, alt_text):
+        item = {
+            "position": asset.position,
+            "asset_slot_id": asset.asset_slot_id,
+            "slot_id": asset.slot_id,
+            "payload_slot": asset.payload_slot,
+            "module_position": asset.module_position,
+            "uploadDestinationId": f"UPLOAD-{asset.asset_slot_id or asset.position}",
+            "altText": alt_text,
+            "width": asset.width,
+            "height": asset.height,
+        }
+        self.uploaded.append(item)
+        return item
+
+    async def _save_draft(self, client, auth, request, content_module_list):
+        self.content_module_list = content_module_list
+        return {"code": 1, "success": True, "data": {"idHash": "CLIENT-SLOT-IDHASH", "statusName": "草稿"}}
+
+
 async def test_save_success_writes_draft_saved_only(tmp: Path) -> None:
     async with async_session() as session:
         catalog = await _make_product(session, tmp, "SUCCESS")
@@ -314,6 +509,131 @@ async def test_save_success_writes_draft_saved_only(tmp: Path) -> None:
         assert_true(evidence.get("submitFlag") == 0, "draft save evidence must prove submitFlag stayed false")
         assert_true("draft_visible" not in (item.publish_evidence_json or ""), "T3 evidence must not claim draft_visible")
         assert_true(item.submitted_at is None and item.draft_visible_at is None, "T3 must not write submit/visible timestamps")
+
+
+async def test_enhanced_success_preflights_before_external_call_and_stays_draft_only(tmp: Path) -> None:
+    async with async_session() as session:
+        catalog = await _make_product(session, tmp, "ENHANCED_SUCCESS", enhanced_plan=True)
+        await session.commit()
+    result = await _create_and_run(catalog)
+    refreshed = await _reload_catalog(catalog.id)
+    payload = await _task_payload_for_catalog(catalog.id)
+    events = await _task_events_for_catalog(catalog.id)
+    event_types = [event.event_type for event in events]
+    policy_events = [event for event in events if event.event_type == "policy"]
+    assert_true(result["status"] == "draft_saved", "enhanced fake client success should return draft_saved")
+    assert_true(refreshed.aplus_upload_status == "draft_saved", "enhanced success should only write draft_saved")
+    assert_true(payload.get("aplus_publish_profile") == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1, "planner payload should record enhanced publish profile")
+    assert_true(len(payload.get("aplus_content_evidence", {}).get("asset_slot_ids") or []) == 7, "planner payload should record enhanced slot evidence")
+    assert_true("external_call" in event_types, "enhanced success should emit one external_call event before fake client")
+    external_index = event_types.index("external_call")
+    preflight_index = next(
+        index
+        for index, event in enumerate(events)
+        if event.event_type == "policy" and "preflight passed" in (event.message or "")
+    )
+    assert_true(preflight_index < external_index, "enhanced mapper preflight evidence must be emitted before external_call")
+    preflight_data = json.loads(policy_events[-1].data_json or "{}")
+    assert_true(preflight_data.get("profile") == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1, "preflight event must be profile-aware")
+    assert_true(len(preflight_data.get("asset_slot_ids") or []) == 7, "preflight event must carry enhanced asset slot ids")
+    async with async_session() as session:
+        item = (
+            await session.execute(select(AplusUploadItem).where(AplusUploadItem.catalog_product_id == catalog.id))
+        ).scalar_one()
+        evidence = json.loads(item.publish_evidence_json or "{}")
+        assert_true(evidence.get("amazon_draft_visibility") == "unconfirmed", "enhanced evidence must stay draft-save-only")
+        assert_true("draft_visible" not in (item.publish_evidence_json or ""), "enhanced success must not claim draft_visible")
+
+
+async def test_enhanced_mapping_failure_stays_before_external_call_and_client(tmp: Path) -> None:
+    async with async_session() as session:
+        catalog = await _make_product(
+            session,
+            tmp,
+            "ENHANCED_MISSING_SLOT",
+            enhanced_plan=True,
+            enhanced_missing_last_slot=True,
+            upload_status="not_uploaded",
+        )
+        await session.commit()
+
+    calls_before = len(FakeDraftSaveClient.calls)
+    result = await _create_and_run(catalog)
+    refreshed = await _reload_catalog(catalog.id)
+    events = await _task_events_for_catalog(catalog.id)
+    assert_true(result["status"] == "failed", "enhanced missing slot should fail locally")
+    assert_true(result["reason_code"] == "aplus_image_slot_missing", "enhanced missing slot should return typed policy reason")
+    assert_true(refreshed.aplus_upload_status == "failed", "enhanced missing slot should write failed")
+    assert_true(len(FakeDraftSaveClient.calls) == calls_before, "enhanced mapping failure must not call fake/real client")
+    assert_true(all(event.event_type != "external_call" for event in events), "enhanced mapping failure must not emit external_call")
+    assert_true(await _count_draft_items(catalog.id) == 0, "enhanced mapping failure must not create draft evidence")
+
+
+async def test_real_client_enhanced_uploads_by_slot_and_assembles_mapper_payload(tmp: Path) -> None:
+    async with async_session() as session:
+        catalog = await _make_product(session, tmp, "CLIENT_SLOT_MAP", enhanced_plan=True)
+        await session.commit()
+    async with async_session() as session:
+        reloaded = (
+            await session.execute(
+                select(CatalogProduct)
+                .where(CatalogProduct.id == catalog.id)
+                .options(
+                    selectinload(CatalogProduct.source_product).selectinload(Product.data),
+                    selectinload(CatalogProduct.source_product).selectinload(Product.aplus),
+                )
+            )
+        ).scalar_one()
+        product = reloaded.source_product
+        assets_result = worker_mod.collect_aplus_publish_assets(product)
+        module_mapping = worker_mod.preflight_validate(product, assets_result.assets)
+
+    assert_true(assets_result.ok and module_mapping.ok, "enhanced client slot fixture should pass local preflight")
+    SlotRecordingDraftSaveClient.uploaded = []
+    client = SlotRecordingDraftSaveClient()
+    original_allow = settings.LINGXING_APLUS_ALLOW_REAL_EXTERNAL_CALLS
+    original_submit = settings.LINGXING_APLUS_SUBMIT_FOR_APPROVAL
+    original_auth = client_mod._get_lingxing_aplus_auth
+
+    async def fake_auth(*, store_id: str):
+        return {"ok": True, "headers": {}, "store_id": store_id}
+
+    try:
+        settings.LINGXING_APLUS_ALLOW_REAL_EXTERNAL_CALLS = True
+        settings.LINGXING_APLUS_SUBMIT_FOR_APPROVAL = False
+        client_mod._get_lingxing_aplus_auth = fake_auth
+        result = await client.save_draft(
+            LingxingAplusDraftSaveRequest(
+                asin="B0ABCDEF12",
+                seller_sku="T3-SKU-CLIENT_SLOT_MAP",
+                document_name="slot-map-test",
+                store_id="17983",
+                site="US",
+                assets=assets_result.assets,
+                product_id=product.id,
+                product_aplus_id=product.aplus.id,
+                content_fingerprint="slot-map-fingerprint",
+                module_mapping=module_mapping,
+            )
+        )
+    finally:
+        settings.LINGXING_APLUS_ALLOW_REAL_EXTERNAL_CALLS = original_allow
+        settings.LINGXING_APLUS_SUBMIT_FOR_APPROVAL = original_submit
+        client_mod._get_lingxing_aplus_auth = original_auth
+
+    uploaded_slot_ids = {item.get("asset_slot_id") for item in SlotRecordingDraftSaveClient.uploaded}
+    expected_slot_ids = {asset.asset_slot_id for asset in assets_result.assets}
+    assert_true(result.id_hash == "CLIENT-SLOT-IDHASH", "slot-aware client should still parse idHash")
+    assert_true(uploaded_slot_ids == expected_slot_ids, "client must upload enhanced assets with asset_slot_id map")
+    assert_true(len(client.content_module_list) == 5, "client must pass uploaded slot map to mapper assembly")
+    assert_true(
+        client.content_module_list[1]["standardThreeImageText"]["block3"]["image"]["uploadDestinationId"].startswith("UPLOAD-m2_"),
+        "feature grid payload must be assembled from slot-keyed uploads, not legacy position fallback",
+    )
+    assert_true(
+        sorted(result.evidence.get("uploaded_asset_slot_ids") or []) == sorted(expected_slot_ids),
+        "client evidence should expose uploaded enhanced slot map",
+    )
 
 
 async def test_prereq_failures_are_structured(tmp: Path) -> None:
@@ -468,6 +788,9 @@ async def main() -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)
             await test_save_success_writes_draft_saved_only(tmp)
+            await test_enhanced_success_preflights_before_external_call_and_stays_draft_only(tmp)
+            await test_enhanced_mapping_failure_stays_before_external_call_and_client(tmp)
+            await test_real_client_enhanced_uploads_by_slot_and_assembles_mapper_payload(tmp)
             await test_prereq_failures_are_structured(tmp)
             await test_module_mapping_failure_does_not_call_client(tmp)
             await test_external_failures_mark_runtime_failed_and_retryable(tmp)

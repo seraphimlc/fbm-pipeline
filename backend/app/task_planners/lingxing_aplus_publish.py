@@ -9,7 +9,7 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.models import AplusUploadItem, CatalogProduct, Product, TaskGroup, TaskRun, TaskStep
 from app.services.asin_match_policy import seller_sku_candidate
-from app.services.lingxing_aplus_module_mapper import preflight_validate
+from app.services.lingxing_aplus_module_mapper import LingxingAplusModuleMappingResult, preflight_validate
 from app.services.lingxing_aplus_publish_policy import build_aplus_content_fingerprint, collect_aplus_publish_assets
 from app.task_runtime.constants import STEP_STATUS_PENDING, STEP_STATUS_READY
 from app.task_runtime.json_utils import json_dumps
@@ -28,6 +28,22 @@ def _clean_optional(value: str | int | None) -> str | None:
 def _base_dedupe_key(*, product_id: int, product_aplus_id: int | None, fingerprint: str) -> str:
     aplus_key = product_aplus_id or "missing"
     return f"lingxing_aplus_publish:product:{product_id}:aplus:{aplus_key}:fp:{fingerprint}"
+
+
+def _content_evidence(assets_result, module_mapping: LingxingAplusModuleMappingResult | None) -> dict:
+    mapping_evidence = module_mapping.evidence if module_mapping and module_mapping.ok else {}
+    asset_evidence = assets_result.evidence if getattr(assets_result, "ok", False) else {}
+    return {
+        "aplus_publish_profile": mapping_evidence.get("profile") or asset_evidence.get("publish_profile"),
+        "module_count": mapping_evidence.get("module_count"),
+        "content_module_types": mapping_evidence.get("content_module_types")
+        or ([mapping_evidence.get("content_module_type")] if mapping_evidence.get("content_module_type") else []),
+        "asset_slot_ids": asset_evidence.get("asset_slot_ids") or mapping_evidence.get("asset_slot_ids") or [],
+        "slot_ids": asset_evidence.get("slot_ids") or [],
+        "required_image_slot_count": mapping_evidence.get("required_image_slot_count") or asset_evidence.get("required_slot_count"),
+        "mapper_reason_code": None if module_mapping and module_mapping.ok else getattr(module_mapping, "reason_code", None),
+        "assets_reason_code": None if getattr(assets_result, "ok", False) else getattr(assets_result, "reason_code", None),
+    }
 
 
 async def _existing_draft_item(db: AsyncSession, catalog: CatalogProduct) -> AplusUploadItem | None:
@@ -95,6 +111,7 @@ async def create_lingxing_aplus_publish_runs(
             continue
 
         assets_result = collect_aplus_publish_assets(product)
+        module_mapping: LingxingAplusModuleMappingResult | None = None
         if assets_result.ok:
             module_mapping = preflight_validate(product, assets_result.assets)
             fingerprint = (
@@ -108,6 +125,7 @@ async def create_lingxing_aplus_publish_runs(
             )
         else:
             fingerprint = f"invalid-{assets_result.reason_code or 'assets'}"
+        content_evidence = _content_evidence(assets_result, module_mapping)
         dedupe_key = _base_dedupe_key(
             product_id=product.id,
             product_aplus_id=getattr(product.aplus, "id", None),
@@ -137,6 +155,8 @@ async def create_lingxing_aplus_publish_runs(
             "store_id": default_store_id,
             "site": default_site,
             "aplus_content_fingerprint": fingerprint,
+            "aplus_content_evidence": content_evidence,
+            "aplus_publish_profile": content_evidence.get("aplus_publish_profile"),
         }
         run = TaskRun(
             task_type="lingxing_aplus_publish",

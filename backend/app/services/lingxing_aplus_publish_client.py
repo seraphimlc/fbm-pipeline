@@ -84,6 +84,20 @@ def _safe_response_summary(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _asset_upload_key(asset: AplusPublishAsset) -> str:
+    return str(asset.asset_slot_id or asset.position)
+
+
+def _asset_alt_text(asset: AplusPublishAsset, alt_text_map: dict[int, str]) -> str:
+    if asset.asset_slot_id:
+        return asset.alt_text
+    return alt_text_map.get(asset.position) or asset.alt_text
+
+
+def _uploaded_slot_map(uploaded_assets: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {str(item["asset_slot_id"]): item for item in uploaded_assets if item.get("asset_slot_id")}
+
+
 async def _get_lingxing_aplus_auth(*, store_id: str) -> dict[str, Any]:
     async with chrome_workflow("lingxing_aplus_publish_auth"):
         opened = await chrome_navigate(LINGXING_APLUS_URL, wait=3)
@@ -168,10 +182,11 @@ class LingxingAplusDraftSaveClient:
             async with httpx.AsyncClient(timeout=30, verify=settings.external_http_verify) as client:
                 alt_text_map = alt_text_by_position(request.module_mapping)
                 uploaded = [
-                    await self._upload_image(client, auth, asset, alt_text_map.get(asset.position) or asset.alt_text)
+                    await self._upload_image(client, auth, asset, _asset_alt_text(asset, alt_text_map))
                     for asset in request.assets
                 ]
-                mapped = assemble_payload(request.module_mapping, uploaded)
+                uploaded_for_assembly = list(_uploaded_slot_map(uploaded).values()) or uploaded
+                mapped = assemble_payload(request.module_mapping, uploaded_for_assembly)
                 if not mapped.ok:
                     raise LingxingAplusDraftSaveClientError(
                         mapped.reason_code or "aplus_module_assembly_failed",
@@ -201,6 +216,7 @@ class LingxingAplusDraftSaveClient:
                 "status_text": status_text,
                 "response": _safe_response_summary(response),
                 "uploaded_image_count": len(uploaded),
+                "uploaded_asset_slot_ids": sorted(_uploaded_slot_map(uploaded)),
                 "module_mapping": mapped.evidence,
             },
         )
@@ -244,6 +260,12 @@ class LingxingAplusDraftSaveClient:
             )
         return {
             "position": asset.position,
+            "asset_slot_id": asset.asset_slot_id,
+            "slot_id": asset.slot_id,
+            "payload_slot": asset.payload_slot,
+            "module_position": asset.module_position,
+            "semantic_role": asset.semantic_role,
+            "upload_key": _asset_upload_key(asset),
             "file_name": asset.path.name,
             "uploadDestinationId": upload_id,
             "altText": alt_text,
