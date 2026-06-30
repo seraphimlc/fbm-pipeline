@@ -29,6 +29,15 @@ from app.aplus_publish.module_registry import (  # noqa: E402
     PROFILE_SPECS_BY_KEY,
     FAILURE_MODULE_SPEC_UNREGISTERED,
     FAILURE_PROFILE_MODULE_SEQUENCE_MISMATCH,
+    FAILURE_ALT_TEXT_MISSING,
+    FAILURE_COMPARISON_COLUMN_ASIN_INVALID,
+    FAILURE_COMPARISON_COLUMN_ASIN_MISSING,
+    FAILURE_COMPARISON_METRIC_ROWS_INVALID,
+    FAILURE_IMAGE_SLOT_DUPLICATE,
+    FAILURE_IMAGE_SLOT_MISSING,
+    FAILURE_IMAGE_SLOT_UNEXPECTED,
+    FAILURE_SPEC_ROWS_INVALID,
+    FAILURE_TEXT_FIELD_MISSING,
     get_module_spec_for_binding,
     get_profile_spec,
     get_publish_profile_spec,
@@ -94,6 +103,162 @@ def _product(modules) -> Product:
 
 def _assets(tmp: Path, *, size: tuple[int, int] = (1940, 1200)) -> list[AplusPublishAsset]:
     return [_image(tmp / f"aplus_{position}.jpg", size=size) for position in range(1, 6)]
+
+
+def _enhanced_modules(overrides=None) -> list[dict]:
+    overrides = overrides or {}
+    modules = [
+        {
+            "position": 1,
+            "type": "standard_image_text_overlay",
+            "semantic_role": "hero",
+            "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+            "profile_version": "1",
+            "module_spec_key": "image_text_overlay_dark",
+            "lingxing_content_module_type": LINGXING_STANDARD_IMAGE_TEXT_OVERLAY,
+            "headline": "Quiet power for daily use",
+            "body": "A focused hero message with a strong product promise.",
+        },
+        {
+            "position": 2,
+            "type": "standard_three_image_text",
+            "semantic_role": "feature_grid",
+            "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+            "profile_version": "1",
+            "module_spec_key": "three_image_text",
+            "lingxing_content_module_type": LINGXING_STANDARD_THREE_IMAGE_TEXT,
+            "headline": "Three reasons it fits the routine",
+            "features": [
+                {"headline": "Fast setup", "body": "Ready quickly without extra tools."},
+                {"headline": "Stable build", "body": "Designed for repeatable daily handling."},
+                {"headline": "Easy care", "body": "Simple surfaces make cleanup straightforward."},
+            ],
+        },
+        {
+            "position": 3,
+            "type": "standard_single_image_specs_detail",
+            "semantic_role": "detail_proof",
+            "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+            "profile_version": "1",
+            "module_spec_key": "single_image_specs_detail",
+            "lingxing_content_module_type": LINGXING_STANDARD_SINGLE_IMAGE_SPECS_DETAIL,
+            "headline": "Details you can check",
+            "description_headline": "Built for practical use",
+            "description_blocks": [
+                {"headline": "Material focus", "body": "The detail view highlights the finish and contact points."},
+                {"headline": "Use case", "body": "Helpful where compact storage and reliable use matter."},
+            ],
+            "specification_headline": "Detail summary",
+            "specification_list_headline": "What to notice",
+            "spec_items": [
+                {"label": "Finish", "value": "Smooth, easy-care surface"},
+                {"label": "Handling", "value": "Balanced shape for repeat use"},
+                {"label": "Storage", "value": "Compact profile for shelves"},
+            ],
+            "specification_text_headline": "Design note",
+            "spec_note": "Confirm final claims against source product facts before publishing.",
+        },
+        {
+            "position": 4,
+            "type": "standard_comparison_table",
+            "semantic_role": "comparison",
+            "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+            "profile_version": "1",
+            "module_spec_key": "comparison_table",
+            "lingxing_content_module_type": LINGXING_STANDARD_COMPARISON_TABLE,
+            "headline": "Compare the details",
+            "metric_row_labels": ["Setup", "Material", "Care"],
+            "current_product_metric_values": ["Tool-free", "Reinforced", "Wipe clean"],
+            "comparison_product_metric_values": ["Requires extras", "Basic", "Hand wash"],
+            "product_columns": [
+                {"column_key": "current_product", "asin": "B0ABCDEF12", "title": "Current product", "highlight": True},
+                {"column_key": "comparison_product", "asin": "B0ZZZZZZ99", "title": "Common alternative", "highlight": False},
+            ],
+        },
+        {
+            "position": 5,
+            "type": "standard_tech_specs",
+            "semantic_role": "technical_or_closing",
+            "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+            "profile_version": "1",
+            "module_spec_key": "tech_specs",
+            "lingxing_content_module_type": LINGXING_STANDARD_TECH_SPECS,
+            "headline": "Technical specs",
+            "tableCount": 1,
+            "spec_rows": [
+                {"label": "Use", "description": "Everyday indoor routines"},
+                {"label": "Care", "description": "Wipe clean as needed"},
+                {"label": "Fit", "description": "Compact storage profile"},
+                {"label": "Pack", "description": "Ships as one ready-to-use item"},
+            ],
+        },
+    ]
+    for position, values in overrides.items():
+        modules[position - 1].update(values)
+    return modules
+
+
+def _enhanced_product(modules: list[dict] | None = None) -> Product:
+    product = Product(id=302, gigab2b_url="https://example.test/enhanced", gigab2b_product_id="ENHANCED", amazon_asin="B0ABCDEF12")
+    product.data = ProductData(item_code="ENHANCED-SKU", title="Enhanced product", listing_title="Enhanced listing")
+    product.aplus = ProductAplus(
+        id=702,
+        product_id=302,
+        aplus_status="done",
+        aplus_plan=json.dumps(
+            {
+                "aplus_plan_version": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+                "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
+                "profile_version": "1",
+                "modules": modules or _enhanced_modules(),
+            },
+            ensure_ascii=False,
+        ),
+    )
+    return product
+
+
+def _enhanced_assets(tmp: Path, *, alt_text: str = "enhanced slot alt") -> list[AplusPublishAsset]:
+    assets: list[AplusPublishAsset] = []
+    for profile_slot in required_image_slots(APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1):
+        slot = profile_slot.slot
+        asset_slot_id = f"m{profile_slot.position}_{slot.slot_id.replace('.', '_')}"
+        path = tmp / f"{asset_slot_id}.jpg"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", (slot.crop_width, slot.crop_height), "white").save(path, format="JPEG")
+        assets.append(
+            AplusPublishAsset(
+                position=profile_slot.position,
+                module_position=profile_slot.position,
+                path=path,
+                alt_text=alt_text,
+                width=slot.crop_width,
+                height=slot.crop_height,
+                content_type="image/jpeg",
+                size=path.stat().st_size,
+                asset_slot_id=asset_slot_id,
+                slot_id=slot.slot_id,
+                semantic_role=profile_slot.semantic_role,
+                payload_slot=".".join(slot.payload_path),
+                target_width=slot.crop_width,
+                target_height=slot.crop_height,
+                min_width=slot.min_width,
+                min_height=slot.min_height,
+            )
+        )
+    return assets
+
+
+def _uploaded_enhanced(assets: list[AplusPublishAsset]) -> list[dict]:
+    return [
+        {
+            "asset_slot_id": asset.asset_slot_id,
+            "uploadDestinationId": f"UPLOAD-{asset.asset_slot_id}",
+            "width": asset.width,
+            "height": asset.height,
+        }
+        for asset in assets
+    ]
 
 
 def test_registry_enhanced_profile_sequence_contract() -> None:
@@ -254,6 +419,96 @@ def test_valid_plan_assembles_rich_text_payload() -> None:
         assert_true(first["block"]["image"]["uploadDestinationId"] == "UPLOAD-1", "uploaded id should be injected after upload")
 
 
+def test_valid_enhanced_plan_assembles_five_confirmed_payload_subtrees() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        assets = _enhanced_assets(Path(raw_tmp))
+        preflight = preflight_validate(_enhanced_product(), assets)
+        assert_true(preflight.ok, f"enhanced preflight should pass: {preflight.reason_code} {preflight.message}")
+        assembled = assemble_payload(preflight, _uploaded_enhanced(assets))
+        assert_true(assembled.ok, f"enhanced assemble should pass: {assembled.reason_code} {assembled.message}")
+        assert_true(
+            [item["contentModuleType"] for item in assembled.content_module_list]
+            == [
+                LINGXING_STANDARD_IMAGE_TEXT_OVERLAY,
+                LINGXING_STANDARD_THREE_IMAGE_TEXT,
+                LINGXING_STANDARD_SINGLE_IMAGE_SPECS_DETAIL,
+                LINGXING_STANDARD_COMPARISON_TABLE,
+                LINGXING_STANDARD_TECH_SPECS,
+            ],
+            "enhanced payload must contain the five confirmed modules in order",
+        )
+        hero = assembled.content_module_list[0]["standardImageTextOverlay"]
+        assert_true(hero["overlayColorType"] == "DARK", "hero overlay must be dark")
+        assert_true(hero["block"]["image"]["imageCropSpecification"]["size"]["height"]["value"] == "300", "hero crop must be 970x300")
+        feature = assembled.content_module_list[1]["standardThreeImageText"]
+        assert_true(feature["block3"]["body"]["textList"][0]["value"] == "Simple surfaces make cleanup straightforward.", "feature block text must be mapped")
+        detail = assembled.content_module_list[2]["standardSingleImageSpecsDetail"]
+        assert_true(detail["specificationListBlock"]["block"]["textList"][2]["position"] == 3, "detail spec rows must preserve positions")
+        comparison = assembled.content_module_list[3]["standardComparisonTable"]
+        assert_true(len(comparison["productColumns"]) == 2, "comparison must contain two product columns")
+        assert_true(comparison["productColumns"][1]["asin"] == "B0ZZZZZZ99", "comparison ASIN must be mapped")
+        assert_true(comparison["productColumns"][0]["metrics"][0]["value"] == "Tool-free", "comparison metric values must be mapped")
+        tech = assembled.content_module_list[4]["standardTechSpecs"]
+        assert_true("image" not in tech, "technical specs must not receive a placeholder image")
+        assert_true(len(tech["specificationList"]) == 4, "tech specs must contain 4+ rows")
+
+
+def test_enhanced_slot_failures_are_typed() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        assets = _enhanced_assets(Path(raw_tmp))
+        missing = preflight_validate(_enhanced_product(), assets[:-1])
+        assert_true(not missing.ok and missing.reason_code == FAILURE_IMAGE_SLOT_MISSING, "missing enhanced slot must fail closed")
+
+        duplicate_assets = assets + [assets[0]]
+        duplicate = preflight_validate(_enhanced_product(), duplicate_assets)
+        assert_true(not duplicate.ok and duplicate.reason_code == FAILURE_IMAGE_SLOT_DUPLICATE, "duplicate enhanced slot must fail closed")
+
+        unexpected_asset = AplusPublishAsset(
+            position=1,
+            module_position=1,
+            path=assets[0].path,
+            alt_text="unexpected",
+            width=970,
+            height=300,
+            content_type="image/jpeg",
+            size=assets[0].size,
+            asset_slot_id="m1_unexpected",
+            slot_id="unexpected.image",
+            payload_slot="standardImageTextOverlay.block.image",
+        )
+        unexpected = preflight_validate(_enhanced_product(), assets + [unexpected_asset])
+        assert_true(not unexpected.ok and unexpected.reason_code == FAILURE_IMAGE_SLOT_UNEXPECTED, "unexpected enhanced slot must fail closed")
+
+        no_alt = _enhanced_assets(Path(raw_tmp) / "no-alt", alt_text="")
+        alt_result = preflight_validate(_enhanced_product(), no_alt)
+        assert_true(not alt_result.ok and alt_result.reason_code == FAILURE_ALT_TEXT_MISSING, "missing enhanced alt text must fail closed")
+
+
+def test_enhanced_text_comparison_and_spec_failures_are_typed() -> None:
+    with tempfile.TemporaryDirectory() as raw_tmp:
+        assets = _enhanced_assets(Path(raw_tmp))
+        missing_text = preflight_validate(_enhanced_product(_enhanced_modules({1: {"body": ""}})), assets)
+        assert_true(not missing_text.ok and missing_text.reason_code == FAILURE_TEXT_FIELD_MISSING, "missing hero body must fail closed")
+
+        missing_second_asin_modules = _enhanced_modules()
+        missing_second_asin_modules[3]["product_columns"][1]["asin"] = ""
+        missing_asin = preflight_validate(_enhanced_product(missing_second_asin_modules), assets)
+        assert_true(not missing_asin.ok and missing_asin.reason_code == FAILURE_COMPARISON_COLUMN_ASIN_MISSING, "missing comparison ASIN must fail closed")
+
+        bad_asin_modules = _enhanced_modules()
+        bad_asin_modules[3]["product_columns"][1]["asin"] = "TOO-SHORT"
+        bad_asin = preflight_validate(_enhanced_product(bad_asin_modules), assets)
+        assert_true(not bad_asin.ok and bad_asin.reason_code == FAILURE_COMPARISON_COLUMN_ASIN_INVALID, "invalid comparison ASIN must fail closed")
+
+        metric_mismatch_modules = _enhanced_modules({4: {"comparison_product_metric_values": ["Only one"]}})
+        metric_mismatch = preflight_validate(_enhanced_product(metric_mismatch_modules), assets)
+        assert_true(not metric_mismatch.ok and metric_mismatch.reason_code == FAILURE_COMPARISON_METRIC_ROWS_INVALID, "metric row mismatch must fail closed")
+
+        short_specs_modules = _enhanced_modules({5: {"spec_rows": [{"label": "Use", "description": "Daily"}]}})
+        short_specs = preflight_validate(_enhanced_product(short_specs_modules), assets)
+        assert_true(not short_specs.ok and short_specs.reason_code == FAILURE_SPEC_ROWS_INVALID, "tech specs with fewer than four rows must fail closed")
+
+
 def test_body_fallback_and_subheading_fallback_are_recorded() -> None:
     with tempfile.TemporaryDirectory() as raw_tmp:
         product = _product(_modules({2: {"text_content": " ", "subheading": ""}}))
@@ -326,6 +581,9 @@ def main() -> None:
     test_registry_old_profile_compatibility_contract()
     test_registry_contract_fails_for_broken_registered_profiles()
     test_valid_plan_assembles_rich_text_payload()
+    test_valid_enhanced_plan_assembles_five_confirmed_payload_subtrees()
+    test_enhanced_slot_failures_are_typed()
+    test_enhanced_text_comparison_and_spec_failures_are_typed()
     test_body_fallback_and_subheading_fallback_are_recorded()
     test_fail_closed_for_missing_text_and_unsupported_contract()
     test_fail_closed_for_count_position_and_asset_mismatch()
