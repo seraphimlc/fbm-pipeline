@@ -174,6 +174,30 @@ QA 目标：
   - `LINGXING_APLUS_ALLOW_REAL_EXTERNAL_CALLS=true`.
   - `LINGXING_APLUS_STORE_ID` and site/store confirmation.
 
+#### RUOMING_UNBLOCK_PRECHECK / LOCAL_SAMPLE_WRITTEN_PROTECTED_STATUS - 若命（agentKey: `ruoming`）- 2026-07-01 CST
+
+- 结论：已按用户继续指令把 `catalog_product_id=8` 准备为本地 `enhanced_basic_aplus_v1` QA 样本；未触发 Lingxing/Chrome/Amazon。真实 M3.3 QA 仍 blocked。
+- Commands:
+  - `cd backend && .venv/bin/python ../scripts/prepare_lingxing_enhanced_aplus_qa_sample.py --catalog-product-id 8 --write --overwrite-aplus`
+  - Result: `READY_SAMPLE_WRITTEN`，`external_side_effects=local_db_and_files_only`。
+  - Generated local slot images: `data/task_evidence/lingxing_enhanced_aplus_qa_samples/catalog_8`
+  - Mapping evidence: profile `enhanced_basic_aplus_v1`，5 modules，7 required image slots，module types `STANDARD_IMAGE_TEXT_OVERLAY` / `STANDARD_THREE_IMAGE_TEXT` / `STANDARD_SINGLE_IMAGE_SPECS_DETAIL` / `STANDARD_COMPARISON_TABLE` / `STANDARD_TECH_SPECS`。
+- Readiness after sample:
+  - Command: `cd backend && .venv/bin/python ../scripts/check_lingxing_enhanced_aplus_qa_readiness.py --catalog-product-id 8`
+  - Result: exit `2`, `status=BLOCKED`。
+  - Env blockers remain: `LINGXING_APLUS_ALLOW_REAL_EXTERNAL_CALLS` false; `LINGXING_APLUS_STORE_ID` missing。
+  - Sample blocker changed: local enhanced content exists, but `catalog_product_id=8` has protected `aplus_upload_status=draft_saved` from prior real draft evidence.
+- Protected evidence:
+  - `catalog_product_id=8` / `product_id=104` currently has `Product/Catalog.aplus_upload_status=draft_saved`。
+  - Existing `AplusUploadItem` count: 1; latest item has idHash present, `amazon_draft_visibility=unconfirmed`, `source_task_run_id=1330`, `source_task_step_id=1336`, `site=US`, `finished_at=2026-06-24T17:43:14`。
+  - 若命没有重置该状态，也没有删除/覆盖旧 upload evidence。
+- Tool fix:
+  - `scripts/prepare_lingxing_enhanced_aplus_qa_sample.py` dry-run now reports `protected_aplus_upload_status` so candidates with prior protected draft state are not falsely shown as ready.
+  - Project rule updated to keep this guard visible.
+- Need user/operator decision:
+  - 是否允许把 `catalog_product_id=8` 作为 QA 样本重置 A+ 发布状态后再次保存真实草稿？这是业务状态修改，会允许重复 draft-save，若不确认则不能继续真实 QA。
+  - 即使允许重置，仍需提供有效 Chrome Lingxing 登录态、`LINGXING_APLUS_ALLOW_REAL_EXTERNAL_CALLS=true` 和 `LINGXING_APLUS_STORE_ID`。
+
 ### MSG-20260630-004 - REQUEST / IMPLEMENT / LINGXING_ENHANCED_BASIC_APLUS_PHASE_6_DOCS_RULES
 
 - From: 若命（agentKey: `ruoming`）

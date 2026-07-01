@@ -27,6 +27,7 @@ from app.aplus_publish.module_registry import (  # noqa: E402
     LINGXING_STANDARD_THREE_IMAGE_TEXT,
     required_image_slots,
 )
+from app.aplus_publish.status import is_protected_status  # noqa: E402
 from app.config import settings  # noqa: E402
 from app.database import async_session, engine  # noqa: E402
 from app.models import CatalogProduct, Product, ProductAplus  # noqa: E402
@@ -88,6 +89,8 @@ def _candidate_summary(catalog: CatalogProduct) -> dict[str, Any]:
         blockers.append("comparison_asin_missing_or_invalid")
     if product_aplus and getattr(product_aplus, "aplus_plan", None) and profile != APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1:
         blockers.append("existing_non_enhanced_aplus_plan")
+    if is_protected_status(catalog.aplus_upload_status):
+        blockers.append("protected_aplus_upload_status")
     return {
         "catalog_product_id": catalog.id,
         "product_id": catalog.source_product_id,
@@ -97,9 +100,17 @@ def _candidate_summary(catalog: CatalogProduct) -> dict[str, Any]:
         "has_current_asin": _is_asin(current_asin),
         "has_comparison_asin": _is_asin(comparison_asin),
         "existing_profile": profile,
+        "aplus_upload_status": catalog.aplus_upload_status,
         "ready_to_prepare": not blockers,
         "blockers": blockers,
     }
+
+
+def _effective_blockers(summary: dict[str, Any], *, overwrite_aplus: bool) -> list[str]:
+    blockers = list(summary.get("blockers") or [])
+    if overwrite_aplus:
+        blockers = [item for item in blockers if item != "existing_non_enhanced_aplus_plan"]
+    return blockers
 
 
 def _plan(catalog: CatalogProduct) -> dict[str, Any]:
@@ -107,7 +118,8 @@ def _plan(catalog: CatalogProduct) -> dict[str, Any]:
     product = catalog.source_product
     current_asin = _clean(catalog.amazon_asin) or _clean(product.amazon_asin if product else None)
     comparison_asin = _clean(catalog.competitor_asin) or _clean(product.competitor_asin if product else None)
-    comparison_title = f"{title[:70]} alternative"
+    sample_title = f"QA enhanced sample {catalog.id}"
+    comparison_title = f"QA comparison {catalog.id}"
     return {
         "aplus_plan_version": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
         "publish_profile": APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
@@ -122,7 +134,7 @@ def _plan(catalog: CatalogProduct) -> dict[str, Any]:
                 "profile_version": "1",
                 "module_spec_key": "image_text_overlay_dark",
                 "lingxing_content_module_type": LINGXING_STANDARD_IMAGE_TEXT_OVERLAY,
-                "headline": f"{title[:80]}",
+                "headline": sample_title,
                 "body": "QA draft sample for verifying enhanced basic A+ hero text and image placement.",
             },
             {
@@ -177,7 +189,7 @@ def _plan(catalog: CatalogProduct) -> dict[str, Any]:
                 "current_product_metric_values": ["submitFlag=0", "7 required", "4 rows"],
                 "comparison_product_metric_values": ["control", "comparison image", "visible fields"],
                 "product_columns": [
-                    {"column_key": "current_product", "asin": current_asin, "title": title[:80], "highlight": True},
+                    {"column_key": "current_product", "asin": current_asin, "title": sample_title, "highlight": True},
                     {"column_key": "comparison_product", "asin": comparison_asin, "title": comparison_title, "highlight": False},
                 ],
             },
@@ -283,7 +295,9 @@ async def _prepare(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
 
     catalog = catalogs[0]
     summary = summaries[0]
-    if not summary["ready_to_prepare"]:
+    effective_blockers = _effective_blockers(summary, overwrite_aplus=args.overwrite_aplus)
+    if effective_blockers:
+        summary = {**summary, "effective_blockers": effective_blockers}
         await engine.dispose()
         return 3, {"status": "NEEDS_FIX", "external_side_effects": "none", "candidate": summary}
     if not catalog.source_product:
@@ -324,7 +338,7 @@ async def _prepare(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
             "external_side_effects": "local_files_written_only",
             "message": "Generated sample did not pass local policy/mapper preflight; database was not committed",
             "assets": {"ok": assets.ok, "reason_code": assets.reason_code, "message": assets.message},
-            "mapping": {"ok": mapping.ok, "reason_code": mapping.reason_code, "message": mapping.message},
+            "mapping": {"ok": mapping.ok, "reason_code": mapping.reason_code, "message": mapping.message, "evidence": mapping.evidence},
         }
     async with async_session() as db:
         await db.merge(product)

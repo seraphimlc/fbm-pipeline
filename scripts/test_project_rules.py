@@ -3393,9 +3393,11 @@ def test_lingxing_aplus_enhanced_m3_3_readiness_is_readonly() -> None:
     assert_true(
         "parser.add_argument(\"--write\", action=\"store_true\"" in prepare_text
         and "parser.add_argument(\"--overwrite-aplus\", action=\"store_true\"" in prepare_text
+        and "protected_aplus_upload_status" in prepare_text
+        and "is_protected_status" in prepare_text
         and "\"DRY_RUN\"" in prepare_text
         and "write_required_for_db_changes" in prepare_text,
-        "M3.3 样本准备脚本默认必须 dry-run，写库和覆盖 A+ 内容必须显式开关",
+        "M3.3 样本准备脚本默认必须 dry-run，写库和覆盖 A+ 内容必须显式开关，并显式暴露 protected publish status",
     )
     assert_true(
         "LingxingAplusDraftSaveClient" not in prepare_text
