@@ -35,6 +35,36 @@
 - 上下文包足够小且足够完整：当前目标、范围、禁止范围、事实来源、文件路径、验证命令和停止条件。
 - 写权限、验证权限和外部副作用权限已明确。
 
+## 生命周期尺度
+
+子 agent 的生命周期按“协作节点”定义，不按单条消息、单个小问题或单次命令定义。默认倾向是：同一节点内复用，节点结束后关闭；不要为了每个小 follow-up 频繁创建和关闭。
+
+优先复用已有子 agent，当且仅当同时满足：
+
+- 角色身份相同，仍是同一个 `agentKey` 和同一份身份文件。
+- 目标相同，仍属于同一工程工作线、同一 review gate、同一 QA rerun、同一 UX/运营复核节点。
+- 范围没有扩大到新模块、新语义契约、新验收目标或新角色职责。
+- 下一步 follow-up 是同一节点的返工、补证据、复测、自检、解释或收口。
+- 上下文仍然干净：没有互相冲突的旧指令、过长历史、过期事实或混入其它任务。
+- 保留该子 agent 会提升连续性，不会损害 review/QA 独立性。
+
+必须关闭或重建，当出现任一情况：
+
+- 角色要改变，或当前子 agent 被要求承担另一个角色职责。
+- 目标/gate 改变：新的 PRD、阶段、review 主题、QA 目标、样本批次或业务复核问题。
+- 当前节点已经形成 `DONE_CLAIMED/PASS/NEEDS_FIX/BLOCKED/REQUEST`，且没有同范围立即 follow-up。
+- 听云工作线已 commit/push、归档、主题切换，或下一阶段需要干净 intake。
+- 镜花/观止需要新的独立判断；旧上下文会污染审查或验收。
+- 上下文过大、陈旧、互相矛盾，或包含不该继续携带的临时事实。
+- 权限、写入范围、外部副作用范围或事实来源发生变化。
+
+尺度基准：
+
+- 听云：按工程工作线复用，不按文件、报错、测试失败或小修小补频繁重建。一个 PRD、一个实现阶段、同一返工链路通常是一个生命周期。
+- 镜花：按 review gate 复用，不按每条 finding 重建。同一 finding 的返工复审可复用；新的 review 主题或需要独立二审时重建。
+- 观止：按 QA gate 或同一 rerun 复用，不按每个操作步骤重建。新的验收目标、样本批次或用户路径时重建。
+- 清秋/霜弦：按一次 UX/运营复核节点复用；新的页面/规则主题通常重建。
+
 ## Dispatch Packet
 
 若命发给子 agent 的第一条消息必须包含完整 dispatch packet。不能只说“帮我 review 一下”或“你现在是听云”。
@@ -61,7 +91,7 @@
 - External side effects allowed: none / explicitly listed only
 - Output format:
 - Stop condition:
-- Lifecycle: close after this gate / keep for same work line until 若命 closes
+- Lifecycle: reuse scale and close condition, for example keep for same work line / same review gate / same QA rerun until 若命 closes
 
 如果身份、权限、范围、事实来源或验证路径不清楚，回复 REQUEST/BLOCKED，不要猜。
 ```
@@ -86,7 +116,7 @@
 - External side effects allowed:
 - Output format:
 - Stop condition:
-- Lifecycle:
+- Lifecycle: current reuse scale and close condition
 ```
 
 保留上下文不是扩大权限。若 follow-up 需要另一种角色职责，若命必须关闭当前子 agent，并用新的授权身份重新创建。

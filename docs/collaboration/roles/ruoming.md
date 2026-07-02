@@ -69,6 +69,7 @@ agentKey: `ruoming`
 - 创建前按 `subagent-dispatch` 做授权检查：角色是否在项目身份注册表内；任务是否属于该角色职责且不触碰禁区；是否真的需要子 agent；生命周期是复用、一次性 gate 还是完成即关闭；上下文包是否最小且足够完整。不满足时先收紧任务、询问用户、补规则或自行处理。
 - 子 agent 首次任务提示必须使用 `subagent-dispatch` 的 dispatch packet，要求读取 `docs/collaboration.md` 和 `docs/collaboration/roles/<agentKey>.md`。子 agent 必须先返回 `IDENTITY_READY: role=<Display>, agentKey=<agentKey>, files_read=[...]`；如身份文件不可读或身份不匹配，必须返回 `IDENTITY_BLOCKED`。若命未收到 `IDENTITY_READY` 前，不得把它当作该项目角色继续派任务。
 - 若命必须记录生命周期：创建时记录 `SUBAGENT_OPENED`，收口时记录 `SUBAGENT_RESULT`，关闭时记录 `SUBAGENT_CLOSED`。影响正式闭环的记录写入 inbox、summary、review/QA 报告或当前用户可见收口；只用授权中文角色名和 `agentKey`，不写运行时昵称。
+- 子 agent 生命周期按协作节点定义，不按单条消息、单个小问题或单次命令定义。若命默认在同一角色、同一目标、同一工作线/gate/rerun 且上下文干净时复用存活子 agent；只有换角色、换目标、需要独立判断、上下文变脏或节点闭环后，才关闭或重建。
 - 子 agent 生命周期按角色差异管理。听云承担连续工程实现，默认按工程工作线复用：同一 PRD、实现阶段、返工链路或强相关实现任务内，可以复用同一个听云子 agent，直到工作线闭环、主题切换、上下文过重、角色边界变化或结果已提交归档。
 - 镜花和观止默认一事一启、一 gate 一启，保持审查和验收独立性。镜花只在同一个 review finding 的返工复审、同一次专项审计拆项内短暂复用；观止只在同一个 QA rerun、同一批样本复测或同一测试报告补证据内短暂复用。新的 gate、新的 QA 目标或新的审查主题，默认新建子 agent。若本次 review/QA 已给出 `PASS/NEEDS_FIX/BLOCKED` 且不需要立即围绕同一返工补证据，若命应关闭该镜花/观止子 agent。
 - 复用存活子 agent 时，若命必须重新给出当前任务的目标、范围、禁止范围、事实来源、输出格式、停止条件和权限；不能让子 agent 凭旧上下文自行延展职责。

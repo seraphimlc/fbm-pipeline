@@ -5989,6 +5989,12 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
         "运行时昵称",
         "runtime",
         "dispatch packet",
+        "生命周期尺度",
+        "协作节点",
+        "不按单条消息",
+        "工程工作线",
+        "review gate",
+        "QA gate",
     ]
     for term in required_terms:
         assert_true(term in playbook_text, f"subagent-dispatch playbook 必须定义 {term}")
@@ -6028,13 +6034,18 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
         and "运行时昵称" in ruoming_text,
         "若命身份文件必须硬性要求身份握手、生命周期关闭和运行时昵称禁区",
     )
+    assert_true(
+        "协作节点" in ruoming_text and "不按单条消息" in ruoming_text and "上下文干净" in ruoming_text,
+        "若命身份文件必须定义子 agent 创建/复用/关闭的生命周期尺度，避免频繁创建关闭",
+    )
 
     init_text = init_script.read_text(encoding="utf-8")
     assert_true(
         '"subagent-dispatch.md"' in init_text
         and "IDENTITY_READY" in init_text
-        and "SUBAGENT_CLOSED" in init_text,
-        "初始化脚本必须能生成子 agent 派发 playbook 和关键握手/关闭规则",
+        and "SUBAGENT_CLOSED" in init_text
+        and "生命周期尺度" in init_text,
+        "初始化脚本必须能生成子 agent 派发 playbook、生命周期尺度和关键握手/关闭规则",
     )
 
 

@@ -11,7 +11,7 @@
 
 - 协作入口是 `docs/collaboration.md`；新会话启动语是“你是某角色，读一下 docs/collaboration.md”。
 - 正式跨 agent 行动和审计结论只写 `docs/collaboration/inbox.md` 顶层 message；topic tree 只记录讨论结构。
-- 若命可按需启动角色子 agent，但必须按 `docs/collaboration/playbooks/subagent-dispatch.md` 执行授权检查、身份文件初始化、`IDENTITY_READY/IDENTITY_BLOCKED` 握手和 `SUBAGENT_OPENED/SUBAGENT_RESULT/SUBAGENT_CLOSED` 生命周期记录。听云按工程工作线优先复用，镜花/观止默认一 gate 一启以保持审查和验收独立性。运行时英文昵称只作传输元数据，不进入项目可见叙述。
+- 若命可按需启动角色子 agent，但必须按 `docs/collaboration/playbooks/subagent-dispatch.md` 执行授权检查、身份文件初始化、`IDENTITY_READY/IDENTITY_BLOCKED` 握手和 `SUBAGENT_OPENED/SUBAGENT_RESULT/SUBAGENT_CLOSED` 生命周期记录。生命周期按协作节点定义，不按单条消息、小问题或单次命令频繁创建关闭；听云按工程工作线优先复用，镜花/观止按 gate/rerun 复用并在节点闭环后关闭。运行时英文昵称只作传输元数据，不进入项目可见叙述。
 - 每个角色节点结束后，若命必须先给用户一份基于文件的总结，再推进下一节点。总结默认放在 `docs/collaboration/summaries/`，也可链接到已有 PRD/review/QA 报告；用户看到总结前默认暂停，不继续启动实现、review、QA、commit/push 或新角色节点，除非用户预先授权连续执行到指定 gate。
 - inbox 是当前行动板，不是历史库；已关闭、被覆盖或只剩追溯价值的消息归档到 `docs/collaboration/archive/`。
 - `DONE_CLAIMED` 不是 PASS，也不是 commit/push 许可。
@@ -38,7 +38,7 @@
 ## 关键流程
 
 - 派工：若命写 PRD/spec 或顶层 REQUEST，听云先写 TASK_DEFINITION，若命 PLAN_APPROVED 后再实现。
-- 子 agent：若命先读 `subagent-dispatch` playbook，准备 dispatch packet，要求子 agent 读取 `docs/collaboration.md` 和对应 `docs/collaboration/roles/<agentKey>.md`，收到 `IDENTITY_READY` 后才可继续派发；听云可按同一 PRD/阶段/返工链路复用，镜花/观止仅在同一复审或同一 QA rerun 内短暂复用，正常 review/QA 给出 `PASS/NEEDS_FIX/BLOCKED` 后即 `SUBAGENT_CLOSED`；子 agent 返回证据后由若命整合并决定正式 gate 和 inbox 记录，同时先形成用户可读总结并暂停等待用户看到。
+- 子 agent：若命先读 `subagent-dispatch` playbook，准备 dispatch packet，要求子 agent 读取 `docs/collaboration.md` 和对应 `docs/collaboration/roles/<agentKey>.md`，收到 `IDENTITY_READY` 后才可继续派发；同一角色、同一目标、同一工作线/gate/rerun 且上下文干净时优先复用，换角色、换目标、需要独立判断、上下文变脏或节点闭环后才 `SUBAGENT_CLOSED` 或重建；子 agent 返回证据后由若命整合并决定正式 gate 和 inbox 记录，同时先形成用户可读总结并暂停等待用户看到。
 - 验收：听云 DONE_CLAIMED 后，若命决定是否需要镜花 code review、观止 QA 或用户确认。
 - 提交：所需 gate 通过后默认由若命做 scoped commit/push；听云只在若命/用户明确授权时提交。
 - 归档：任务关闭或被新消息覆盖后，先保存清理前快照，再压缩 inbox 当前行动板。
@@ -62,7 +62,7 @@
 - skill 脚本语法：`python3 -m py_compile /Users/liuchang/.codex/skills/multi-agent-collaboration/scripts/init_collaboration.py`
 - skill 初始化冒烟：`python3 /Users/liuchang/.codex/skills/multi-agent-collaboration/scripts/init_collaboration.py --project /tmp/mac-skill-test --skip-superpowers-setup`
 - 当前消息定位：`rg -n "MSG-|DONE_CLAIMED|NEEDS_FIX|PLAN_APPROVED|IDENTITY_READY|SUBAGENT_CLOSED|agentKey" docs/collaboration/inbox.md`
-- skill 规则定位：`rg -n "Review Gate|Inbox Archiving|DONE_CLAIMED|commit/push|Cross-layer semantic|On-Demand Sub-Agent|按需子 agent|subagent-dispatch|IDENTITY_READY|runtime nickname|运行时昵称|跨层语义|生产端" /Users/liuchang/.codex/skills/multi-agent-collaboration`
+- skill 规则定位：`rg -n "Review Gate|Inbox Archiving|DONE_CLAIMED|commit/push|Cross-layer semantic|On-Demand Sub-Agent|按需子 agent|subagent-dispatch|生命周期尺度|协作节点|IDENTITY_READY|runtime nickname|运行时昵称|跨层语义|生产端" /Users/liuchang/.codex/skills/multi-agent-collaboration`
 
 ## 常见定位
 
