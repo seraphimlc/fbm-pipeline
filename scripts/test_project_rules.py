@@ -5966,6 +5966,78 @@ asyncio.run(main())
     assert_true(result.returncode == 0, f"候选详情 fixture adapter 行为验证失败: {result.stderr or result.stdout}")
 
 
+def test_subagent_dispatch_identity_lifecycle_contract() -> None:
+    playbook = ROOT / "docs" / "collaboration" / "playbooks" / "subagent-dispatch.md"
+    collaboration = ROOT / "docs" / "collaboration.md"
+    ruoming = ROOT / "docs" / "collaboration" / "roles" / "ruoming.md"
+    domain_index = ROOT / "docs" / "domain-index" / "collaboration.md"
+    skill_root = Path.home() / ".codex" / "skills" / "multi-agent-collaboration"
+    skill_doc = skill_root / "SKILL.md"
+    init_script = skill_root / "scripts" / "init_collaboration.py"
+
+    assert_true(playbook.is_file(), "必须有子 agent 派发 playbook，不能只在公共规约里叙述")
+    assert_true(skill_doc.is_file(), "multi-agent-collaboration skill 必须存在并同步子 agent 规约")
+    assert_true(init_script.is_file(), "multi-agent-collaboration 初始化脚本必须存在并同步子 agent 模板")
+
+    playbook_text = playbook.read_text(encoding="utf-8")
+    required_terms = [
+        "IDENTITY_READY",
+        "IDENTITY_BLOCKED",
+        "SUBAGENT_OPENED",
+        "SUBAGENT_RESULT",
+        "SUBAGENT_CLOSED",
+        "运行时昵称",
+        "runtime",
+        "dispatch packet",
+    ]
+    for term in required_terms:
+        assert_true(term in playbook_text, f"subagent-dispatch playbook 必须定义 {term}")
+
+    role_files = {
+        "tingyun": "听云",
+        "guanzhi": "观止",
+        "jinghua": "镜花",
+        "qingqiu": "清秋",
+        "shuangxian": "霜弦",
+    }
+    for agent_key, display in role_files.items():
+        role_path = f"docs/collaboration/roles/{agent_key}.md"
+        assert_true(
+            role_path in playbook_text and display in playbook_text,
+            f"subagent-dispatch 必须把 {display}/{agent_key} 绑定到身份文件",
+        )
+
+    assert_true(
+        "若命是主控身份" in playbook_text and "不作为若命自己创建的子 agent 身份" in playbook_text,
+        "若命不能作为若命自己创建的子 agent 身份",
+    )
+
+    for path in (collaboration, ruoming, domain_index, skill_doc, init_script):
+        text = path.read_text(encoding="utf-8")
+        assert_true(
+            "docs/collaboration/playbooks/subagent-dispatch.md" in text
+            or "subagent-dispatch.md" in text,
+            f"{path} 必须引用 subagent-dispatch playbook",
+        )
+
+    ruoming_text = ruoming.read_text(encoding="utf-8")
+    assert_true(
+        "IDENTITY_READY" in ruoming_text
+        and "IDENTITY_BLOCKED" in ruoming_text
+        and "SUBAGENT_CLOSED" in ruoming_text
+        and "运行时昵称" in ruoming_text,
+        "若命身份文件必须硬性要求身份握手、生命周期关闭和运行时昵称禁区",
+    )
+
+    init_text = init_script.read_text(encoding="utf-8")
+    assert_true(
+        '"subagent-dispatch.md"' in init_text
+        and "IDENTITY_READY" in init_text
+        and "SUBAGENT_CLOSED" in init_text,
+        "初始化脚本必须能生成子 agent 派发 playbook 和关键握手/关闭规则",
+    )
+
+
 def main() -> int:
     tests = [
         test_category_conflict_only_overrides_conflict,
@@ -6041,6 +6113,7 @@ def main() -> int:
         test_auto_competitor_visual_match_phase_b_fixture_behaviour,
         test_auto_competitor_candidate_capture_and_selection_phase1_contract,
         test_auto_competitor_candidate_capture_fixture_adapter_behaviour,
+        test_subagent_dispatch_identity_lifecycle_contract,
     ]
     for test in tests:
         test()
