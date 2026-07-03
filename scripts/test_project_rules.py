@@ -6037,20 +6037,69 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
 
     ruoming_text = ruoming.read_text(encoding="utf-8")
     assert_true(
-        "IDENTITY_READY" in ruoming_text
-        and "IDENTITY_BLOCKED" in ruoming_text
-        and "SUBAGENT_RESET" in ruoming_text
-        and "SUBAGENT_CLOSED" in ruoming_text
-        and "运行时昵称" in ruoming_text,
-        "若命身份文件必须硬性要求身份握手、reset/关闭记录和运行时昵称禁区",
+        "docs/collaboration/playbooks/subagent-dispatch.md" in ruoming_text
+        and "调度协议只有一个事实源" in ruoming_text
+        and "不复写 packet、握手、reset 或 close 细节" in ruoming_text,
+        "若命身份文件只应引用 subagent-dispatch 单一事实源，不应复写 dispatch/reset/close 细节",
     )
     assert_true(
-        "身份池" in ruoming_text
-        and "协作节点" in ruoming_text
-        and "不按单条消息" in ruoming_text
-        and "默认跟子 agent 沟通" in ruoming_text
-        and "才要求 reset" in ruoming_text,
-        "若命身份文件必须定义子 agent 身份常驻和 reset 尺度，避免频繁创建关闭",
+        all(term not in ruoming_text for term in ("IDENTITY_READY", "IDENTITY_BLOCKED", "SUBAGENT_RESET", "SUBAGENT_CLOSED")),
+        "身份握手、reset 和关闭记录细节必须只存在于 subagent-dispatch playbook",
+    )
+
+    role_dir = ROOT / "docs" / "collaboration" / "roles"
+    skill_role_dir = template_root / "collaboration" / "roles"
+    required_role_sections = [
+        "## 身份定位",
+        "## 职责边界",
+        "## 启动读取",
+        "## 入场 / 不入场",
+        "## 工作原则",
+        "## 判定标准",
+        "## 输出最小格式",
+        "## 需要读取的 playbook",
+    ]
+    for role_path in sorted(role_dir.glob("*.md")):
+        role_text = role_path.read_text(encoding="utf-8")
+        line_count = len(role_text.splitlines())
+        assert_true(60 <= line_count <= 180, f"{role_path} 应保持 identity contract 规模，当前 {line_count} 行")
+        for section in required_role_sections:
+            assert_true(section in role_text, f"{role_path} 必须包含标准角色章节 {section}")
+        assert_true(
+            "REVIEW_SCOPING / 请求解释器" not in role_text
+            and "## 审查节点" not in role_text
+            and "## 标准审查维度库" not in role_text,
+            f"{role_path} 不能塞入 review playbook 级 SOP",
+        )
+
+    for role_path in sorted(skill_role_dir.glob("*.md")):
+        role_text = role_path.read_text(encoding="utf-8")
+        line_count = len(role_text.splitlines())
+        assert_true(60 <= line_count <= 180, f"{role_path} 应保持 identity contract 规模，当前 {line_count} 行")
+        for section in required_role_sections:
+            assert_true(section in role_text, f"{role_path} 必须包含标准角色章节 {section}")
+
+    code_review = ROOT / "docs" / "collaboration" / "playbooks" / "code-review.md"
+    skill_code_review = template_root / "collaboration" / "playbooks" / "code-review.md"
+    code_review_text = code_review.read_text(encoding="utf-8")
+    skill_code_review_text = skill_code_review.read_text(encoding="utf-8")
+    for text, path in ((code_review_text, code_review), (skill_code_review_text, skill_code_review)):
+        assert_true(
+            "REVIEW_SCOPING / 请求解释器" in text
+            and "## 审查节点" in text
+            and "REQUIREMENT_REVIEW" in text
+            and "SOLUTION_REVIEW" in text
+            and "DELIVERY_REVIEW" in text,
+            f"{path} 必须承接镜花 review scoping、审查节点和交付审查 SOP",
+        )
+
+    assert_true(
+        "身份池" in playbook_text
+        and "协作节点" in playbook_text
+        and "不按单条消息" in playbook_text
+        and "默认给子 agent 沟通" in playbook_text
+        and "才明确要求 reset" in playbook_text,
+        "subagent-dispatch playbook 必须定义子 agent 身份常驻和 reset 尺度，避免频繁创建关闭",
     )
 
     skill_text = skill_doc.read_text(encoding="utf-8")
@@ -6070,10 +6119,10 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
     )
     skill_ruoming_text = skill_ruoming.read_text(encoding="utf-8")
     assert_true(
-        "身份池" in skill_ruoming_text
-        and "SUBAGENT_RESET" in skill_ruoming_text
-        and "默认跟子 agent 沟通" in skill_ruoming_text,
-        "skill 模板中的若命身份必须包含身份池和 reset 控制",
+        "docs/collaboration/playbooks/subagent-dispatch.md" in skill_ruoming_text
+        and "调度协议只有一个事实源" in skill_ruoming_text
+        and all(term not in skill_ruoming_text for term in ("IDENTITY_READY", "IDENTITY_BLOCKED", "SUBAGENT_RESET", "SUBAGENT_CLOSED")),
+        "skill 模板中的若命身份只能引用 subagent-dispatch，不得复写身份握手、reset 或关闭细节",
     )
 
     init_text = init_script.read_text(encoding="utf-8")
