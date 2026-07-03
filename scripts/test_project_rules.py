@@ -5974,10 +5974,15 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
     skill_root = Path.home() / ".codex" / "skills" / "multi-agent-collaboration"
     skill_doc = skill_root / "SKILL.md"
     init_script = skill_root / "scripts" / "init_collaboration.py"
+    template_root = skill_root / "templates"
+    skill_playbook = template_root / "collaboration" / "playbooks" / "subagent-dispatch.md"
+    skill_ruoming = template_root / "collaboration" / "roles" / "ruoming.md"
 
     assert_true(playbook.is_file(), "必须有子 agent 派发 playbook，不能只在公共规约里叙述")
     assert_true(skill_doc.is_file(), "multi-agent-collaboration skill 必须存在并同步子 agent 规约")
     assert_true(init_script.is_file(), "multi-agent-collaboration 初始化脚本必须存在并同步子 agent 模板")
+    assert_true(skill_playbook.is_file(), "multi-agent-collaboration skill 必须把 playbook 拆到 templates/collaboration/playbooks")
+    assert_true(skill_ruoming.is_file(), "multi-agent-collaboration skill 必须把角色身份拆到 templates/collaboration/roles")
 
     playbook_text = playbook.read_text(encoding="utf-8")
     required_terms = [
@@ -6022,7 +6027,7 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
         "若命不能作为若命自己创建的子 agent 身份",
     )
 
-    for path in (collaboration, ruoming, domain_index, skill_doc, init_script):
+    for path in (collaboration, ruoming, domain_index, skill_doc):
         text = path.read_text(encoding="utf-8")
         assert_true(
             "docs/collaboration/playbooks/subagent-dispatch.md" in text
@@ -6048,15 +6053,39 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
         "若命身份文件必须定义子 agent 身份常驻和 reset 尺度，避免频繁创建关闭",
     )
 
+    skill_text = skill_doc.read_text(encoding="utf-8")
+    assert_true(
+        "templates/collaboration/roles/*.md" in skill_text
+        and "templates/collaboration/playbooks/*.md" in skill_text
+        and "Keep `SKILL.md` short" in skill_text,
+        "SKILL.md 必须保持路由/维护层，角色和 playbook 正文必须拆到 templates",
+    )
+
+    skill_playbook_text = skill_playbook.read_text(encoding="utf-8")
+    assert_true(
+        "SUBAGENT_RESET" in skill_playbook_text
+        and "identity pool" in skill_playbook_text
+        and "默认不关闭常驻身份" in skill_playbook_text,
+        "skill 模板中的 subagent-dispatch 必须包含身份池和 reset 控制",
+    )
+    skill_ruoming_text = skill_ruoming.read_text(encoding="utf-8")
+    assert_true(
+        "身份池" in skill_ruoming_text
+        and "SUBAGENT_RESET" in skill_ruoming_text
+        and "默认跟子 agent 沟通" in skill_ruoming_text,
+        "skill 模板中的若命身份必须包含身份池和 reset 控制",
+    )
+
     init_text = init_script.read_text(encoding="utf-8")
     assert_true(
-        '"subagent-dispatch.md"' in init_text
-        and "IDENTITY_READY" in init_text
-        and "SUBAGENT_RESET" in init_text
-        and "SUBAGENT_CLOSED" in init_text
-        and "身份池" in init_text
-        and "生命周期尺度" in init_text,
-        "初始化脚本必须能生成子 agent 派发 playbook、身份池、reset 尺度和关键握手/关闭规则",
+        "TEMPLATE_ROOT" in init_text
+        and "read_template" in init_text
+        and "template_files(\"collaboration/roles\")" in init_text
+        and "template_files(\"collaboration/playbooks\")" in init_text
+        and "ROLES_TEMPLATE" not in init_text
+        and "ROLE_TEMPLATES" not in init_text
+        and "PLAYBOOK_TEMPLATES" not in init_text,
+        "初始化脚本必须读取 templates，不得再内嵌角色/playbook 大字符串",
     )
 
 
