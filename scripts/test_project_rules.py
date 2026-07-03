@@ -5984,14 +5984,18 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
         "IDENTITY_READY",
         "IDENTITY_BLOCKED",
         "SUBAGENT_OPENED",
+        "SUBAGENT_RESET",
         "SUBAGENT_RESULT",
         "SUBAGENT_CLOSED",
         "运行时昵称",
         "runtime",
         "dispatch packet",
+        "身份池",
+        "identity pool",
         "生命周期尺度",
         "协作节点",
         "不按单条消息",
+        "默认不关闭常驻身份",
         "工程工作线",
         "review gate",
         "QA gate",
@@ -6030,22 +6034,29 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
     assert_true(
         "IDENTITY_READY" in ruoming_text
         and "IDENTITY_BLOCKED" in ruoming_text
+        and "SUBAGENT_RESET" in ruoming_text
         and "SUBAGENT_CLOSED" in ruoming_text
         and "运行时昵称" in ruoming_text,
-        "若命身份文件必须硬性要求身份握手、生命周期关闭和运行时昵称禁区",
+        "若命身份文件必须硬性要求身份握手、reset/关闭记录和运行时昵称禁区",
     )
     assert_true(
-        "协作节点" in ruoming_text and "不按单条消息" in ruoming_text and "上下文干净" in ruoming_text,
-        "若命身份文件必须定义子 agent 创建/复用/关闭的生命周期尺度，避免频繁创建关闭",
+        "身份池" in ruoming_text
+        and "协作节点" in ruoming_text
+        and "不按单条消息" in ruoming_text
+        and "默认跟子 agent 沟通" in ruoming_text
+        and "才要求 reset" in ruoming_text,
+        "若命身份文件必须定义子 agent 身份常驻和 reset 尺度，避免频繁创建关闭",
     )
 
     init_text = init_script.read_text(encoding="utf-8")
     assert_true(
         '"subagent-dispatch.md"' in init_text
         and "IDENTITY_READY" in init_text
+        and "SUBAGENT_RESET" in init_text
         and "SUBAGENT_CLOSED" in init_text
+        and "身份池" in init_text
         and "生命周期尺度" in init_text,
-        "初始化脚本必须能生成子 agent 派发 playbook、生命周期尺度和关键握手/关闭规则",
+        "初始化脚本必须能生成子 agent 派发 playbook、身份池、reset 尺度和关键握手/关闭规则",
     )
 
 

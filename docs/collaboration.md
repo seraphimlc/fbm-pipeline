@@ -70,7 +70,7 @@
 
 默认协作形态可以从“多个长期角色会话通过 inbox 接力”，调整为“若命主线程按需启动并按工作线复用角色子 agent”。这个模式的目标是减少 heartbeat 空跑、减少 inbox 噪音，并让若命统一掌握入场、边界、gate 和闭环。
 
-若命创建、复用或关闭子 agent 时，必须先按 `docs/collaboration/playbooks/subagent-dispatch.md` 执行 dispatch packet、`IDENTITY_READY/IDENTITY_BLOCKED` 身份握手和 `SUBAGENT_OPENED/SUBAGENT_RESULT/SUBAGENT_CLOSED` 生命周期记录。没有身份文件初始化、没有授权角色绑定或没有明确关闭条件时，不创建子 agent。
+若命初始化、复用、reset 或关闭子 agent 时，必须先按 `docs/collaboration/playbooks/subagent-dispatch.md` 执行身份池初始化、dispatch packet、`IDENTITY_READY/IDENTITY_BLOCKED` 身份握手和 `SUBAGENT_OPENED/SUBAGENT_RESET/SUBAGENT_RESULT/SUBAGENT_CLOSED` 生命周期记录。没有身份文件初始化、没有授权角色绑定或没有明确 reset/关闭判断时，不派具体任务。
 
 授权身份：
 
@@ -81,11 +81,11 @@
 适用原则：
 
 - 若命主线程负责整体产品判断、任务定义、角色入场、结果整合、gate 决策、commit/push 和关闭归档。
-- 若命创建子 agent 前必须通过 `subagent-dispatch` 授权检查：角色是否在项目身份注册表内；任务是否属于该角色职责且不触碰禁区；是否真的需要子 agent 而不是若命直接处理；生命周期是复用、一次性 gate 还是完成即关闭；上下文包是否足够小且足够完整。任何一项不满足时，不创建子 agent，先收紧任务、询问用户、补充协作规则或自行处理。
-- 子 agent 生命周期按协作节点定义，不按单条消息、单个小问题或单次命令定义。同一角色、同一目标、同一工作线/gate/rerun 且上下文干净时优先复用；换角色、换目标、需要独立判断、上下文变脏或节点闭环后才关闭或重建。
-- 角色子 agent 的生命周期按角色差异管理。听云承担连续工程实现，默认按工程工作线复用；镜花和观止承担低频 gate，默认一事一启、一 gate 一启，保持审查/验收独立性。
-- 听云工作线可以是一条 PRD、一个实现阶段、一条返工链路或一组强相关实现任务；同一工作线内的实现、返工、自检和对账可以复用同一个听云子 agent，直到工作线闭环、主题切换、上下文过重、角色边界变化或结果已提交归档后再关闭。
-- 镜花和观止通常不需要长期保留上下文。镜花只在同一个 review finding 的返工复审、同一次专项审计拆项内短暂复用；观止只在同一个 QA rerun、同一批样本复测或同一测试报告补证据内短暂复用。新的 gate、新的 QA 目标或新的审查主题，默认新建子 agent。若本次 review/QA 已给出 `PASS/NEEDS_FIX/BLOCKED` 且不需要立即围绕同一返工补证据，就应关闭该镜花/观止子 agent。
+- 若命派具体任务前必须通过 `subagent-dispatch` 授权检查：角色是否在项目身份注册表内；任务是否属于该角色职责且不触碰禁区；是否真的需要子 agent 而不是若命直接处理；本次是复用常驻身份上下文、先 reset，还是运行时不可用时重建；上下文包是否足够小且足够完整。任何一项不满足时，不派任务，先收紧任务、询问用户、补充协作规则或自行处理。
+- 子 agent 身份可以常驻；任务授权按协作节点定义，不按单条消息、单个小问题或单次命令定义。同一角色、同一目标、同一工作线/gate/rerun 且上下文干净时优先复用；换角色、换目标、需要独立判断、上下文变脏、权限/事实源变化或上下文过长时由若命要求 reset。
+- 角色子 agent 的身份可常驻，生命周期重点从“频繁关闭/重建”调整为“若命判断是否 reset”。默认沟通、分任务或同节点 follow-up 不强调 reset。
+- 听云工作线可以是一条 PRD、一个实现阶段、一条返工链路或一组强相关实现任务；同一工作线内的实现、返工、自检和对账可以复用同一个听云子 agent。新的不相关工作线、上下文过重或上下文变脏时 reset。
+- 镜花和观止可以身份常驻，但 review/QA 任务仍按 gate/rerun 重新 dispatch。新的 gate、新的 QA 目标、新的审查主题或需要独立判断时 reset；同一 finding 复审、同一 QA rerun 或同一批样本补证据默认复用。
 - 每次给存活子 agent 下发新任务时，若命仍必须重新声明当前目标、范围、禁止范围、事实来源、输出格式、停止条件和权限；不能因为子 agent 保留上下文就让它自行延展职责。
 - 子 agent 的首次任务提示必须使用 `subagent-dispatch` 的 dispatch packet，包含角色身份、`docs/collaboration.md`、`docs/collaboration/roles/<agentKey>.md`、`IDENTITY_READY/IDENTITY_BLOCKED` 握手、任务目标、范围、禁止范围、事实来源、输出格式、停止条件、是否允许写文件、是否允许运行验证、是否允许触碰外部系统。
 - 子 agent 不自行 commit/push、不自行扩大范围、不替若命决定是否需要其它角色入场。需要越权、缺事实、产品语义不清或验证不可执行时，返回 `REQUEST/BLOCKED` 给若命。
@@ -121,17 +121,17 @@
 - External side effects allowed: none / explicitly listed only
 - Output format:
 - Stop condition:
-- Lifecycle: close after this gate / keep for same work line until 若命 closes
+- Lifecycle: reuse current identity; reset only if 若命 explicitly says so / same work line / same review gate / same QA rerun
 
 若发现身份、权限、范围、事实来源或验证路径不清楚，回复 REQUEST/BLOCKED，不要猜。
 ```
 
 生命周期关闭规则：
 
-- 授权 gate 或工作线完成、且没有同范围立即 follow-up 时，若命必须关闭对应子 agent。
-- 镜花/观止返回 `PASS/NEEDS_FIX/BLOCKED` 后，除非立即做同一 finding 复审、同一 QA rerun 或同一证据补充，否则关闭。
-- 听云在阶段已 commit/push、主题切换、角色边界变化、上下文变脏或下个任务需要干净 intake 时关闭或重建。
-- 不因为子 agent 已存在就保留；保留的上下文是成本和风险，不是权限。
+- 任务节点完成后默认保留常驻身份，不立即释放子 agent。
+- 若命不需要每次沟通都强调 reset；同一节点 follow-up 默认复用当前上下文。
+- 新的不相关任务、上下文变脏、需要独立判断、权限/事实源变化或上下文过长时，若命要求 reset。
+- reset 失败、身份阻塞、运行时不可用、用户明确要求释放或安全原因需要切断时，才关闭对应子 agent。
 - 不复用子 agent 扮演另一个角色。听云不能通过 follow-up prompt 变成镜花、观止或若命；需要新角色时新建已授权身份。
 
 子 agent 上下文预算：
@@ -146,7 +146,7 @@ inbox 使用边界：
 
 - `docs/collaboration/inbox.md` 是正式行动板和审计板，不是子 agent 聊天记录。
 - 子 agent 的中间分析、内部计划、草稿和短过程不写入 inbox；长证据写入 PRD、review、QA 或其它报告文件。
-- 会影响项目闭环的正式结果必须可追溯：任务创建、关键决策、`SUBAGENT_OPENED`、`SUBAGENT_RESULT`、`DONE_CLAIMED`、`CODE_REVIEW PASS/NEEDS_FIX/BLOCKED`、`QA PASS/NEEDS_FIX/BLOCKED`、用户确认、commit/push、`SUBAGENT_CLOSED`、关闭/归档，应在 inbox 留短结论和证据链接，或由若命在关闭消息中汇总。
+- 会影响项目闭环的正式结果必须可追溯：任务创建、关键决策、`SUBAGENT_OPENED`、必要时的 `SUBAGENT_RESET`、`SUBAGENT_RESULT`、`DONE_CLAIMED`、`CODE_REVIEW PASS/NEEDS_FIX/BLOCKED`、`QA PASS/NEEDS_FIX/BLOCKED`、用户确认、commit/push、必要时的 `SUBAGENT_CLOSED`、关闭/归档，应在 inbox 留短结论和证据链接，或由若命在关闭消息中汇总。
 - 如果一个子 agent 任务只服务于若命当轮判断，且没有形成独立项目动作，可以不写 inbox；若它改变了任务范围、gate、风险结论或交付状态，必须留下正式记录。
 - 每个角色节点结束后，若命必须先生成或更新一份基于文件的用户可读总结，再推进下一节点。总结默认放在 `docs/collaboration/summaries/`，也可以链接到本轮已有 PRD、review 或 QA 报告，但必须能独立回答：谁完成了什么、依据哪些文件/命令、改了哪些文件、结论是什么、未覆盖什么、下一步选项是什么。
 - 在用户看到该总结前，若命不得继续启动下一个实现、review、QA、commit/push 或新角色节点，除非用户已经在当前消息里明确授权“连续执行到某个 gate”。这个暂停点是协作可见性要求，不是低效 ACK。
