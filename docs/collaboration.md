@@ -219,90 +219,13 @@ inbox 使用边界：
 - 听云、观止、镜花、清秋、霜弦发现自己读取 inbox 时被历史消息干扰，应写 `REQUEST` 提醒若命归档，必要时可只读当前相关消息继续工作。
 - 任何角色新增长证据、长日志、截图说明、审计报告或 QA 记录时，应写到独立文件并在 inbox 留链接，不得把 inbox 当报告正文。
 
-## Review Gate 与提交推送
+## 若命交付编排边界
 
-不要长期积压未提交代码。每个可独立回滚的任务或阶段，在验证和必要 gate 通过后，应及时 `commit` 并 `push`。
+分支生命周期、复杂工程阶段设计、review/QA gate 顺序、commit/push、是否合并回稳定分支和何时归档，都是若命的交付编排职责。具体方法写在 `docs/collaboration/playbooks/delivery-orchestration.md`，不在公共规约里展开。
 
-## 分支生命周期管理
+其它角色默认不创建分支、不切分支、不合并、不 rebase、不自行提交或 push、不把未通过 gate 的代码推到稳定分支、不自行决定提交边界。若当前分支、阶段、gate、提交范围或复杂工程拆分不清，写 `REQUEST` 给若命。
 
-`main` 只承载已经通过必要 gate、可作为稳定基线继续开发的内容。分支创建、目标分支、阶段提交、合并回 `main` 和是否继续沿用当前分支，由若命统一判断。
-
-基本规则：
-
-- 新功能、重构、数据模型、任务框架、外部集成、批量变更或高风险修复，默认不要直接在 `main` 上施工；由若命决定是否创建 `codex/<topic>` 分支或沿用当前 feature/integration 分支。
-- 执行者不能自行把工作切到新分支、合并回 `main`、rebase/merge 其它分支，或把未通过 gate 的代码推到 `main`。如果当前分支不合适，写 `REQUEST` 给若命。
-- 一个分支可以承载一个完整 PRD、一个阶段性集成主题，或若命明确批准的一组强相关任务；不把无关功能、协作规则、缓存文件和临时产物混在同一个提交序列里。
-- 阶段通过 gate 后由若命做 scoped commit/push 到当前若命批准的分支；这不等于可以合并进 `main`。
-- 合并进 `main` 前必须满足：工作区干净或无关改动已隔离；对应 inbox message 已闭环；必要的若命 review、镜花 code/design review、观止 QA 或用户确认已通过；验证命令和风险说明可追溯；commit 范围清楚、可回滚。
-- 若命负责决定合并方式和时机，并在合并后安排关闭/归档相关消息、停止无用 heartbeat、必要时更新索引或发布下一阶段任务。
-
-分支命名默认使用 `codex/<short-topic>`。如果项目已有其它分支规范，以项目规范为准，但仍由若命做生命周期决策。
-
-## 复杂工程任务的设计与执行
-
-复杂工程任务不要按“若命一步步派实现、听云一步步临场设计”的方式推进。涉及多模块、多阶段、数据模型、状态机、任务框架、外部集成、链路迁移、旧路径退役或长期维护口径变化时，默认采用“整体技术方案先行、分阶段执行闭环”的模式。
-
-流程：
-
-1. 若命先给出 PRD/spec 或明确 REQUEST：写清目标、非目标、用户路径、状态/动作、数据边界、禁止范围、验收标准和 gate。
-2. 听云先读完整 PRD/spec，写整体技术方案和任务规划设计；不要直接写实现代码。
-3. 技术方案必须拆成可 review、可验证、可提交的阶段。每个阶段要有输入、输出、范围、禁止范围、涉及文件/模块、验证命令、文档/索引要求和 gate。
-4. 若命 review 技术方案的产品语义、范围、执行顺序和验收口径；镜花 review 技术方案的架构、数据模型、模块边界、状态机、任务生命周期、测试策略和可维护性。
-5. 方案通过后，听云按已批准阶段逐个执行。每完成一个阶段，只汇报该阶段 `DONE_CLAIMED`，列实际改动、验证结果、偏差和是否仍符合整体方案。
-6. 若实现中发现整体方案需要调整，听云写 `REQUEST / DESIGN_CHANGE`，说明原因、选项、影响、推荐方案和需要谁确认；不能直接改方向继续写代码。
-7. 若命和镜花按阶段 review 执行结果；通过后由若命及时 commit/push，再进入下一阶段。
-
-小型、低风险、局部 bug 或文案调整可以跳过整体技术方案 gate，但若任务连续返工、范围开始扩大、或 review 暴露出设计问题，应立即回到该模式。
-
-闭环顺序：
-
-1. 执行者完成实现，写 `DONE_CLAIMED`，列范围、文件、验证命令、证据、未覆盖项和索引更新对账。
-2. 若命做任务闭环 review：确认是否按 PRD/inbox 执行、是否越界、验证证据是否足够、是否需要镜花或观止出场。
-3. 涉及高风险代码面时，若命派镜花 code review。高风险包括跨层语义契约、数据表/字段/索引、任务框架、状态机、异步流程、API 契约、筛选/统计/分页、权限/可见性、外部副作用、安全边界、大重构或若命不踏实的实现。
-4. 涉及用户路径、页面行为、导出/生成产物、外部平台或业务验收时，若命派观止 QA。
-5. 所需 gate 全部通过后，由若命负责 scoped `commit + push`；听云不再作为默认提交执行者。这样减少跨 agent 往返，并由同一个角色统一把 gate、范围、验证、提交和关闭动作闭环。
-6. 提交推送完成后，若命把对应 inbox message 标记关闭或归档。
-
-提交许可：
-
-- 低风险任务：`DONE_CLAIMED` + 若命 `REVIEW_PASS` 后可以提交。
-- 高风险任务：再加镜花 `CODE_REVIEW_PASS`。
-- 用户路径任务：再加观止 `QA_PASS` 或用户明确确认。
-- `DONE_CLAIMED` 不是提交许可；执行者不能自己宣布 PASS 后直接提交，也不能在 gate 通过后自行提交，除非若命/用户在该任务里明确授权。
-
-提交边界：
-
-- 一个 commit 对应一个清晰任务或一个可独立回滚的阶段。
-- 不把多个无关主题攒进一个 commit。
-- 不提交未验证内容；跑不了的验证必须先在 `DONE_CLAIMED` 和提交说明中写清楚。
-- 不提交 `tmp/`、日志、浏览器 profile、本地数据库备份、临时导出文件、真实凭据或其它本机产物。
-- 提交前至少执行 `git status --short`、必要验证命令和 `git diff --check`；前端改动需跑项目约定 build。
-
-commit message 格式：
-
-```text
-<type>: <short summary>
-```
-
-常用 type：
-
-- `feat`: 新功能或新业务能力。
-- `fix`: bug 修复。
-- `refactor`: 不改变用户行为的重构。
-- `docs`: 文档、协作规约、索引。
-- `test`: 测试、项目规则、测试夹具。
-- `chore`: 配置、依赖、脚本、维护动作。
-
-示例：
-
-```text
-feat: add task runtime for giga pull
-fix: correct task run pagination totals
-refactor: centralize product workflow projection
-docs: add multi-agent collaboration guide
-test: lock amazon workflow enums
-chore: archive collaboration inbox history
-```
+听云可以按若命要求写 `TECHNICAL_PLAN` 和分阶段方案；镜花可以 review 方案/代码；观止可以 QA；清秋/霜弦可以做专项复核。但是否采用整体技术方案先行、是否进入下一阶段、是否提交推送，仍由若命根据 gate 和项目事实决定。
 
 ## 通用工程质量底线
 
@@ -350,6 +273,7 @@ chore: archive collaboration inbox history
 - `docs/collaboration/playbooks/qa.md`：正式 QA gate、测试矩阵、场景验收、证据格式和 PASS/NEEDS_FIX/BLOCKED 判定。
 - `docs/collaboration/playbooks/qa-case-library.md`：QA 用例库结构、用例准入、选择规则和维护责任。
 - `docs/collaboration/playbooks/subagent-dispatch.md`：若命创建/复用/关闭子 agent 的身份文件初始化、授权检查、运行时昵称禁区和生命周期记录。
+- `docs/collaboration/playbooks/delivery-orchestration.md`：若命的分支生命周期、复杂工程阶段设计、review/QA gate、commit/push 和归档编排。
 - `docs/collaboration/playbooks/context-indexing.md`：项目索引、领域索引、scoped `rg`、索引维护和 token 节约方法。
 
 ## 启动语模板

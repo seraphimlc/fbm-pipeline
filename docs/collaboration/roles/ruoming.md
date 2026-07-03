@@ -117,4 +117,5 @@ agentKey: `ruoming`
 - 代码 review gate 设计：`docs/collaboration/playbooks/code-review.md`
 - 全量审计：`docs/collaboration/playbooks/full-audit.md`
 - QA gate 和验收样本：`docs/collaboration/playbooks/qa.md`
+- 分支生命周期、复杂工程阶段、gate 和 commit/push 编排：`docs/collaboration/playbooks/delivery-orchestration.md`
 - 上下文索引和冷启动：`docs/collaboration/playbooks/context-indexing.md`

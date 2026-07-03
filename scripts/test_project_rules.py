@@ -5968,6 +5968,7 @@ asyncio.run(main())
 
 def test_subagent_dispatch_identity_lifecycle_contract() -> None:
     playbook = ROOT / "docs" / "collaboration" / "playbooks" / "subagent-dispatch.md"
+    delivery_playbook = ROOT / "docs" / "collaboration" / "playbooks" / "delivery-orchestration.md"
     collaboration = ROOT / "docs" / "collaboration.md"
     ruoming = ROOT / "docs" / "collaboration" / "roles" / "ruoming.md"
     domain_index = ROOT / "docs" / "domain-index" / "collaboration.md"
@@ -5976,12 +5977,15 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
     init_script = skill_root / "scripts" / "init_collaboration.py"
     template_root = skill_root / "templates"
     skill_playbook = template_root / "collaboration" / "playbooks" / "subagent-dispatch.md"
+    skill_delivery_playbook = template_root / "collaboration" / "playbooks" / "delivery-orchestration.md"
     skill_ruoming = template_root / "collaboration" / "roles" / "ruoming.md"
 
     assert_true(playbook.is_file(), "必须有子 agent 派发 playbook，不能只在公共规约里叙述")
+    assert_true(delivery_playbook.is_file(), "必须有若命交付编排 playbook，不能把分支/阶段/提交 SOP 放在公共规约里")
     assert_true(skill_doc.is_file(), "multi-agent-collaboration skill 必须存在并同步子 agent 规约")
     assert_true(init_script.is_file(), "multi-agent-collaboration 初始化脚本必须存在并同步子 agent 模板")
     assert_true(skill_playbook.is_file(), "multi-agent-collaboration skill 必须把 playbook 拆到 templates/collaboration/playbooks")
+    assert_true(skill_delivery_playbook.is_file(), "multi-agent-collaboration skill 必须包含 delivery-orchestration playbook 模板")
     assert_true(skill_ruoming.is_file(), "multi-agent-collaboration skill 必须把角色身份拆到 templates/collaboration/roles")
 
     playbook_text = playbook.read_text(encoding="utf-8")
@@ -6122,6 +6126,39 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
             and "不要混进 reusable role template" in text,
             f"{path} 必须定义 role/playbook/project-doc 的角色扩展分层规则",
         )
+        assert_true(
+            "若命交付编排边界" in text
+            and "docs/collaboration/playbooks/delivery-orchestration.md" in text
+            and "其它角色默认不创建分支" in text
+            and "不切分支" in text
+            and "不自行提交或 push" in text,
+            f"{path} 必须只保留若命交付编排公共边界，并指向 delivery-orchestration playbook",
+        )
+        assert_true(
+            "## 分支生命周期管理" not in text
+            and "## 复杂工程任务的设计与执行" not in text
+            and "commit message 格式" not in text,
+            f"{path} 不应继续承载若命分支/复杂工程/提交 SOP 细节",
+        )
+
+    delivery_text = delivery_playbook.read_text(encoding="utf-8")
+    skill_delivery_text = skill_delivery_playbook.read_text(encoding="utf-8")
+    for text, path in ((delivery_text, delivery_playbook), (skill_delivery_text, skill_delivery_playbook)):
+        assert_true(
+            "适用角色：若命" in text
+            and "其它角色默认不创建分支" in text
+            and "## 分支生命周期" in text
+            and "## 复杂工程任务设计与执行" in text
+            and "## Gate 与提交" in text
+            and "commit message 格式" in text,
+            f"{path} 必须承接若命分支生命周期、复杂工程编排和 commit/push SOP",
+        )
+
+    assert_true(
+        "docs/collaboration/playbooks/delivery-orchestration.md" in ruoming_text
+        and "docs/collaboration/playbooks/delivery-orchestration.md" in skill_ruoming.read_text(encoding="utf-8"),
+        "若命身份文件必须指向 delivery-orchestration playbook",
+    )
     assert_true(
         "role files answer who the role is" in skill_text
         and "playbooks answer how the role works" in skill_text
