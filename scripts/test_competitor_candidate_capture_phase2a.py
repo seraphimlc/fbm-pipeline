@@ -21,6 +21,13 @@ from app.task_runtime.constants import RUN_STATUS_RUNNING, RUN_STATUS_SUCCEEDED,
 from app.task_runtime.json_utils import json_dumps  # noqa: E402
 
 
+def _ensure_actions_registered() -> None:
+    try:
+        product_actions.register_product_task_actions()
+    except Exception:
+        pass
+
+
 HTML = """
 <html><body data-asin="{asin}">
   <span id="productTitle">{title}</span>
@@ -246,6 +253,10 @@ async def _test_partial_success_current_set() -> tuple[int, list[int]]:
             suffix="candidate_capture",
             status=RUN_STATUS_RUNNING,
         )
+        old_visual_run_id = old_visual_run.id
+        current_visual_run_id = current_visual_run.id
+        capture_run_id = capture_run.id
+        capture_step_id = capture_step.id
         old_candidate = await _make_candidate(
             session,
             product_id=product.id,
@@ -288,6 +299,8 @@ async def _test_partial_success_current_set() -> tuple[int, list[int]]:
             result = await action.execute_step(session, capture_step, {"product_id": product.id})
             assert result["success_count"] == 1, result
             await action.on_step_success(session, capture_step, result)
+            assert result["status"] == "downstream_failed", result
+            assert "自动选竞品没有达到 medium 阈值" in result["downstream_error"], result
         finally:
             product_actions.get_amazon_listing_detail_adapter = original_adapter
 
@@ -302,14 +315,15 @@ async def _test_partial_success_current_set() -> tuple[int, list[int]]:
             ).scalars().all()
         }
         assert refreshed.workflow_node == WORKFLOW_NODE_AUTO_SELECT_COMPETITOR, refreshed.workflow_node
-        assert refreshed.workflow_status == WORKFLOW_STATUS_PENDING, refreshed.workflow_status
+        assert refreshed.workflow_status == WORKFLOW_STATUS_FAILED, refreshed.workflow_status
+        assert "自动选竞品没有达到 medium 阈值" in (refreshed.workflow_error or ""), refreshed.workflow_error
         assert refreshed.competitor_asin is None, refreshed.competitor_asin
         assert rows[old_candidate.id].capture_status is None, rows[old_candidate.id].capture_status
         assert rows[first.id].capture_status == "succeeded", rows[first.id].capture_status
-        assert rows[first.id].detail_task_run_id == capture_run.id, rows[first.id].detail_task_run_id
+        assert rows[first.id].detail_task_run_id == capture_run_id, rows[first.id].detail_task_run_id
         assert rows[second.id].capture_status == "failed", rows[second.id].capture_status
-        assert rows[second.id].detail_task_step_id == capture_step.id, rows[second.id].detail_task_step_id
-        return product.id, [old_visual_run.id, current_visual_run.id, capture_run.id]
+        assert rows[second.id].detail_task_step_id == capture_step_id, rows[second.id].detail_task_step_id
+        return product.id, [old_visual_run_id, current_visual_run_id, capture_run_id]
 
 
 async def _test_full_failure_leaves_no_current_facts() -> tuple[int, list[int]]:
@@ -391,6 +405,11 @@ async def _test_same_asin_reused_row_clears_old_detail_and_final() -> tuple[int,
             suffix="same_asin_candidate_capture",
             status=RUN_STATUS_RUNNING,
         )
+        old_visual_run_id = old_visual_run.id
+        current_visual_run_id = current_visual_run.id
+        current_visual_step_id = current_visual_step.id
+        capture_run_id = capture_run.id
+        capture_step_id = capture_step.id
         candidate = await _make_candidate(
             session,
             product_id=product.id,
@@ -431,15 +450,15 @@ async def _test_same_asin_reused_row_clears_old_detail_and_final() -> tuple[int,
                 .where(AmazonCompetitorSearchCandidate.id == candidate.id)
             )
         ).scalar_one()
-        assert row.visual_task_run_id == current_visual_run.id, row.visual_task_run_id
-        assert row.visual_task_step_id == current_visual_step.id, row.visual_task_step_id
-        assert row.detail_task_run_id == capture_run.id, row.detail_task_run_id
-        assert row.detail_task_step_id == capture_step.id, row.detail_task_step_id
+        assert row.visual_task_run_id == current_visual_run_id, row.visual_task_run_id
+        assert row.visual_task_step_id == current_visual_step_id, row.visual_task_step_id
+        assert row.detail_task_run_id == capture_run_id, row.detail_task_run_id
+        assert row.detail_task_step_id == capture_step_id, row.detail_task_step_id
         assert row.capture_status == "succeeded", row.capture_status
         assert row.brand != "STALE_BRAND", row.brand
         assert row.final_selected == 0, row.final_selected
         assert row.final_reason is None, row.final_reason
-        return product.id, [old_visual_run.id, current_visual_run.id, capture_run.id]
+        return product.id, [old_visual_run_id, current_visual_run_id, capture_run_id]
 
 
 async def _test_result_ids_mismatch_clears_current_facts() -> tuple[int, list[int]]:
@@ -695,6 +714,7 @@ async def _test_success_hook_all_failed_rolls_back_current_facts() -> tuple[int,
 
 async def main() -> None:
     await run_schema_maintenance()
+    _ensure_actions_registered()
     product_ids: list[int] = []
     run_ids: list[int] = []
     try:
