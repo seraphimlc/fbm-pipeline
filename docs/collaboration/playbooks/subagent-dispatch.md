@@ -175,6 +175,30 @@ SUBAGENT_CLOSED
 - next_action:
 ```
 
+## 上下文预算
+
+若命给子 agent 的上下文包必须小而完整：
+
+- 给当前用户目标、正式角色身份、精确 REQUEST/PRD 片段、相关文件、必要的 `git status` 事实、允许验证命令和停止条件。
+- 不粘贴完整 inbox、完整聊天历史、长日志、大量生成数据或无关角色文档。
+- 优先给文件路径、message ID、短摘录和验证命令；让子 agent 在权限范围内自行读取命名文件。
+- 如果任务依赖大量历史，先把历史归档或压缩成有边界的文档，再从该文档派工。
+- 存活子 agent 上下文出现陈旧、冲突或过重时，reset 或用干净 prompt 重建授权身份。
+
+## Inbox 和总结边界
+
+`docs/collaboration/inbox.md` 是正式行动板和审计板，不是子 agent 聊天记录。
+
+- 子 agent 的中间分析、内部计划、草稿和短过程不写入 inbox；长证据写入 PRD、review、QA 或其它报告文件。
+- 会影响项目闭环的正式结果必须可追溯：任务创建、关键决策、`SUBAGENT_OPENED`、必要时的 `SUBAGENT_RESET`、`SUBAGENT_RESULT`、`DONE_CLAIMED`、`CODE_REVIEW PASS/NEEDS_FIX/BLOCKED`、`QA PASS/NEEDS_FIX/BLOCKED`、用户确认、commit/push、必要时的 `SUBAGENT_CLOSED`、关闭/归档，应在 inbox 留短结论和证据链接，或由若命在关闭消息中汇总。
+- 如果一个子 agent 任务只服务于若命当轮判断，且没有形成独立项目动作，可以不写 inbox；若它改变了任务范围、gate、风险结论或交付状态，必须留下正式记录。
+- 每个角色节点结束后，若命必须先生成或更新一份基于文件的用户可读总结，再推进下一节点。总结默认放在 `docs/collaboration/summaries/`，也可以链接到本轮已有 PRD、review 或 QA 报告，但必须能独立回答：谁完成了什么、依据哪些文件/命令、改了哪些文件、结论是什么、未覆盖什么、下一步选项是什么。
+- 在用户看到该总结前，若命不得继续启动下一个实现、review、QA、commit/push 或新角色节点，除非用户已经在当前消息里明确授权“连续执行到某个 gate”。这个暂停点是协作可见性要求，不是低效 ACK。
+
+## 用户直连角色会话
+
+长期角色会话仍可存在，用户也可以单独打开角色会话直接讨论。此类会话的结论属于建议或用户直连沟通；是否转成项目行动、如何落地、需不需要 gate，仍由若命根据项目事实决定。
+
 ## 运行时昵称禁区
 
 禁止把工具返回的英文昵称、通用标签或临时名字写成项目身份。以下写法不能进入 inbox、summary、review、QA 报告、用户结论或项目文档正文：

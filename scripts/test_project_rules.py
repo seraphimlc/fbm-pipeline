@@ -6008,6 +6008,9 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
         "工程工作线",
         "review gate",
         "QA gate",
+        "上下文预算",
+        "Inbox 和总结边界",
+        "用户直连角色会话",
     ]
     for term in required_terms:
         assert_true(term in playbook_text, f"subagent-dispatch playbook 必须定义 {term}")
@@ -6127,6 +6130,23 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
             f"{path} 必须定义 role/playbook/project-doc 的角色扩展分层规则",
         )
         assert_true(
+            "按需子 agent 公共边界" in text
+            and "docs/collaboration/playbooks/subagent-dispatch.md" in text
+            and "其它角色不自行创建、关闭、reset、转派或切换身份" in text
+            and "被 dispatch 的角色只按当前目标、范围、事实来源、权限、输出格式和停止条件执行" in text,
+            f"{path} 必须只保留按需子 agent 公共边界，并指向 subagent-dispatch playbook",
+        )
+        assert_true(
+            "IDENTITY_READY" not in text
+            and "IDENTITY_BLOCKED" not in text
+            and "SUBAGENT_OPENED" not in text
+            and "SUBAGENT_RESET" not in text
+            and "SUBAGENT_CLOSED" not in text
+            and "Dispatch Packet" not in text
+            and "Follow-Up Packet" not in text,
+            f"{path} 不应继续承载若命子 agent dispatch/reset/生命周期 SOP 细节",
+        )
+        assert_true(
             "若命交付编排边界" in text
             and "docs/collaboration/playbooks/delivery-orchestration.md" in text
             and "其它角色默认不创建分支" in text
@@ -6165,6 +6185,28 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
         and "project-only rules stay in project docs" in skill_text,
         "SKILL.md maintenance rules 必须保留 role/playbook/project-doc 分层原则",
     )
+    assert_true(
+        "Detailed identity binding, lifecycle, context budget, inbox recording" in skill_text
+        and all(term not in skill_text for term in ("IDENTITY_READY", "IDENTITY_BLOCKED", "SUBAGENT_RESET", "SUBAGENT_CLOSED")),
+        "SKILL.md 顶层只应描述 subagent 公共边界，生命周期 token 必须留在 subagent-dispatch playbook",
+    )
+
+    full_audit_text = (
+        ROOT / "docs" / "collaboration" / "playbooks" / "full-audit.md"
+    ).read_text(encoding="utf-8")
+    skill_full_audit_text = (
+        skill_root / "templates" / "collaboration" / "playbooks" / "full-audit.md"
+    ).read_text(encoding="utf-8")
+    for path, text in (
+        ("docs/collaboration/playbooks/full-audit.md", full_audit_text),
+        ("skill templates/collaboration/playbooks/full-audit.md", skill_full_audit_text),
+    ):
+        assert_true(
+            "镜花不能自行创建、启动、关闭、reset 或转派子 agent" in text
+            and "由若命按 `docs/collaboration/playbooks/subagent-dispatch.md` 决定是否 dispatch 授权身份" in text
+            and "镜花可以启动子 agent" not in text,
+            f"{path} 必须把子 agent 调度权收敛给若命，镜花只能提出专项审计拆分建议",
+        )
 
     skill_playbook_text = skill_playbook.read_text(encoding="utf-8")
     assert_true(

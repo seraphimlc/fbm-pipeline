@@ -11,8 +11,7 @@
 
 - 协作入口是 `docs/collaboration.md`；新会话启动语是“你是某角色，读一下 docs/collaboration.md”。
 - 正式跨 agent 行动和审计结论只写 `docs/collaboration/inbox.md` 顶层 message；topic tree 只记录讨论结构。
-- 若命可按需启动角色子 agent，但必须按 `docs/collaboration/playbooks/subagent-dispatch.md` 执行授权检查、身份池初始化、`IDENTITY_READY/IDENTITY_BLOCKED` 握手和 `SUBAGENT_OPENED/SUBAGENT_RESET/SUBAGENT_RESULT/SUBAGENT_CLOSED` 生命周期记录。子 agent 身份可以常驻；任务授权按协作节点定义，不按单条消息、小问题或单次命令频繁创建关闭；听云按工程工作线优先复用，镜花/观止按 gate/rerun 复用。新的不相关任务、上下文变脏、需要独立判断、权限/事实源变化或上下文过长时由若命要求 reset。运行时英文昵称只作传输元数据，不进入项目可见叙述。
-- 每个角色节点结束后，若命必须先给用户一份基于文件的总结，再推进下一节点。总结默认放在 `docs/collaboration/summaries/`，也可链接到已有 PRD/review/QA 报告；用户看到总结前默认暂停，不继续启动实现、review、QA、commit/push 或新角色节点，除非用户预先授权连续执行到指定 gate。
+- 按需子 agent 是若命的调度方式；公共边界在 `docs/collaboration.md`，完整身份池、dispatch、reset/关闭、上下文预算、inbox 记录和节点总结 SOP 在 `docs/collaboration/playbooks/subagent-dispatch.md`。其它角色只需知道自己按授权 dispatch 执行，不自行创建、关闭、reset、转派或切换身份。
 - inbox 是当前行动板，不是历史库；已关闭、被覆盖或只剩追溯价值的消息归档到 `docs/collaboration/archive/`。
 - 分支生命周期、复杂工程阶段、review/QA gate 顺序、commit/push、是否合并回稳定分支和何时归档，归若命交付编排；公共边界在 `docs/collaboration.md`，具体 SOP 在 `docs/collaboration/playbooks/delivery-orchestration.md`。
 - `DONE_CLAIMED` 不是 PASS，也不是 commit/push 许可。其它角色默认不创建分支、不切分支、不合并、不 rebase、不自行提交或 push；若分支、阶段、gate 或提交范围不清，写 `REQUEST` 给若命。
@@ -39,7 +38,7 @@
 ## 关键流程
 
 - 派工：若命写 PRD/spec 或顶层 REQUEST，听云先写 TASK_DEFINITION，若命 PLAN_APPROVED 后再实现。
-- 子 agent：若命先读 `subagent-dispatch` playbook，准备 dispatch packet，要求子 agent 读取 `docs/collaboration.md` 和对应 `docs/collaboration/roles/<agentKey>.md`，收到 `IDENTITY_READY` 后进入 identity pool；同一角色、同一目标、同一工作线/gate/rerun 且上下文干净时优先复用。默认跟子 agent 沟通、分任务或同节点 follow-up 时不强调 reset；新不相关任务、换角色、换目标、需要独立判断、上下文变脏、权限/事实源变化或上下文过长时才 `SUBAGENT_RESET`，reset 不可用或身份阻塞时才 `SUBAGENT_CLOSED` 或重建；子 agent 返回证据后由若命整合并决定正式 gate 和 inbox 记录，同时先形成用户可读总结并暂停等待用户看到。
+- 子 agent：若命先读 `subagent-dispatch` playbook，再按授权身份、当前目标、范围、事实来源、权限、输出格式和停止条件 dispatch。子 agent 返回证据后由若命整合并决定正式 gate、inbox 记录和用户可读总结。
 - 验收和提交：听云 DONE_CLAIMED 后，若命按 `delivery-orchestration` 判断是否需要镜花 code review、观止 QA 或用户确认；所需 gate 通过后默认由若命做 scoped commit/push。其它角色只在若命/用户明确授权时提交。
 - 归档：任务关闭或被新消息覆盖后，先保存清理前快照，再压缩 inbox 当前行动板。
 - skill 更新：公共规约变化时，同步更新 `SKILL.md` 和 `scripts/init_collaboration.py`，并用临时目录跑初始化脚本验证。
@@ -70,7 +69,7 @@
 - 要读当前下一步：只看 `docs/collaboration/inbox.md` 当前 open message。
 - 要查历史证据：按消息编号 `rg` `docs/collaboration/archive/`，不要整篇读归档。
 - 要改角色行为：按 role/playbook/project-doc 分层判断；身份边界改 `docs/collaboration/roles/*.md`，工作方法/SOP 改 `docs/collaboration/playbooks/*.md`，项目特有规则改项目文档，再判断是否同步 skill。
-- 要查子 agent 协作边界：先读 `docs/collaboration/playbooks/subagent-dispatch.md`，再读 `docs/collaboration.md` 的“按需子 agent 协作模式”和 `docs/collaboration/roles/ruoming.md` 的“按需子 agent 调度职责”。
+- 要查子 agent 协作边界：公共边界读 `docs/collaboration.md` 的“按需子 agent 公共边界”；若命调度 SOP 读 `docs/collaboration/playbooks/subagent-dispatch.md`；若命职责入口读 `docs/collaboration/roles/ruoming.md` 的“子 agent 调度”。
 - 要查分支、复杂工程阶段、gate、commit/push 和归档编排：读 `docs/collaboration/playbooks/delivery-orchestration.md`。
 - 要改可复用初始化模板：改 skill 的 `SKILL.md` 和 `scripts/init_collaboration.py`。
 - 要查 review 规则：读 `docs/collaboration/playbooks/code-review.md`。

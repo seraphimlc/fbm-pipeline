@@ -58,98 +58,22 @@
 
 多 agent 协作的目标是提高判断质量和执行稳定性，不是制造更多往返。每一次互动都必须有明确 gate 价值、执行价值或证据价值。
 
-- 若命不要把复杂任务切成连续小实现消息。复杂工程默认走完整 PRD/REQUEST -> 听云整体 `TECHNICAL_PLAN` -> 若命/必要镜花 review -> 按已批准阶段执行。只有阶段执行结果、设计偏差或阻断事实需要新的流转。
-- 镜花不是默认跟跑角色。是否唤起镜花由若命/用户决定；镜花被唤起后按指定 review 节点和范围执行。低风险文案、局部无结构风险 bug，若命默认不派镜花。
-- 观止不是提前试错角色。是否唤起观止由若命/用户决定；观止被唤起后按指定 QA 范围执行。代码未稳定、关键 review 未过、样本和预期不清时，若命默认不派最终 QA；必要时只派观止做 QA 可行性/样本设计，不写 PASS。
+- 复杂工程、阶段拆分、gate 顺序和提交节奏由若命按 `docs/collaboration/playbooks/delivery-orchestration.md` 编排；公共规约不展开具体方法。
+- 镜花、观止、清秋、霜弦不是默认跟跑角色。是否入场由若命/用户决定；被唤起后只按指定节点、范围和输出要求执行。
 - Review 只能给结论、证据、问题和建议，不能把新执行任务藏在 review addendum、status 或报告里。凡是需要听云继续实现、返工、补文档、补测试、观止 QA 或镜花复审的动作，必须由若命创建新的顶部 inbox message。
 - 状态消息要少而有用。没有新事实、无阻塞、无计划变化、无证据更新时，不写 `ACK/STATUS` 刷存在感。优先使用有动作含义的消息：`REQUEST`、`TECHNICAL_PLAN`、`DONE_CLAIMED`、`NEEDS_FIX`、`PASS`、`BLOCKED`、`CLOSED`。`ACK` 只在需要确认排期、等待 gate、说明先写计划、不立即执行或输入不完整时使用。
 - heartbeat 发现可执行任务时，不写“发现任务/建议下一步”的空状态。要么执行并产出任务要求的结果，要么说明不能执行的具体阻塞。
 - inbox 是当前行动板，不是聊天记录。长设计、长 review、QA 证据、命令输出和历史过程写到独立文档或归档文件，inbox 只留当前动作、结论、关键证据路径和下一步。
 
-## 按需子 agent 协作模式
+## 按需子 agent 公共边界
 
-默认协作形态可以从“多个长期角色会话通过 inbox 接力”，调整为“若命主线程按需启动并按工作线复用角色子 agent”。这个模式的目标是减少 heartbeat 空跑、减少 inbox 噪音，并让若命统一掌握入场、边界、gate 和闭环。
+按需子 agent 是若命的调度方式，不是所有角色都要掌握的操作模式。完整 SOP 写在 `docs/collaboration/playbooks/subagent-dispatch.md`，公共规约只保留跨角色边界。
 
-若命初始化、复用、reset 或关闭子 agent 时，必须先按 `docs/collaboration/playbooks/subagent-dispatch.md` 执行身份池初始化、dispatch packet、`IDENTITY_READY/IDENTITY_BLOCKED` 身份握手和 `SUBAGENT_OPENED/SUBAGENT_RESET/SUBAGENT_RESULT/SUBAGENT_CLOSED` 生命周期记录。没有身份文件初始化、没有授权角色绑定或没有明确 reset/关闭判断时，不派具体任务。
-
-授权身份：
-
-- 项目正式子 agent 只能使用本文“角色索引”和 `docs/collaboration/roles/*.md` 中已经约定的身份：听云、观止、镜花、清秋、霜弦，或用户明确批准并已补充协作文档的新角色。若命是主控身份，不作为若命自己创建的子 agent 身份。
-- 子 agent 工具返回的运行时昵称不是项目身份。若工具返回英文昵称、`Reviewer`、`Architect` 等通用标签，若命只能把它当作传输标签；首次 prompt 必须把该子 agent 绑定到一个已授权角色和 `agentKey`，项目消息、报告、inbox 记录和闭环结论都使用授权角色名。
-- 不能临时创造匿名、泛化或便利身份来参与正式流程。新增或改名角色必须先经用户明确确认角色名、`agentKey`、职责边界、禁止权限、初始化方式和生命周期规则，并同步更新协作文档；否则若命必须选用现有角色或自行处理。
-
-适用原则：
-
-- 若命主线程负责整体产品判断、任务定义、角色入场、结果整合、gate 决策、commit/push 和关闭归档。
-- 若命派具体任务前必须通过 `subagent-dispatch` 授权检查：角色是否在项目身份注册表内；任务是否属于该角色职责且不触碰禁区；是否真的需要子 agent 而不是若命直接处理；本次是复用常驻身份上下文、先 reset，还是运行时不可用时重建；上下文包是否足够小且足够完整。任何一项不满足时，不派任务，先收紧任务、询问用户、补充协作规则或自行处理。
-- 子 agent 身份可以常驻；任务授权按协作节点定义，不按单条消息、单个小问题或单次命令定义。同一角色、同一目标、同一工作线/gate/rerun 且上下文干净时优先复用；换角色、换目标、需要独立判断、上下文变脏、权限/事实源变化或上下文过长时由若命要求 reset。
-- 角色子 agent 的身份可常驻，生命周期重点从“频繁关闭/重建”调整为“若命判断是否 reset”。默认沟通、分任务或同节点 follow-up 不强调 reset。
-- 听云工作线可以是一条 PRD、一个实现阶段、一条返工链路或一组强相关实现任务；同一工作线内的实现、返工、自检和对账可以复用同一个听云子 agent。新的不相关工作线、上下文过重或上下文变脏时 reset。
-- 镜花和观止可以身份常驻，但 review/QA 任务仍按 gate/rerun 重新 dispatch。新的 gate、新的 QA 目标、新的审查主题或需要独立判断时 reset；同一 finding 复审、同一 QA rerun 或同一批样本补证据默认复用。
-- 每次给存活子 agent 下发新任务时，若命仍必须重新声明当前目标、范围、禁止范围、事实来源、输出格式、停止条件和权限；不能因为子 agent 保留上下文就让它自行延展职责。
-- 子 agent 的首次任务提示必须使用 `subagent-dispatch` 的 dispatch packet，包含角色身份、`docs/collaboration.md`、`docs/collaboration/roles/<agentKey>.md`、`IDENTITY_READY/IDENTITY_BLOCKED` 握手、任务目标、范围、禁止范围、事实来源、输出格式、停止条件、是否允许写文件、是否允许运行验证、是否允许触碰外部系统。
-- 子 agent 不自行 commit/push、不自行扩大范围、不替若命决定是否需要其它角色入场。需要越权、缺事实、产品语义不清或验证不可执行时，返回 `REQUEST/BLOCKED` 给若命。
-- 多个编码类子 agent 并行时，若命必须先拆清文件/模块所有权、分支/工作区策略、冲突处理方式和收口顺序；不能让多个执行者在同一文件或同一语义契约上无协调施工。
-- 长期角色会话仍可存在，用户也可以单独打开角色会话直接讨论。此类会话的结论属于建议或用户直连沟通；是否转成项目行动、如何落地、需不需要 gate，仍由若命根据项目事实决定。
-
-子 agent 首次 prompt 最低模板：
-
-```text
-你是 <角色显示名>，agentKey=<agentKey>。这是项目授权身份，不使用运行时昵称作为项目身份。
-
-身份初始化：
-- 必须读取：docs/collaboration.md
-- 必须读取：docs/collaboration/roles/<agentKey>.md
-- 如果无法读取身份文件，或文件里的 agentKey/Display 与本 prompt 不一致，立刻回复：
-  IDENTITY_BLOCKED: role=<角色显示名>, agentKey=<agentKey>, reason=<原因>
-- 身份初始化成功后，第一行必须回复：
-  IDENTITY_READY: role=<角色显示名>, agentKey=<agentKey>, files_read=[docs/collaboration.md, docs/collaboration/roles/<agentKey>.md]
-
-启动上下文：
-- 读：docs/collaboration.md
-- 读：docs/collaboration/roles/<agentKey>.md
-- 读：当前 REQUEST/PRD/相关 inbox 消息或本 prompt 中的精简摘录
-
-任务：
-- Objective:
-- Scope:
-- Forbidden scope:
-- Fact sources:
-- Files you may read:
-- Files you may change, or READ ONLY:
-- Verification allowed:
-- External side effects allowed: none / explicitly listed only
-- Output format:
-- Stop condition:
-- Lifecycle: reuse current identity; reset only if 若命 explicitly says so / same work line / same review gate / same QA rerun
-
-若发现身份、权限、范围、事实来源或验证路径不清楚，回复 REQUEST/BLOCKED，不要猜。
-```
-
-生命周期关闭规则：
-
-- 任务节点完成后默认保留常驻身份，不立即释放子 agent。
-- 若命不需要每次沟通都强调 reset；同一节点 follow-up 默认复用当前上下文。
-- 新的不相关任务、上下文变脏、需要独立判断、权限/事实源变化或上下文过长时，若命要求 reset。
-- reset 失败、身份阻塞、运行时不可用、用户明确要求释放或安全原因需要切断时，才关闭对应子 agent。
-- 不复用子 agent 扮演另一个角色。听云不能通过 follow-up prompt 变成镜花、观止或若命；需要新角色时新建已授权身份。
-
-子 agent 上下文预算：
-
-- 给最小完整上下文包：当前用户目标、角色身份、精确 REQUEST/PRD 片段、相关文件、必要的 `git status` 事实和验证命令。
-- 不粘贴完整 inbox、完整聊天历史、长日志、大量生成数据或无关角色文档。
-- 优先给文件路径、message ID、短摘录和验证命令；让子 agent 在权限范围内自行读取命名文件。
-- 如果任务依赖大量历史，先把历史归档或压缩成有边界的文档，再从该文档派工。
-- 存活子 agent 上下文出现陈旧、冲突或过重时，关闭并用干净 prompt 重建授权角色。
-
-inbox 使用边界：
-
-- `docs/collaboration/inbox.md` 是正式行动板和审计板，不是子 agent 聊天记录。
-- 子 agent 的中间分析、内部计划、草稿和短过程不写入 inbox；长证据写入 PRD、review、QA 或其它报告文件。
-- 会影响项目闭环的正式结果必须可追溯：任务创建、关键决策、`SUBAGENT_OPENED`、必要时的 `SUBAGENT_RESET`、`SUBAGENT_RESULT`、`DONE_CLAIMED`、`CODE_REVIEW PASS/NEEDS_FIX/BLOCKED`、`QA PASS/NEEDS_FIX/BLOCKED`、用户确认、commit/push、必要时的 `SUBAGENT_CLOSED`、关闭/归档，应在 inbox 留短结论和证据链接，或由若命在关闭消息中汇总。
-- 如果一个子 agent 任务只服务于若命当轮判断，且没有形成独立项目动作，可以不写 inbox；若它改变了任务范围、gate、风险结论或交付状态，必须留下正式记录。
-- 每个角色节点结束后，若命必须先生成或更新一份基于文件的用户可读总结，再推进下一节点。总结默认放在 `docs/collaboration/summaries/`，也可以链接到本轮已有 PRD、review 或 QA 报告，但必须能独立回答：谁完成了什么、依据哪些文件/命令、改了哪些文件、结论是什么、未覆盖什么、下一步选项是什么。
-- 在用户看到该总结前，若命不得继续启动下一个实现、review、QA、commit/push 或新角色节点，除非用户已经在当前消息里明确授权“连续执行到某个 gate”。这个暂停点是协作可见性要求，不是低效 ACK。
+- 若命负责初始化、复用、reset、关闭和派发授权子 agent；其它角色不自行创建、关闭、reset、转派或切换身份。
+- 正式子 agent 只能绑定本文“角色索引”里的授权身份和 `agentKey`；运行时昵称不是项目身份，不能进入 inbox、报告或用户结论。
+- 被 dispatch 的角色只按当前目标、范围、事实来源、权限、输出格式和停止条件执行；身份、权限、范围或验证路径不清时回复 `REQUEST/BLOCKED`。
+- 常驻的是身份，不是权限。子 agent 保留上下文不代表可以延展任务、扩大范围或替若命决定其它角色是否入场。
+- 用户直连某个角色会话得到的结论属于建议或直连沟通；是否转成项目行动、如何落地、需不需要 gate，仍由若命根据项目事实决定。
 
 ## 文档留痕原则
 
@@ -269,7 +193,7 @@ inbox 使用边界：
 复杂任务才按需读取执行手册；不要在普通启动时一次性读取全部 playbook。
 
 - `docs/collaboration/playbooks/code-review.md`：代码 review、结构审查、查询/状态/错误/测试/文档影响判断。
-- `docs/collaboration/playbooks/full-audit.md`：全量审计、跨模块审计、历史提交审计、子 agent 只读专项审计和报告模板。
+- `docs/collaboration/playbooks/full-audit.md`：全量审计、跨模块审计、历史提交审计、只读专项审计拆分建议和报告模板。
 - `docs/collaboration/playbooks/qa.md`：正式 QA gate、测试矩阵、场景验收、证据格式和 PASS/NEEDS_FIX/BLOCKED 判定。
 - `docs/collaboration/playbooks/qa-case-library.md`：QA 用例库结构、用例准入、选择规则和维护责任。
 - `docs/collaboration/playbooks/subagent-dispatch.md`：若命创建/复用/关闭子 agent 的身份文件初始化、授权检查、运行时昵称禁区和生命周期记录。
