@@ -173,6 +173,14 @@ inbox 使用边界：
 - 执行手册：复杂 review、全量审计、QA、PRD、heartbeat 等方法写到 `docs/collaboration/playbooks/`；身份文件只指向何时读取。
 - 项目/领域索引：`docs/project-index.md` 和 `docs/domain-index/*.md` 只做导航，帮助 agent 快速定位代码、API、页面、表和验证入口。
 
+角色扩展分层规则：
+
+- 角色文件只回答“这个角色是谁”：身份定位、职责边界、启动读取、入场/不入场、工作原则、判定标准、最小输出格式和需要读取的 playbook。
+- playbook 回答“这个角色怎么干活”：SOP、检查清单、判断流程、测试矩阵、review/QA/dispatch 模板、生命周期细节、场景库和长方法论。
+- 后续扩展角色能力时，默认先新增或扩展 `docs/collaboration/playbooks/*.md`，再在对应 `docs/collaboration/roles/*.md` 加一句读取条件；只有身份边界、职责归属、授权范围或 gate 口径变化时，才修改角色文件。
+- 项目特有业务规则、领域规则、样本、平台口径或临时约束，放项目文档、domain index、PRD、review/QA 文件或项目级规则；不要混进 reusable role template。
+- 判断口诀：能回答“他是谁”的放 role；能回答“他怎么做”的放 playbook；只对本项目成立的放项目文档。
+
 派工文档要求：
 
 - 默认情况下，小任务不要求单独写技术设计文档，也不要求执行者反问是否需要文档。
