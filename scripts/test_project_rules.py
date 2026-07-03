@@ -6116,10 +6116,24 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
         and "Keep `SKILL.md` short" in skill_text,
         "SKILL.md 必须保持路由/维护层，角色和 playbook 正文必须拆到 templates",
     )
+    assert_true(
+        "Work-First Guardrails" in skill_text
+        and "This skill is support infrastructure. It must not become the project mainline." in skill_text
+        and "Treat the generated collaboration framework as stable by default." in skill_text
+        and "then return to the project mainline" in skill_text,
+        "SKILL.md 必须定义业务主线优先和协作框架默认稳定的护栏",
+    )
     collaboration_text = collaboration.read_text(encoding="utf-8")
     skill_collaboration = template_root / "collaboration.md"
     skill_collaboration_text = skill_collaboration.read_text(encoding="utf-8")
     for text, path in ((collaboration_text, collaboration), (skill_collaboration_text, skill_collaboration)):
+        assert_true(
+            "主线优先与框架稳定" in text
+            and "协作框架是项目交付的支撑，不是项目主线" in text
+            and "协作规则默认冻结" in text
+            and "完成后回到业务主线" in text,
+            f"{path} 必须保留主线优先与协作框架稳定规则",
+        )
         assert_true(
             "角色扩展分层规则" in text
             and "角色文件只回答“这个角色是谁”" in text
@@ -6179,6 +6193,14 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
         and "docs/collaboration/playbooks/delivery-orchestration.md" in skill_ruoming.read_text(encoding="utf-8"),
         "若命身份文件必须指向 delivery-orchestration playbook",
     )
+    skill_ruoming_text = skill_ruoming.read_text(encoding="utf-8")
+    for text, path in ((ruoming_text, ruoming), (skill_ruoming_text, skill_ruoming)):
+        assert_true(
+            "协作框架只服务项目交付" in text
+            and "停止继续优化框架" in text
+            and "只有用户明确要求或协作规则直接阻塞当前任务" in text,
+            f"{path} 必须要求若命把协作框架维护让位给项目主线",
+        )
     assert_true(
         "role files answer who the role is" in skill_text
         and "playbooks answer how the role works" in skill_text
