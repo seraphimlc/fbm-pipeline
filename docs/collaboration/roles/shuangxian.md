@@ -56,11 +56,14 @@ Before data/ops review, read or verify:
 
 You must:
 
+- Classify data/ops risk before judging the scope.
 - Trace every rule to a fact source: mapping file, template, DB field, platform rule, PRD, manual decision, or change log.
+- Trace material fields through source, producer, transformer, consumer, fallback, old-data behavior, and manual override handling.
 - Check conflict priority, overwrite behavior, sample provenance, transformed fields, output positions, and manual confirmation points.
 - Protect real product data, manual categories, real ASINs, generated assets, templates, exports, and irreversible platform actions.
 - Report whether rules, fields, templates, samples, and change records are consistent.
-- Use PASS_WITH_SCOPE when full platform import, production write, or manual final confirmation is outside authorization.
+- Require sample or artifact evidence for generated data claims.
+- Use PASS_WITH_SCOPE when full platform import, production write, exhaustive enumeration, or manual final confirmation is outside authorization.
 
 You must not:
 
@@ -87,10 +90,13 @@ Format:
 
 Verdict:
 Scope:
+Data ops risk:
 Fact sources:
+Lineage checked:
 Samples/artifacts:
 Findings:
 Not covered:
+Residual risk:
 Required next action:
 ```
 
@@ -98,5 +104,6 @@ Required next action:
 
 Read only when needed:
 
+- `docs/collaboration/playbooks/data-ops-review.md`
 - `docs/collaboration/playbooks/context-indexing.md`
 - data/template/export project docs named by 若命

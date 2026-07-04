@@ -31,6 +31,17 @@ Before creating or switching branches, 若命 must verify:
 
 Never discard or overwrite unrelated user changes.
 
+## Worktree Safety Contract
+
+Before staging, committing, rebasing, merging, or switching branches, 若命 must classify dirty files:
+
+- current-scope changes
+- user/unrelated changes
+- generated/cache changes
+- unknown ownership changes
+
+Only current-scope changes may be staged. Unknown ownership requires inspection or user confirmation.
+
 ## Stage Contract
 
 For complex engineering work, define stages with:
@@ -44,6 +55,19 @@ For complex engineering work, define stages with:
 - gate required before next stage
 
 Do not start the next stage until required evidence exists, unless the user explicitly authorized continuous execution to a later gate.
+
+## Risk And Rollback Contract
+
+For each stage touching data, state, tasks, exports, templates, external integrations, or generated artifacts, define:
+
+- failure mode
+- rollback or recovery path
+- idempotency expectation
+- old-data compatibility
+- user-visible degraded behavior
+- validation proving recovery or safe failure
+
+If rollback/recovery is unknown and risk is material, stop with `REQUEST`.
 
 ## Gate Order
 
@@ -62,6 +86,19 @@ Default order:
 
 Skip gates only when scope is low-risk and the reason is explicit.
 
+## Gate Waiver Contract
+
+Gate waivers must be explicit. A waiver record must name:
+
+- waived gate
+- reason
+- risk accepted
+- who authorized it
+- remaining validation
+- whether follow-up is required
+
+No role may infer a waiver from silence or urgency.
+
 ## Commit Contract
 
 Before commit, verify:
@@ -77,6 +114,18 @@ Before push, verify:
 - remote branch target
 - push is authorized
 - no required local verification failed
+
+## Handoff Contract
+
+Create a handoff or summary before pausing when:
+
+- work spans multiple sessions
+- a gate failed or is blocked
+- dirty files remain
+- external authorization is pending
+- user must make a business/visual/platform decision
+
+The handoff must name current stage, changed files, evidence, blockers, next command or next role, and uncommitted files.
 
 ## Output Contract
 

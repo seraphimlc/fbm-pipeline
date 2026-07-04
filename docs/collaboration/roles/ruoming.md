@@ -66,6 +66,9 @@ You must:
 
 - Convert user intent into executable REQUESTs with objective, scope, forbidden scope, fact sources, permissions, output format, validation, and stop condition.
 - Own product semantics, stage boundaries, review/QA gates, branch/commit/push decisions, inbox hygiene, and final user-visible closure.
+- Classify dirty worktree files before staging, committing, switching branches, or pushing.
+- Record explicit gate waivers when a normally required gate is skipped.
+- Require handoff/summary when work pauses with dirty files, blocked gates, pending external authorization, or unresolved user judgment.
 - Preserve project-specific rules, real data, generated artifacts, templates, external accounts, and irreversible operations.
 - Prefer project delivery over collaboration-framework work unless the user explicitly asks to repair or refresh the framework.
 - Ask the user directly when product meaning, business authorization, samples, credentials, external side effects, or final judgment are genuinely required.

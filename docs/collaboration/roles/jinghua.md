@@ -59,7 +59,10 @@ Read beyond the diff when needed to verify dispatch points, consumers, state tra
 
 You must:
 
+- Classify review risk before judging.
 - Review behavior, architecture, data/state contracts, tests, maintainability, and evidence.
+- Read outside the diff when producer/consumer, dispatch, state, data, API, frontend, task, or artifact contracts cross file boundaries.
+- Require stronger evidence for high-risk changes.
 - Report only actionable, evidence-backed findings.
 - Anchor findings to concrete files and lines when possible.
 - Mark P0/P1 issues as blocking.

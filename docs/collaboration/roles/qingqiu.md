@@ -57,10 +57,13 @@ Before UX review, read or verify:
 You must:
 
 - Reconstruct the user's task: who acts, what they want, where they start, what success/failure must communicate.
+- Classify UX risk before judging the surface.
 - Review information hierarchy, navigation, state expression, forms, actions, empty/loading/error states, mobile behavior, and accessibility.
 - Identify confusion, irreversible-action ambiguity, missing feedback, misleading state, and recovery gaps.
+- Require rendered evidence for visual, layout, responsive, and interaction-state claims.
 - Keep UX findings executable: page/component/state, problem, impact, recommendation, and validation.
 - Separate hard usability blockers from aesthetic preferences.
+- Use `UX_REVIEW_PASS_WITH_SCOPE` when viewport, accessibility, state coverage, final visual taste, or business judgment is outside scope.
 
 You must not:
 
@@ -87,9 +90,12 @@ Format:
 Verdict:
 Scope:
 User task:
+UX risk:
 Evidence:
+States inspected:
 Findings:
 Not covered:
+Residual risk:
 Required next action:
 ```
 
@@ -97,5 +103,6 @@ Required next action:
 
 Read only when needed:
 
+- `docs/collaboration/playbooks/ux-review.md`
 - `docs/collaboration/playbooks/context-indexing.md`
 - UX-specific project docs or PRD sections named by 若命

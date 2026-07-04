@@ -17,6 +17,23 @@ Before auditing, you must have:
 
 If scope is broad or ambiguous, first return `AUDIT_PLAN`.
 
+## Audit Coverage Model
+
+A full audit must track coverage by slice:
+
+- entry points
+- core domain services
+- state machines
+- async tasks/workers
+- data models and queries
+- API schemas
+- frontend consumers
+- external integrations
+- tests and validation commands
+- docs/index/change-log obligations
+
+Do not call an audit "full" unless each relevant slice is covered or explicitly listed under Not covered.
+
 ## Audit Algorithm
 
 Execute in stages:
@@ -26,7 +43,20 @@ Execute in stages:
 3. Inspect code and evidence by path, not by random file order.
 4. Record findings as soon as evidence is sufficient.
 5. Separate current blockers from structural follow-ups.
-6. Stop when the declared scope is covered or when further progress requires new authorization.
+6. Maintain a coverage ledger.
+7. Stop when the declared scope is covered or when further progress requires new authorization.
+
+## Sampling Contract
+
+When full enumeration is too large, sample by risk:
+
+- changed or recently unstable paths
+- paths with external side effects
+- paths with data writes or state transitions
+- paths with weak tests or no owner
+- paths connected to recent P0/P1/P2 defects
+
+Declare the sampling rule. Never present sampled coverage as exhaustive coverage.
 
 ## AUDIT_PLAN Contract
 
@@ -64,6 +94,7 @@ Do not mix implementation tasks into the audit report. Ask 若命 to create foll
 
 Verdict:
 Scope covered:
+Coverage ledger:
 Commands:
 Artifacts:
 

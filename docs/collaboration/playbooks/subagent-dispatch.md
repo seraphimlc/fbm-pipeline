@@ -101,6 +101,30 @@ Before every task dispatch, 若命 must validate:
 
 If any item fails, do not dispatch.
 
+## Parallelism And Independence
+
+Dispatch agents in parallel only when their scopes do not share write targets, mutable state, external side effects, or review independence requirements.
+
+Do not run implementation and review on the same uncommitted moving target unless the review packet pins the diff or file set.
+
+For independent review/QA, prefer reset or fresh identity context when prior discussion could bias the result.
+
+## Result Acceptance
+
+若命 must inspect every child result before using it.
+
+Accept a child result only when it includes:
+
+- formal role and `agentKey`
+- scope actually covered
+- files read/changed
+- evidence
+- unverified scope
+- residual risk
+- requested next action
+
+If the result exceeds permission, uses runtime nickname as identity, lacks evidence, or changes scope, treat it as `REQUEST` or `BLOCKED`, not as a gate result.
+
 ## Dispatch Packet
 
 Use this exact structure for a new child task:

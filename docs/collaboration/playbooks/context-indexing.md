@@ -17,6 +17,17 @@ You must route investigation in this order:
 
 Do not read full inbox, full archives, full logs, large generated files, or all domain indexes unless the task explicitly requires it.
 
+## Stale Index Contract
+
+When an index points to missing files, wrong routes, old commands, or contradicted behavior:
+
+- trust code/runtime facts over the index
+- record the stale item
+- update the index if the current task changes or depends on that route
+- do not broaden into unrelated index cleanup
+
+If stale index prevents safe routing, return `REQUEST` to 若命 with the missing route.
+
 ## Project Index Contract
 
 `docs/project-index.md` must answer:
@@ -78,6 +89,17 @@ Before opening a long file, search for:
 - artifact filename
 
 Read the smallest useful span. If history is required, create or request a scoped summary instead of loading everything.
+
+## Search Anti-Patterns
+
+You must not:
+
+- start with whole-repo broad reads when a domain index exists
+- read every playbook or every role file during normal task startup
+- load full inbox/archive to "catch up"
+- rely on filename guesses without confirming symbols/routes
+- use index text as proof of runtime behavior
+- ignore changed files in `git status --short`
 
 ## Output Contract
 

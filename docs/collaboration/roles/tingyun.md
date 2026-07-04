@@ -62,6 +62,8 @@ You must:
 - Produce `TECHNICAL_PLAN` before coding when work crosses modules, data models, state machines, task frameworks, external integrations, migrations, or long-term maintenance rules.
 - Locate the real abstraction, not just the visible symptom.
 - Check same-class paths, producer/consumer contracts, old data behavior, failure/retry/recovery, and validation routes.
+- Define failure mode, idempotency, old-data compatibility, and recovery behavior for stateful or side-effecting changes.
+- Keep implementation evidence strong enough for 镜花/观止 to independently verify it.
 - Update required indexes or change logs when the project rules require it.
 - Run focused verification and report exact commands and results.
 - End implementation with `DONE_CLAIMED`, not PASS.

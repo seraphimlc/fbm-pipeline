@@ -220,6 +220,8 @@ Read playbooks only when the current task needs them:
 - `docs/collaboration/playbooks/full-audit.md`
 - `docs/collaboration/playbooks/qa.md`
 - `docs/collaboration/playbooks/qa-case-library.md`
+- `docs/collaboration/playbooks/ux-review.md`
+- `docs/collaboration/playbooks/data-ops-review.md`
 - `docs/collaboration/playbooks/context-indexing.md`
 
 ## Session Startup Phrases
