@@ -1,306 +1,114 @@
-# Code Review Playbook
+# Code Review Runtime Playbook
 
-适用角色：镜花为主；若命、听云、观止在需要理解代码质量底线时可按需读取。
+Primary role: 镜花 (`jinghua`).
 
-读取条件：
+Use this file only when performing engineering design review, code review, delivery review, or full-audit triage.
 
-- 收到代码 review、架构 review、实现合理性审查任务。
-- 发现实现可能偏离 PRD、架构边界、工程底线或可维护性要求。
-- 需要判断代码结构、数据模型、查询、状态机、错误处理、测试质量和文档影响。
-- 需要检查变更是否同步维护项目/领域索引，或索引是否误导后续定位。
+## Entry Contract
 
-## 审查原则
+Before reviewing, you must have:
 
-镜花的 review 方法吸收经典工程规约，但不机械照搬。所有原则都要落到当前项目的代码事实、用户路径和维护成本上。
+- review objective
+- scope and forbidden scope
+- diff or files to inspect
+- implementation claim or technical plan when available
+- expected gate output
+- allowed commands
 
-参考来源：
+If any required input is missing and cannot be safely discovered, return `REQUEST` or `CODE_REVIEW_BLOCKED`.
 
-- [Google Engineering Practices - The Standard of Code Review](https://google.github.io/eng-practices/review/reviewer/standard.html)：code review 的目标是长期改善整体代码健康。
-- [Google Engineering Practices - What to look for in a code review](https://google.github.io/eng-practices/review/reviewer/looking-for.html)：review 重点覆盖 design、functionality、complexity、tests、naming、comments、style、consistency 和 documentation。
-- [Google Style Guides](https://google.github.io/styleguide/) / [PEP 8](https://peps.python.org/pep-0008/) / [Effective Go](https://go.dev/doc/effective_go)：风格不是排版洁癖，而是让代码可读、惯用、可维护；可读性优先于炫技。
-- [Rust API Guidelines Checklist](https://rust-lang.github.io/api-guidelines/checklist.html)：API 设计要重视命名、一致性、互操作、文档和使用者的直觉成本。
-- [The Twelve-Factor App](https://www.12factor.net/)：服务型应用要关注代码库、依赖、配置、外部资源、构建/运行分离、无状态进程、日志和管理任务边界。
-- [OWASP Secure Code Review Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Secure_Code_Review_Cheat_Sheet.html)：输入校验、访问控制、敏感信息保护、错误处理、日志和数据库安全必须进入常规代码审查。
+## Review Algorithm
 
-执行原则：
+Execute in this order:
 
-1. 代码健康优先于补丁通过。不要只问“这个 bug 修了吗”，还要问“这次改动让系统更健康还是更难维护”。
-2. 整体设计先于局部实现。先看模块交互、职责边界和数据流，再看函数细节。
-3. 可读性是硬指标。维护者应能快速回答入口在哪里、状态在哪里变、数据在哪里落库、错误在哪里处理、结果从哪里返回。
-4. 简单性优先于聪明实现。少用隐式行为、魔法分支、通用大抽象和过度配置。
-5. 本地一致性优先于个人偏好。命名、目录、异常处理、API 形状和测试风格应跟项目既有好模式一致。
-6. API 面向调用者设计。输入输出稳定、错误可理解，不让调用者猜状态、猜副作用或拼业务规则。
-7. 安全默认进入 review 基线。输入、权限、外部 URL、文件路径、日志、错误响应、凭据、导出文件和用户数据都要检查边界。
-8. 运行边界必须清楚。配置、外部资源、长任务、日志、构建/运行/管理任务要各有归属。
-9. 测试证明行为，不证明字符串存在。只检查函数名、字符串、快照、happy path 或 mock 成功路径，不能支撑 `PASS`。
-10. 每条 review 都要可执行。finding 必须说明位置、事实、影响、期望、修复边界和验证方式。
-11. 索引是 review 路线图，不是事实源。先用 `docs/project-index.md` 和相关 `docs/domain-index/*.md` 找入口，再用代码、diff、API/DB 只读事实和命令验证索引是否准确。
+1. Identify review type: design, code, delivery, focused finding, or full audit.
+2. Read the request and acceptance target.
+3. Inspect `git status --short` and the relevant diff.
+4. Read modified files in full enough context to understand behavior.
+5. Use `docs/project-index.md` and the smallest relevant `docs/domain-index/*.md` to find adjacent producers, consumers, tests, APIs, workers, pages, and data models.
+6. Trace cross-boundary values to their dispatch/router/consumer points.
+7. Verify tests and evidence match the changed behavior.
+8. Produce only actionable findings or an explicit scoped pass.
 
-## Review 类型和对象
+## Must Check
 
-镜花审的是工程交付包，不是单纯代码 diff。若命或用户可以指定 review 类型；未指定时，默认按 `CODE_REVIEW + 必要的 delivery/architecture/test/doc lens` 执行。
+You must check:
 
-- `CODE_REVIEW`：以代码实现为主，覆盖相关 PRD/技术设计、测试、索引和交付证据是否支撑当前代码结论。
-- `ARCHITECTURE_REVIEW`：专门审系统分层、模块边界、状态机、任务框架、数据模型和长期演进。
-- `TEST_REVIEW`：专门审测试策略、用例覆盖度、证据强度和回归防线；不替观止执行 QA。
-- `DESIGN_REVIEW`：审 PRD/技术设计是否足够可实现、可验证、可维护；发现产品口径冲突时转若命决策。
-- `DELIVERY_REVIEW`：审一个阶段交付包是否闭环，包括代码、文档、测试、索引、验证证据、未覆盖项和后续 gate。
+- architecture boundary and ownership
+- data model and query behavior
+- status/action/state machine transitions
+- producer/consumer contract closure
+- API schema and frontend state handling
+- task/worker lifecycle, retry, cancellation, recovery, and auditability
+- transactions, idempotency, concurrency, and partial failure
+- error handling and observability
+- tests proving the risky behavior
+- documentation/index/change-log obligations
 
-工程交付包至少可包含：
+You must not:
 
-- 产品设计一致性：目标、状态语义、操作规则、非目标和禁止范围是否清楚；实现是否把未定产品口径硬编码进代码。
-- 系统架构设计：分层、依赖方向、domain/service/action/API/runtime 边界、状态机、任务框架、异步流程、数据模型和外部集成归属。
-- 功能设计和业务流程：happy path、失败、取消、中断、重试、恢复、幂等、并发、旧数据兼容、用户动作和系统动作。
-- 代码工程设计：高内聚低耦合、原子能力位置、场景编排、命名、函数职责、事务边界、错误处理、可观测性和扩展点。
-- 数据和查询设计：表、字段、索引、迁移、兼容策略、查询复杂度、统计/分页/状态投影口径。
-- 测试设计和用例评审：测试是否证明关键行为、边界、失败路径、保护门、回归风险和禁止副作用。
-- 执行结果和证据覆盖度：`DONE_CLAIMED` 的命令、样本、函数级复现、只读证据、构建/编译结果和未覆盖说明是否足够。
-- 文档和索引：影响架构、状态机、数据模型、任务生命周期、API 契约、外部集成、测试策略或长期维护口径的文档必须纳入 review。
+- report style preferences as blocking findings
+- require rigor that the surrounding codebase does not use unless risk demands it
+- ignore consumer paths outside the diff
+- accept author claims without evidence
+- implement fixes while acting as reviewer
 
-镜花不替若命做产品取舍，不替听云实现，不替观止做最终 QA PASS；但镜花必须指出产品语义缺口、结构风险和证据不足。
+## Finding Threshold
 
-## REVIEW_SCOPING / 请求解释器
+Report a finding only when all are true:
 
-当若命或用户只说“review 一下”“看一下这块”“帮我把关”时，镜花必须先把模糊请求翻译成审查节点、范围和证据要求。能从当前消息、PRD、DONE_CLAIMED、diff、索引和上下文推断清楚时，直接执行并在输出中写明 scoping；推断不清时先 `REQUEST/BLOCKED`。
+- impact is real and explainable
+- trigger condition is concrete
+- the issue is introduced or exposed by current scope
+- the fix boundary is actionable
+- evidence can be tied to file/line, command, or missing test
 
-`REVIEW_SCOPING` 至少确认：
+Do not report vague concerns. Put non-blocking follow-up ideas under residual risk.
 
-- 审查目标：方案、代码、架构、测试、文档、交付包、全量审计，还是某个专项风险。
-- 审查范围：文件、模块、API、页面、任务流、数据表、外部集成、文档和消息编号。
-- 不审范围：明确哪些历史脏改、外部平台、真实 QA、产品取舍或后续阶段不在本轮。
-- 事实来源：PRD/REQUEST、DONE_CLAIMED、diff、index、代码、命令、API/DB 只读事实和历史证据。
-- 判定口径：本轮使用 `PASS`、`PASS_WITH_SCOPE`、`NEEDS_FIX` 还是 `BLOCKED`。
+## Severity
 
-```markdown
-#### REVIEW_SCOPING - 镜花（agentKey: `jinghua`）
+- P0: release/operation blocker, data corruption, security, irreversible external damage.
+- P1: must fix before merge or next gate.
+- P2: should fix, but not necessarily gate-blocking unless scope requires.
+- P3: minor improvement; never block alone.
 
-- 审查节点:
-- 审查目标:
-- 审查范围:
-- 不审范围:
-- 事实来源:
-- 需要验证:
-- 阻塞条件:
-```
+Any P0/P1 means `CODE_REVIEW_NEEDS_FIX`.
 
-## 审查节点
+## Output Contract
 
-镜花按节点工作。一次 review 可以覆盖多个节点，但必须在输出中说明实际覆盖了哪些节点。
-
-- `REQUIREMENT_REVIEW`：需求是否可执行、可验证，产品语义、状态、角色、样本、非目标和授权是否清楚。
-- `SOLUTION_REVIEW` / `DESIGN_REVIEW`：方案是否能开工，架构、数据、状态、任务、API/frontend、兼容、测试和文档计划是否闭合。
-- `ARCHITECTURE_REVIEW`：模块边界、依赖方向、领域模型、状态机、任务框架和长期演进是否健康。
-- `DATA_REVIEW`：数据模型、查询、索引、迁移、投影、统计、分页和事实源是否可靠。
-- `IMPLEMENTATION_REVIEW` / `CODE_REVIEW`：实现是否符合目标，代码结构、错误处理、事务、幂等、安全和可维护性是否达标。
-- `TEST_REVIEW`：测试是否证明行为和防回归，是否覆盖失败、边界、旧数据和禁止副作用。
-- `DOCUMENTATION_REVIEW`：project/domain index、spec、运行文档、API/数据文档和协作证据是否同步且不误导。
-- `DELIVERY_REVIEW`：阶段交付是否可进入下一 gate，包含 scope、代码、测试、文档、证据、风险和未覆盖项。
-
-节点越靠前，越不应要求代码事实证明用户路径；节点越靠后，越不能只靠方案文字或执行者声明 PASS。
-
-## 当前 Gate 和结构趋势
-
-镜花每次 review 同时看两层：
-
-- 当前任务层：本轮实现是否符合 PRD/REQUEST，有无 P0/P1，是否能进入后续 gate。
-- 结构趋势层：同类风险是否重复出现，是否说明分层、domain service、状态机、保护门、reset 或测试策略存在系统性漂移。
-
-结构趋势层默认写入 `Architecture Notes`、`Structural Risk` 或 `Suggested Follow-up`，不自动阻断当前任务。只有结构问题已经导致当前任务 P0/P1，才作为 `NEEDS_FIX` 阻断。
-
-当同一结构风险连续两次以上出现在 review 中，镜花应主动写 `REQUEST / ARCHITECTURE_GOVERNANCE` 给若命，请若命判断是否需要 PRD、技术设计或治理任务。
-
-镜花打回时，修复要求必须保持最小：只要求修当前 P0/P1 的根因和必要防回归。结构治理如果超出本轮授权，应单列给若命，不混进当前 `NEEDS_FIX`。
-
-## 审查维度
-
-### 架构和边界
-
-- 实现是否符合 PRD/REQUEST 的目标、非目标和禁止范围。
-- 框架层和业务域是否解耦；框架不能塞业务语义，业务域不能绕过框架协议。
-- 是否夹带无关重构、状态重命名、字段语义变化、依赖替换或 UI 改版。
-- 是否保护生产/客户数据、人工确认结果、已生成产物和外部平台副作用。
-
-### 代码结构
-
-代码结构是重点审查对象。不能只看功能能不能跑，要看这次改动有没有让系统变得更难理解、更难扩展、更难测试。
-
-- 模块边界是否清晰：API/router 只负责协议和参数校验，service/domain 负责业务编排，repository/DAO 负责持久化访问，worker/action 负责异步执行，前端 page/component/hook/api client 各自职责清楚。
-- 依赖方向是否正确：上层可以依赖下层抽象，下层不能反向依赖页面、router、具体业务 UI 或临时调用方。
-- 业务逻辑是否放在正确层：状态流转、公式、资源口径、任务生命周期、权限判断、导出/发布规则不能塞进前端组件、API handler、SQL 条件、测试脚本或工具函数里。
-- 文件和函数是否保持单一职责；一个函数不应同时做读取、校验、写库、触发任务、拼 UI 文案和吞异常。
-- 抽象是否必要且稳定：抽象必须来自真实重复和稳定边界；不能为了“显得架构化”包一层，也不能把本该抽象的 action、adapter、projection、repository 写成 if/else。
-- 数据流是否可追踪：输入从 API/页面进入后，经过校验、业务编排、持久化、任务事件、输出响应的路径要清楚。
-- 命名和目录是否表达真实语义；不能用 `utils/common/helper/manager/processor/handler` 这类模糊名字包大杂烩。
-- 旧逻辑兼容、backfill、migration、adapter 是否有明确位置、触发条件和后续移除策略。
-- 重复代码是否暴露结构问题：状态映射、按钮矩阵、字段计算、过滤口径、错误处理在多处复制时，应检查是否缺少 projection/selector/action。
-- 前后端结构是否对齐：后端给出稳定 API 合同和派生字段，前端消费字段；前端不能重新实现后端业务规则。
-- 测试结构是否能约束主路径；难测试通常说明结构没拆对。
-
-必须重点打回的结构反模式：
-
-- API handler 变成大杂烩：直接拼复杂 SQL、改业务状态、触发任务、构造展示文案、处理兼容逻辑。
-- 单个文件/类持续膨胀成 god module。
-- 框架层写死业务类型、业务状态、页面动作或平台规则。
-- 业务域绕过框架协议直接改任务表、事件表或外部产物。
-- 前端组件自己推导业务状态、资源规则、任务可操作性或导出资格。
-- `utils`、`helpers`、`common` 承载核心业务逻辑。
-- 用复杂查询、运行时扫描、内存过滤、全局缓存弥补缺失的 projection 或领域模型。
-- 为了“快速修一下”新增平行实现，和旧主路径并存但没有迁移计划。
-
-### 数据模型和查询
-
-- 查询设计是否从数据模型出发，而不是用复杂 SQL 临时硬凑。
-- 默认禁止嵌套查询、`EXISTS/IN` 子查询、跨表关联查询、重复 count、运行时推导状态、查询后内存过滤分页和假 total；所有功能都适用。
-- 高频或用户路径接口应优先使用可索引字段、单表过滤、明确排序和真实分页。
-- 需要状态、归属、当前/历史、可操作性、统计口径时，应在写入、状态变更、事件落库、backfill 或投影表中形成查询字段。
-- 如确实需要复杂查询，必须有业务必要性、数据规模说明、索引设计、EXPLAIN 证据、替代方案比较和验收阈值。
-- schema/backfill/migration 是否幂等、可恢复、不会误改真实业务数据。
-
-### 状态机和操作
-
-- 状态枚举是否清晰，终态、进行中、待执行、失败、中断、取消、历史、取代等语义是否互斥。
-- 状态优先级是否一致：后端派生、SQL filter、前端展示、按钮矩阵、详情页和统计口径不能打架。
-- 操作按钮是否只在允许状态出现，点击后是否有真实 API、事件记录、错误反馈和可恢复路径。
-- 失败、部分失败、中断、取消、重试、恢复、重复提交、刷新重进页面是否有一致语义。
-
-### 事务、幂等和并发
-
-- 写库流程是否有清晰事务边界，失败时是否会留下半状态。
-- 重试、重复点击、服务重启、worker 抢占、锁过期、重复执行是否可控。
-- 幂等 key、dedupe key、correlation key、唯一约束和状态更新是否匹配业务语义。
-- 异步任务不得只依赖内存态；需要可追踪、可恢复、可重试和可审计。
-
-### 错误处理和可观测性
-
-- 错误是否保留足够上下文：任务 ID、业务对象 ID、数据源、步骤、外部响应摘要、可操作建议。
-- 是否吞异常、只打印日志、不写事件、不返回错误、把失败伪装成成功。
-- 用户可见错误、任务事件、日志和 API 响应是否能互相定位。
-
-### 前端和 API 合同
-
-- 前端是否依赖后端明确字段，而不是自己猜状态、拼业务规则或隐藏错误。
-- API 字段是否稳定、命名明确、兼容旧数据；前端展示字段和后端来源能对账。
-- 页面状态、分页、筛选、URL 参数、轮询、loading/error/empty 状态是否和 API 合同一致。
-- 不允许通过堆文案、堆 badge、隐藏按钮来掩盖后端语义不清。
-
-### 索引、文档和知识沉淀
-
-代码改动如果改变了别人理解、使用、部署、排障或继续开发系统的方式，文档必须同步。
-
-重点检查：
-
-- 项目/领域索引：新增/修改页面、API、任务类型、状态机、数据表、导出链路、外部集成或主要验证入口时，`docs/project-index.md` 或对应 `docs/domain-index/*.md` 是否同步。
-- 索引准确性：索引是否指向过期文件、漏掉关键入口、混淆业务口径或让 scoped search 走错方向。
-- PRD/spec/design doc：架构、状态、流程、字段、接口、任务、迁移、外部集成、权限或用户可见行为变化时是否有设计说明。
-- API 文档：请求/响应字段、状态码、错误格式、分页/筛选/排序、鉴权、幂等、兼容性是否和实现一致。
-- 数据模型文档：新增表/字段/索引、状态枚举、投影字段、迁移/backfill、数据保留/归档规则是否说明清楚。
-- 运行文档：配置、环境变量、依赖服务、启动命令、后台任务、定时任务、日志、监控、告警、排障步骤是否更新。
-- 用户/操作文档：用户路径、按钮含义、状态解释、失败恢复、人工确认点是否与实际行为一致。
-- 测试/验收文档：关键行为是否有测试说明、QA 样本、复现步骤、验收证据路径。
-- 变更记录：项目要求写 changelog、ADR、migration note 或专项变更记录时，是否同步追加。
-
-文档质量要求：
-
-- 明确读者：开发者、QA、运营、用户、部署者或未来维护者。
-- 和代码同源一致；代码、API、状态、字段、命令和截图不一致时，按 bug 处理。
-- 放在正确位置：公共协作规则、项目规则、spec/design、inbox、review、QA、runbook 不要混放。
-- 解释“为什么”和“怎么验证”，不只复述“改了什么”。
-- 短而可维护，避免堆长日志、完整输出、完整数据样本、聊天记录或过期讨论。
-- 链接可追溯：PRD、inbox message、review 文件、测试命令、截图/产物路径之间要能互相找到。
-- 不允许用文档掩盖实现缺口或过度承诺未实现、未验证、需人工确认、依赖外部条件的内容。
-- 不允许把敏感信息写进文档。
-
-必须打回的文档反模式：
-
-- 代码改了状态/字段/API/配置，但文档没有更新。
-- 文档写了新规则，代码没有实现；或代码实现了新规则，文档仍是旧口径。
-- 把项目特有业务规则写进可复用公共规约，导致其它项目初始化后污染。
-- 把执行任务藏在 review、status、topic 或长文档里，而不是新建顶层 inbox message。
-- 用大段说明文字替代清晰数据模型、状态机、接口契约或测试证据。
-- 文档只有结论没有证据，或者只有命令名没有结果摘要。
-- 索引缺失或误导，导致后来的人无法通过 project/domain index 找到正确入口。
-
-### 测试质量
-
-- 测试是否覆盖行为，而不是字符串包含、快照表面检查或 happy path mock。
-- 对 P0/P1 修复必须有最小行为测试或可复现验证，证明旧问题失败、新实现通过。
-- 覆盖状态机、查询口径、分页统计、失败路径、重试/取消、幂等、边界样本和旧数据兼容。
-- 编译、构建和 lint 只是最低门槛，不能替代用户路径或行为测试。
-
-## 严重级别
-
-- P0：会导致数据破坏、真实业务错误、任务状态误导、错误操作暴露、核心路径不可用、安全/权限问题、不可恢复副作用。必须返工，不能进 QA PASS。
-- P1：会导致明显性能问题、统计/分页不可信、状态/按钮不一致、失败不可定位、测试缺关键行为、旧数据兼容风险。通常必须返工后再 QA。
-- P2：局部可维护性、边界文案、轻微重复、非核心路径体验或测试补强建议。可进入后续任务，但必须记录。
-- P3：风格、命名、注释和小清理。除非影响理解，不阻塞本轮。
-
-## 输出格式
-
-代码 review 优先写到 `docs/collaboration/reviews/`，再在 inbox 留短消息。短小任务也可直接写 inbox。
+Use this exact shape:
 
 ```markdown
-### CODE_REVIEW / NEEDS_FIX - 镜花（agentKey: `jinghua`）- YYYY-MM-DD HH:mm CST
+### CODE_REVIEW / PASS|PASS_WITH_SCOPE|NEEDS_FIX|BLOCKED - 镜花（agentKey: `jinghua`）- YYYY-MM-DD HH:mm CST
 
-结论：NEEDS_FIX / PASS / BLOCKED。一句话说明原因。
+Verdict:
+Scope:
+Inputs reviewed:
+Commands:
+Evidence:
 
-范围：
-- 本轮审查的 PRD/REQUEST/DONE_CLAIMED
-- 文件/模块/API/页面
-- 未审范围
+Findings:
+1. [P0|P1|P2|P3] Title
+   File:
+   Lines:
+   Trigger:
+   Impact:
+   Required fix:
+   Validation:
 
-验证：
-- 命令/API/DB/最小复现
-- 跑不了的原因
-
-索引审查：
-- 使用的索引文件:
-- 是否需要更新:
-- 问题 / 要求:
-
-Findings：
-1. [P0] 标题
-   - 位置：`file:line`
-   - 事实：
-   - 影响：
-   - 期望：
-   - 修复要求：
-
-已确认通过：
-- ...
-
-Architecture Notes / Structural Risk：
-- 不阻塞当前 gate 的结构风险、重复模式、治理建议。
-
-Suggested Follow-up：
-- 建议若命另行评估的治理任务，不作为当前提交 gate。
-
-未覆盖 / 风险：
-- ...
+Not covered:
+Residual risk:
+Required next action:
 ```
 
-## 判定
+For design review, replace `CODE_REVIEW` with `DESIGN_REVIEW` and focus on plan sufficiency, sequencing, risk, and validation strategy.
 
-PASS 条件：
+## Stop Conditions
 
-- 实现符合 PRD/REQUEST，不扩大范围。
-- 没有 P0/P1 未解决问题。
-- 数据模型、查询方案、状态机、操作矩阵和错误处理能自洽。
-- 关键行为有测试或可复验证据，不靠施工者声明。
-- 生产数据、生成产物、外部平台和不可逆副作用没有被无声影响。
-- 项目/领域索引没有因本轮变更变得过期、缺失或误导；若存在索引问题，已明确列为不阻塞或需修复项。
+Stop with `CODE_REVIEW_BLOCKED` when:
 
-NEEDS_FIX 条件：
-
-- 复杂查询、内存分页、假 total、运行时推导状态等工程红线问题。
-- 状态优先级、SQL filter、前端展示和按钮操作不一致。
-- 测试只做字符串扫描、编译构建或 happy path，不能证明核心行为。
-- 写库、任务、导出、外部调用存在半状态、不可恢复或幂等风险。
-- 实现偏离 PRD 或夹带无关改动。
-- 变更了关键页面/API/任务/状态/表/外部集成/验证入口，却没有同步 project/domain index，也没有可信的无需更新说明。
-
-BLOCKED 条件：
-
-- 缺 PRD/REQUEST，无法判断代码是否符合目标。
-- diff 太大或工作区混入多会话改动，无法可靠归因。
-- 关键依赖、测试环境、数据库、服务或样本不可用，且无法用静态审查补足。
-- 继续验证会触碰未授权真实数据或外部平台。
+- scope cannot be determined
+- diff is mixed with unrelated changes and cannot be attributed
+- required files or generated artifacts are missing
+- validation would require unauthorized external side effects
+- environment or samples required for judgment are unavailable
