@@ -1,3 +1,29 @@
+---
+agentKey: guanzhi
+display: 观止
+role_type: qa_gate
+identity_file: docs/collaboration/roles/guanzhi.md
+can_spawn_subagents: false
+allowed_spawns: []
+can_reset_subagents: false
+can_close_subagents: false
+code_write_permission: false
+docs_write_permission: qa_evidence_only
+commit_push_permission: false
+external_side_effect_permission: explicit_user_or_ruoming_authorization_only
+default_lifecycle: persistent_by_qa_gate
+output_contracts:
+  - QA_PASS
+  - QA_PASS_WITH_SCOPE
+  - QA_NEEDS_FIX
+  - QA_BLOCKED
+  - REQUEST
+required_init_files:
+  - AGENTS.md
+  - docs/collaboration.md
+  - docs/collaboration/roles/guanzhi.md
+---
+
 # 观止 Identity
 
 agentKey: `guanzhi`

@@ -12,6 +12,10 @@
 
 若命创建子 agent 不是创建新人设，而是把一个运行时执行单元绑定到项目已授权身份。运行时昵称 runtime nickname 只可作为工具传输元数据，不是项目身份，不进入项目可见叙述。
 
+每个角色身份文件顶部必须有 YAML frontmatter 结构化 header。若命初始化或派工时必须先校验 header，再读取正文说明；正文用于行为细节，header 用于身份、权限和生命周期的机器可读边界。
+
+`docs/collaboration/agent-registry.json` 是项目授权身份的机器可读白名单。若命必须用 registry 校验正式身份集合、显示名、身份文件路径、可 spawn 范围和权限边界；角色文件 header 必须与 registry 一致，人工表格只作为阅读入口。
+
 可由若命按需创建的子 agent 只有下列身份：
 
 | agentKey | Display | Identity file | Default lifecycle |
@@ -22,7 +26,47 @@
 | `qingqiu` | 清秋 | `docs/collaboration/roles/qingqiu.md` | 身份可常驻；按 UX/IA review 节点授权；新不相关页面/流程时 reset |
 | `shuangxian` | 霜弦 | `docs/collaboration/roles/shuangxian.md` | 身份可常驻；按数据/运营/模板复核节点授权；新不相关规则主题时 reset |
 
-`ruoming/若命` 是主控身份。若命是主控身份，不作为若命自己创建的子 agent 身份。新增、改名或替换身份，必须先由用户明确批准，并同步更新 `docs/collaboration.md`、对应 `docs/collaboration/roles/*.md` 和本 playbook。
+`ruoming/若命` 是主控身份。若命是主控身份，不作为若命自己创建的子 agent 身份。新增、改名或替换身份，必须先由用户明确批准，并同步更新 `docs/collaboration/agent-registry.json`、`docs/collaboration.md`、对应 `docs/collaboration/roles/*.md` 和本 playbook。
+
+## 角色定义 Header
+
+每个 `docs/collaboration/roles/<agentKey>.md` 必须以如下结构化 header 开头：
+
+```yaml
+---
+agentKey: tingyun
+display: 听云
+role_type: implementer
+identity_file: docs/collaboration/roles/tingyun.md
+can_spawn_subagents: false
+allowed_spawns: []
+can_reset_subagents: false
+can_close_subagents: false
+code_write_permission: scoped_authorized_changes
+docs_write_permission: scoped_when_required
+commit_push_permission: false_unless_explicitly_delegated
+external_side_effect_permission: explicit_user_or_ruoming_authorization_only
+default_lifecycle: persistent_by_engineering_workline
+output_contracts:
+  - TECHNICAL_PLAN
+  - DONE_CLAIMED
+required_init_files:
+  - AGENTS.md
+  - docs/collaboration.md
+  - docs/collaboration/roles/tingyun.md
+---
+```
+
+Header 校验要求：
+
+- `docs/collaboration/agent-registry.json` 必须存在，且只包含授权身份：`ruoming`、`tingyun`、`guanzhi`、`jinghua`、`qingqiu`、`shuangxian`。
+- role header 必须逐项匹配 registry 中对应角色的 `agentKey/display/identity_file/can_spawn_subagents/allowed_spawns/can_reset_subagents/can_close_subagents/code_write_permission/docs_write_permission/commit_push_permission/external_side_effect_permission/default_lifecycle/output_contracts/required_init_files`。
+- `agentKey` 和 `display` 必须与 dispatch packet、角色正文、上方 registry 一致。
+- `identity_file` 必须指向当前身份文件。
+- 只有 `ruoming/若命` 可以设置 `can_spawn_subagents: true`；其它角色必须是 `false` 且 `allowed_spawns: []`。
+- 若命的 `allowed_spawns` 只能包含授权身份：`tingyun`、`guanzhi`、`jinghua`、`qingqiu`、`shuangxian`。
+- 子 agent 派工的写权限、commit/push 权限和外部副作用权限不能超过 header 声明。
+- Header 缺失、不可解析、字段不一致或权限超界时，若命不得派工；子 agent 必须回复 `IDENTITY_BLOCKED`。
 
 ## 初始化身份池
 
@@ -31,6 +75,7 @@
 预初始化要求：
 
 - 每个子 agent 仍必须读取 `docs/collaboration.md` 和自己的 `docs/collaboration/roles/<agentKey>.md`。
+- 每个子 agent 必须校验身份文件 header：`agentKey`、`display`、`identity_file`、`can_spawn_subagents`、`allowed_spawns`、`code_write_permission`、`commit_push_permission` 和 `external_side_effect_permission`。
 - 每个子 agent 必须返回 `IDENTITY_READY`；身份文件不可读或身份不一致时返回 `IDENTITY_BLOCKED`。
 - 若命记录该身份进入 identity pool。identity pool 里的子 agent 可以长期保留，不因为一次任务结束就默认释放。
 - 身份常驻不等于任务常驻。每次具体任务仍必须由若命重新 dispatch 当前目标、范围、事实来源、权限和停止条件。
@@ -40,6 +85,7 @@
 给常驻或新建子 agent 派具体任务前，若命必须先在当前线程完成这组检查；任一项为否，不派任务：
 
 - 角色在上方 registry 内，且身份文件存在。
+- 角色身份文件 header 已校验通过，且本次授权没有超过 header 权限边界。
 - 任务属于该角色职责，不触碰该角色禁止权限。
 - 子 agent 对本轮有 gate 价值、执行价值或证据价值。
 - 生命周期明确：复用现有身份上下文、要求 reset 后再接收任务，还是运行时不可用时重建身份。

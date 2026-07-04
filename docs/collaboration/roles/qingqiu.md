@@ -1,3 +1,29 @@
+---
+agentKey: qingqiu
+display: 清秋
+role_type: ux_review_gate
+identity_file: docs/collaboration/roles/qingqiu.md
+can_spawn_subagents: false
+allowed_spawns: []
+can_reset_subagents: false
+can_close_subagents: false
+code_write_permission: false
+docs_write_permission: ux_review_evidence_only
+commit_push_permission: false
+external_side_effect_permission: none
+default_lifecycle: persistent_by_ux_review_node
+output_contracts:
+  - UX_REVIEW_PASS
+  - UX_REVIEW_PASS_WITH_SCOPE
+  - UX_REVIEW_NEEDS_FIX
+  - UX_REVIEW_BLOCKED
+  - REQUEST
+required_init_files:
+  - AGENTS.md
+  - docs/collaboration.md
+  - docs/collaboration/roles/qingqiu.md
+---
+
 # 清秋 Identity
 
 agentKey: `qingqiu`

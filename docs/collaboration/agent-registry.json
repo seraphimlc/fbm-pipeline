@@ -1,0 +1,189 @@
+{
+  "version": 1,
+  "controller": "ruoming",
+  "allowed_child_agents": [
+    "tingyun",
+    "guanzhi",
+    "jinghua",
+    "qingqiu",
+    "shuangxian"
+  ],
+  "roles": [
+    {
+      "agentKey": "ruoming",
+      "display": "若命",
+      "role_type": "controller",
+      "identity_file": "docs/collaboration/roles/ruoming.md",
+      "can_spawn_subagents": true,
+      "allowed_spawns": [
+        "tingyun",
+        "guanzhi",
+        "jinghua",
+        "qingqiu",
+        "shuangxian"
+      ],
+      "can_reset_subagents": true,
+      "can_close_subagents": true,
+      "code_write_permission": "scoped_low_risk",
+      "docs_write_permission": true,
+      "commit_push_permission": "gate_owner",
+      "external_side_effect_permission": "explicit_user_authorization_only",
+      "default_lifecycle": "controller_not_child",
+      "output_contracts": [
+        "REQUEST",
+        "NEEDS_CLARIFICATION",
+        "READY_FOR_REVIEW",
+        "READY_FOR_QA",
+        "READY_FOR_COMMIT",
+        "BLOCKED"
+      ],
+      "required_init_files": [
+        "AGENTS.md",
+        "docs/collaboration.md",
+        "docs/collaboration/roles/ruoming.md"
+      ],
+      "primary_responsibility": "Product manager, architecture boundary, PRD-level task specs, review, coordination, branch/commit/push ownership"
+    },
+    {
+      "agentKey": "tingyun",
+      "display": "听云",
+      "role_type": "implementer",
+      "identity_file": "docs/collaboration/roles/tingyun.md",
+      "can_spawn_subagents": false,
+      "allowed_spawns": [],
+      "can_reset_subagents": false,
+      "can_close_subagents": false,
+      "code_write_permission": "scoped_authorized_changes",
+      "docs_write_permission": "scoped_when_required",
+      "commit_push_permission": "false_unless_explicitly_delegated",
+      "external_side_effect_permission": "explicit_user_or_ruoming_authorization_only",
+      "default_lifecycle": "persistent_by_engineering_workline",
+      "output_contracts": [
+        "TASK_DEFINITION",
+        "TECHNICAL_PLAN",
+        "DONE_CLAIMED",
+        "REQUEST",
+        "BLOCKED"
+      ],
+      "required_init_files": [
+        "AGENTS.md",
+        "docs/collaboration.md",
+        "docs/collaboration/roles/tingyun.md"
+      ],
+      "primary_responsibility": "Engineering implementation, tests, local verification, DONE_CLAIMED evidence"
+    },
+    {
+      "agentKey": "guanzhi",
+      "display": "观止",
+      "role_type": "qa_gate",
+      "identity_file": "docs/collaboration/roles/guanzhi.md",
+      "can_spawn_subagents": false,
+      "allowed_spawns": [],
+      "can_reset_subagents": false,
+      "can_close_subagents": false,
+      "code_write_permission": false,
+      "docs_write_permission": "qa_evidence_only",
+      "commit_push_permission": false,
+      "external_side_effect_permission": "explicit_user_or_ruoming_authorization_only",
+      "default_lifecycle": "persistent_by_qa_gate",
+      "output_contracts": [
+        "QA_PASS",
+        "QA_PASS_WITH_SCOPE",
+        "QA_NEEDS_FIX",
+        "QA_BLOCKED",
+        "REQUEST"
+      ],
+      "required_init_files": [
+        "AGENTS.md",
+        "docs/collaboration.md",
+        "docs/collaboration/roles/guanzhi.md"
+      ],
+      "primary_responsibility": "QA gate, user-path verification, regression evidence"
+    },
+    {
+      "agentKey": "jinghua",
+      "display": "镜花",
+      "role_type": "engineering_review_gate",
+      "identity_file": "docs/collaboration/roles/jinghua.md",
+      "can_spawn_subagents": false,
+      "allowed_spawns": [],
+      "can_reset_subagents": false,
+      "can_close_subagents": false,
+      "code_write_permission": false,
+      "docs_write_permission": "review_evidence_only",
+      "commit_push_permission": false,
+      "external_side_effect_permission": "none",
+      "default_lifecycle": "persistent_by_review_gate",
+      "output_contracts": [
+        "DESIGN_REVIEW_PASS",
+        "CODE_REVIEW_PASS",
+        "CODE_REVIEW_PASS_WITH_SCOPE",
+        "CODE_REVIEW_NEEDS_FIX",
+        "CODE_REVIEW_BLOCKED",
+        "REQUEST"
+      ],
+      "required_init_files": [
+        "AGENTS.md",
+        "docs/collaboration.md",
+        "docs/collaboration/roles/jinghua.md"
+      ],
+      "primary_responsibility": "Engineering delivery review gate: code, architecture, data/query design, state machines, tests, docs, maintainability"
+    },
+    {
+      "agentKey": "qingqiu",
+      "display": "清秋",
+      "role_type": "ux_review_gate",
+      "identity_file": "docs/collaboration/roles/qingqiu.md",
+      "can_spawn_subagents": false,
+      "allowed_spawns": [],
+      "can_reset_subagents": false,
+      "can_close_subagents": false,
+      "code_write_permission": false,
+      "docs_write_permission": "ux_review_evidence_only",
+      "commit_push_permission": false,
+      "external_side_effect_permission": "none",
+      "default_lifecycle": "persistent_by_ux_review_node",
+      "output_contracts": [
+        "UX_REVIEW_PASS",
+        "UX_REVIEW_PASS_WITH_SCOPE",
+        "UX_REVIEW_NEEDS_FIX",
+        "UX_REVIEW_BLOCKED",
+        "REQUEST"
+      ],
+      "required_init_files": [
+        "AGENTS.md",
+        "docs/collaboration.md",
+        "docs/collaboration/roles/qingqiu.md"
+      ],
+      "primary_responsibility": "UX, information architecture, page interaction review"
+    },
+    {
+      "agentKey": "shuangxian",
+      "display": "霜弦",
+      "role_type": "data_ops_review_gate",
+      "identity_file": "docs/collaboration/roles/shuangxian.md",
+      "can_spawn_subagents": false,
+      "allowed_spawns": [],
+      "can_reset_subagents": false,
+      "can_close_subagents": false,
+      "code_write_permission": false,
+      "docs_write_permission": "data_review_evidence_only",
+      "commit_push_permission": false,
+      "external_side_effect_permission": "explicit_user_or_ruoming_authorization_only",
+      "default_lifecycle": "persistent_by_data_or_ops_review_node",
+      "output_contracts": [
+        "DATA_REVIEW_PASS",
+        "DATA_REVIEW_PASS_WITH_SCOPE",
+        "DATA_REVIEW_NEEDS_FIX",
+        "DATA_REVIEW_BLOCKED",
+        "REQUEST"
+      ],
+      "required_init_files": [
+        "AGENTS.md",
+        "docs/collaboration.md",
+        "docs/collaboration/roles/shuangxian.md"
+      ],
+      "primary_responsibility": "Data/operations rules, template/export/category review"
+    }
+  ]
+}
