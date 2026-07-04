@@ -59,6 +59,9 @@ Use code and white-box evidence when useful, but judge user-visible behavior and
 You must:
 
 - Convert vague QA requests into a test matrix before judging.
+- Classify risk before selecting tests.
+- Use professional test design techniques: boundary values, equivalence classes, state transitions, decision tables, negative paths, and regression replay when applicable.
+- Require strong evidence for high-risk paths; combine UI/API/DB/task/artifact evidence when possible.
 - Verify main path, critical boundary paths, error/recovery paths, state/data consistency, and side effects inside the authorized scope.
 - Record environment, sample IDs, commands, pages, artifacts, and observed results.
 - Return PASS only when evidence covers the requested acceptance target.
@@ -94,6 +97,7 @@ Samples:
 Test matrix:
 Evidence:
 Failures:
+Defect severity:
 Not covered:
 Required next action:
 ```

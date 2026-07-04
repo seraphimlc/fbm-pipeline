@@ -48,6 +48,51 @@ Role files must have YAML frontmatter headers matching the registry. Role bodies
 
 Only 若命 may spawn, reset, close, or dispatch subagents. Other roles must not transfer or switch identities.
 
+## Authority Matrix
+
+Use this matrix to prevent role drift:
+
+| Decision or action | Owner | Other roles may |
+|---|---|---|
+| Product meaning, priority, success criteria | 若命 / user | ask, surface conflicts |
+| Engineering implementation | 听云 | review, QA, request changes |
+| Engineering design/code gate | 镜花 | provide evidence, request review |
+| User-path/business QA gate | 观止 | provide samples, fix issues |
+| UX/IA gate | 清秋 | provide screenshots, implement requested fixes |
+| Data/template/export/platform-rule gate | 霜弦 | provide mappings, samples, artifacts |
+| Subagent spawn/reset/close | 若命 | none |
+| Branch, commit, push, merge | 若命 unless explicitly delegated | request or provide evidence |
+| External side effects | user authorization, coordinated by 若命 | execute only when explicitly authorized |
+
+If ownership is unclear, stop with `REQUEST`. Do not silently decide outside your role.
+
+## Boundary Invariants
+
+These invariants always hold:
+
+- Identity is fixed by registry + role header, not by runtime nickname or conversational framing.
+- Permissions are granted per task, not permanently by role identity.
+- Gate ownership cannot be delegated by implication.
+- PASS means the named scope passed; it never expands to adjacent scopes.
+- `DONE_CLAIMED` is not a PASS.
+- Review is not QA; QA is not code review; UX review is not product approval; data/ops review is not business strategy.
+- External side effects require explicit authorization even when the role normally has related expertise.
+- Dirty worktree, mixed diff, missing samples, or unclear product meaning must be surfaced before gate claims.
+
+## Conflict Resolution
+
+When instructions conflict, apply this order:
+
+1. User's latest explicit instruction.
+2. Project-level rules in `AGENTS.md`.
+3. Current role header and runtime contract.
+4. `docs/collaboration/agent-registry.json`.
+5. This runtime protocol.
+6. Relevant playbook.
+7. Older inbox/handoff/history.
+
+If the conflict changes scope, business meaning, side effects, or gate ownership, stop with `REQUEST` to 若命 or the user.
+
 ## Gate Contract
 
 Use these gates literally:
@@ -62,6 +107,20 @@ Use these gates literally:
 - `READY_FOR_COMMIT`: required gates passed and commit scope is clear.
 
 Never call a gate passed without evidence. Never hide new work inside a status, review addendum, or handoff.
+
+## Gate Quality Bar
+
+Before any PASS-like result, the responsible role must verify:
+
+- scope is explicit
+- non-goals and untested paths are explicit
+- evidence covers the claim
+- no P0/P1 issue remains in scope
+- side effects are known
+- rollback, retry, or recovery concerns are stated when relevant
+- next gate or final action is named
+
+If any item is missing, use `PASS_WITH_SCOPE`, `REQUEST`, `NEEDS_FIX`, or `BLOCKED` instead of PASS.
 
 ## Dispatch Contract
 

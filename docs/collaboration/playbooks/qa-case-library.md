@@ -15,11 +15,14 @@ Status: active | draft | retired
 Owner: 观止（agentKey: `guanzhi`）
 Domain:
 Risk covered:
+Risk class:
+Test design technique:
 Preconditions:
 Sample requirements:
 Steps:
 Expected results:
 Evidence to capture:
+Evidence strength required:
 Side effects:
 Cleanup:
 Last validated:
@@ -48,8 +51,25 @@ Add a case only when:
 - expected result is objective
 - sample requirements are explicit
 - side effects and cleanup are clear
+- risk class and design technique are named
+- evidence required is strong enough for the risk class
 
 Do not add vague checklist items.
+
+## Library Quality Bar
+
+A mature QA library must include cases for:
+
+- smoke path
+- main user path
+- negative path
+- permission/destructive action path
+- state transition or async path when the domain has tasks
+- data consistency path when UI/API/DB/artifact must agree
+- artifact/export path when generated outputs exist
+- regression path for recent P0/P1/P2 bugs
+
+If a domain lacks these categories, mark the gap in the QA result instead of pretending the library is complete.
 
 ## Maintenance Rules
 
