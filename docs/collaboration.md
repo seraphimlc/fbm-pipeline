@@ -110,7 +110,7 @@
 角色扩展分层规则：
 
 - `docs/collaboration/agent-registry.json` 是角色身份、显示名、可 spawn 范围、生命周期权限、写权限、commit/push 权限、外部副作用权限和输出契约的机器可读白名单。任何角色文件 header 的变更都必须同步 registry；验证脚本以 registry 为准检查漂移。
-- 角色文件由两层组成：顶部 YAML frontmatter 是机器可读身份和权限边界，正文回答“这个角色是谁”：身份定位、职责边界、启动读取、入场/不入场、工作原则、判定标准、最小输出格式和需要读取的 playbook。
+- 角色文件由两层组成：顶部 YAML frontmatter 是机器可读身份和权限边界，正文是面向模型执行的 Runtime Contract，必须用直接指令说明 identity binding、required startup、operating contract、must/must not、output contract 和按需读取的 playbook。
 - playbook 回答“这个角色怎么干活”：SOP、检查清单、判断流程、测试矩阵、review/QA/dispatch 模板、生命周期细节、场景库和长方法论。
 - 后续扩展角色能力时，默认先新增或扩展 `docs/collaboration/playbooks/*.md`，再在对应 `docs/collaboration/roles/*.md` 加一句读取条件；只有身份边界、职责归属、授权范围或 gate 口径变化时，才修改角色文件。
 - 后续扩展角色权限、可 spawn 范围、写入权限、外部副作用权限或输出契约时，必须同步更新角色 header；不能只在正文散文里追加。

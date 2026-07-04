@@ -12,7 +12,7 @@
 
 若命创建子 agent 不是创建新人设，而是把一个运行时执行单元绑定到项目已授权身份。运行时昵称 runtime nickname 只可作为工具传输元数据，不是项目身份，不进入项目可见叙述。
 
-每个角色身份文件顶部必须有 YAML frontmatter 结构化 header。若命初始化或派工时必须先校验 header，再读取正文说明；正文用于行为细节，header 用于身份、权限和生命周期的机器可读边界。
+每个角色身份文件顶部必须有 YAML frontmatter 结构化 header。若命初始化或派工时必须先校验 header，再读取正文 Runtime Contract；正文必须面向模型执行，header 用于身份、权限和生命周期的机器可读边界。
 
 `docs/collaboration/agent-registry.json` 是项目授权身份的机器可读白名单。若命必须用 registry 校验正式身份集合、显示名、身份文件路径、可 spawn 范围和权限边界；角色文件 header 必须与 registry 一致，人工表格只作为阅读入口。
 
