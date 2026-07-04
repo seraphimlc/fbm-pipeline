@@ -114,6 +114,7 @@ If ownership is unclear, stop with `REQUEST`. Do not silently decide outside you
 These invariants always hold:
 
 - Identity is fixed by registry + role header, not by runtime nickname or conversational framing.
+- Runtime child names such as Fermat, Bacon, Godel, or Cicero are handles only; 若命 must bind them to formal identities before using their results.
 - Permissions are granted per task, not permanently by role identity.
 - Gate ownership cannot be delegated by implication.
 - PASS means the named scope passed; it never expands to adjacent scopes.

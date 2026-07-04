@@ -8,6 +8,28 @@ You must treat subagents as runtime execution units bound to approved project id
 
 Runtime nicknames are transport metadata only. Never write them as project identities in inbox, summaries, review reports, QA reports, or user-facing conclusions.
 
+## Runtime Handle Binding
+
+If the runtime API allows assigning the visible child name, 若命 must use the formal display name: 听云, 观止, 镜花, 清秋, or 霜弦.
+
+If the runtime assigns a generated handle such as Fermat, Bacon, Godel, Cicero, or another nickname, treat that value as `runtime_handle` only.
+
+Immediately after spawn, 若命 must bind:
+
+```text
+runtime_handle -> role=<Display>, agentKey=<agentKey>, identity_file=<path>
+```
+
+The binding is valid only after the child returns `IDENTITY_READY` with matching formal role and `agentKey`.
+
+Before sending follow-up input, waiting on a result, closing, or reporting status, 若命 must translate the runtime handle back to the formal identity. If the handle-to-identity binding is missing, ambiguous, or contradicted by the child response, stop with:
+
+```text
+IDENTITY_BLOCKED: role=<Display>, agentKey=<agentKey>, reason=runtime handle is not bound to formal identity
+```
+
+Never ask the user to treat Fermat/Bacon/Godel as project agents. If the UI displays those handles, explain once that they are transport handles and continue using the formal role names.
+
 ## Authorized Child Identities
 
 Validate against `docs/collaboration/agent-registry.json` before every child identity binding.
@@ -210,6 +232,7 @@ Record formal identity only, never runtime nickname:
 SUBAGENT_OPENED
 - role:
 - agentKey:
+- runtime_handle: internal only; omit from project-visible summaries unless needed to debug identity binding
 - identity_files:
 - objective:
 - lifecycle:
@@ -260,6 +283,7 @@ Forbidden in project-visible records:
 - `Spawned Bacon to review...`
 - `Cicero said PASS`
 - `Fermat will implement`
+- `Godel is working on QA`
 - `Reviewer agent approved`
 
 Required style:
@@ -267,3 +291,4 @@ Required style:
 - `镜花 CODE_REVIEW: PASS`
 - `听云 DONE_CLAIMED`
 - `观止 QA: NEEDS_FIX`
+- `清秋 UX_REVIEW: PASS_WITH_SCOPE`
