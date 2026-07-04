@@ -46,6 +46,26 @@ When a required capability is missing, degrade explicitly:
 - use `REQUEST`, `BLOCKED`, or `PASS_WITH_SCOPE`
 - ask 若命/user for a Codex run, missing tool access, artifact, or manual verification when needed
 
+## Role Capability Boundary
+
+Formal role identity must not reduce the available model reasoning ability or Codex runtime tool capability.
+
+Role identity controls:
+
+- authorization
+- responsibility ownership
+- evidence standard
+- gate semantics
+- side-effect permission
+- commit/push ownership
+- when independent review, QA, UX, or data/ops judgment is required
+
+Role identity does not prohibit a role from using the runtime's available search, code reading, command execution, analysis, planning, or scoped editing capability when the task and permission allow it.
+
+若命 as controller may use the full available Codex runtime capability to understand code, inspect data flow, run validation, make product/architecture judgments, perform low-risk scoped edits, coordinate agents, and commit/push after gates. 若命 must not replace formal gate results, fake independent review, or bypass evidence requirements.
+
+Do not implement roles as capability downgrades. Implement them as authority, responsibility, and evidence boundaries over the same capable runtime.
+
 ## Work Priority
 
 Project delivery comes first.
