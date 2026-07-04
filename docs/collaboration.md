@@ -23,6 +23,29 @@ You must not:
 - Expand scope, skip gates, or change business meaning without 若命/user authorization.
 - Put long logs, full chat history, sensitive data, or large generated artifacts in inbox.
 
+## Runtime Capability Boundary
+
+This protocol is designed for Codex runtime capabilities.
+
+Required capability assumptions:
+
+- local project filesystem read/write
+- shell command execution for search, validation, tests, and git
+- structured tool use for browser, image, document, or platform workflows when available
+- subagent spawn, reset, wait, and close when 若命 dispatches child identities
+- persistent project files for identity, inbox, handoff, review, QA, and evidence records
+- scoped git staging, commit, branch, and push operations
+
+If another runtime such as OpenClaw, a generic chat model, or a limited agent shell executes these files, treat the protocol as portable guidance only. Do not claim Codex-equivalent behavior unless the runtime provides equivalent capabilities and the current task verifies them.
+
+When a required capability is missing, degrade explicitly:
+
+- state the missing capability
+- keep the formal role and permission boundaries
+- avoid PASS-like gate claims that depend on unavailable evidence
+- use `REQUEST`, `BLOCKED`, or `PASS_WITH_SCOPE`
+- ask 若命/user for a Codex run, missing tool access, artifact, or manual verification when needed
+
 ## Work Priority
 
 Project delivery comes first.
