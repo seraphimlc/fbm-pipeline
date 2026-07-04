@@ -13,35 +13,48 @@ from typing import Any
 
 
 NARRATIVE_DIAGNOSIS_PROMPT_SECTION = """## Product Narrative Diagnosis
-Before designing modules, diagnose the product story with AI judgment. Do not merely restate the title or feature list.
+Before designing modules, diagnose the product story with AI judgment. Treat this as the strategic brief for all five A+ banners, not as copywriting filler.
+
 Use the product facts, Step 6 image diagnostics, available reference images, category, price point, and primary keyword to decide:
-- why the target buyer would care
-- what the buyer is uncertain about
-- whether the current image/fact evidence is strong, mixed, or limited
-- what A+ must add beyond MAIN/gallery images
-- which emotional, practical, proof, or objection-reduction story should lead"""
+- the buyer's job-to-be-done: what real-life problem, desire, upgrade, or confidence gap makes this product worth considering
+- the most plausible buyer context: where, when, and by whom the product is used or owned, without inventing unsupported scenes
+- the main conversion trigger: which supported fact or visible detail could move a shopper from interest to purchase
+- the main objections: what the shopper may doubt about fit, size, material, quality, setup, compatibility, safety, included parts, or value
+- the evidence level: whether current product facts and references are strong, mixed, or limited for the story being told
+- the evidence gaps: what cannot be safely shown or claimed because the images/facts do not prove it
+- what A+ must add beyond MAIN/gallery images: deeper context, comparison of use cases, ownership feeling, objection reduction, or proof hierarchy
+- which story mode should lead: emotional experience, practical problem-solution, visible proof, spec objection, trust, comparison, or occasion/gift logic
+
+Diagnosis rules:
+- Separate supported facts from plausible interpretation. Never treat an assumption as evidence.
+- Do not merely restate the title, bullet list, keyword, or gallery captions.
+- Do not choose a story that would fit any product in the category. Tie every diagnosis point to this product's facts, references, price point, or image gaps.
+- If evidence is limited, choose conservative module strategies that explain, contextualize, or reduce risk instead of inventing visuals.
+- If Step 6 reports image risks or conversion gaps, translate them into buyer questions and module jobs.
+- Avoid unsupported claims about certifications, safety, health, age range, waterproofing, durability, compatibility, capacity, material, performance, included accessories, or competitor superiority.
+- Each module strategy must answer a different buyer question and must guide the downstream image script: what to show, what evidence to use, and what not to claim."""
 
 
 NARRATIVE_DIAGNOSIS_OUTPUT_SCHEMA = """"product_narrative_diagnosis": {{
-    "diagnosis_summary": "one concise paragraph explaining the A+ story strategy for this exact product",
-    "product_story_type": "experience_led|proof_led|spec_objection_led|trust_led|comparison_led|gift_or_occasion_led|problem_solution_led",
-    "primary_buyer_motivation": "the main reason the buyer would care",
-    "target_use_context": "the most plausible real-life use or ownership context",
-    "dominant_purchase_trigger": "what makes the buyer move from interest to purchase",
-    "key_buyer_objections": ["specific doubts this product must answer"],
-    "evidence_strength": "strong|mixed|limited",
-    "evidence_gaps": ["missing visual/fact proof that A+ should handle conservatively"],
-    "differentiation_angle": "how this product should feel different without inventing claims",
-    "gallery_repetition_risk": "what MAIN/gallery already covers and A+ should not simply repeat",
-    "visual_story_tone": "warm|technical|minimal|premium|playful|practical|durable|soft|clean",
+    "diagnosis_summary": "one concise decision brief explaining the A+ story strategy for this exact product; include the buyer problem, leading proof/experience angle, and what A+ must avoid inventing",
+    "product_story_type": "choose exactly one: experience_led|proof_led|spec_objection_led|trust_led|comparison_led|gift_or_occasion_led|problem_solution_led",
+    "primary_buyer_motivation": "the buyer's concrete job-to-be-done or desired outcome, not a generic category benefit",
+    "target_use_context": "the most plausible real-life use or ownership context supported by facts/references",
+    "dominant_purchase_trigger": "the supported fact, visible detail, or resolved doubt most likely to move the buyer from interest to purchase",
+    "key_buyer_objections": ["2-5 specific buyer doubts this A+ must answer"],
+    "evidence_strength": "strong|mixed|limited; judge whether facts/references are enough for the proposed story",
+    "evidence_gaps": ["missing visual/fact proof that A+ should handle conservatively or avoid showing as fact"],
+    "differentiation_angle": "the supported way this product can feel different without inventing claims",
+    "gallery_repetition_risk": "what MAIN/gallery already covers and what A+ should not simply repeat",
+    "visual_story_tone": "choose exactly one: warm|technical|minimal|premium|playful|practical|durable|soft|clean",
     "narrative_strategy_by_module": {{
-      "hero": "story job for module 1",
-      "lifestyle": "story job for module 2",
-      "feature_proof": "story job for module 3",
-      "spec_objection": "story job for module 4",
-      "closing": "story job for module 5"
+      "hero": "module 1 buyer question, story job, and evidence/visual direction",
+      "lifestyle": "module 2 buyer question, story job, and evidence/visual direction",
+      "feature_proof": "module 3 buyer question, story job, and evidence/visual direction",
+      "spec_objection": "module 4 buyer question, story job, and evidence/visual direction",
+      "closing": "module 5 buyer question, story job, and evidence/visual direction"
     }},
-    "claims_to_avoid": ["unsupported claims, scenes, certifications, materials, or outcomes to avoid"]
+    "claims_to_avoid": ["unsupported claims, scenes, certifications, materials, outcomes, accessories, compatibility, or performance promises to avoid"]
   }}"""
 
 
