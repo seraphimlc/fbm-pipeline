@@ -28,6 +28,7 @@ Fill or update with stable routes only:
 - Backend: `backend/app/`
 - Frontend: `frontend/`
 - Workers/tasks: `backend/app/tasks/`, `backend/app/pipeline/`
+- A+ narrative diagnosis: `backend/app/pipeline/aplus_narrative_diagnosis.py`
 - Templates/exports: `backend/app/pipeline/template_mappings/`, `backend/app/pipeline/templates/`
 - Lingxing enhanced A+ readiness: `scripts/check_lingxing_enhanced_aplus_qa_readiness.py`
 - Lingxing enhanced A+ sample dry-run: `scripts/prepare_lingxing_enhanced_aplus_qa_sample.py`

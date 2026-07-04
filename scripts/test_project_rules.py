@@ -3668,6 +3668,7 @@ def test_lingxing_aplus_enhanced_basic_registry_phase1_contract() -> None:
 
 def test_lingxing_aplus_step7_enhanced_phase2_producer_schema() -> None:
     step7_text = (ROOT / "backend" / "app" / "pipeline" / "step7_aplus_plan.py").read_text()
+    diagnosis_text = (ROOT / "backend" / "app" / "pipeline" / "aplus_narrative_diagnosis.py").read_text(encoding="utf-8")
     step7_ast = ast.parse(step7_text)
     run_aplus_plan_node = next(
         node for node in step7_ast.body if isinstance(node, ast.AsyncFunctionDef) and node.name == "run_aplus_plan"
@@ -3687,11 +3688,13 @@ def test_lingxing_aplus_step7_enhanced_phase2_producer_schema() -> None:
         "Step7 旧 5 横幅默认链路必须是通用品类质量契约，不能保留沙发专用视觉约束",
     )
     assert_true(
-        "## Product Narrative Diagnosis" in step7_text
-        and '"product_narrative_diagnosis"' in step7_text
-        and "def _normalize_product_narrative_diagnosis" in step7_text
-        and "narrative_strategy_by_module" in step7_text,
-        "Step7 必须先用 AI 做商品叙事诊断，并把诊断作为 plan 顶层结构化字段",
+        "NARRATIVE_DIAGNOSIS_PROMPT_SECTION" in step7_text
+        and "normalize_product_narrative_diagnosis" in step7_text
+        and "## Product Narrative Diagnosis" in diagnosis_text
+        and '"product_narrative_diagnosis"' in diagnosis_text
+        and "def normalize_product_narrative_diagnosis" in diagnosis_text
+        and "narrative_strategy_by_module" in diagnosis_text,
+        "A+ 商品叙事诊断必须是独立命名阶段，Step7 只作为兼容规划入口引用它并保留 plan 顶层字段",
     )
     assert_true(
         "len(plan.get('modules') or [])" in run_aplus_plan_source,
