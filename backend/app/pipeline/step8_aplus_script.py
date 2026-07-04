@@ -51,6 +51,21 @@ def _reference_filename(path: str) -> str:
         return Path(unquote(urlparse(path).path)).name or "remote-reference.jpg"
     return Path(path).name
 
+
+def _plan_context_for_script_prompt(plan: dict) -> dict:
+    modules = plan.get("modules") if isinstance(plan.get("modules"), list) else []
+    context = {
+        "plan_summary": plan.get("plan_summary"),
+        "product_narrative_diagnosis": plan.get("product_narrative_diagnosis"),
+        "aplus_plan_version": plan.get("aplus_plan_version"),
+        "publish_profile": plan.get("publish_profile"),
+        "profile_version": plan.get("profile_version"),
+        "tone": plan.get("tone"),
+        "color_palette": plan.get("color_palette"),
+        "modules": modules,
+    }
+    return {key: value for key, value in context.items() if value not in (None, "", [])}
+
 SYSTEM_PROMPT = """You are an expert at writing image generation prompts for Amazon A+ Content.
 You create detailed, specific prompts for GPT Image API that produce:
 - Professional product photography
@@ -100,6 +115,7 @@ Tone: {tone}
 ## Requirements
 For each module in the plan, generate a detailed image generation prompt:
 - Adapt the visual strategy to the actual product category and product facts. Do not reuse furniture, sofa, home decor, toy, apparel, electronics, or other category-specific assumptions unless they match this product.
+- Use product_narrative_diagnosis as the decision brief for the five-banner story. Each script must reflect the diagnosis summary, buyer motivation, objections, evidence strength/gaps, claims to avoid, and that module's narrative_strategy_by_module.
 - Prompt should describe exact visual composition
 - Include product appearance (color, material, shape)
 - Specify text overlays (headlines, key points)
@@ -124,6 +140,7 @@ For each module in the plan, generate a detailed image generation prompt:
 - Preserve each plan module's publish_profile, lingxing_content_module_type, and semantic_role in the script JSON for traceability.
 - Each prompt should be 100-300 words
 - Treat the five outputs as one coherent banner sequence: hero identity, lifestyle/use context, feature or material proof, practical objection reducer, closing confidence/ownership scene.
+- Do not ignore the diagnosis by writing five interchangeable generic banners. If evidence_strength is limited or evidence_gaps are present, keep claims and visuals conservative.
 - For each banner, define a clear foreground/background or left/right composition. Avoid clutter, tiny callouts, dense charts, fake UI, fake badges, and generic stock-scene mood boards.
 - Use at most 1-3 short on-image text fragments. If text is not essential, prefer clean product storytelling over decorative copy.
 
@@ -143,6 +160,7 @@ Output JSON:
       "width": {output_width},
       "height": {output_height},
       "style": "photography|3d_render|infographic|lifestyle",
+      "narrative_diagnosis_used": "how product_narrative_diagnosis shaped this script",
       "conversion_goal": "copied or sharpened from the A+ plan",
       "buyer_objection": "copied or sharpened from the A+ plan",
       "evidence_source": "facts/references this image is allowed to use",
@@ -1329,6 +1347,10 @@ def normalize_aplus_scripts_for_plan(scripts_data: dict, plan: dict) -> dict:
 
 def _fallback_aplus_scripts(plan: dict, product: Product, pd: ProductData) -> dict:
     modules = plan.get("modules") if isinstance(plan.get("modules"), list) else []
+    diagnosis = plan.get("product_narrative_diagnosis") if isinstance(plan.get("product_narrative_diagnosis"), dict) else {}
+    diagnosis_summary = diagnosis.get("diagnosis_summary") or "Use a truthful five-banner story based on product facts and selected references."
+    module_strategy = diagnosis.get("narrative_strategy_by_module") if isinstance(diagnosis.get("narrative_strategy_by_module"), dict) else {}
+    claims_to_avoid = diagnosis.get("claims_to_avoid") if isinstance(diagnosis.get("claims_to_avoid"), list) else []
     title = pd.listing_title or pd.title or "Product"
     category = pd.leaf_category or "General"
     color = pd.color or "the original product color"
@@ -1337,6 +1359,8 @@ def _fallback_aplus_scripts(plan: dict, product: Product, pd: ProductData) -> di
     for idx in range(1, 6):
         module = modules[idx - 1] if idx - 1 < len(modules) and isinstance(modules[idx - 1], dict) else {}
         headline = module.get("headline") or module.get("type") or f"A+ Module {idx}"
+        semantic_role = module.get("semantic_role")
+        narrative_job = module_strategy.get(semantic_role) or module_strategy.get(str(semantic_role or "").strip()) or diagnosis_summary
         key_message = module.get("key_message") or module.get("conversion_goal") or "Explain a visible product benefit using selected reference images."
         image_concept = module.get("image_concept") or module.get("experience_angle") or "Create a clean Amazon A+ product image using selected references."
         scripts.append(
@@ -1344,10 +1368,11 @@ def _fallback_aplus_scripts(plan: dict, product: Product, pd: ProductData) -> di
                 "module_position": idx,
                 "publish_profile": module.get("publish_profile") or APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
                 "lingxing_content_module_type": module.get("lingxing_content_module_type") or LINGXING_STANDARD_HEADER_IMAGE_TEXT,
-                "semantic_role": module.get("semantic_role"),
+                "semantic_role": semantic_role,
                 "fallback_script": True,
                 "prompt": (
                     f"Create Amazon A+ module {idx} for {title}. Module headline: {headline}. "
+                    f"Product narrative diagnosis: {diagnosis_summary}. This module's narrative job: {narrative_job}. "
                     f"Product category: {category}. Preserve the product as shown in the selected reference images: "
                     f"same product type, shape, proportions, key parts, {color}, {material}, surface finish, and visible construction. "
                     f"Visual concept: {image_concept}. Conversion message: {key_message}. "
@@ -1363,6 +1388,7 @@ def _fallback_aplus_scripts(plan: dict, product: Product, pd: ProductData) -> di
                 "width": settings.APLUS_IMAGE_WIDTH,
                 "height": settings.APLUS_IMAGE_HEIGHT,
                 "style": "photography" if idx in (1, 2, 5) else "infographic",
+                "narrative_diagnosis_used": narrative_job,
                 "conversion_goal": module.get("conversion_goal") or key_message,
                 "buyer_objection": module.get("buyer_objection") or "Help shoppers understand the product clearly before purchase.",
                 "evidence_source": module.get("evidence_source") or "Use only product facts and selected reference images.",
@@ -1374,6 +1400,7 @@ def _fallback_aplus_scripts(plan: dict, product: Product, pd: ProductData) -> di
                 ],
                 "visual_do_not_claim": module.get("visual_do_not_claim") or [
                     "Do not show unsupported accessories, functions, certifications, safety claims, or material changes.",
+                    *[str(item) for item in claims_to_avoid[:3] if item],
                 ],
                 "text_overlays": [
                     {"text": str(headline)[:48], "position": "top-center", "font_size": "large"},
@@ -1426,7 +1453,7 @@ async def run_aplus_script(product_id: int) -> dict:
             color=pd.color or "N/A",
             material=pd.material or "N/A",
             category=pd.leaf_category or "General",
-            plan_json=json.dumps(plan.get("modules", []), ensure_ascii=False, indent=2),
+            plan_json=json.dumps(_plan_context_for_script_prompt(plan), ensure_ascii=False, indent=2),
             reference_candidates=_reference_candidates_for_prompt(_load_reference_candidates(product)),
             colors=", ".join(plan.get("color_palette", ["#FFFFFF", "#000000"])),
             style=plan.get("tone", "professional"),

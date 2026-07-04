@@ -3687,6 +3687,13 @@ def test_lingxing_aplus_step7_enhanced_phase2_producer_schema() -> None:
         "Step7 旧 5 横幅默认链路必须是通用品类质量契约，不能保留沙发专用视觉约束",
     )
     assert_true(
+        "## Product Narrative Diagnosis" in step7_text
+        and '"product_narrative_diagnosis"' in step7_text
+        and "def _normalize_product_narrative_diagnosis" in step7_text
+        and "narrative_strategy_by_module" in step7_text,
+        "Step7 必须先用 AI 做商品叙事诊断，并把诊断作为 plan 顶层结构化字段",
+    )
+    assert_true(
         "len(plan.get('modules') or [])" in run_aplus_plan_source,
         "Step7 run_aplus_plan 完成日志必须从最终 plan 读取模块数量",
     )
@@ -3739,6 +3746,27 @@ malicious_llm_plan = {
     "aplus_plan_version": APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
     "publish_profile": APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1,
     "profile_version": "999",
+    "product_narrative_diagnosis": {
+        "diagnosis_summary": "Storage shoppers need a room-fit story, not just a spec list.",
+        "product_story_type": "problem_solution_led",
+        "primary_buyer_motivation": "make a small room feel organized and comfortable",
+        "target_use_context": "apartment living room with daily storage needs",
+        "dominant_purchase_trigger": "storage chaise solves clutter without changing the room layout",
+        "key_buyer_objections": ["Will it fit?", "Does the fabric look comfortable?"],
+        "evidence_strength": "mixed",
+        "evidence_gaps": ["setup proof is limited"],
+        "differentiation_angle": "storage plus modular comfort",
+        "gallery_repetition_risk": "gallery already shows the sofa shape",
+        "visual_story_tone": "warm",
+        "narrative_strategy_by_module": {
+            "hero": "lead with storage comfort",
+            "lifestyle": "show small-room fit",
+            "feature_proof": "show fabric and storage detail",
+            "spec_objection": "answer size and setup",
+            "closing": "close on organized ownership",
+        },
+        "claims_to_avoid": ["do not invent stain-proof fabric"],
+    },
     "modules": [
         {
             "position": 99,
@@ -3767,11 +3795,17 @@ default_plan = build_aplus_plan_from_business_content(
 assert DEFAULT_APLUS_PUBLISH_PROFILE == APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1
 assert default_plan["modules"][0]["publish_profile"] == APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1
 assert default_plan["modules"][0]["lingxing_content_module_type"] == LINGXING_STANDARD_HEADER_IMAGE_TEXT
+assert default_plan["product_narrative_diagnosis"]["product_story_type"] == "problem_solution_led"
+assert default_plan["product_narrative_diagnosis"]["primary_buyer_motivation"] == "make a small room feel organized and comfortable"
+assert default_plan["product_narrative_diagnosis"]["diagnosis_source"] == "llm"
 
 default_fallback = fallback_aplus_plan(product, product_data, product_image, ["storage chaise"])
 assert default_fallback["modules"][0]["publish_profile"] == APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1
 assert default_fallback["modules"][0]["lingxing_content_module_type"] == LINGXING_STANDARD_HEADER_IMAGE_TEXT
 assert [module["semantic_role"] for module in default_fallback["modules"]] == ["hero", "lifestyle", "feature_proof", "spec_objection", "closing"]
+assert default_fallback["product_narrative_diagnosis"]["diagnosis_source"] == "fallback"
+assert default_fallback["product_narrative_diagnosis"]["evidence_strength"] in {"strong", "mixed", "limited"}
+assert set(default_fallback["product_narrative_diagnosis"]["narrative_strategy_by_module"]) == {"hero", "lifestyle", "feature_proof", "spec_objection", "closing"}
 
 plan = build_aplus_plan_from_business_content(
     malicious_llm_plan,
@@ -3787,6 +3821,8 @@ assert plan["aplus_plan_version"] == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_
 assert plan["publish_profile"] == APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1
 assert plan["profile_version"] == contract.profile_version == "1"
 assert plan["module_contract_source"] == APLUS_MODULE_CONTRACT_SOURCE
+assert plan["product_narrative_diagnosis"]["product_story_type"] == "problem_solution_led"
+assert plan["product_narrative_diagnosis"]["narrative_strategy_by_module"]["spec_objection"] == "answer size and setup"
 assert len(plan["modules"]) == contract.module_count == 5
 
 for module, expected in zip(plan["modules"], contract.modules, strict=True):
@@ -3895,6 +3931,13 @@ def test_lingxing_aplus_step8_step9_phase3_slot_assets() -> None:
         and "producer_contract_for_profile(" in step8_text
         and "normalize_aplus_scripts_for_plan" in step8_text,
         "Step8 enhanced slot schema 必须从 module_registry required image slot contract 构建，不能散落硬编码",
+    )
+    assert_true(
+        "def _plan_context_for_script_prompt" in step8_text
+        and "product_narrative_diagnosis" in step8_text
+        and "plan_json=json.dumps(_plan_context_for_script_prompt(plan)" in step8_text
+        and "narrative_diagnosis_used" in step8_text,
+        "Step8 必须把 Step7 AI 商品叙事诊断传给脚本 LLM，并要求每张横幅说明如何使用诊断",
     )
     assert_true(
         "image_slots" in step9_text

@@ -16,6 +16,9 @@ If this file is stale, update it only for the routes affected by the current tas
 | Domain | Domain index | Main roots | Validation |
 |---|---|---|---|
 | Amazon template/export | `docs/domain-index/README.md` | `backend/app/pipeline/` | mapping/template checks |
+| Product flow / A+ | `docs/domain-index/product-flow.md` | `backend/app/pipeline/`, `backend/app/product_tasks/`, `backend/app/task_planners/` | A+ pipeline/task checks |
+| Task runtime | `docs/domain-index/task-runtime.md` | `backend/app/task_runtime/`, `backend/app/task_planners/` | task runtime scripts |
+| Runtime security | `docs/domain-index/runtime-security.md` | `backend/app/main.py`, `backend/app/services/` | security/startup checks |
 | Collaboration | `docs/collaboration.md` | `docs/collaboration/` | `init_collaboration.py --validate-only` |
 
 ## Main Entrypoints
@@ -26,6 +29,8 @@ Fill or update with stable routes only:
 - Frontend: `frontend/`
 - Workers/tasks: `backend/app/tasks/`, `backend/app/pipeline/`
 - Templates/exports: `backend/app/pipeline/template_mappings/`, `backend/app/pipeline/templates/`
+- Lingxing enhanced A+ readiness: `scripts/check_lingxing_enhanced_aplus_qa_readiness.py`
+- Lingxing enhanced A+ sample dry-run: `scripts/prepare_lingxing_enhanced_aplus_qa_sample.py`
 - Data/migrations:
 - Tests:
 
