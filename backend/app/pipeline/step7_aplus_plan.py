@@ -55,8 +55,8 @@ SYSTEM_PROMPT = """You are an Amazon A+ Content strategist. You design compellin
 Critical visual planning rules:
 - On-image text must NOT contain the brand name. Do not plan a logo, wordmark, brand-name headline, or brand-name caption inside the image.
 - Lifestyle scenes may include people when useful, but any visible person must be shown as a complete, natural full body. Do not plan cropped heads, cropped hands, cropped legs, or partial bodies.
-- Preserve the original product identity and proportions as much as possible. Do not plan transformations that change the sofa shape, color, module count, cushion proportions, armrest structure, fabric texture, or low-profile silhouette.
-- Preserve the product material shown in the reference images. Do not plan a change from the supplied upholstery/fabric/wood/metal material into another material.
+- Preserve the original product identity and proportions as much as possible. Do not plan transformations that change the product type, silhouette, color, material, visible parts, package, surface finish, scale, or construction.
+- Preserve the product material shown in the reference images. Do not plan a change from the supplied fabric/plastic/wood/metal/glass/paper/rubber/packaging material into another material.
 - Plan different reference-image roles per module. Do not make every A+ image use the same two product references.
 - Anchor every planned A+ image to selling points that are actually visible or supported by its selected reference images.
 - The generated A+ image may change scene, people, light, camera framing, and styling, but the product itself should stay as close as possible to the selected reference images. Do not add, remove, reshape, recolor, retexture, or redesign product parts.
@@ -98,7 +98,7 @@ PLAN_PROMPT = """Design an A+ Content plan for this Amazon product.
 4. Render specs only as a buyer-objection story in the spec_objection module; do not create an unsupported native comparison chart or native spec table.
 5. Last module: confidence, ownership close, or cross-sell context
 6. Each module needs: type="standard_header_image_text", semantic_role, headline, subheading, key message, text_content, image concept
-7. Image concepts must preserve the original product shape, color, module count, cushion proportions, armrests, fabric texture, and low-profile silhouette.
+7. Image concepts must preserve the original product type, shape, color, proportions, material, texture/finish, package, visible parts, accessories, and construction.
 8. If a scene includes people, specify complete full-body people with natural anatomy and no cropped body parts.
 9. Any planned on-image text must avoid the brand name "{brand}".
 10. For each module, add a reference_strategy that names the two different kinds of product references needed for that module, such as product identity, lifestyle context, dimensions, material close-up, comfort detail, or finished-back view.
@@ -114,6 +114,8 @@ PLAN_PROMPT = """Design an A+ Content plan for this Amazon product.
 20. Do not pretend missing gallery evidence exists. If references are limited, use conservative text/spec explanation or a visual concept anchored to available references, and avoid unsupported visual claims.
 21. For every module, define the conversion strategy fields: conversion_goal, buyer_objection, evidence_source, risk_guardrails, visual_do_not_claim, experience_angle, and gallery_overlap_avoidance.
 22. Keep on-image copy short and useful. Do not write keyword-stuffed or paragraph-like image text.
+23. Treat the 5 modules as five wide banner images, not as independent posters. Each image should have one clear focal product/reference anchor, one buyer question, and a simple left/right or foreground/background composition that will still read at 1940 x 1200.
+24. The five banners must form this standard story arc: (1) product identity and promise, (2) realistic use/fit context, (3) visible feature or material proof, (4) objection reducer for size/setup/material/compatibility, (5) ownership close or confidence moment.
 
 Output JSON:
 {{
@@ -801,19 +803,77 @@ def _reference_candidate_count(pi: ProductImage | None) -> int:
     return len({str(path) for path in reference_paths if path})
 
 
+STANDARD_BANNER_ROLE_GUIDANCE = {
+    "hero": {
+        "subheading": "A clear first look at the product and its primary value.",
+        "experience_angle": "Show the product immediately understandable in a clean hero setting.",
+        "buyer_objection": "What is this product, and why should I keep reading?",
+        "banner_layout": "Wide hero banner with the product as the dominant focal point and one short benefit phrase.",
+        "preferred_reference_roles": ["product identity", "best complete product view"],
+        "reference_strategy": "Use a strong product-identity reference plus one context or angle reference; preserve exact product shape, color, material, packaging, and visible construction.",
+        "image_style": "photography",
+    },
+    "lifestyle": {
+        "subheading": "Show the product in a realistic usage moment.",
+        "experience_angle": "Show a believable ownership or usage moment that explains fit, scale, or daily value.",
+        "buyer_objection": "Will this fit my real use case?",
+        "banner_layout": "Wide lifestyle banner with real context, enough negative space for short copy, and the product still clearly visible.",
+        "preferred_reference_roles": ["usage context", "product identity"],
+        "reference_strategy": "Use one usage/context reference when available plus one product-identity reference; preserve scale and visible product details.",
+        "image_style": "lifestyle",
+    },
+    "feature_proof": {
+        "subheading": "Focus on supported construction, finish, or functional details.",
+        "experience_angle": "Turn a visible product detail into buyer confidence.",
+        "buyer_objection": "Can I trust the quality or function shown in the listing?",
+        "banner_layout": "Wide proof banner with one main product view and restrained callouts for visible details only.",
+        "preferred_reference_roles": ["material close-up", "feature detail"],
+        "reference_strategy": "Use a detail/material/feature reference plus one identity reference; avoid showing features not visible in references.",
+        "image_style": "infographic",
+    },
+    "spec_objection": {
+        "subheading": "Answer the buyer's practical fit or setup questions.",
+        "experience_angle": "Make dimensions, setup, compatibility, material, or included details feel easy to understand.",
+        "buyer_objection": "Will the size, setup, material, or compatibility work for me?",
+        "banner_layout": "Wide explanatory banner with simple visual hierarchy; use at most two short callouts and no dense spec table.",
+        "preferred_reference_roles": ["dimensions or scale", "product identity"],
+        "reference_strategy": "Use scale/dimension/detail evidence plus one identity reference; if evidence is limited, keep the visual conservative.",
+        "image_style": "infographic",
+    },
+    "closing": {
+        "subheading": "Close with a practical ownership scene.",
+        "experience_angle": "Show the final ownership payoff after the buyer understands the product.",
+        "buyer_objection": "Is this the right choice to finish my setup or solve my need?",
+        "banner_layout": "Wide closing banner with a composed final-use scene and one concise confidence message.",
+        "preferred_reference_roles": ["finished use scene", "product identity"],
+        "reference_strategy": "Use an ownership/context reference plus one product-identity reference; keep the close truthful and not exaggerated.",
+        "image_style": "lifestyle",
+    },
+}
+
+
 def _normalize_module_strategy(module: dict, index: int) -> dict:
     module["position"] = index
     module["type"] = INTERNAL_STANDARD_HEADER_IMAGE_TEXT_TYPE
     module["semantic_role"] = semantic_role_for_position(index)
     module["publish_profile"] = APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1
     module["lingxing_content_module_type"] = LINGXING_STANDARD_HEADER_IMAGE_TEXT
+    role_guidance = STANDARD_BANNER_ROLE_GUIDANCE.get(module["semantic_role"], {})
     if not str(module.get("headline") or "").strip():
         module["headline"] = f"A+ Module {index}"
+    if not str(module.get("subheading") or "").strip() and role_guidance.get("subheading"):
+        module["subheading"] = role_guidance["subheading"]
     module.setdefault("conversion_goal", module.get("key_message") or module.get("headline") or f"Explain A+ module {index}")
-    module.setdefault("buyer_objection", "Clarify the buyer doubt addressed by this module.")
+    module.setdefault("buyer_objection", role_guidance.get("buyer_objection") or "Clarify the buyer doubt addressed by this module.")
+    module.setdefault("reference_strategy", role_guidance.get("reference_strategy") or "Use one product-identity reference and one support reference matched to this module.")
     module.setdefault("evidence_source", module.get("reference_strategy") or "Use available product facts and selected reference images.")
-    module.setdefault("experience_angle", module.get("image_concept") or module.get("headline") or "Show a realistic ownership or usage experience.")
+    module.setdefault("experience_angle", role_guidance.get("experience_angle") or module.get("image_concept") or module.get("headline") or "Show a realistic ownership or usage experience.")
     module.setdefault("gallery_overlap_avoidance", "Avoid repeating MAIN/gallery specs unless adding deeper usage context.")
+    module.setdefault("banner_layout", role_guidance.get("banner_layout") or "Wide Amazon A+ banner with one clear focal product/reference anchor and restrained copy.")
+    module.setdefault("image_style", role_guidance.get("image_style") or module.get("image_style") or "photography")
+    preferred_roles = module.get("preferred_reference_roles")
+    if not isinstance(preferred_roles, list) or not preferred_roles:
+        module["preferred_reference_roles"] = list(role_guidance.get("preferred_reference_roles") or ["product identity", "supporting detail"])
     if not str(module.get("key_message") or "").strip():
         module["key_message"] = module.get("conversion_goal") or module.get("headline") or f"Explain A+ module {index}"
     if not str(module.get("text_content") or "").strip():
@@ -828,6 +888,14 @@ def _normalize_module_strategy(module: dict, index: int) -> dict:
     if not isinstance(do_not_claim, list):
         module["visual_do_not_claim"] = [
             "Do not show unsupported accessories, functions, certifications, safety claims, or material changes.",
+        ]
+    checklist = module.get("quality_checklist")
+    if not isinstance(checklist, list):
+        module["quality_checklist"] = [
+            "One clear buyer question and one visible product benefit.",
+            "Product identity remains faithful to selected references.",
+            "Wide banner composition reads clearly at 1940 x 1200.",
+            "On-image copy is short, benefit-led, and brand-name free.",
         ]
     return module
 

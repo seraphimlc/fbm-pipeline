@@ -62,7 +62,7 @@ Key rules:
 - Prompts must be in English
 - Describe exact composition, lighting, color scheme
 - Include product appearance based on attributes
-- Specify text elements to render (headlines, bullet points)
+- Specify only short, benefit-led text elements when useful; avoid dense text, paragraph overlays, keyword stuffing, and copied supplier labels.
 - On-image text must NOT contain the brand name. The brand can guide style internally, but do not render it as a logo, wordmark, headline, caption, or text overlay.
 - Lifestyle scenes may include people when useful, but any visible person must be shown as a complete, natural full body. Do not crop people at the head, hands, torso, legs, or feet.
 - Preserve the original product identity and proportions as much as possible: same product type, shape, color, scale, key parts, visible accessories, material, surface finish, and distinctive construction details shown in the references.
@@ -70,6 +70,7 @@ Key rules:
 - Each A+ module must use its own two reference images chosen for that module's purpose. Do not reuse the same pair for every image.
 - Each generated image should stay close to the selected references' visible selling points. Do not invent new product functions, parts, accessories, finishes, construction details, or claims that are not visible in the references or supported by product facts.
 - You may change scene, people, light, room styling, camera framing, and A+ layout, but keep the product itself as close as possible to the selected reference images.
+- The current standard profile is five wide STANDARD_HEADER_IMAGE_TEXT banners. Every prompt must read as a wide A+ banner with one clear focal product/reference anchor, not as a busy square ad or generic lifestyle poster.
 - Output dimensions should match Amazon A+ specs
 
 Output valid JSON only."""
@@ -122,6 +123,9 @@ For each module in the plan, generate a detailed image generation prompt:
 - For child, baby, pet, medical, electrical, or safety-sensitive products, avoid unsupported certification, age, safety, health, durability, battery, waterproof, or performance claims; show only realistic compliant use supported by product facts and references.
 - Preserve each plan module's publish_profile, lingxing_content_module_type, and semantic_role in the script JSON for traceability.
 - Each prompt should be 100-300 words
+- Treat the five outputs as one coherent banner sequence: hero identity, lifestyle/use context, feature or material proof, practical objection reducer, closing confidence/ownership scene.
+- For each banner, define a clear foreground/background or left/right composition. Avoid clutter, tiny callouts, dense charts, fake UI, fake badges, and generic stock-scene mood boards.
+- Use at most 1-3 short on-image text fragments. If text is not essential, prefer clean product storytelling over decorative copy.
 
 Standard output size for this pipeline:
 - Every A+ image: {output_width} x {output_height} px
@@ -691,16 +695,20 @@ def _module_strategy(module: dict, script: dict | None = None) -> dict:
     evidence_source = script.get("evidence_source") or module.get("evidence_source") or module.get("reference_strategy") or ""
     experience_angle = script.get("experience_angle") or module.get("experience_angle") or module.get("image_concept") or ""
     gallery_overlap_avoidance = script.get("gallery_overlap_avoidance") or module.get("gallery_overlap_avoidance") or ""
+    banner_layout = script.get("banner_layout") or module.get("banner_layout") or ""
     risk_guardrails = _list_value(script.get("risk_guardrails")) or _list_value(module.get("risk_guardrails"))
     visual_do_not_claim = _list_value(script.get("visual_do_not_claim")) or _list_value(module.get("visual_do_not_claim"))
+    quality_checklist = _list_value(script.get("quality_checklist")) or _list_value(module.get("quality_checklist"))
     return {
         "conversion_goal": conversion_goal,
         "buyer_objection": buyer_objection,
         "evidence_source": evidence_source,
         "experience_angle": experience_angle,
         "gallery_overlap_avoidance": gallery_overlap_avoidance,
+        "banner_layout": banner_layout,
         "risk_guardrails": risk_guardrails,
         "visual_do_not_claim": visual_do_not_claim,
+        "quality_checklist": quality_checklist,
     }
 
 
@@ -716,12 +724,15 @@ def _attach_module_strategy_section(script: dict, module: dict) -> None:
         f"- Evidence source: {strategy.get('evidence_source') or 'Use only product facts and selected reference images.'}",
         f"- Experience angle: {strategy.get('experience_angle') or 'Show a realistic ownership or usage experience.'}",
         f"- Avoid gallery overlap: {strategy.get('gallery_overlap_avoidance') or 'Do not repeat MAIN/gallery specs unless adding deeper usage context.'}",
+        f"- Wide banner layout: {strategy.get('banner_layout') or 'Use one clear focal product/reference anchor with a clean foreground/background or left/right composition.'}",
     ]
     if strategy.get("risk_guardrails"):
         lines.append("- Risk guardrails: " + "; ".join(strategy["risk_guardrails"]))
     if strategy.get("visual_do_not_claim"):
         lines.append("- Do not claim or show: " + "; ".join(strategy["visual_do_not_claim"]))
-    lines.append("The image should feel like an experience page, not a parameter sheet. Keep on-image copy short, benefit-led, and non-misleading.")
+    if strategy.get("quality_checklist"):
+        lines.append("- Quality checklist: " + "; ".join(strategy["quality_checklist"]))
+    lines.append("The image should feel like an experience-led Amazon A+ wide banner, not a parameter sheet or generic ad. Keep on-image copy short, benefit-led, and non-misleading.")
 
     section = "\n".join(lines)
     prompt = script.get("prompt") or ""
@@ -896,6 +907,22 @@ def _append_reference_section(script: dict, refs: list[dict], brand: str) -> Non
         "product_change_rule": "Only scene, layout, lighting, framing, styling, and text placement may change; do not redesign the product itself.",
         "brand_text_rule": f"Do not render the brand name '{brand}' or any logo/wordmark as on-image text.",
     }
+    reference_lines = ["Selected reference images for this final prompt:"]
+    for ref in refs:
+        label = ref.get("label") or "Reference"
+        filename = ref.get("filename") or _reference_filename(ref.get("path") or "")
+        reference_lines.append(
+            f"- {label} ({filename}): use for {ref.get('use_for') or 'product fidelity'}; "
+            f"visible selling point: {ref.get('visible_selling_point') or 'visible product evidence'}; "
+            "preserve product identity, material, finish, color, proportions, package, and construction from this reference."
+        )
+    reference_lines.append(
+        "Use these selected references as the product identity anchors. Do not invent parts, accessories, materials, claims, badges, labels, packaging, or construction details that are not visible in them."
+    )
+    reference_section = "\n".join(reference_lines)
+    prompt = script.get("prompt") or ""
+    if "Selected reference images for this final prompt:" not in prompt:
+        script["prompt"] = f"{prompt.rstrip()}\n\n{reference_section}".strip()
 
 
 def _append_regeneration_diagnosis_section(script: dict, diagnosis: dict | None) -> None:

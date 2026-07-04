@@ -3679,6 +3679,14 @@ def test_lingxing_aplus_step7_enhanced_phase2_producer_schema() -> None:
         "Step7 默认 prompt 必须保持旧 standard_header_image_text_v1 语义，不能在旧默认链路要求 enhanced roles",
     )
     assert_true(
+        "sofa shape" not in step7_text
+        and "cushion proportions" not in step7_text
+        and "STANDARD_BANNER_ROLE_GUIDANCE" in step7_text
+        and "banner_layout" in step7_text
+        and "quality_checklist" in step7_text,
+        "Step7 旧 5 横幅默认链路必须是通用品类质量契约，不能保留沙发专用视觉约束",
+    )
+    assert_true(
         "len(plan.get('modules') or [])" in run_aplus_plan_source,
         "Step7 run_aplus_plan 完成日志必须从最终 plan 读取模块数量",
     )
@@ -4167,6 +4175,12 @@ def test_aplus_fallback_script_and_provider_resize_metadata_behaviour() -> None:
         and "provider_raw_height" in step9_text
         and "_provider_image_metadata(image_payload, size_info)" in step9_text,
         "Step9 最终 image manifest 必须持久化 provider raw size 与 upscaled_from_provider",
+    )
+    assert_true(
+        "Selected reference images for this final prompt:" in step8_text
+        and "Wide banner layout:" in step8_text
+        and "experience-led Amazon A+ wide banner" in step8_text,
+        "Step8 旧 5 横幅最终 prompt 必须落地实际参考图和宽横幅构图约束",
     )
     code = r'''
 import asyncio
