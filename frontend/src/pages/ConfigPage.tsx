@@ -3,6 +3,7 @@ import { Alert, Button, Card, Descriptions, Form, Input, InputNumber, Select, Sp
 import { SaveOutlined, ReloadOutlined } from '@ant-design/icons';
 import { getConfig, updateConfig } from '../api';
 import type { SystemConfig, SystemConfigUpdate } from '../api';
+import { runMutationWithUX } from '../api/mutationRunner.ts';
 
 const { Title, Text } = Typography;
 
@@ -74,15 +75,19 @@ const ConfigPage: React.FC = () => {
 
   const saveConfig = async (values: SystemConfigUpdate) => {
     setSaving(true);
-    try {
-      await updateConfig(values);
-      setSaved(true);
-      message.success('配置已保存，重启后生效');
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '保存失败');
-    } finally {
-      setSaving(false);
-    }
+    await runMutationWithUX(
+      'updateConfig|frontend/src/pages/ConfigPage.tsx|saveConfig',
+      async (metadata) => {
+        await updateConfig(values, metadata);
+        setSaved(true);
+        message.success('配置已保存，重启后生效');
+      },
+      {
+        errorFallback: '保存失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setSaving(false),
+      },
+    ).catch(() => undefined);
   };
 
   if (loading) return <Spin size="large" style={{ display: 'block', margin: '100px auto' }} />;

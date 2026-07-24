@@ -25,6 +25,7 @@ from app.pipeline.ride_on_category import RIDE_ON_CATEGORY_MARKERS, select_ride_
 from app.pipeline.search_terms import normalize_search_terms
 from app.services.oss_uploader import oss_configured, upload_private_image
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 logger = logging.getLogger(__name__)
@@ -2154,8 +2155,96 @@ def _build_amazon_template_file(product: Product, pd: ProductData, mapping: dict
     return build_amazon_template_file(product, pd, mapping)
 
 
+class AmazonTemplateBusinessError(ValueError):
+    """Expected product/template validation failure, safe to expose as row evidence."""
+
+
+async def run_amazon_template_in_session(db: AsyncSession, product: Product) -> dict:
+    """Generate and persist template metadata without committing or rolling back ``db``."""
+
+    if not product or not product.data:
+        raise AmazonTemplateBusinessError(f"Product {getattr(product, 'id', None)} not found or no data")
+    pd = product.data
+    try:
+        mapping = _load_template_mapping(product, pd)
+    except ValueError as exc:
+        raise AmazonTemplateBusinessError(str(exc)) from exc
+    template_path = Path(mapping["template_path"])
+    if not template_path.is_file():
+        raise AmazonTemplateBusinessError(f"模板文件不存在: {template_path}")
+    if not pd.item_code:
+        raise AmazonTemplateBusinessError("缺少商品Code，无法生成SKU")
+    if not pd.listing_title or not pd.listing_bullets:
+        raise AmazonTemplateBusinessError("缺少Listing文案，请先执行Step5")
+
+    await ensure_amazon_template_semantic_fields(product, pd, mapping, template_path)
+    if not product.upc:
+        from app.services.upc_pool import UpcPoolEmptyError, ensure_product_upc
+
+        try:
+            await ensure_product_upc(db, product)
+        except UpcPoolEmptyError as exc:
+            raise AmazonTemplateBusinessError(str(exc)) from exc
+    if product.catalog_item:
+        product.catalog_item.upc = product.upc
+    await db.flush()
+
+    product_snapshot = _snapshot_model(product)
+    product_snapshot.data = _snapshot_model(product.data)
+    product_snapshot.images = _snapshot_model(product.images)
+    product_snapshot.aplus = _snapshot_model(product.aplus)
+    try:
+        template_result = await asyncio.to_thread(
+            _build_amazon_template_file,
+            product_snapshot,
+            product_snapshot.data,
+            mapping,
+        )
+    except ValueError as exc:
+        raise AmazonTemplateBusinessError(str(exc)) from exc
+
+    output_path = Path(template_result["path"])
+    pd.amazon_template_path = template_result["path"]
+    pd.amazon_template_warnings = json.dumps(template_result["warnings"], ensure_ascii=False)
+    pd.amazon_template_fill_summary = json.dumps(template_result["fill_summary"], ensure_ascii=False)
+    pd.amazon_template_generated_at = datetime.now()
+    file_result = await db.execute(
+        select(ProductFile).where(
+            ProductFile.product_id == product.id,
+            ProductFile.file_type == "amazon_import_template",
+            ProductFile.path == template_result["path"],
+        )
+    )
+    product_file = file_result.scalar_one_or_none()
+    metadata_json = json.dumps({
+        "warnings": template_result["warnings"],
+        "uploaded_images": template_result["uploaded_images"],
+        "fill_summary": template_result["fill_summary"],
+        "filled_fields": template_result["filled_fields"],
+    }, ensure_ascii=False)
+    if product_file:
+        product_file.label = "Amazon导入表格"
+        product_file.directory = str(output_path.parent)
+        product_file.metadata_json = metadata_json
+        product_file.updated_at = datetime.now()
+    else:
+        db.add(ProductFile(
+            product_id=product.id,
+            file_type="amazon_import_template",
+            label="Amazon导入表格",
+            path=template_result["path"],
+            directory=str(output_path.parent),
+            metadata_json=metadata_json,
+            created_at=datetime.now(),
+            updated_at=datetime.now(),
+        ))
+    await db.flush()
+    return template_result
+
+
 async def run_amazon_template(product_id: int) -> dict:
-    """生成 Amazon 类目导入模板。"""
+    """Generate an Amazon template and explicitly commit the direct-call transaction."""
+
     async with async_session() as db:
         result = await db.execute(
             select(Product)
@@ -2168,88 +2257,9 @@ async def run_amazon_template(product_id: int) -> dict:
             .where(Product.id == product_id)
         )
         product = result.scalar_one_or_none()
-        if not product or not product.data:
-            raise ValueError(f"Product {product_id} not found or no data")
-
-        pd = product.data
-        mapping = _load_template_mapping(product, pd)
-        template_path = Path(mapping["template_path"])
-        if not template_path.is_file():
-            raise FileNotFoundError(f"模板文件不存在: {template_path}")
-        if not pd.item_code:
-            raise ValueError("缺少商品Code，无法生成SKU")
-        if not pd.listing_title or not pd.listing_bullets:
-            raise ValueError("缺少Listing文案，请先执行Step5")
-        await ensure_amazon_template_semantic_fields(product, pd, mapping, template_path)
+        if not product:
+            raise AmazonTemplateBusinessError(f"Product {product_id} not found or no data")
+        template_result = await run_amazon_template_in_session(db, product)
         await db.commit()
-
-        if not product.upc:
-            from app.services.upc_pool import UpcPoolEmptyError, ensure_product_upc
-
-            try:
-                await ensure_product_upc(db, product)
-            except UpcPoolEmptyError as exc:
-                raise ValueError(str(exc)) from exc
-        if product.catalog_item:
-            product.catalog_item.upc = product.upc
-        await db.flush()
-
-        product_snapshot = _snapshot_model(product)
-        product_snapshot.data = _snapshot_model(product.data)
-        product_snapshot.images = _snapshot_model(product.images)
-        product_snapshot.aplus = _snapshot_model(product.aplus)
-        pd_snapshot = product_snapshot.data
-
-        try:
-            template_result = await asyncio.to_thread(_build_amazon_template_file, product_snapshot, pd_snapshot, mapping)
-        except Exception:
-            await db.rollback()
-            raise
-        await db.commit()
-
-    output_path = Path(template_result["path"])
-
-    async with async_session() as db:
-        result = await db.execute(select(Product).options(selectinload(Product.data)).where(Product.id == product_id))
-        product = result.scalar_one_or_none()
-        if not product or not product.data:
-            raise ValueError(f"Product {product_id} not found or no data")
-        pd = product.data
-        pd.amazon_template_path = template_result["path"]
-        pd.amazon_template_warnings = json.dumps(template_result["warnings"], ensure_ascii=False)
-        pd.amazon_template_fill_summary = json.dumps(template_result["fill_summary"], ensure_ascii=False)
-        pd.amazon_template_generated_at = datetime.now()
-        file_result = await db.execute(
-            select(ProductFile).where(
-                ProductFile.product_id == product.id,
-                ProductFile.file_type == "amazon_import_template",
-                ProductFile.path == template_result["path"],
-            )
-        )
-        product_file = file_result.scalar_one_or_none()
-        metadata_json = json.dumps({
-            "warnings": template_result["warnings"],
-            "uploaded_images": template_result["uploaded_images"],
-            "fill_summary": template_result["fill_summary"],
-            "filled_fields": template_result["filled_fields"],
-        }, ensure_ascii=False)
-        if product_file:
-            product_file.label = "Amazon导入表格"
-            product_file.directory = str(output_path.parent)
-            product_file.metadata_json = metadata_json
-            product_file.updated_at = datetime.now()
-        else:
-            db.add(ProductFile(
-                product_id=product.id,
-                file_type="amazon_import_template",
-                label="Amazon导入表格",
-                path=template_result["path"],
-                directory=str(output_path.parent),
-                metadata_json=metadata_json,
-                created_at=datetime.now(),
-                updated_at=datetime.now(),
-            ))
-        await db.commit()
-
-        logger.info(f"[Step10] Amazon导入模板已生成: {output_path}")
-        return template_result
+    logger.info("[Step10] Amazon导入模板已生成: %s", template_result["path"])
+    return template_result

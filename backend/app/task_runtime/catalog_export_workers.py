@@ -13,9 +13,15 @@ from app.services.offline_tasks import (
     _recover_catalog_export_result_from_file,
 )
 from app.services.oss_uploader import upload_private_file
-from app.task_runtime.events import update_step_progress
-from app.task_runtime.json_utils import json_dumps, json_loads
-from app.task_runtime.registry import TaskContext, register_worker
+from app.task_runtime.catalog_export_status import (
+    CATALOG_STEP_OWNER_TASK_RUN,
+    load_newest_material_catalog_step_results,
+    normalize_catalog_export_response,
+    select_catalog_export_payload,
+)
+from app.task_runtime.events import update_step_progress_in_session
+from app.task_runtime.json_utils import json_loads
+from app.task_runtime.registry import TaskContext, TaskWorkerOutcome, register_worker
 
 
 def _payload(ctx: TaskContext) -> dict[str, Any]:
@@ -32,7 +38,30 @@ def _catalog_export_task_run_object_key(run_id: int, filename: str) -> str:
     return f"{prefix}/{key}" if prefix else key
 
 
-async def catalog_export_template(ctx: TaskContext) -> dict[str, Any]:
+def _outcome(payload: dict[str, Any]) -> TaskWorkerOutcome:
+    status = str(payload.get("status") or "failed")
+    if status == "done":
+        terminal_status = "succeeded"
+        event_type = "status"
+        event_message = "导出文件生成完成"
+    elif status == "partial_failed":
+        terminal_status = "partial_failed"
+        event_type = "warning"
+        event_message = "导出文件已生成，部分商品未导出"
+    else:
+        terminal_status = "failed"
+        event_type = "error"
+        event_message = "商品均未成功导出"
+    return TaskWorkerOutcome(
+        payload=payload,
+        terminal_status=terminal_status,
+        event_type=event_type,
+        event_message=event_message,
+        propagate_single_step_run=True,
+    )
+
+
+async def catalog_export_template(ctx: TaskContext) -> TaskWorkerOutcome:
     payload = _payload(ctx)
     catalog_ids = list(dict.fromkeys(int(item_id) for item_id in payload.get("catalog_product_ids") or []))
     categories = [str(item) for item in (payload.get("categories") or []) if str(item).strip()]
@@ -41,12 +70,28 @@ async def catalog_export_template(ctx: TaskContext) -> dict[str, Any]:
     if not catalog_ids:
         raise RuntimeError("导出步骤缺少商品")
 
-    existing_result = json_loads(ctx.step.result_json, {})
+    catalog_step_results = await load_newest_material_catalog_step_results(
+        ctx.db,
+        owner_kind=CATALOG_STEP_OWNER_TASK_RUN,
+        owner_ids=[ctx.run.id],
+    )
+    existing_result = normalize_catalog_export_response(
+        select_catalog_export_payload(
+            ctx.run.summary_json,
+            () if catalog_step_results.get(ctx.run.id) is None else (catalog_step_results[ctx.run.id],),
+        )
+    )
     if _catalog_export_result_ready(existing_result):
         if isinstance(existing_result, dict):
-            ctx.run.summary_json = json_dumps(existing_result)
-            await ctx.db.commit()
-            return existing_result
+            await update_step_progress_in_session(
+                ctx.db,
+                ctx.step,
+                current=len(catalog_ids),
+                total=len(catalog_ids),
+                message="已复用现有导出结果",
+                data={"catalog_product_ids": catalog_ids, "filename": existing_result.get("filename")},
+            )
+            return _outcome(existing_result)
 
     from app.api.products import CatalogExportBuildError, build_catalog_export_zip
 
@@ -63,9 +108,7 @@ async def catalog_export_template(ctx: TaskContext) -> dict[str, Any]:
     if recovered_result:
         recovered_result["task_source"] = "task_run"
         recovered_result["task_run_id"] = ctx.run.id
-        ctx.run.summary_json = json_dumps(recovered_result)
-        await ctx.db.commit()
-        await update_step_progress(
+        await update_step_progress_in_session(
             ctx.db,
             ctx.step,
             current=len(catalog_ids),
@@ -73,9 +116,9 @@ async def catalog_export_template(ctx: TaskContext) -> dict[str, Any]:
             message="已复用已有导出文件",
             data={"catalog_product_ids": catalog_ids, "filename": recovered_result.get("filename")},
         )
-        return recovered_result
+        return _outcome(recovered_result)
 
-    await update_step_progress(
+    await update_step_progress_in_session(
         ctx.db,
         ctx.step,
         current=0,
@@ -86,7 +129,27 @@ async def catalog_export_template(ctx: TaskContext) -> dict[str, Any]:
     result = await ctx.db.execute(select(CatalogProduct).where(CatalogProduct.id.in_(catalog_ids)))
     catalog_items = result.scalars().all()
     if not catalog_items:
-        raise RuntimeError("导出商品不存在")
+        failed_at = datetime.now()
+        result_payload = _catalog_export_result_payload(
+            category=category,
+            categories=categories,
+            template_name=template_name or None,
+            template_path=payload.get("template_path"),
+            catalog_ids=catalog_ids,
+            report_rows=[],
+            created_at=failed_at,
+        )
+        result_payload["task_source"] = "task_run"
+        result_payload["task_run_id"] = ctx.run.id
+        await update_step_progress_in_session(
+            ctx.db,
+            ctx.step,
+            current=len(catalog_ids),
+            total=len(catalog_ids),
+            message="导出商品不存在",
+            data={"failed_count": result_payload.get("failed_count")},
+        )
+        return _outcome(result_payload)
 
     try:
         zip_bytes, _filename, report_rows = await build_catalog_export_zip(catalog_items, ctx.db)
@@ -103,9 +166,19 @@ async def catalog_export_template(ctx: TaskContext) -> dict[str, Any]:
         )
         result_payload["task_source"] = "task_run"
         result_payload["task_run_id"] = ctx.run.id
-        ctx.run.summary_json = json_dumps(result_payload)
-        await ctx.db.commit()
-        raise RuntimeError(exc.message) from exc
+        await update_step_progress_in_session(
+            ctx.db,
+            ctx.step,
+            current=len(catalog_ids),
+            total=len(catalog_ids),
+            message=exc.message,
+            data={
+                "success_count": result_payload.get("success_count"),
+                "skipped_count": result_payload.get("skipped_count"),
+                "failed_count": result_payload.get("failed_count"),
+            },
+        )
+        return _outcome(result_payload)
 
     target_path = export_dir / f"catalog_export_r{ctx.run.id}_s{ctx.step.id}.zip"
     await asyncio.to_thread(target_path.write_bytes, zip_bytes)
@@ -151,9 +224,7 @@ async def catalog_export_template(ctx: TaskContext) -> dict[str, Any]:
     )
     result_payload["task_source"] = "task_run"
     result_payload["task_run_id"] = ctx.run.id
-    ctx.run.summary_json = json_dumps(result_payload)
-    await ctx.db.commit()
-    await update_step_progress(
+    await update_step_progress_in_session(
         ctx.db,
         ctx.step,
         current=len(catalog_ids),
@@ -166,7 +237,7 @@ async def catalog_export_template(ctx: TaskContext) -> dict[str, Any]:
             "failed_count": result_payload.get("failed_count"),
         },
     )
-    return result_payload
+    return _outcome(result_payload)
 
 
 def register_catalog_export_workers() -> None:

@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Card, Form, Input, Button, Typography, message, Select } from 'antd';
 import { createProduct } from '../api';
+import { runMutationWithUX } from '../api/mutationRunner.ts';
 
 const { Title } = Typography;
 
@@ -12,20 +13,24 @@ const CreateProduct: React.FC = () => {
 
   const handleSubmit = async (values: { gigab2b_url: string; competitor_asin?: string; brand?: string }) => {
     setLoading(true);
-    try {
+    await runMutationWithUX(
+      'createProduct|frontend/src/pages/CreateProduct.tsx|handleSubmit',
+      async (metadata) => {
       const payload = {
         ...values,
         gigab2b_url: values.gigab2b_url.trim(),
         competitor_asin: values.competitor_asin?.trim() || undefined,
       };
-      const { data } = await createProduct(payload);
+      const { data } = await createProduct(payload, metadata);
       message.success('任务创建成功');
       navigate(`/products/${data.id}`);
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '创建失败');
-    } finally {
-      setLoading(false);
-    }
+      },
+      {
+        errorFallback: '创建失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setLoading(false),
+      },
+    ).catch(() => undefined);
   };
 
   return (

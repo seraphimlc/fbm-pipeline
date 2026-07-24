@@ -1,9 +1,10 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Button, Progress, Space, Table, Tag, Typography, message } from 'antd';
-import { DownloadOutlined, PauseOutlined, PlayCircleOutlined, ReloadOutlined, RedoOutlined } from '@ant-design/icons';
+import { Button, Progress, Space, Table, Tag, Tooltip, Typography, message } from 'antd';
+import { DownOutlined, DownloadOutlined, PauseOutlined, PlayCircleOutlined, ReloadOutlined, RedoOutlined, RightOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import { downloadOfflineTaskResult, getOfflineTask, listOfflineTasks, pauseOfflineTask, rerunOfflineTask, resumeOfflineTask } from '../api';
-import type { OfflineTask, OfflineTaskDetail, OfflineTaskStep } from '../api';
+import type { CatalogExportResult, CatalogExportRow, OfflineTask, OfflineTaskDetail, OfflineTaskStep } from '../api';
+import { runMutationWithUX } from '../api/mutationRunner.ts';
 
 const { Title, Text } = Typography;
 
@@ -54,6 +55,25 @@ const latestResultLabel = (value?: string | null) => {
   const item = map[value || ''] || { color: 'default', label: value || '-' };
   return <Tag color={item.color}>{item.label}</Tag>;
 };
+
+const catalogResultStatusTag = (result: CatalogExportResult, taskId: number) => {
+  const map: Record<string, { color: string; label: string }> = {
+    done: { color: 'success', label: '已完成' },
+    partial_failed: { color: 'warning', label: '部分完成' },
+    failed: { color: 'error', label: '失败' },
+  };
+  const item = map[result.status] || { color: 'default', label: result.status || '未知' };
+  return <Tag data-testid={`offline-task-catalog-result-status-${taskId}`} color={item.color}>结果 {item.label}</Tag>;
+};
+
+const catalogRowStatusTag = (status?: string | null) => {
+  if (status === 'exported') return <Tag color="success">已导出</Tag>;
+  if (status === 'skipped') return <Tag color="warning">已跳过</Tag>;
+  if (status === 'failed') return <Tag color="error">失败</Tag>;
+  return <Tag>{status || '未知'}</Tag>;
+};
+
+const catalogRowKey = (taskId: number, row: CatalogExportRow) => `${taskId}-${row.row_ordinal}`;
 
 const formatTime = (value: string | null) => value ? dayjs(value).format('YYYY-MM-DD HH:mm:ss') : '-';
 
@@ -139,6 +159,22 @@ const liveResult = (record: OfflineTask | OfflineTaskStep) => {
 };
 
 const resultSummary = (record: OfflineTask) => {
+  if (record.task_type === 'catalog_export') {
+    const result = record.catalog_export_result;
+    if (!result) {
+      return <Text data-testid={`offline-task-catalog-summary-${record.id}`} type="secondary">暂无结构化导出结果</Text>;
+    }
+    return (
+      <Space data-testid={`offline-task-catalog-summary-${record.id}`} size={4} wrap>
+        {catalogResultStatusTag(result, record.id)}
+        <Tag color="blue">请求 {result.requested_count ?? 0}</Tag>
+        <Tag color="success">成功 {result.success_count ?? result.exported_count ?? 0}</Tag>
+        <Tag color="warning">跳过 {result.skipped_count ?? 0}</Tag>
+        <Tag color="error">失败 {result.failed_count ?? 0}</Tag>
+        <Tag>报告 {result.report_count ?? result.rows?.length ?? 0}</Tag>
+      </Space>
+    );
+  }
   const result = liveResult(record);
   if (record.task_type === 'giga_pull') {
     const scanned = Number((result as any).scanned_sku_count || 0);
@@ -165,18 +201,6 @@ const resultSummary = (record: OfflineTask) => {
         {failed ? <Tag color="error">失败 {failed}</Tag> : null}
         {currentMessage ? <Text type="secondary" ellipsis style={{ maxWidth: 260 }}>{currentMessage}</Text> : null}
         <Tag>心跳 {heartbeatText(record.updated_at)}</Tag>
-      </Space>
-    );
-  }
-  if (record.task_type === 'catalog_export' && Object.keys(result).length) {
-    const exported = Number((result as any).exported_count || 0);
-    const skipped = Number((result as any).skipped_count || 0);
-    const report = Number((result as any).report_count || 0);
-    return (
-      <Space size={4} wrap>
-        <Tag color="success">导出 {exported}</Tag>
-        {skipped ? <Tag color="warning">跳过 {skipped}</Tag> : null}
-        {report ? <Tag>报告 {report}</Tag> : null}
       </Space>
     );
   }
@@ -223,10 +247,51 @@ const taskProgress = (record: OfflineTask) => {
   return <Progress percent={percent} size="small" status={record.failed_steps ? 'exception' : undefined} />;
 };
 
-const resultRows = (record: OfflineTask) => {
+const productBulkResultRows = (record: OfflineTask) => {
   const result = parseResult(record.result_json);
   const rows = (result as any).rows;
   return Array.isArray(rows) ? rows : [];
+};
+
+const catalogExportRowsTable = (record: OfflineTask) => {
+  const rows = Array.isArray(record.catalog_export_result?.rows) ? record.catalog_export_result.rows : [];
+  return (
+    <div data-testid={`offline-task-catalog-rows-${record.id}`} style={{ width: '100%' }}>
+      <Text strong>导出逐商品结果</Text>
+      <Table<CatalogExportRow>
+        rowKey={(row) => catalogRowKey(record.id, row)}
+        size="small"
+        pagination={rows.length > 8 ? { pageSize: 8, size: 'small' } : false}
+        dataSource={rows}
+        locale={{ emptyText: '暂无逐商品结果' }}
+        columns={[
+          { title: '商品ID', dataIndex: 'product_id', width: 90, render: (value) => value ?? '-' },
+          { title: '商品资料ID', dataIndex: 'catalog_id', width: 110, render: (value) => value ?? '-' },
+          { title: '商品Code', dataIndex: 'item_code', width: 160, render: (value) => value || '-' },
+          { title: '状态', dataIndex: 'status', width: 110, render: catalogRowStatusTag },
+          {
+            title: '原因',
+            dataIndex: 'reason',
+            ellipsis: true,
+            render: (value, row) => {
+              const reason = value || '-';
+              return (
+                <Tooltip title={reason}>
+                  <Text
+                    data-testid={`offline-task-catalog-row-reason-${catalogRowKey(record.id, row)}`}
+                    title={reason}
+                    ellipsis
+                  >
+                    {reason}
+                  </Text>
+                </Tooltip>
+              );
+            },
+          },
+        ]}
+      />
+    </div>
+  );
 };
 
 const OfflineTaskCenter: React.FC = () => {
@@ -262,44 +327,56 @@ const OfflineTaskCenter: React.FC = () => {
 
   const rerunTask = async (taskId: number) => {
     setRerunningId(taskId);
-    try {
-      const { data } = await rerunOfflineTask(taskId);
-      setDetails((prev) => ({ ...prev, [taskId]: data }));
-      message.success(`已重跑任务 #${taskId}`);
-      await fetchTasks();
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '重跑失败');
-    } finally {
-      setRerunningId(null);
-    }
+    await runMutationWithUX(
+      'rerunOfflineTask|frontend/src/pages/OfflineTaskCenter.tsx|rerunTask',
+      async (metadata) => {
+        const { data } = await rerunOfflineTask(taskId, metadata);
+        setDetails((prev) => ({ ...prev, [taskId]: data }));
+        message.success(`已重跑任务 #${taskId}`);
+        await fetchTasks();
+      },
+      {
+        errorFallback: '重跑失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setRerunningId(null),
+      },
+    ).catch(() => undefined);
   };
 
   const pauseTask = async (taskId: number) => {
     setPausingId(taskId);
-    try {
-      const { data } = await pauseOfflineTask(taskId);
-      setDetails((prev) => ({ ...prev, [taskId]: data }));
-      message.success(`已挂起任务 #${taskId}`);
-      await fetchTasks();
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '挂起失败');
-    } finally {
-      setPausingId(null);
-    }
+    await runMutationWithUX(
+      'pauseOfflineTask|frontend/src/pages/OfflineTaskCenter.tsx|pauseTask',
+      async (metadata) => {
+        const { data } = await pauseOfflineTask(taskId, metadata);
+        setDetails((prev) => ({ ...prev, [taskId]: data }));
+        message.success(`已挂起任务 #${taskId}`);
+        await fetchTasks();
+      },
+      {
+        errorFallback: '挂起失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setPausingId(null),
+      },
+    ).catch(() => undefined);
   };
 
   const resumeTask = async (taskId: number) => {
     setResumingId(taskId);
-    try {
-      const { data } = await resumeOfflineTask(taskId);
-      setDetails((prev) => ({ ...prev, [taskId]: data }));
-      message.success(`已恢复任务 #${taskId}`);
-      await fetchTasks();
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '恢复失败');
-    } finally {
-      setResumingId(null);
-    }
+    await runMutationWithUX(
+      'resumeOfflineTask|frontend/src/pages/OfflineTaskCenter.tsx|resumeTask',
+      async (metadata) => {
+        const { data } = await resumeOfflineTask(taskId, metadata);
+        setDetails((prev) => ({ ...prev, [taskId]: data }));
+        message.success(`已恢复任务 #${taskId}`);
+        await fetchTasks();
+      },
+      {
+        errorFallback: '恢复失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setResumingId(null),
+      },
+    ).catch(() => undefined);
   };
 
   const saveBlob = (blob: Blob, filename: string) => {
@@ -319,8 +396,7 @@ const OfflineTaskCenter: React.FC = () => {
   const downloadTask = async (task: OfflineTask) => {
     setDownloadingId(task.id);
     try {
-      const result = parseResult(task.result_json);
-      const filename = String((result as any).filename || `catalog_export_${task.id}.zip`);
+      const filename = task.catalog_export_result?.filename || `catalog_export_${task.id}.zip`;
       const { data } = await downloadOfflineTaskResult(task.id);
       saveBlob(data, filename);
     } catch (error: any) {
@@ -388,6 +464,9 @@ const OfflineTaskCenter: React.FC = () => {
         loading={loading}
         dataSource={items}
         pagination={false}
+        onRow={(record) => ({
+          'data-testid': `offline-task-${record.id}`,
+        } as React.HTMLAttributes<HTMLTableRowElement>)}
         columns={[
           { title: '任务ID', dataIndex: 'id', width: 90, render: (value: number) => `#${value}` },
           { title: '任务', dataIndex: 'title', ellipsis: true },
@@ -438,7 +517,7 @@ const OfflineTaskCenter: React.FC = () => {
               const canPause = ['pending', 'running'].includes(record.status);
               const canResume = record.status === 'paused';
               const canRerun = ['failed', 'partial_failed', 'interrupted'].includes(record.status);
-              const canDownload = record.task_type === 'catalog_export' && ['done', 'partial_failed'].includes(record.status);
+              const canDownload = record.task_type === 'catalog_export' && record.can_download;
               return (
                 <Space size="small">
                   {canPause && (
@@ -474,6 +553,7 @@ const OfflineTaskCenter: React.FC = () => {
                   )}
                   {canDownload && (
                     <Button
+                      data-testid={`offline-task-download-${record.id}`}
                       size="small"
                       type="primary"
                       icon={<DownloadOutlined />}
@@ -491,9 +571,13 @@ const OfflineTaskCenter: React.FC = () => {
         expandable={{
           expandedRowRender: (record) => {
             const detail = details[record.id];
-            const rows = resultRows(detail || record);
+            const effectiveRecord = detail || record;
+            const rows = effectiveRecord.task_type === 'product_bulk_advance'
+              ? productBulkResultRows(effectiveRecord)
+              : [];
             return (
               <Space direction="vertical" size={12} style={{ width: '100%' }}>
+                {effectiveRecord.task_type === 'catalog_export' ? catalogExportRowsTable(effectiveRecord) : null}
                 <Table
                   rowKey="id"
                   size="small"
@@ -530,6 +614,16 @@ const OfflineTaskCenter: React.FC = () => {
           onExpand: (expanded, record) => {
             if (expanded && !details[record.id]) fetchDetail(record.id);
           },
+          expandIcon: ({ expanded, onExpand, record }) => (
+            <Button
+              data-testid={`offline-task-expand-${record.id}`}
+              type="text"
+              size="small"
+              aria-label={expanded ? `收起旧任务 #${record.id}` : `展开旧任务 #${record.id}`}
+              icon={expanded ? <DownOutlined /> : <RightOutlined />}
+              onClick={(event) => onExpand(record, event)}
+            />
+          ),
         }}
       />
     </div>

@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Button, Empty, message, Modal, Popconfirm, Select, Space, Table, Tabs, Tag, Tooltip, Typography, Upload } from 'antd';
-import { DeleteOutlined, DownloadOutlined, PauseCircleOutlined, PlayCircleOutlined, ReloadOutlined, UploadOutlined } from '@ant-design/icons';
+import { DeleteOutlined, DownOutlined, DownloadOutlined, PauseCircleOutlined, PlayCircleOutlined, ReloadOutlined, RightOutlined, UploadOutlined } from '@ant-design/icons';
 import {
   createCatalogExportTaskRuns,
   deleteCatalogTemplateFile,
@@ -16,10 +16,28 @@ import {
   updateCatalogTemplateFileStatus,
   uploadCatalogCategoryTemplate,
 } from '../api';
-import type { CatalogExportCategorySummary, CatalogExportFile, CatalogProduct, CatalogTemplateFileSummary } from '../api';
+import type { CatalogExportCategorySummary, CatalogExportFile, CatalogExportRow, CatalogProduct, CatalogTemplateFileSummary } from '../api';
+import { runMutationWithUX } from '../api/mutationRunner.ts';
 
 const { Title, Text } = Typography;
 const ALL_CATEGORIES = '__all__';
+
+type PendingTemplateUpload = {
+  category: string;
+  fileName: string;
+  status: 'uploading' | 'failed';
+};
+
+const catalogExportFileKey = (record: CatalogExportFile) => `${record.task_source}-${record.task_id}`;
+
+const catalogExportRowKey = (fileKey: string, row: CatalogExportRow) => `${fileKey}-${row.row_ordinal}`;
+
+const catalogExportRowStatusTag = (status?: string | null) => {
+  if (status === 'exported') return <Tag color="success">已导出</Tag>;
+  if (status === 'skipped') return <Tag color="warning">已跳过</Tag>;
+  if (status === 'failed') return <Tag color="error">失败</Tag>;
+  return <Tag>{status || '未知'}</Tag>;
+};
 
 const CatalogList: React.FC = () => {
   const navigate = useNavigate();
@@ -38,7 +56,8 @@ const CatalogList: React.FC = () => {
   const [templateCategories, setTemplateCategories] = useState<CatalogExportCategorySummary[]>([]);
   const [templateFiles, setTemplateFiles] = useState<CatalogTemplateFileSummary[]>([]);
   const [categoriesLoading, setCategoriesLoading] = useState(false);
-  const [templateUploading, setTemplateUploading] = useState(false);
+  const [templateUploading, setTemplateUploading] = useState<string | null>(null);
+  const [pendingTemplateUpload, setPendingTemplateUpload] = useState<PendingTemplateUpload | null>(null);
   const [templateDownloadingFileId, setTemplateDownloadingFileId] = useState<string | null>(null);
   const [templateFileMutatingId, setTemplateFileMutatingId] = useState<string | null>(null);
   const [exportDownloadingTaskId, setExportDownloadingTaskId] = useState<string | null>(null);
@@ -275,24 +294,30 @@ const CatalogList: React.FC = () => {
     }
     setExporting(true);
     const hideLoading = message.loading(`正在为${label}创建导出任务，系统会按模板拆分...`, 0);
-    try {
-      const { data } = await createCatalogExportTaskRuns(ids);
-      if (data.runs.length) {
-        message.success(`已创建 ${data.runs.length} 个新任务中心导出任务，请到新任务中心或已导出列表下载结果`);
-        scheduleExportCompletionRefresh();
-      } else {
-        message.warning('没有创建导出任务，请检查类目模板和商品状态');
-      }
-      if (data.errors?.length) {
-        message.warning(`有 ${data.errors.length} 个商品未进入导出任务，可在任务中心任务详情或接口返回中查看原因`);
-      }
-      await refreshVisibleExportView();
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '创建导出任务失败');
-    } finally {
-      hideLoading();
-      setExporting(false);
-    }
+    await runMutationWithUX(
+      'createCatalogExportTaskRuns|frontend/src/pages/CatalogList.tsx|createExportTasksByIds',
+      async (metadata) => {
+        const { data } = await createCatalogExportTaskRuns(ids, metadata);
+        if (data.runs.length) {
+          message.success(`已创建 ${data.runs.length} 个新任务中心导出任务，请到新任务中心或已导出列表下载结果`);
+          scheduleExportCompletionRefresh();
+        } else {
+          message.warning('没有创建导出任务，请检查类目模板和商品状态');
+        }
+        if (data.errors?.length) {
+          message.warning(`有 ${data.errors.length} 个商品未进入导出任务，可在任务中心任务详情或接口返回中查看原因`);
+        }
+        await refreshVisibleExportView();
+      },
+      {
+        errorFallback: '创建导出任务失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => {
+          hideLoading();
+          setExporting(false);
+        },
+      },
+    ).catch(() => undefined);
   };
 
   const exportCatalog = async () => {
@@ -316,17 +341,28 @@ const CatalogList: React.FC = () => {
       message.warning('只支持上传 .xls / .xlsx / .xlsm 模板文件');
       return;
     }
-    setTemplateUploading(true);
-    try {
-      const { data } = await uploadCatalogCategoryTemplate(category, file);
-      message.success(`模板已上传 OSS，并缓存到本地：${data.filename}`);
-      await refreshExportCenterData();
-      await fetchItems();
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '模板上传失败');
-    } finally {
-      setTemplateUploading(false);
-    }
+    setPendingTemplateUpload({ category, fileName: file.name, status: 'uploading' });
+    setTemplateUploading(category);
+    await runMutationWithUX(
+      'uploadCatalogCategoryTemplate|frontend/src/pages/CatalogList.tsx|uploadTemplateForCategory',
+      async (metadata) => {
+        const { data } = await uploadCatalogCategoryTemplate(category, file, metadata);
+        message.success(`模板已上传 OSS，并缓存到本地：${data.filename}`);
+        await refreshExportCenterData();
+        await fetchItems();
+        setPendingTemplateUpload(null);
+      },
+      {
+        errorFallback: '模板上传失败',
+        onError: (errorMessage) => {
+          setPendingTemplateUpload((current) => current && current.category === category
+            ? { ...current, status: 'failed' }
+            : current);
+          message.error(errorMessage);
+        },
+        clearLoading: () => setTemplateUploading(null),
+      },
+    ).catch(() => undefined);
   };
 
   const downloadTemplateFile = async (record: CatalogTemplateFileSummary) => {
@@ -401,30 +437,38 @@ const CatalogList: React.FC = () => {
 
   const toggleTemplateFile = async (record: CatalogTemplateFileSummary) => {
     setTemplateFileMutatingId(record.file_id);
-    try {
-      await updateCatalogTemplateFileStatus(record.file_id, !record.enabled);
-      message.success(record.enabled ? '模板已停用' : '模板已启用');
-      await refreshExportCenterData();
-      await fetchItems();
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '更新模板状态失败');
-    } finally {
-      setTemplateFileMutatingId(null);
-    }
+    await runMutationWithUX(
+      'updateCatalogTemplateFileStatus|frontend/src/pages/CatalogList.tsx|toggleTemplateFile',
+      async (metadata) => {
+        await updateCatalogTemplateFileStatus(record.file_id, !record.enabled, metadata);
+        message.success(record.enabled ? '模板已停用' : '模板已启用');
+        await refreshExportCenterData();
+        await fetchItems();
+      },
+      {
+        errorFallback: '更新模板状态失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setTemplateFileMutatingId(null),
+      },
+    ).catch(() => undefined);
   };
 
   const deleteTemplateFile = async (record: CatalogTemplateFileSummary) => {
     setTemplateFileMutatingId(record.file_id);
-    try {
-      await deleteCatalogTemplateFile(record.file_id);
-      message.success('模板文件已删除');
-      await refreshExportCenterData();
-      await fetchItems();
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '删除模板失败');
-    } finally {
-      setTemplateFileMutatingId(null);
-    }
+    await runMutationWithUX(
+      'deleteCatalogTemplateFile|frontend/src/pages/CatalogList.tsx|deleteTemplateFile',
+      async (metadata) => {
+        await deleteCatalogTemplateFile(record.file_id, metadata);
+        message.success('模板文件已删除');
+        await refreshExportCenterData();
+        await fetchItems();
+      },
+      {
+        errorFallback: '删除模板失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setTemplateFileMutatingId(null),
+      },
+    ).catch(() => undefined);
   };
 
   const riskTag = (risk?: string | null, count?: number | null) => {
@@ -435,11 +479,66 @@ const CatalogList: React.FC = () => {
     return <Tag>未检查</Tag>;
   };
 
-  const exportTaskStatusTag = (status: string) => {
-    if (status === 'done') return <Tag color="success">已完成</Tag>;
-    if (status === 'partial_failed') return <Tag color="warning">部分完成</Tag>;
-    if (status === 'failed') return <Tag color="error">失败</Tag>;
-    return <Tag>{status}</Tag>;
+  const exportTaskStatusTag = (record: CatalogExportFile) => {
+    const testId = `catalog-export-file-status-${catalogExportFileKey(record)}`;
+    if (record.task_status === 'done' || record.task_status === 'succeeded') {
+      return <Tag data-testid={testId} color="success">已完成</Tag>;
+    }
+    if (record.task_status === 'partial_failed') return <Tag data-testid={testId} color="warning">部分完成</Tag>;
+    if (record.task_status === 'failed') return <Tag data-testid={testId} color="error">失败</Tag>;
+    return <Tag data-testid={testId}>{record.task_status}</Tag>;
+  };
+
+  const catalogExportRowsTable = (record: CatalogExportFile) => {
+    const fileKey = catalogExportFileKey(record);
+    return (
+      <div data-testid={`catalog-export-file-rows-${fileKey}`} style={{ padding: '4px 8px 8px' }}>
+        <Text strong>导出逐商品结果</Text>
+        <Table<CatalogExportRow>
+          rowKey={(row) => catalogExportRowKey(fileKey, row)}
+          size="small"
+          pagination={record.rows.length > 8 ? { pageSize: 8, size: 'small' } : false}
+          dataSource={record.rows}
+          locale={{ emptyText: '暂无逐商品结果' }}
+          columns={[
+            {
+              title: '商品资料ID / 商品ID',
+              width: 180,
+              render: (_: unknown, row) => (
+                <Space direction="vertical" size={0}>
+                  <Text>{row.catalog_id != null ? `资料 #${row.catalog_id}` : '资料 -'}</Text>
+                  <Text type="secondary">{row.product_id != null ? `商品 #${row.product_id}` : '商品 -'}</Text>
+                </Space>
+              ),
+            },
+            { title: '商品Code', dataIndex: 'item_code', width: 150, render: (value) => value || '-' },
+            { title: '类目', dataIndex: 'category', width: 220, ellipsis: true, render: (value) => value || '-' },
+            { title: 'Seller SKU', dataIndex: 'seller_sku', width: 170, render: (value) => value || '-' },
+            { title: '状态', dataIndex: 'status', width: 110, render: catalogExportRowStatusTag },
+            {
+              title: '原因',
+              dataIndex: 'reason',
+              ellipsis: true,
+              render: (value, row) => {
+                const reason = value || '-';
+                return (
+                  <Tooltip title={reason}>
+                    <Text
+                      data-testid={`catalog-export-file-row-reason-${catalogExportRowKey(fileKey, row)}`}
+                      title={reason}
+                      ellipsis
+                      style={{ maxWidth: 360 }}
+                    >
+                      {reason}
+                    </Text>
+                  </Tooltip>
+                );
+              },
+            },
+          ]}
+        />
+      </div>
+    );
   };
 
   const isCatalogProductExported = (record: CatalogProduct) =>
@@ -565,7 +664,7 @@ const CatalogList: React.FC = () => {
             #{record.task_id}
           </Button>
           <Tag color={record.task_source === 'task_run' ? 'blue' : 'default'}>{record.task_source === 'task_run' ? '新任务' : '旧任务'}</Tag>
-          {exportTaskStatusTag(record.task_status)}
+          {exportTaskStatusTag(record)}
         </Space>
       ),
     },
@@ -573,9 +672,9 @@ const CatalogList: React.FC = () => {
       title: '商品统计',
       width: 150,
       render: (_: unknown, record: CatalogExportFile) => (
-        <Space direction="vertical" size={2}>
-          <Text>文件 {record.file_product_count} / 任务 {record.task_product_count}</Text>
-          <Text type="secondary">成功 {record.success_count} · 跳过 {record.skipped_count} · 失败 {record.failed_count}</Text>
+        <Space data-testid={`catalog-export-file-counts-${catalogExportFileKey(record)}`} direction="vertical" size={2}>
+          <Text>请求 {record.task_product_count} · 文件 {record.file_product_count}</Text>
+          <Text type="secondary">成功 {record.success_count} · 跳过 {record.skipped_count} · 失败 {record.failed_count} · 报告 {record.report_count}</Text>
         </Space>
       ),
     },
@@ -614,6 +713,7 @@ const CatalogList: React.FC = () => {
       render: (_: unknown, record: CatalogExportFile) => (
         <Space size={4}>
           <Button
+            data-testid={`catalog-export-file-download-${catalogExportFileKey(record)}`}
             size="small"
             icon={<DownloadOutlined />}
             disabled={!record.can_download}
@@ -742,19 +842,38 @@ const CatalogList: React.FC = () => {
       title: '上传模板',
       width: 150,
       render: (_: unknown, record: any) => (
-        <Upload
-          showUploadList={false}
-          accept=".xls,.xlsx,.xlsm"
-          customRequest={({ file, onSuccess, onError }) => {
-            uploadTemplateForCategory(record.category, file as File)
-              .then(() => onSuccess?.('ok'))
-              .catch((error) => onError?.(error));
-          }}
-        >
-          <Button size="small" icon={<UploadOutlined />} loading={templateUploading}>
-            上传模板
-          </Button>
-        </Upload>
+        <Space direction="vertical" size={4}>
+          <Upload
+            showUploadList={false}
+            accept=".xls,.xlsx,.xlsm"
+            disabled={templateUploading === record.category}
+            customRequest={({ file, onSuccess, onError }) => {
+              uploadTemplateForCategory(record.category, file as File)
+                .then(() => onSuccess?.('ok'))
+                .catch((error) => onError?.(error));
+            }}
+          >
+            <Button
+              size="small"
+              icon={<UploadOutlined />}
+              loading={templateUploading === record.category}
+              disabled={templateUploading === record.category}
+            >
+              上传模板
+            </Button>
+          </Upload>
+          {pendingTemplateUpload?.category === record.category ? (
+            <Text
+              data-testid={`catalog-template-pending-file-${record.category}`}
+              type={pendingTemplateUpload?.status === 'failed' ? 'danger' : 'secondary'}
+              ellipsis={{ tooltip: pendingTemplateUpload?.fileName }}
+              style={{ maxWidth: 180 }}
+            >
+              {pendingTemplateUpload?.fileName}
+              {pendingTemplateUpload?.status === 'failed' ? '（上传失败，文件名已保留，请重新选择上传）' : '（上传中）'}
+            </Text>
+          ) : null}
+        </Space>
       ),
     },
   ];
@@ -933,6 +1052,24 @@ const CatalogList: React.FC = () => {
                       size="middle"
                       tableLayout="fixed"
                       locale={{ emptyText: '暂无导出文件记录；请刷新或检查导出任务是否已完成' }}
+                      onRow={(record) => ({
+                        'data-testid': `catalog-export-file-${catalogExportFileKey(record)}`,
+                        'data-task-status': record.task_status,
+                      } as React.HTMLAttributes<HTMLTableRowElement>)}
+                      expandable={{
+                        expandedRowRender: catalogExportRowsTable,
+                        rowExpandable: () => true,
+                        expandIcon: ({ expanded, onExpand, record }) => (
+                          <Button
+                            data-testid={`catalog-export-file-expand-${catalogExportFileKey(record)}`}
+                            type="text"
+                            size="small"
+                            aria-label={expanded ? `收起导出任务 #${record.task_id}` : `展开导出任务 #${record.task_id}`}
+                            icon={expanded ? <DownOutlined /> : <RightOutlined />}
+                            onClick={(event) => onExpand(record, event)}
+                          />
+                        ),
+                      }}
                       pagination={{
                         current: page,
                         pageSize: Math.min(pageSize, 100),

@@ -1,7 +1,7 @@
 # Project Runtime Index
 
 Status: route map, not source of truth
-Updated: 2026-07-04
+Updated: 2026-07-22
 
 Use this file to route investigation. Do not treat it as proof. Verify facts in code, commands, APIs, DB read-only evidence, pages, artifacts, or explicit user decisions.
 
@@ -34,6 +34,11 @@ Fill or update with stable routes only:
 - Lingxing enhanced A+ sample dry-run: `scripts/prepare_lingxing_enhanced_aplus_qa_sample.py`
 - Data/migrations:
 - Tests:
+- Workflow action contract: `contracts/product_workflow_actions.json`, `scripts/test_stability_repair_r1_workflow_actions.py`, `frontend/scripts/test-product-workflow-actions.mjs`
+- Catalog export outcome/UI: `backend/app/task_runtime/catalog_export_status.py`, `scripts/test_stability_repair_r1_catalog_export.py`, `scripts/test_stability_repair_r1_catalog_frontend.py`
+- TikTok channel status/UI: `backend/app/services/tiktok_status.py`, `backend/app/api/products.py`, `backend/app/api/tiktok.py`, `scripts/test_stability_repair_r1_tiktok.py`, `scripts/test_stability_repair_r1_tiktok_frontend.py`
+- Remote dev write guard: `scripts/start.sh`, `scripts/read_startup_env.py`, `frontend/dev-api-write-guard.ts`, `frontend/vite.config.ts`, `backend/app/main.py`, `scripts/test_stability_repair_r1_remote_guard.py`
+- Frontend mutation D2b static/runtime gates: `frontend/src/api/index.ts`, `frontend/src/api/mutationRunner.ts`, `frontend/src/api/mutationInventory.generated.ts`, `frontend/src/api/mutationOwnerContract.ts`, `frontend/src/workflow/productWorkflowActionRegistry.ts`, `frontend/scripts/generate-mutation-inventory.mjs`, `frontend/scripts/test-mutation-inventory.mjs`, `frontend/scripts/test-mutation-foundation.mjs`, `frontend/tests/mutation-ux.r1.spec.ts`, `frontend/playwright.mutation.r1.config.ts`, `scripts/test_stability_repair_r1_mutation_frontend.py`
 
 ## Validation Entrypoints
 
@@ -41,6 +46,18 @@ Fill with commands that agents may run locally:
 
 ```bash
 python3 /Users/liuchang/.codex/skills/multi-agent-collaboration/scripts/init_collaboration.py --project . --validate-only
+cd frontend && npm run contracts:check
+cd frontend && npm run mutations:check
+cd frontend && npm run test:workflow-actions:e2e
+cd backend && R1_TEST_MYSQL_ADMIN_URL='mysql+asyncmy://root@127.0.0.1:3306/' .venv/bin/python ../scripts/test_stability_repair_r1_workflow_actions.py --with-mysql
+cd backend && R1_TEST_MYSQL_ADMIN_URL='mysql+asyncmy://root@127.0.0.1:3306/' .venv/bin/python ../scripts/test_stability_repair_r1_catalog_export.py
+R1_TEST_MYSQL_ADMIN_URL='mysql+asyncmy://root@127.0.0.1:3306/' backend/.venv/bin/python scripts/test_stability_repair_r1_catalog_frontend.py
+R1_TEST_MYSQL_ADMIN_URL='mysql+asyncmy://root@127.0.0.1:3306/' backend/.venv/bin/python scripts/test_stability_repair_r1_tiktok.py
+R1_TEST_MYSQL_ADMIN_URL='mysql+asyncmy://root@127.0.0.1:3306/' backend/.venv/bin/python scripts/test_stability_repair_r1_tiktok_frontend.py
+python3 scripts/test_stability_repair_r1_remote_guard.py
+python3 scripts/test_stability_repair_r1_mutation_frontend.py
+R1_TEST_MYSQL_ADMIN_URL='mysql+asyncmy://root@127.0.0.1:3306/' python3 scripts/testing/run_with_r1_mysql.py -- make test-project-rules
+# DB behavior requires explicit R1_TEST_MYSQL_ADMIN_URL and --with-mysql; never reuse application DATABASE_URL.
 ```
 
 ## Hard Boundaries

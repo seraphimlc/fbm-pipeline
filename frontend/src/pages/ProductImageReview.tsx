@@ -10,6 +10,7 @@ import {
   updateProductListingImages,
 } from '../api';
 import type { ProductDataSource, ProductImageReviewDetail, ProductImageReviewQueueItem } from '../api';
+import { runMutationWithUX } from '../api/mutationRunner.ts';
 
 const { Title, Text } = Typography;
 const PRODUCT_DATA_SOURCE_KEY = 'fbm.productList.dataSourceId';
@@ -354,24 +355,28 @@ const ProductImageReview: React.FC = () => {
   const saveAndNext = async () => {
     if (!detail || !draftPaths.length) return;
     setSaving(true);
-    try {
-      await updateProductListingImages(detail.id, {
-        main_image_path: draftPaths[0],
-        gallery_images: draftPaths.slice(1),
-      });
-      message.success('图片已保存');
-      const nextQueue = queue.filter((item) => item.id !== detail.id);
-      setQueue(nextQueue);
-      setQueueTotal((previous) => Math.max(previous - 1, 0));
-      const nextId = nextQueue[currentIndex >= 0 ? Math.min(currentIndex, nextQueue.length - 1) : 0]?.id || null;
-      setCurrentId(nextId);
-      if (!nextId) setDetail(null);
-      loadQueue(nextId).catch(() => message.error('刷新图片确认列表失败'));
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '保存图片失败');
-    } finally {
-      setSaving(false);
-    }
+    await runMutationWithUX(
+      'updateProductListingImages|frontend/src/pages/ProductImageReview.tsx|saveAndNext',
+      async (metadata) => {
+        await updateProductListingImages(detail.id, {
+          main_image_path: draftPaths[0],
+          gallery_images: draftPaths.slice(1),
+        }, metadata);
+        message.success('图片已保存');
+        const nextQueue = queue.filter((item) => item.id !== detail.id);
+        setQueue(nextQueue);
+        setQueueTotal((previous) => Math.max(previous - 1, 0));
+        const nextId = nextQueue[currentIndex >= 0 ? Math.min(currentIndex, nextQueue.length - 1) : 0]?.id || null;
+        setCurrentId(nextId);
+        if (!nextId) setDetail(null);
+        loadQueue(nextId).catch(() => message.error('刷新图片确认列表失败'));
+      },
+      {
+        errorFallback: '保存图片失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setSaving(false),
+      },
+    ).catch(() => undefined);
   };
 
   const skipCurrent = () => {

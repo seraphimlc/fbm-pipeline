@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from app.models import TaskRun, TaskStep
 
+from app.task_runtime.catalog_export_status import effective_task_run_status
+
 RUN_STATUS_PENDING = "pending"
 RUN_STATUS_RUNNING = "running"
 RUN_STATUS_SUCCEEDED = "succeeded"
@@ -21,6 +23,7 @@ STEP_STATUS_READY = "ready"
 STEP_STATUS_RUNNING = "running"
 STEP_STATUS_SUCCEEDED = "succeeded"
 STEP_STATUS_FAILED = "failed"
+STEP_STATUS_PARTIAL_FAILED = "partial_failed"
 STEP_STATUS_INTERRUPTED = "interrupted"
 STEP_STATUS_CANCELED = "canceled"
 
@@ -151,7 +154,13 @@ def latest_event_message(run: TaskRun) -> str | None:
     return None
 
 
-def compute_task_run_display(run: TaskRun, *, superseded_by_run_id: int | None = None) -> dict[str, Any]:
+def compute_task_run_display(
+    run: TaskRun,
+    *,
+    superseded_by_run_id: int | None = None,
+    effective_status: str | None = None,
+    effective_error_summary: str | None = None,
+) -> dict[str, Any]:
     steps = sorted(getattr(run, "steps", []) or [], key=lambda item: (item.sort_order, item.id))
     now = datetime.now()
     failed_step = next((step for step in steps if step.status in {STEP_STATUS_FAILED, STEP_STATUS_INTERRUPTED}), None)
@@ -159,8 +168,17 @@ def compute_task_run_display(run: TaskRun, *, superseded_by_run_id: int | None =
     ready_step = next((step for step in steps if step.status == STEP_STATUS_READY), None)
     pending_step = next((step for step in steps if step.status == STEP_STATUS_PENDING), None)
     current_step = running_step or ready_step or failed_step or pending_step or (steps[-1] if steps else None)
-    error_summary = _compact_error(failed_step.error_message if failed_step else None) or _summary_error(run.summary_json)
+    error_summary = (
+        _compact_error(effective_error_summary)
+        or _compact_error(failed_step.error_message if failed_step else None)
+        or _summary_error(run.summary_json)
+    )
     last_heartbeat = max((step.heartbeat_at for step in steps if step.heartbeat_at), default=None)
+    run_status = effective_status or effective_task_run_status(
+        task_type=run.task_type,
+        status=run.status,
+        summary_json=run.summary_json,
+    )
 
     if superseded_by_run_id:
         status = "superseded"
@@ -170,29 +188,30 @@ def compute_task_run_display(run: TaskRun, *, superseded_by_run_id: int | None =
         status = "cancel_requested"
         reason = "已请求取消，等待当前步骤结束"
         actions = ["view_detail", "refresh"]
-    elif run.status == RUN_STATUS_CANCELED:
+    elif run_status == RUN_STATUS_CANCELED:
         status = "canceled"
         reason = "用户已取消"
         actions = ["view_detail", "copy_error"] if error_summary else ["view_detail"]
-    elif run.status == RUN_STATUS_FAILED:
+    elif run_status == RUN_STATUS_FAILED:
         status = "failed"
         reason = f"失败：{error_summary or '请查看错误详情'}"
         actions = ["view_detail", "retry_failed_steps", "copy_error", "refresh"]
-    elif run.status == RUN_STATUS_PARTIAL_FAILED:
+    elif run_status == RUN_STATUS_PARTIAL_FAILED:
         status = "partial_failed"
         reason = "部分完成，存在失败项"
-        actions = ["view_detail", "retry_failed_steps", "copy_error", "refresh"]
         if run.task_type == "catalog_export":
-            actions.insert(1, "download_result")
-    elif run.status == RUN_STATUS_INTERRUPTED:
+            actions = ["view_detail", "download_result", "copy_error", "refresh"]
+        else:
+            actions = ["view_detail", "retry_failed_steps", "copy_error", "refresh"]
+    elif run_status == RUN_STATUS_INTERRUPTED:
         status = "interrupted"
         reason = "任务未完成，可重试"
         actions = ["view_detail", "retry_failed_steps", "refresh"]
-    elif run.status == RUN_STATUS_PAUSED:
+    elif run_status == RUN_STATUS_PAUSED:
         status = "paused"
         reason = "任务已挂起"
         actions = ["view_detail", "refresh"]
-    elif run.status == RUN_STATUS_SUCCEEDED:
+    elif run_status == RUN_STATUS_SUCCEEDED:
         status = "succeeded"
         reason = "生成子任务提交完成" if run.task_type == "product_bulk_advance" else "任务完成"
         actions = ["view_detail", "refresh"]
@@ -222,8 +241,8 @@ def compute_task_run_display(run: TaskRun, *, superseded_by_run_id: int | None =
         reason = "任务已创建，等待生成步骤"
         actions = ["view_detail", "cancel", "refresh"]
     else:
-        status = run.status
-        reason = run.status or "任务状态未知"
+        status = run_status
+        reason = run_status or "任务状态未知"
         actions = ["view_detail", "refresh"]
 
     progress_total = sum(step.progress_total or 0 for step in steps) or sum(group.progress_total or 0 for group in getattr(run, "groups", []) or [])

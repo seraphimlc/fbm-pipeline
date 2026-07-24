@@ -28,6 +28,14 @@ from app.services.oss_uploader import upload_private_file
 from app.services.giga_product_drafts import upsert_product_drafts_from_giga_batch
 from app.task_planners.product_image_analysis import create_product_image_analysis_runs
 from app.task_planners.product_listing import create_product_listing_runs
+from app.task_runtime.catalog_export_status import (
+    CATALOG_STEP_OWNER_OFFLINE_TASK,
+    catalog_export_resolution_is_ready,
+    load_newest_material_catalog_step_results,
+    normalize_catalog_export_response,
+    resolve_catalog_export_artifact,
+    select_catalog_export_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -77,13 +85,11 @@ def _catalog_export_object_key(task_id: int, filename: str) -> str:
 
 
 def _catalog_export_result_ready(payload: object) -> bool:
-    if not isinstance(payload, dict):
-        return False
-    file_path = str(payload.get("file_path") or "").strip()
-    object_key = str(payload.get("oss_object_key") or "").strip()
-    if file_path and Path(file_path).expanduser().is_file():
-        return True
-    return bool(object_key and payload.get("filename"))
+    return catalog_export_resolution_is_ready(resolve_catalog_export_artifact(
+        payload,
+        allowed_export_root=settings.DATA_DIR / "exports",
+        object_cache_subdir="offline-ready",
+    ))
 
 
 def _catalog_export_row_status(row: dict) -> str:
@@ -127,28 +133,56 @@ def _catalog_export_result_payload(
     oss_url: str | None = None,
     file_size: int | None = None,
 ) -> dict:
-    rows = _catalog_export_result_rows(report_rows)
+    requested_ids = list(dict.fromkeys(int(catalog_id) for catalog_id in catalog_ids))
+    reported_rows = _catalog_export_result_rows(report_rows)
+    rows_by_catalog_id: dict[int, dict] = {}
+    for row in reported_rows:
+        try:
+            catalog_id = int(row.get("catalog_id"))
+        except (TypeError, ValueError):
+            continue
+        if catalog_id in requested_ids and catalog_id not in rows_by_catalog_id:
+            rows_by_catalog_id[catalog_id] = row
+    rows = [
+        rows_by_catalog_id.get(catalog_id) or {
+            "catalog_id": catalog_id,
+            "product_id": None,
+            "item_code": None,
+            "seller_sku": None,
+            "category": category,
+            "status": "failed",
+            "reason": "导出结果缺少行级结果",
+            "template_file": None,
+            "output_file": None,
+        }
+        for catalog_id in requested_ids
+    ]
     success_count = sum(1 for row in rows if row["status"] == "exported")
     skipped_count = sum(1 for row in rows if row["status"] == "skipped")
     failed_count = sum(1 for row in rows if row["status"] == "failed")
-    status = "failed"
-    if success_count and (skipped_count or failed_count):
+    local_artifact = bool(file_path and Path(file_path).expanduser().is_file())
+    remote_artifact = bool(str(oss_object_key or "").strip() and str(filename or "").strip())
+    artifact_available = local_artifact or remote_artifact
+    if success_count <= 0 or not artifact_available:
+        status = "failed"
+    elif skipped_count or failed_count:
         status = "partial_failed"
-    elif success_count:
+    else:
         status = "done"
-    return {
+    return normalize_catalog_export_response({
         "status": status,
         "category": category,
         "categories": categories or [category],
         "template_name": template_name or None,
         "template_path": template_path,
-        "catalog_product_ids": catalog_ids,
-        "requested_count": len(catalog_ids),
+        "catalog_product_ids": requested_ids,
+        "requested_count": len(requested_ids),
         "success_count": success_count,
         "exported_count": success_count,
         "skipped_count": skipped_count,
         "failed_count": failed_count,
-        "report_count": len(report_rows),
+        "artifact_available": artifact_available,
+        "report_count": len(rows),
         "filename": filename,
         "file_path": file_path,
         "oss_object_key": oss_object_key,
@@ -157,12 +191,15 @@ def _catalog_export_result_payload(
         "report_filename": "导出报告.xlsx" if report_rows else None,
         "created_at": created_at.isoformat(),
         "rows": rows,
-    }
+    })
 
 
 def _report_rows_from_export_zip(path: Path) -> list[dict]:
     with ZipFile(path) as archive:
-        report_name = next((name for name in archive.namelist() if name.lower().endswith(".xlsx")), None)
+        report_name = next(
+            (name for name in archive.namelist() if Path(name).name == "导出报告.xlsx"),
+            None,
+        )
         if not report_name:
             return []
         workbook = load_workbook(BytesIO(archive.read(report_name)), read_only=True, data_only=True)
@@ -205,7 +242,7 @@ def _recover_catalog_export_result_from_file(
             continue
         if not report_rows:
             continue
-        return _catalog_export_result_payload(
+        payload = _catalog_export_result_payload(
             category=category,
             categories=categories,
             template_name=template_name,
@@ -217,6 +254,8 @@ def _recover_catalog_export_result_from_file(
             file_path=str(path),
             file_size=path.stat().st_size,
         )
+        if _catalog_export_result_ready(payload):
+            return payload
     return None
 
 
@@ -1044,9 +1083,19 @@ async def _run_product_bulk_advance_step(db: AsyncSession, step: OfflineTaskStep
 async def _run_catalog_export_step(db: AsyncSession, step: OfflineTaskStep) -> None:
     step_id = step.id
     task_id = step.task_id
-    existing_result = _json_loads(step.result_json, {})
+    task = await db.get(OfflineTask, task_id)
+    catalog_step_results = await load_newest_material_catalog_step_results(
+        db,
+        owner_kind=CATALOG_STEP_OWNER_OFFLINE_TASK,
+        owner_ids=[task_id],
+    )
+    existing_result = normalize_catalog_export_response(
+        select_catalog_export_payload(
+            task.result_json if task else None,
+            () if catalog_step_results.get(task_id) is None else (catalog_step_results[task_id],),
+        )
+    )
     if step.status == STEP_STATUS_SUCCESS and _catalog_export_result_ready(existing_result):
-        task = await db.get(OfflineTask, step.task_id)
         if task and isinstance(existing_result, dict):
             if not task.result_json:
                 task.result_json = _json_dumps(existing_result)
@@ -1067,7 +1116,6 @@ async def _run_catalog_export_step(db: AsyncSession, step: OfflineTaskStep) -> N
             progress_current=progress_total,
             progress_total=progress_total,
         )
-        task = await db.get(OfflineTask, step.task_id)
         if task and not task.result_json:
             task.result_json = _json_dumps(existing_result)
             task.updated_at = datetime.now()

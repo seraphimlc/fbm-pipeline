@@ -16,15 +16,21 @@ import {
   listProducts,
   pausePipeline,
   restartPipeline,
-  retryProductAutoImageSelection,
-  retryProductCompetitorSearch,
-  retryProductCompetitorVisualMatch,
   resumePipeline,
   retryStep,
   STEP_LABELS,
 } from '../api';
-import type { GigaSyncBatch, Product, TaskRunDetail, WorkbenchOverview } from '../api';
+import type { GigaSyncBatch, Product, TaskRunDetail, TikTokChannelStatus, WorkbenchOverview } from '../api';
 import type { ProductDataSource } from '../api';
+import type { MutationCallsiteId } from '../api/mutationInventory.generated.ts';
+import { runMutationWithUX } from '../api/mutationRunner.ts';
+import {
+  dispatchProductWorkflowAction,
+  getProductWorkflowAction,
+  reportUnknownProductWorkflowAction,
+  type ProductWorkflowApiClientExport,
+} from '../workflow/productWorkflowActionRegistry';
+import { ProductWorkflowUnknownAction } from '../workflow/ProductWorkflowUnknownAction';
 
 const { Title, Text } = Typography;
 const { RangePicker } = DatePicker;
@@ -38,6 +44,14 @@ const RUNNING_STATUSES = [
   'step5_listing',
   'step6_curating',
 ];
+
+const PRODUCT_LIST_WORKFLOW_CALLSITE_IDS = {
+  resumePipeline: 'resumePipeline|frontend/src/pages/ProductList.tsx|runProductWorkflowAction',
+  retryProductAutoImageSelection: 'retryProductAutoImageSelection|frontend/src/pages/ProductList.tsx|runProductWorkflowAction',
+  retryProductCompetitorSearch: 'retryProductCompetitorSearch|frontend/src/pages/ProductList.tsx|runProductWorkflowAction',
+  retryProductCompetitorVisualMatch: 'retryProductCompetitorVisualMatch|frontend/src/pages/ProductList.tsx|runProductWorkflowAction',
+  retryStep: 'retryStep|frontend/src/pages/ProductList.tsx|runProductWorkflowAction',
+} satisfies Record<ProductWorkflowApiClientExport, MutationCallsiteId>;
 
 type WorkStatus =
   | 'needs_initialization'
@@ -97,6 +111,36 @@ const WORK_STATUS_FILTERS: Array<'all' | WorkStatus> = [
   'exported',
   'failed',
 ];
+
+const TIKTOK_CHANNEL_STATUSES: TikTokChannelStatus[] = [
+  'failed',
+  'draft',
+  'missing_required_info',
+  'unsupported',
+];
+
+const TIKTOK_CHANNEL_STATUS_META: Record<TikTokChannelStatus, {
+  label: string;
+  shortLabel: string;
+  color: string;
+  reason: string;
+}> = {
+  failed: { label: '失败', shortLabel: '失败', color: 'error', reason: '商品处理失败' },
+  draft: { label: '草稿', shortLabel: '草稿', color: 'default', reason: '暂无可展示 SKU' },
+  missing_required_info: { label: '资料不完整', shortLabel: '资料不完整', color: 'warning', reason: '缺少采购价或分仓库存' },
+  unsupported: {
+    label: '资料已齐 · 导出暂未接入',
+    shortLabel: '资料已齐 · 导出暂未接入',
+    color: 'blue',
+    reason: 'TikTok 导出/发布尚未接入',
+  },
+};
+
+const channelStatusParam = (value: string | null): 'all' | TikTokChannelStatus => (
+  value && TIKTOK_CHANNEL_STATUSES.includes(value as TikTokChannelStatus)
+    ? value as TikTokChannelStatus
+    : 'all'
+);
 
 const PRIMARY_WORK_STATUS: WorkStatus[] = [
   'auto_select_images',
@@ -201,6 +245,9 @@ const ProductList: React.FC = () => {
   const [generationStatusFilter, setGenerationStatusFilter] = useState<'all' | WorkStatus>(
     workStatusParam(initialSearch.get('work_status'))
   );
+  const [channelStatusFilter, setChannelStatusFilter] = useState<'all' | TikTokChannelStatus>(
+    channelStatusParam(initialSearch.get('channel_status'))
+  );
   const [overview, setOverview] = useState<WorkbenchOverview | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [dataSources, setDataSources] = useState<ProductDataSource[]>([]);
@@ -245,6 +292,9 @@ const ProductList: React.FC = () => {
   );
 
   const productWorkStatus = (product: Product): WorkStatus => {
+    if ((product.sales_channel || '').toLowerCase() === 'tiktok') {
+      return product.channel_status === 'failed' ? 'failed' : 'running';
+    }
     const workflowStatus = product.workflow?.work_status;
     if (workflowStatus && WORK_STATUS_FILTERS.includes(workflowStatus as WorkStatus)) return workflowStatus as WorkStatus;
     if (product.status === 'failed') return 'failed';
@@ -272,8 +322,9 @@ const ProductList: React.FC = () => {
     const params = new URLSearchParams();
     if (page > 1) params.set('page', String(page));
     if (pageSize !== 20) params.set('page_size', String(pageSize));
-    if (statusFilter) params.set('status', statusFilter);
-    if (generationStatusFilter !== 'all') params.set('work_status', generationStatusFilter);
+    if (!isTikTokSource && statusFilter) params.set('status', statusFilter);
+    if (isTikTokSource && channelStatusFilter !== 'all') params.set('channel_status', channelStatusFilter);
+    if (!isTikTokSource && generationStatusFilter !== 'all') params.set('work_status', generationStatusFilter);
     if (itemId) params.set('item_id', itemId);
     if (competitorAsin) params.set('competitor_asin', competitorAsin);
     if (upc) params.set('upc', upc);
@@ -304,52 +355,18 @@ const ProductList: React.FC = () => {
     window.open(reviewPath(path, productId), '_blank', 'noopener,noreferrer');
   };
 
-  const retryAutoImageSelection = async (productId: number) => {
-    setRerunningId(productId);
-    try {
-      await retryProductAutoImageSelection(productId);
-      await refreshWorkbenchRows();
-      message.success('已创建或复用自动选图任务');
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '重试自动选图失败');
-    } finally {
-      setRerunningId(null);
-    }
-  };
-
-  const retryCompetitorSearch = async (productId: number) => {
-    setRerunningId(productId);
-    try {
-      await retryProductCompetitorSearch(productId);
-      await refreshWorkbenchRows();
-      message.success('已创建或复用自动竞品搜索任务');
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '启动自动竞品搜索失败');
-    } finally {
-      setRerunningId(null);
-    }
-  };
-
-  const retryCompetitorVisualMatch = async (productId: number) => {
-    setRerunningId(productId);
-    try {
-      await retryProductCompetitorVisualMatch(productId);
-      await refreshWorkbenchRows();
-      message.success('已创建或复用竞品视觉初筛任务');
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '启动竞品视觉初筛失败');
-    } finally {
-      setRerunningId(null);
-    }
-  };
-
   const handleWorkStatusClick = (value: 'all' | WorkStatus) => {
     setGenerationStatusFilter(value);
     setPage(1);
   };
 
+  const handleChannelStatusClick = (value: 'all' | TikTokChannelStatus) => {
+    setChannelStatusFilter(value);
+    setPage(1);
+  };
+
   const fetchProducts = async () => {
-    if (!selectedDataSourceId) return;
+    if (!selectedDataSourceId || !activeDataSource) return;
     setLoading(true);
     try {
       const { data } = await listProducts({
@@ -358,8 +375,9 @@ const ProductList: React.FC = () => {
         item_id: itemId.trim() || undefined,
         competitor_asin: isTikTokSource ? undefined : competitorAsin.trim() || undefined,
         upc: isTikTokSource ? undefined : upc.trim() || undefined,
-        status: statusFilter,
-        work_status: generationStatusFilter === 'all' ? undefined : generationStatusFilter,
+        status: isTikTokSource ? undefined : statusFilter,
+        work_status: !isTikTokSource && generationStatusFilter !== 'all' ? generationStatusFilter : undefined,
+        channel_status: isTikTokSource && channelStatusFilter !== 'all' ? channelStatusFilter : undefined,
         sku_code: skuCode.trim() || undefined,
         data_source_id: selectedDataSourceId,
         created_from: dateRange?.[0],
@@ -375,7 +393,7 @@ const ProductList: React.FC = () => {
   };
 
   const fetchOverview = async () => {
-    if (!selectedDataSourceId) return;
+    if (!selectedDataSourceId || !activeDataSource) return;
     try {
       const { data } = await getWorkbenchOverview({ data_source_id: selectedDataSourceId });
       setOverview(data);
@@ -455,9 +473,18 @@ const ProductList: React.FC = () => {
     ]);
   };
 
-  useEffect(() => { fetchProducts(); }, [page, pageSize, itemId, competitorAsin, upc, statusFilter, generationStatusFilter, dateRange, selectedDataSourceId, isTikTokSource]);
+  useEffect(() => { fetchProducts(); }, [page, pageSize, itemId, competitorAsin, upc, statusFilter, generationStatusFilter, channelStatusFilter, dateRange, selectedDataSourceId, activeDataSource?.id, isTikTokSource]);
   useEffect(() => { fetchDataSources(); }, []);
-  useEffect(() => { fetchOverview(); }, [selectedDataSourceId]);
+  useEffect(() => { fetchOverview(); }, [selectedDataSourceId, activeDataSource?.id, isTikTokSource]);
+  useEffect(() => {
+    if (!activeDataSource) return;
+    if (isTikTokSource) {
+      setStatusFilter(undefined);
+      setGenerationStatusFilter('all');
+    } else {
+      setChannelStatusFilter('all');
+    }
+  }, [activeDataSource?.id, isTikTokSource]);
   useEffect(() => {
     if (!activeGigaSyncBatch && !['pending', 'running'].includes(latestGigaPullTask?.status || '')) return;
     const timer = window.setInterval(() => {
@@ -466,11 +493,13 @@ const ProductList: React.FC = () => {
     return () => window.clearInterval(timer);
   }, [activeGigaSyncBatch?.batch_id, latestGigaPullTask?.id, latestGigaPullTask?.status, selectedDataSourceId, activeSite]);
   useEffect(() => {
+    if (!activeDataSource) return;
     const params = new URLSearchParams();
     if (page > 1) params.set('page', String(page));
     if (pageSize !== 20) params.set('page_size', String(pageSize));
-    if (statusFilter) params.set('status', statusFilter);
-    if (generationStatusFilter !== 'all') params.set('work_status', generationStatusFilter);
+    if (!isTikTokSource && statusFilter) params.set('status', statusFilter);
+    if (isTikTokSource && channelStatusFilter !== 'all') params.set('channel_status', channelStatusFilter);
+    if (!isTikTokSource && generationStatusFilter !== 'all') params.set('work_status', generationStatusFilter);
     if (itemId) params.set('item_id', itemId);
     if (competitorAsin) params.set('competitor_asin', competitorAsin);
     if (upc) params.set('upc', upc);
@@ -486,7 +515,7 @@ const ProductList: React.FC = () => {
     if (nextSearch !== currentSearch) {
       navigate({ pathname: location.pathname, search: nextSearch ? `?${nextSearch}` : '' }, { replace: true });
     }
-  }, [page, pageSize, itemId, competitorAsin, upc, statusFilter, generationStatusFilter, dateRange, skuCode, location.pathname, location.search, navigate]);
+  }, [page, pageSize, itemId, competitorAsin, upc, statusFilter, generationStatusFilter, channelStatusFilter, dateRange, skuCode, activeDataSource?.id, isTikTokSource, location.pathname, location.search, navigate]);
 
   const handleSearch = () => {
     setItemId(itemIdInput.trim());
@@ -510,6 +539,7 @@ const ProductList: React.FC = () => {
     setDateRange(null);
     setStatusFilter(undefined);
     setGenerationStatusFilter('all');
+    setChannelStatusFilter('all');
     setPage(1);
   };
 
@@ -524,20 +554,24 @@ const ProductList: React.FC = () => {
       return;
     }
     setPullingGigaProducts(true);
-    try {
-      const { data } = await createGigaPullTaskRuns({ data_source_ids: selectedPullDataSourceIds });
-      const firstRun = data.runs[0];
-      message.success(`已提交新任务中心：${data.runs.map((run) => `#${run.id}`).join('、')}`);
-      const detail = await getTaskRun(firstRun.id);
-      setLatestGigaPullTask(detail.data);
-      setPullModalOpen(false);
-      await refreshWorkbenchRows();
-      navigate('/task-runs');
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '提交店铺商品同步失败');
-    } finally {
-      setPullingGigaProducts(false);
-    }
+    await runMutationWithUX(
+      'createGigaPullTaskRuns|frontend/src/pages/ProductList.tsx|pullMissingGigaProducts',
+      async (metadata) => {
+        const { data } = await createGigaPullTaskRuns({ data_source_ids: selectedPullDataSourceIds }, metadata);
+        const firstRun = data.runs[0];
+        message.success(`已提交新任务中心：${data.runs.map((run) => `#${run.id}`).join('、')}`);
+        const detail = await getTaskRun(firstRun.id);
+        setLatestGigaPullTask(detail.data);
+        setPullModalOpen(false);
+        await refreshWorkbenchRows();
+        navigate('/task-runs');
+      },
+      {
+        errorFallback: '提交店铺商品同步失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setPullingGigaProducts(false),
+      },
+    ).catch(() => undefined);
   };
 
   const serverFilterSummary = () => {
@@ -578,45 +612,55 @@ const ProductList: React.FC = () => {
       onOk: async () => {
         setCreatingBulkAdvanceTask(true);
         const hideLoading = message.loading('正在按当前筛选创建批量推进审计任务...', 0);
-        try {
-          const { data } = await createProductBulkAdvanceTaskByFilter({
-            item_id: itemId.trim() || undefined,
-            competitor_asin: competitorAsin.trim() || undefined,
-            upc: upc.trim() || undefined,
-            status: statusFilter,
-            work_status: generationStatusFilter === 'all' ? undefined : generationStatusFilter,
-            data_source_id: selectedDataSourceId,
-            created_from: dateRange?.[0],
-            created_to: dateRange?.[1],
-            sku_keyword: skuCode.trim() || undefined,
-            limit: 1000,
-          });
-          const result = parseJson<{ requested_count?: number; started_count?: number; skipped_count?: number }>(data.summary_json, {});
-          message.success(`已创建任务中心 #${data.id}：提交 ${result.requested_count || 0}，入队 ${result.started_count || 0}，跳过 ${result.skipped_count || 0}`);
-          await refreshWorkbenchRows();
-          navigate('/task-runs');
-        } catch (error: any) {
-          message.error(error?.response?.data?.detail || '创建批量推进任务失败');
-        } finally {
-          hideLoading();
-          setCreatingBulkAdvanceTask(false);
-        }
+        await runMutationWithUX(
+          'createProductBulkAdvanceTaskByFilter|frontend/src/pages/ProductList.tsx|onOk',
+          async (metadata) => {
+            const { data } = await createProductBulkAdvanceTaskByFilter({
+              item_id: itemId.trim() || undefined,
+              competitor_asin: competitorAsin.trim() || undefined,
+              upc: upc.trim() || undefined,
+              status: statusFilter,
+              work_status: generationStatusFilter === 'all' ? undefined : generationStatusFilter,
+              data_source_id: selectedDataSourceId,
+              created_from: dateRange?.[0],
+              created_to: dateRange?.[1],
+              sku_keyword: skuCode.trim() || undefined,
+              limit: 1000,
+            }, metadata);
+            const result = parseJson<{ requested_count?: number; started_count?: number; skipped_count?: number }>(data.summary_json, {});
+            message.success(`已创建任务中心 #${data.id}：提交 ${result.requested_count || 0}，入队 ${result.started_count || 0}，跳过 ${result.skipped_count || 0}`);
+            await refreshWorkbenchRows();
+            navigate('/task-runs');
+          },
+          {
+            errorFallback: '创建批量推进任务失败',
+            onError: (errorMessage) => message.error(errorMessage),
+            clearLoading: () => {
+              hideLoading();
+              setCreatingBulkAdvanceTask(false);
+            },
+          },
+        ).catch(() => undefined);
       },
     });
   };
 
   const handleDeleteProduct = async (record: Product) => {
     setDeletingId(record.id);
-    try {
-      await deleteProduct(record.id);
-      message.success('商品已删除');
-      if (products.length === 1 && page > 1) setPage(page - 1);
-      await refreshWorkbenchRows();
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '删除失败');
-    } finally {
-      setDeletingId(null);
-    }
+    await runMutationWithUX(
+      'deleteProduct|frontend/src/pages/ProductList.tsx|handleDeleteProduct',
+      async (metadata) => {
+        await deleteProduct(record.id, metadata);
+        message.success('商品已删除');
+        if (products.length === 1 && page > 1) setPage(page - 1);
+        await refreshWorkbenchRows();
+      },
+      {
+        errorFallback: '删除失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setDeletingId(null),
+      },
+    ).catch(() => undefined);
   };
 
   const fetchRowSkus = async (row: ProductRow) => {
@@ -634,28 +678,94 @@ const ProductList: React.FC = () => {
   };
 
   const suspendProductTask = async (productId: number) => {
-    try {
-      await pausePipeline(productId);
-      message.success('已挂起，后续自动流程不会继续执行');
-      await refreshWorkbenchRows();
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '挂起失败');
-    }
+    setRerunningId(productId);
+    await runMutationWithUX(
+      'pausePipeline|frontend/src/pages/ProductList.tsx|suspendProductTask',
+      async (metadata) => {
+        await pausePipeline(productId, metadata);
+        message.success('已挂起，后续自动流程不会继续执行');
+        await refreshWorkbenchRows();
+      },
+      {
+        errorFallback: '挂起失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setRerunningId(null),
+      },
+    ).catch(() => undefined);
   };
 
   const resumeProductTask = async (productId: number) => {
-    try {
-      await resumePipeline(productId);
-      message.success('已继续执行');
-      await refreshWorkbenchRows();
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '继续失败');
+    setRerunningId(productId);
+    await runMutationWithUX(
+      'resumePipeline|frontend/src/pages/ProductList.tsx|resumeProductTask',
+      async (metadata) => {
+        await resumePipeline(productId, metadata);
+        message.success('已继续执行');
+        await refreshWorkbenchRows();
+      },
+      {
+        errorFallback: '继续失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setRerunningId(null),
+      },
+    ).catch(() => undefined);
+  };
+
+  const runProductWorkflowAction = async (product: Product, action: string) => {
+    const definition = getProductWorkflowAction(action);
+    const isApiAction = definition?.kind === 'api';
+    if (isApiAction) setRerunningId(product.id);
+    const dispatchContext = {
+        productId: product.id,
+        relatedCorrelationKey: product.workflow?.related_correlation_key,
+        navigate: (target: string) => {
+          if (target === `/products/${product.id}`) {
+            openProductDetail(product.id);
+          } else if (target.startsWith('/products/image-review')) {
+            window.open(target, '_blank', 'noopener,noreferrer');
+          } else {
+            navigate(target);
+          }
+        },
+    };
+    if (!definition || definition.kind !== 'api') {
+      try {
+        await dispatchProductWorkflowAction(action, dispatchContext);
+      } catch (error: any) {
+        message.error(error?.response?.data?.detail || '操作失败');
+      }
+      return;
     }
+    await runMutationWithUX(
+      PRODUCT_LIST_WORKFLOW_CALLSITE_IDS[definition.client_export],
+      async (metadata) => {
+        const result = await dispatchProductWorkflowAction(action, {
+          ...dispatchContext,
+          mutationMetadata: metadata,
+        });
+        if (result.status === 'handled') {
+          await refreshWorkbenchRows();
+          message.success(product.workflow?.primary_action_label ? `已提交：${product.workflow.primary_action_label}` : '已提交处理');
+        }
+      },
+      {
+        errorFallback: '操作失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setRerunningId(null),
+      },
+    ).catch(() => undefined);
   };
 
   const workStatusTag = (status: WorkStatus) => {
     const meta = WORK_STATUS_META[status];
     return <Tag color={meta.color}>{meta.label}</Tag>;
+  };
+
+  const tiktokChannelStatusTag = (product: Product) => {
+    const status = product.channel_status;
+    if (!status) return <Tag>未分类</Tag>;
+    const meta = TIKTOK_CHANNEL_STATUS_META[status];
+    return <Tag color={meta.color}>{product.channel_status_label || meta.label}</Tag>;
   };
 
   const workflowStatusTag = (product: Product, fallback: WorkStatus) => {
@@ -670,11 +780,11 @@ const ProductList: React.FC = () => {
 
   const currentTaskStatus = (record: Product) => {
     if (isTikTokSource) {
-      if (record.status === 'failed' && record.error_message) return `失败：${record.error_message}`;
-      if (record.catalog_exported_at || record.catalog_export_task_id) return '已导出，可在 TikTok 导出链路接入后再次导出';
-      if (record.status === 'completed') return '待 TikTok 导出';
-      if (record.status === 'created') return '待补资料或待定价';
-      return record.current_task_status || record.status || '-';
+      if (record.channel_status === 'failed' && record.error_message) return `失败：${record.error_message}`;
+      return record.channel_status_reason
+        || (record.channel_status ? TIKTOK_CHANNEL_STATUS_META[record.channel_status].reason : null)
+        || record.current_task_status
+        || '-';
     }
     if (record.workflow?.action_reason) return record.workflow.action_reason;
     if (record.status === 'completed' && isProductExported(record)) {
@@ -746,93 +856,26 @@ const ProductList: React.FC = () => {
     const workflowAction = product.workflow?.primary_action;
     const workflowActionLabel = product.workflow?.primary_action_label;
     if (workflowAction) {
-      const label = workflowActionLabel || '处理';
-      if (workflowAction === 'open_image_review') {
-        return <Button size="small" type="primary" onClick={() => openReviewPage('/products/image-review', product.id)}>{label}</Button>;
+      const definition = getProductWorkflowAction(workflowAction);
+      if (!definition) {
+        reportUnknownProductWorkflowAction(workflowAction);
+        return <ProductWorkflowUnknownAction action={workflowAction} surface="product-list" size="small" />;
       }
-      if (workflowAction === 'open_task_center') {
-        const correlationKey = product.workflow?.related_correlation_key;
-        const target = correlationKey ? `/task-runs?correlation_key=${encodeURIComponent(correlationKey)}` : '/task-runs';
-        return <Button size="small" onClick={() => navigate(target)}>{label}</Button>;
-      }
-      if (workflowAction === 'retry_auto_image_selection') {
-        return (
-          <Button
-            size="small"
-            type="primary"
-            icon={<RedoOutlined />}
-            loading={rerunningId === product.id}
-            onClick={() => retryAutoImageSelection(product.id)}
-          >
-            {label}
-          </Button>
-        );
-      }
-      if (workflowAction === 'start_competitor_search' || workflowAction === 'retry_competitor_search' || workflowAction === 'restart_competitor_search') {
-        return (
-          <Button
-            size="small"
-            type="primary"
-            icon={<RedoOutlined />}
-            loading={rerunningId === product.id}
-            onClick={() => retryCompetitorSearch(product.id)}
-          >
-            {label}
-          </Button>
-        );
-      }
-      if (workflowAction === 'retry_competitor_visual_match') {
-        return (
-          <Button
-            size="small"
-            type="primary"
-            icon={<RedoOutlined />}
-            loading={rerunningId === product.id}
-            onClick={() => retryCompetitorVisualMatch(product.id)}
-          >
-            {label}
-          </Button>
-        );
-      }
-      if (workflowAction === 'retry_image_analysis' || workflowAction === 'retry_listing_generation') {
-        return (
-          <Button
-            size="small"
-            type="primary"
-            icon={<RedoOutlined />}
-            loading={rerunningId === product.id}
-            onClick={async () => { setRerunningId(product.id); try { await retryStep(product.id); await refreshWorkbenchRows(); } finally { setRerunningId(null); } }}
-          >
-            {label}
-          </Button>
-        );
-      }
-      if (workflowAction === 'manual_adjust_images') {
-        return <Button size="small" onClick={() => openReviewPage('/products/image-review', product.id)}>{label}</Button>;
-      }
-      if (workflowAction === 'open_export_center') {
-        return <Button size="small" type="primary" onClick={() => navigate('/export-center')}>{label}</Button>;
-      }
-      if (workflowAction === 'retry') {
-        return (
-          <Button
-            size="small"
-            type="primary"
-            icon={<RedoOutlined />}
-            loading={rerunningId === product.id}
-            onClick={async () => { setRerunningId(product.id); try { await retryStep(product.id); await refreshWorkbenchRows(); } finally { setRerunningId(null); } }}
-          >
-            {label}
-          </Button>
-        );
-      }
-      if (workflowAction === 'resume') {
-        return <Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={() => resumeProductTask(product.id)}>{label}</Button>;
-      }
-      if (workflowAction === 'open_detail') {
-        return <Button size="small" type="primary" onClick={() => openProductDetail(product.id)}>{label}</Button>;
-      }
-      return null;
+      const label = workflowActionLabel || definition.default_label;
+      const icon = definition.kind === 'api'
+        ? (workflowAction === 'resume' ? <PlayCircleOutlined /> : <RedoOutlined />)
+        : undefined;
+      return (
+        <Button
+          size="small"
+          type={workflowAction === 'open_task_center' ? 'default' : 'primary'}
+          icon={icon}
+          loading={definition.kind === 'api' && rerunningId === product.id}
+          onClick={() => void runProductWorkflowAction(product, definition.action)}
+        >
+          {label}
+        </Button>
+      );
     }
     if (product.workflow) return null;
     if (row.workStatus === 'select_images') {
@@ -859,7 +902,21 @@ const ProductList: React.FC = () => {
           type="primary"
           icon={<RedoOutlined />}
           loading={rerunningId === product.id}
-          onClick={async () => { setRerunningId(product.id); try { await retryStep(product.id); await refreshWorkbenchRows(); } finally { setRerunningId(null); } }}
+          onClick={async () => {
+            setRerunningId(product.id);
+            await runMutationWithUX(
+              'retryStep|frontend/src/pages/ProductList.tsx|renderPrimaryRowAction|1',
+              async (metadata) => {
+                await retryStep(product.id, metadata);
+                await refreshWorkbenchRows();
+              },
+              {
+                errorFallback: '重试失败',
+                onError: (errorMessage) => message.error(errorMessage),
+                clearLoading: () => setRerunningId(null),
+              },
+            ).catch(() => undefined);
+          }}
         >
           重试
         </Button>
@@ -867,7 +924,7 @@ const ProductList: React.FC = () => {
     }
     if (product.status === 'paused' || product.status === 'pending_review') {
       return (
-        <Button size="small" type="primary" icon={<PlayCircleOutlined />} onClick={() => resumeProductTask(product.id)}>
+        <Button size="small" type="primary" icon={<PlayCircleOutlined />} loading={rerunningId === product.id} onClick={() => resumeProductTask(product.id)}>
           继续
         </Button>
       );
@@ -881,7 +938,27 @@ const ProductList: React.FC = () => {
     }
     if (product.status === 'failed' && product.current_step > 1) {
       return (
-        <Button size="small" type="primary" icon={<RedoOutlined />} onClick={async () => { await retryStep(product.id); await refreshWorkbenchRows(); }}>
+        <Button
+          size="small"
+          type="primary"
+          icon={<RedoOutlined />}
+          loading={rerunningId === product.id}
+          onClick={async () => {
+            setRerunningId(product.id);
+            await runMutationWithUX(
+              'retryStep|frontend/src/pages/ProductList.tsx|renderPrimaryRowAction|2',
+              async (metadata) => {
+                await retryStep(product.id, metadata);
+                await refreshWorkbenchRows();
+              },
+              {
+                errorFallback: '重试失败',
+                onError: (errorMessage) => message.error(errorMessage),
+                clearLoading: () => setRerunningId(null),
+              },
+            ).catch(() => undefined);
+          }}
+        >
           重试
         </Button>
       );
@@ -920,11 +997,7 @@ const ProductList: React.FC = () => {
       width: 140,
       render: (_: unknown, row: ProductRow) => {
         if (!isTikTokSource) return workflowStatusTag(row.product, row.workStatus);
-        if (row.product.status === 'failed') return <Tag color="error">失败</Tag>;
-        if (row.product.catalog_exported_at || row.product.catalog_export_task_id) return <Tag color="green">已导出</Tag>;
-        if (row.product.status === 'completed') return <Tag color="success">待导出</Tag>;
-        if (row.product.status === 'created') return <Tag color="warning">待补资料</Tag>;
-        return <Tag color="processing">{row.product.status || '处理中'}</Tag>;
+        return tiktokChannelStatusTag(row.product);
       },
     },
     {
@@ -970,7 +1043,7 @@ const ProductList: React.FC = () => {
           <Space size="small">
             {primaryAction}
             {canManualAdjustImages ? (
-              <Button size="small" icon={<EditOutlined />} onClick={() => openReviewPage('/products/image-review', product.id)}>
+              <Button size="small" icon={<EditOutlined />} onClick={() => void runProductWorkflowAction(product, 'manual_adjust_images')}>
                 手动调图
               </Button>
             ) : null}
@@ -979,7 +1052,7 @@ const ProductList: React.FC = () => {
                 size="small"
                 icon={<RedoOutlined />}
                 loading={rerunningId === product.id}
-                onClick={() => retryCompetitorSearch(product.id)}
+                onClick={() => void runProductWorkflowAction(product, 'restart_competitor_search')}
               >
                 重搜竞品
               </Button>
@@ -993,7 +1066,7 @@ const ProductList: React.FC = () => {
                 cancelText="取消"
                 onConfirm={() => suspendProductTask(product.id)}
               >
-                <Button size="small" icon={<PauseOutlined />}>挂起</Button>
+                <Button size="small" icon={<PauseOutlined />} loading={rerunningId === product.id}>挂起</Button>
               </Popconfirm>
             ) : null}
             {canRestartProduct && (
@@ -1002,10 +1075,24 @@ const ProductList: React.FC = () => {
                 description="会保留已使用图片，清空旧候选竞品、已选竞品和后续生成结果；有主图时会重新搜索候选竞品。"
                 okText="重新开始"
                 cancelText="取消"
-                onConfirm={async () => { await restartPipeline(product.id); await refreshWorkbenchRows(); }}
+                onConfirm={async () => {
+                  setRerunningId(product.id);
+                  await runMutationWithUX(
+                    'restartPipeline|frontend/src/pages/ProductList.tsx|render',
+                    async (metadata) => {
+                      await restartPipeline(product.id, metadata);
+                      await refreshWorkbenchRows();
+                    },
+                    {
+                      errorFallback: '重新开始失败',
+                      onError: (errorMessage) => message.error(errorMessage),
+                      clearLoading: () => setRerunningId(null),
+                    },
+                  ).catch(() => undefined);
+                }}
               >
                 <Tooltip title="重新开始流程">
-                  <Button size="small" icon={<RedoOutlined />} />
+                  <Button size="small" icon={<RedoOutlined />} loading={rerunningId === product.id} />
                 </Tooltip>
               </Popconfirm>
             )}
@@ -1028,18 +1115,27 @@ const ProductList: React.FC = () => {
     const overviewCounts = overview as unknown as Partial<Record<WorkStatus, number>>;
     return Number(overviewCounts[status] ?? pageStatusCounts(status));
   };
+  const channelStatusCount = (status: TikTokChannelStatus) => (
+    Number(overview?.channel_status_counts?.[status] ?? products.filter((product) => product.channel_status === status).length)
+  );
   const activeFilterCount = [
     itemId,
     isTikTokSource ? null : competitorAsin,
     isTikTokSource ? null : upc,
     skuCode,
-    statusFilter,
-    generationStatusFilter !== 'all' ? generationStatusFilter : null,
+    isTikTokSource ? null : statusFilter,
+    isTikTokSource
+      ? channelStatusFilter !== 'all' ? channelStatusFilter : null
+      : generationStatusFilter !== 'all' ? generationStatusFilter : null,
     dateRange,
   ].filter(Boolean).length;
-  const tableSummary = generationStatusFilter === 'all'
-    ? `表格当前筛选 ${total} 条`
-    : `${WORK_STATUS_META[generationStatusFilter].label}：当前筛选 ${total} 条`;
+  const tableSummary = isTikTokSource
+    ? channelStatusFilter === 'all'
+      ? `表格当前筛选 ${total} 条`
+      : `${TIKTOK_CHANNEL_STATUS_META[channelStatusFilter].label}：当前筛选 ${total} 条`
+    : generationStatusFilter === 'all'
+      ? `表格当前筛选 ${total} 条`
+      : `${WORK_STATUS_META[generationStatusFilter].label}：当前筛选 ${total} 条`;
 
   return (
     <div className="product-workbench">
@@ -1063,6 +1159,8 @@ const ProductList: React.FC = () => {
               window.localStorage.setItem(PRODUCT_DATA_SOURCE_KEY, String(value));
               setPage(1);
               setGenerationStatusFilter('all');
+              setChannelStatusFilter('all');
+              setStatusFilter(undefined);
               if ((nextSource?.sales_channel || 'amazon').toLowerCase() === 'tiktok') {
                 setCompetitorAsin('');
                 setCompetitorAsinInput('');
@@ -1084,7 +1182,26 @@ const ProductList: React.FC = () => {
           <Button icon={<ReloadOutlined />} onClick={refreshWorkbenchRows}>刷新</Button>
         </Space>
 
-        {!isTikTokSource && (
+        {isTikTokSource ? (
+          <div className="product-metric-grid">
+            {TIKTOK_CHANNEL_STATUSES.map((status) => {
+              const meta = TIKTOK_CHANNEL_STATUS_META[status];
+              return (
+                <button
+                  key={status}
+                  type="button"
+                  data-testid={`tiktok-channel-metric-${status}`}
+                  className={`product-metric ${channelStatusFilter === status ? 'is-active' : ''}`}
+                  onClick={() => handleChannelStatusClick(status)}
+                >
+                  <span className="product-metric-label">{meta.shortLabel}</span>
+                  <strong>{channelStatusCount(status)}</strong>
+                  <span className="product-metric-action">筛选查看</span>
+                </button>
+              );
+            })}
+          </div>
+        ) : (
           <div className="product-metric-grid">
             {PRIMARY_WORK_STATUS.map((status) => {
               const meta = WORK_STATUS_META[status];
@@ -1164,25 +1281,40 @@ const ProductList: React.FC = () => {
           </>
         )}
         <RangePicker value={dateRangeInput} onChange={(value) => setDateRangeInput(value as [dayjs.Dayjs, dayjs.Dayjs] | null)} />
-        <Select
-          allowClear
-          placeholder="处理状态"
-          style={{ width: 160 }}
-          value={statusFilter}
-          onChange={(value) => {
-            setStatusFilter(value);
-            setGenerationStatusFilter('all');
-            setPage(1);
-          }}
-          options={[
-            { value: 'created', label: '待处理' },
-            { value: 'competitor_searching', label: '搜索候选竞品中' },
-            { value: 'paused', label: '已挂起' },
-            { value: 'pending_review', label: '待人工确认' },
-            { value: 'completed', label: '已生成 Listing' },
-            { value: 'failed', label: '失败' },
-          ]}
-        />
+        {isTikTokSource ? (
+          <Select
+            allowClear
+            data-testid="tiktok-channel-filter"
+            placeholder="TikTok 渠道状态"
+            style={{ width: 220 }}
+            value={channelStatusFilter === 'all' ? undefined : channelStatusFilter}
+            onChange={(value) => handleChannelStatusClick(value || 'all')}
+            options={TIKTOK_CHANNEL_STATUSES.map((value) => ({
+              value,
+              label: TIKTOK_CHANNEL_STATUS_META[value].label,
+            }))}
+          />
+        ) : (
+          <Select
+            allowClear
+            placeholder="处理状态"
+            style={{ width: 160 }}
+            value={statusFilter}
+            onChange={(value) => {
+              setStatusFilter(value);
+              setGenerationStatusFilter('all');
+              setPage(1);
+            }}
+            options={[
+              { value: 'created', label: '待处理' },
+              { value: 'competitor_searching', label: '搜索候选竞品中' },
+              { value: 'paused', label: '已挂起' },
+              { value: 'pending_review', label: '待人工确认' },
+              { value: 'completed', label: '已生成 Listing' },
+              { value: 'failed', label: '失败' },
+            ]}
+          />
+        )}
         <Button type="primary" onClick={handleSearch}>查询</Button>
         <Button disabled={!activeFilterCount} onClick={resetFilters}>清空</Button>
       </section>

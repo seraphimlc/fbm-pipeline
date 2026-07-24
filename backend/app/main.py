@@ -1,4 +1,6 @@
 import os
+import hmac
+import ipaddress
 import logging
 from pathlib import Path
 
@@ -40,11 +42,37 @@ logging.basicConfig(
 logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
 SAFE_HTTP_METHODS = {"GET", "HEAD", "OPTIONS"}
-LOCAL_CLIENT_HOSTS = {"127.0.0.1", "::1", "localhost"}
+REMOTE_PROXY_HEADER = "X-FBM-Proxy-Client"
+REMOTE_PROXY_VALUE = "remote"
+REMOTE_READ_ONLY_RESPONSE = {
+    "code": "REMOTE_DEV_READ_ONLY",
+    "detail": "当前是远程只读访问",
+}
+
+
+def _normalize_client_host(value: str | None) -> str:
+    host = str(value or "").strip().lower()
+    if host.startswith("["):
+        closing_bracket = host.find("]")
+        if closing_bracket > 0:
+            host = host[1:closing_bracket]
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        return str(address.ipv4_mapped)
+    return str(address)
 
 
 def _is_local_client(client) -> bool:
-    return bool(client and getattr(client, "host", None) in LOCAL_CLIENT_HOSTS)
+    host = _normalize_client_host(getattr(client, "host", None) if client else None)
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _has_valid_dev_token(request: Request, configured_token: str | None) -> bool:
@@ -52,11 +80,15 @@ def _has_valid_dev_token(request: Request, configured_token: str | None) -> bool
     if not token:
         return False
     header_token = request.headers.get("X-FBM-Dev-Token", "").strip()
-    if header_token and header_token == token:
-        return True
+    if header_token:
+        return hmac.compare_digest(header_token.encode("utf-8"), token.encode("utf-8"))
     authorization = request.headers.get("Authorization", "").strip()
     prefix = "Bearer "
-    return authorization.startswith(prefix) and authorization[len(prefix):].strip() == token
+    bearer_token = authorization[len(prefix):].strip() if authorization.startswith(prefix) else ""
+    return bool(bearer_token) and hmac.compare_digest(
+        bearer_token.encode("utf-8"),
+        token.encode("utf-8"),
+    )
 
 
 def _path_is_within_roots(path: Path, roots: list[Path]) -> bool:
@@ -139,10 +171,14 @@ app.include_router(offline_tasks_router)
 @app.middleware("http")
 async def mutating_api_guard(request: Request, call_next):
     if request.url.path.startswith("/api") and request.method.upper() not in SAFE_HTTP_METHODS:
-        if not _is_local_client(request.client) and not _has_valid_dev_token(request, settings.API_DEV_TOKEN):
+        marked_remote = request.headers.get(REMOTE_PROXY_HEADER, "").strip().lower() == REMOTE_PROXY_VALUE
+        if (
+            (not _is_local_client(request.client) or marked_remote)
+            and not _has_valid_dev_token(request, settings.API_DEV_TOKEN)
+        ):
             return JSONResponse(
                 status_code=403,
-                content={"detail": "Mutating API requests require local access or a valid dev token."},
+                content=REMOTE_READ_ONLY_RESPONSE,
             )
     return await call_next(request)
 

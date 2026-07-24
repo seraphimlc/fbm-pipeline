@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Button, Dropdown, Input, Modal, Progress, Select, Space, Table, Tag, Typography, message } from 'antd';
-import { DownloadOutlined, MoreOutlined, ReloadOutlined, RedoOutlined, ThunderboltOutlined, WarningOutlined } from '@ant-design/icons';
+import { Button, Dropdown, Input, Modal, Progress, Select, Space, Table, Tag, Tooltip, Typography, message } from 'antd';
+import { DownOutlined, DownloadOutlined, MoreOutlined, ReloadOutlined, RedoOutlined, RightOutlined, ThunderboltOutlined, WarningOutlined } from '@ant-design/icons';
 import { useSearchParams } from 'react-router-dom';
 import dayjs from 'dayjs';
 import {
@@ -13,7 +13,8 @@ import {
   retryTaskStep,
   wakeTaskRun,
 } from '../api';
-import type { TaskGroup, TaskRun, TaskRunDetail, TaskStep } from '../api';
+import type { CatalogExportResult, CatalogExportRow, TaskGroup, TaskRun, TaskRunDetail, TaskStep } from '../api';
+import { runMutationWithUX } from '../api/mutationRunner.ts';
 
 const { Title, Text } = Typography;
 
@@ -157,7 +158,52 @@ const latestResultLabel = (value?: string | null) => {
   return <Tag color={item.color}>{item.label}</Tag>;
 };
 
+const catalogResultStatusTag = (result: CatalogExportResult, runId: number) => {
+  const map: Record<string, { color: string; label: string }> = {
+    done: { color: 'success', label: '已完成' },
+    partial_failed: { color: 'warning', label: '部分完成' },
+    failed: { color: 'error', label: '失败' },
+  };
+  const item = map[result.status] || { color: 'default', label: result.status || '未知' };
+  return <Tag data-testid={`task-run-catalog-result-status-${runId}`} color={item.color}>结果 {item.label}</Tag>;
+};
+
+const catalogRowStatusTag = (status?: string | null) => {
+  const map: Record<string, { color: string; label: string }> = {
+    exported: { color: 'success', label: '已导出' },
+    skipped: { color: 'warning', label: '已跳过' },
+    failed: { color: 'error', label: '失败' },
+  };
+  const item = map[status || ''] || { color: 'default', label: status || '未知' };
+  return <Tag color={item.color}>{item.label}</Tag>;
+};
+
+const catalogRowKey = (runId: number, row: CatalogExportRow) => `${runId}-${row.row_ordinal}`;
+
 const runSummary = (record: TaskRun) => {
+  if (record.task_type === 'catalog_export') {
+    const result = record.catalog_export_result;
+    if (!result?.status) {
+      return <Text data-testid={`task-run-catalog-summary-${record.id}`} type="secondary">暂无结构化导出结果</Text>;
+    }
+    const successCount = result.success_count ?? result.exported_count ?? 0;
+    return (
+      <Space data-testid={`task-run-catalog-summary-${record.id}`} size={4} wrap>
+        {catalogResultStatusTag(result, record.id)}
+        <Tag data-testid={`task-run-catalog-count-requested-${record.id}`} color="blue">请求 {result.requested_count ?? 0}</Tag>
+        <Tag data-testid={`task-run-catalog-count-success-${record.id}`} color="success">成功 {successCount}</Tag>
+        <Tag data-testid={`task-run-catalog-count-skipped-${record.id}`} color="warning">跳过 {result.skipped_count ?? 0}</Tag>
+        <Tag data-testid={`task-run-catalog-count-failed-${record.id}`} color="error">失败 {result.failed_count ?? 0}</Tag>
+        <Tag data-testid={`task-run-catalog-count-report-${record.id}`}>报告 {result.report_count ?? result.rows?.length ?? 0}</Tag>
+        {result.filename ? <Tag color="processing">{result.filename}</Tag> : null}
+        {result.reason ? (
+          <Tooltip title={result.reason}>
+            <Text type="danger" ellipsis style={{ maxWidth: 320 }}>{result.reason}</Text>
+          </Tooltip>
+        ) : null}
+      </Space>
+    );
+  }
   if (record.display_reason || record.error_summary) {
     return (
       <Text title={record.error_summary || record.display_reason || ''} ellipsis style={{ maxWidth: 400, display: 'block' }}>
@@ -266,58 +312,74 @@ const TaskRunCenter: React.FC = () => {
 
   const retryRun = async (runId: number) => {
     setRetryingId(runId);
-    try {
-      const { data } = await retryFailedTaskRunSteps(runId);
-      setDetails((prev) => ({ ...prev, [runId]: data }));
-      message.success(`已提交失败步骤重跑：#${runId}`);
-      await fetchRuns();
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '重试失败步骤失败');
-    } finally {
-      setRetryingId(null);
-    }
+    await runMutationWithUX(
+      'retryFailedTaskRunSteps|frontend/src/pages/TaskRunCenter.tsx|retryRun',
+      async (metadata) => {
+        const { data } = await retryFailedTaskRunSteps(runId, metadata);
+        setDetails((prev) => ({ ...prev, [runId]: data }));
+        message.success(`已提交失败步骤重跑：#${runId}`);
+        await fetchRuns();
+      },
+      {
+        errorFallback: '重试失败步骤失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setRetryingId(null),
+      },
+    ).catch(() => undefined);
   };
 
   const wakeRun = async (runId: number) => {
     setActingRunId(runId);
-    try {
-      const { data } = await wakeTaskRun(runId);
-      setDetails((prev) => ({ ...prev, [runId]: data }));
-      message.success(`已唤醒执行器：#${runId}`);
-      await fetchRuns(true);
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '唤醒执行器失败');
-    } finally {
-      setActingRunId(null);
-    }
+    await runMutationWithUX(
+      'wakeTaskRun|frontend/src/pages/TaskRunCenter.tsx|wakeRun',
+      async (metadata) => {
+        const { data } = await wakeTaskRun(runId, metadata);
+        setDetails((prev) => ({ ...prev, [runId]: data }));
+        message.success(`已唤醒执行器：#${runId}`);
+        await fetchRuns(true);
+      },
+      {
+        errorFallback: '唤醒执行器失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setActingRunId(null),
+      },
+    ).catch(() => undefined);
   };
 
   const cancelRun = async (runId: number) => {
     setActingRunId(runId);
-    try {
-      const { data } = await cancelTaskRun(runId, '用户取消');
-      setDetails((prev) => ({ ...prev, [runId]: data }));
-      message.success(`已提交取消：#${runId}`);
-      await fetchRuns(true);
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '取消任务失败');
-    } finally {
-      setActingRunId(null);
-    }
+    await runMutationWithUX(
+      'cancelTaskRun|frontend/src/pages/TaskRunCenter.tsx|cancelRun',
+      async (metadata) => {
+        const { data } = await cancelTaskRun(runId, '用户取消', metadata);
+        setDetails((prev) => ({ ...prev, [runId]: data }));
+        message.success(`已提交取消：#${runId}`);
+        await fetchRuns(true);
+      },
+      {
+        errorFallback: '取消任务失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setActingRunId(null),
+      },
+    ).catch(() => undefined);
   };
 
   const markInterrupted = async (runId: number) => {
     setActingRunId(runId);
-    try {
-      const { data } = await markTaskRunInterrupted(runId, '人工标记中断');
-      setDetails((prev) => ({ ...prev, [runId]: data }));
-      message.success(`已标记中断：#${runId}`);
-      await fetchRuns(true);
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '标记中断失败');
-    } finally {
-      setActingRunId(null);
-    }
+    await runMutationWithUX(
+      'markTaskRunInterrupted|frontend/src/pages/TaskRunCenter.tsx|markInterrupted',
+      async (metadata) => {
+        const { data } = await markTaskRunInterrupted(runId, '人工标记中断', metadata);
+        setDetails((prev) => ({ ...prev, [runId]: data }));
+        message.success(`已标记中断：#${runId}`);
+        await fetchRuns(true);
+      },
+      {
+        errorFallback: '标记中断失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setActingRunId(null),
+      },
+    ).catch(() => undefined);
   };
 
   const goCurrentRun = async (run: TaskRun) => {
@@ -331,16 +393,20 @@ const TaskRunCenter: React.FC = () => {
 
   const retryOneStep = async (step: TaskStep) => {
     setRetryingId(step.id);
-    try {
-      await retryTaskStep(step.id);
-      message.success(`已提交 step #${step.id} 重跑`);
-      await fetchRuns(true);
-      await fetchDetail(step.task_run_id);
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '重跑 step 失败');
-    } finally {
-      setRetryingId(null);
-    }
+    await runMutationWithUX(
+      'retryTaskStep|frontend/src/pages/TaskRunCenter.tsx|retryOneStep',
+      async (metadata) => {
+        await retryTaskStep(step.id, metadata);
+        message.success(`已提交 step #${step.id} 重跑`);
+        await fetchRuns(true);
+        await fetchDetail(step.task_run_id);
+      },
+      {
+        errorFallback: '重跑 step 失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setRetryingId(null),
+      },
+    ).catch(() => undefined);
   };
 
   const showDetail = async (runId: number) => {
@@ -391,8 +457,8 @@ const TaskRunCenter: React.FC = () => {
     setDownloadingRunId(run.id);
     try {
       const response = await downloadTaskRunResult(run.id);
-      const summary: any = parseJson(run.summary_json);
-      saveBlob(response.data, extractFilename(response.headers['content-disposition'], summary.filename || `catalog_export_run_${run.id}.zip`));
+      const fallback = run.catalog_export_result?.filename || `catalog_export_run_${run.id}.zip`;
+      saveBlob(response.data, extractFilename(response.headers['content-disposition'], fallback));
     } catch (error: any) {
       message.error(error?.response?.data?.detail || '下载导出文件失败');
     } finally {
@@ -419,6 +485,59 @@ const TaskRunCenter: React.FC = () => {
             { title: '子任务', dataIndex: 'latest_result', width: 140, render: latestResultLabel },
             { title: '步骤', dataIndex: 'latest_step', width: 90, render: (value: number | null, row: any) => value ?? row.current_step ?? '-' },
             { title: '原因', dataIndex: 'latest_reason', ellipsis: true, render: (value: string | null, row: any) => value || row.reason || '-' },
+          ]}
+        />
+      </div>
+    );
+  };
+
+  const catalogExportRowsTable = (record: TaskRun) => {
+    if (record.task_type !== 'catalog_export') return null;
+    const rows = Array.isArray(record.catalog_export_result?.rows) ? record.catalog_export_result.rows : [];
+    return (
+      <div data-testid={`task-run-catalog-rows-${record.id}`} style={{ marginBottom: 12 }}>
+        <Text strong>导出逐商品结果</Text>
+        <Table<CatalogExportRow>
+          rowKey={(row) => catalogRowKey(record.id, row)}
+          size="small"
+          pagination={rows.length > 8 ? { pageSize: 8, size: 'small' } : false}
+          dataSource={rows}
+          locale={{ emptyText: '暂无逐商品结果' }}
+          columns={[
+            {
+              title: '商品资料ID / 商品ID',
+              width: 180,
+              render: (_: unknown, row) => (
+                <Space direction="vertical" size={0}>
+                  <Text>{row.catalog_id != null ? `资料 #${row.catalog_id}` : '资料 -'}</Text>
+                  <Text type="secondary">{row.product_id != null ? `商品 #${row.product_id}` : '商品 -'}</Text>
+                </Space>
+              ),
+            },
+            { title: '商品Code', dataIndex: 'item_code', width: 150, render: (value) => value || '-' },
+            { title: '类目', dataIndex: 'category', width: 220, ellipsis: true, render: (value) => value || '-' },
+            { title: 'Seller SKU', dataIndex: 'seller_sku', width: 170, render: (value) => value || '-' },
+            { title: '状态', dataIndex: 'status', width: 110, render: catalogRowStatusTag },
+            {
+              title: '原因',
+              dataIndex: 'reason',
+              ellipsis: true,
+              render: (value, row) => {
+                const reason = value || '-';
+                return (
+                  <Tooltip title={reason}>
+                    <Text
+                      data-testid={`task-run-catalog-row-reason-${catalogRowKey(record.id, row)}`}
+                      title={reason}
+                      ellipsis
+                      style={{ maxWidth: 360 }}
+                    >
+                      {reason}
+                    </Text>
+                  </Tooltip>
+                );
+              },
+            },
           ]}
         />
       </div>
@@ -586,7 +705,13 @@ const TaskRunCenter: React.FC = () => {
               return (
                 <Space size={4}>
                   {actions.includes('download_result') ? (
-                    <Button size="small" icon={<DownloadOutlined />} loading={downloadingRunId === record.id} onClick={() => downloadRun(record)}>
+                    <Button
+                      data-testid={`task-run-download-${record.id}`}
+                      size="small"
+                      icon={<DownloadOutlined />}
+                      loading={downloadingRunId === record.id}
+                      onClick={() => downloadRun(record)}
+                    >
                       下载
                     </Button>
                   ) : null}
@@ -621,6 +746,7 @@ const TaskRunCenter: React.FC = () => {
             const detail = details[record.id];
             return (
               <>
+                {catalogExportRowsTable(detail || record)}
                 {productBulkRowsTable(detail || record)}
                 <Table
                   rowKey="id"
@@ -700,6 +826,16 @@ const TaskRunCenter: React.FC = () => {
             setExpandedRowKeys((prev) => expanded ? [...new Set([...prev, record.id])] : prev.filter((key) => key !== record.id));
             if (expanded && !details[record.id]) fetchDetail(record.id);
           },
+          expandIcon: ({ expanded, onExpand, record }) => (
+            <Button
+              data-testid={`task-run-expand-${record.id}`}
+              type="text"
+              size="small"
+              aria-label={expanded ? `收起任务 #${record.id}` : `展开任务 #${record.id}`}
+              icon={expanded ? <DownOutlined /> : <RightOutlined />}
+              onClick={(event) => onExpand(record, event)}
+            />
+          ),
         }}
       />
     </div>

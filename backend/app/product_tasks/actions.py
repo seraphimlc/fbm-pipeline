@@ -683,6 +683,7 @@ async def _project_competitor_candidate_capture_failed(
     *,
     product_id: int,
     message: str,
+    workflow_error: str | None = None,
 ) -> None:
     try:
         product = await _load_product(db, product_id)
@@ -698,7 +699,7 @@ async def _project_competitor_candidate_capture_failed(
         product,
         node=WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES,
         status=WORKFLOW_STATUS_FAILED,
-        error=message,
+        error=workflow_error or message,
         now=now,
     )
     product.updated_at = now
@@ -711,6 +712,7 @@ async def _project_auto_competitor_selection_failed(
     *,
     product_id: int,
     message: str,
+    workflow_error: str | None = None,
 ) -> None:
     try:
         product = await _load_product(db, product_id)
@@ -725,7 +727,7 @@ async def _project_auto_competitor_selection_failed(
         product,
         node=WORKFLOW_NODE_AUTO_SELECT_COMPETITOR,
         status=WORKFLOW_STATUS_FAILED,
-        error=message,
+        error=workflow_error or message,
         now=now,
     )
     product.updated_at = now
@@ -1533,7 +1535,12 @@ class ProductCompetitorVisualMatchAction:
         except Exception as exc:
             await db.rollback()
             message = f"视觉初筛已完成，但候选详情抓取任务创建失败: {type(exc).__name__}: {exc}"
-            await _project_competitor_candidate_capture_failed(db, product_id=product_id, message=message)
+            await _project_competitor_candidate_capture_failed(
+                db,
+                product_id=product_id,
+                message=message,
+                workflow_error=json_dumps({"code": "task_run_creation_failed", "message": message}),
+            )
             result["status"] = "downstream_failed"
             result["downstream_error"] = message
             return
@@ -2143,7 +2150,12 @@ class ProductCompetitorCandidateCaptureAction:
         except Exception as exc:
             await db.rollback()
             message = f"候选详情抓取已完成，但自动选竞品任务创建失败: {type(exc).__name__}: {exc}"
-            await _project_auto_competitor_selection_failed(db, product_id=product_id, message=message)
+            await _project_auto_competitor_selection_failed(
+                db,
+                product_id=product_id,
+                message=message,
+                workflow_error=json_dumps({"code": "task_run_creation_failed", "message": message}),
+            )
             result["status"] = "downstream_failed"
             result["downstream_error"] = message
             return

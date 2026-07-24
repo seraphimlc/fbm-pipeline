@@ -3,6 +3,7 @@ import { Button, Card, Col, Form, Input, Row, Select, Space, Table, Tag, Typogra
 import { PlusOutlined, ReloadOutlined, SearchOutlined } from '@ant-design/icons';
 import { importUpcPool, listUpcPool } from '../api';
 import type { UpcPoolItem, UpcPoolSummary } from '../api';
+import { runMutationWithUX } from '../api/mutationRunner.ts';
 
 const { Title, Text } = Typography;
 
@@ -44,8 +45,10 @@ const UpcPoolPage: React.FC = () => {
 
   const handleAdd = async (values: { text: string }) => {
     setSaving(true);
-    try {
-      const { data } = await importUpcPool(values.text);
+    await runMutationWithUX(
+      'importUpcPool|frontend/src/pages/UpcPoolPage.tsx|handleAdd',
+      async (metadata) => {
+      const { data } = await importUpcPool(values.text, metadata);
       setSummary(data.summary);
       form.resetFields();
       message.success(`已加入 ${data.added} 个UPC${data.duplicated ? `，跳过重复 ${data.duplicated} 个` : ''}`);
@@ -54,11 +57,13 @@ const UpcPoolPage: React.FC = () => {
       }
       setPage(1);
       fetchItems();
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || 'UPC加入失败');
-    } finally {
-      setSaving(false);
-    }
+      },
+      {
+        errorFallback: 'UPC加入失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setSaving(false),
+      },
+    ).catch(() => undefined);
   };
 
   const columns = [

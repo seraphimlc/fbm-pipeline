@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import ast
+import asyncio
+import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -20,6 +23,118 @@ from app.pipeline.search_terms import SEARCH_TERMS_MAX_KEYWORDS, normalize_searc
 def assert_true(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
+
+
+def test_r1_mysql_wrapper_contract() -> None:
+    wrapper = ROOT / "scripts" / "testing" / "run_with_r1_mysql.py"
+    focused_test = ROOT / "scripts" / "testing" / "test_run_with_r1_mysql.py"
+    project_index = (ROOT / "docs" / "project-index.md").read_text(encoding="utf-8")
+    technical_plan = (
+        ROOT / "docs" / "superpowers" / "specs" / "2026-07-22-stability-repair-r1-technical-plan.md"
+    ).read_text(encoding="utf-8")
+    assert_true(wrapper.is_file(), "R1 必须提供完整子进程树 MySQL 隔离 wrapper")
+    assert_true(focused_test.is_file(), "R1 MySQL wrapper 必须有 fail-closed focused test")
+    wrapper_text = wrapper.read_text(encoding="utf-8")
+    focused_text = focused_test.read_text(encoding="utf-8")
+    assert_true(
+        "isolated_r1_mysql(ROOT)" in wrapper_text
+        and "_validated_admin_url()" in wrapper_text
+        and "os.execve(" in wrapper_text
+        and '"PATH": f"{backend_venv_bin}' in wrapper_text
+        and '"VIRTUAL_ENV": str(backend_venv)' in wrapper_text
+        and "asyncio.create_subprocess_exec(" in wrapper_text
+        and "start_new_session=True" in wrapper_text
+        and "os.killpg(process.pid, signal.SIGTERM)" in wrapper_text
+        and "os.killpg(process.pid, signal.SIGKILL)" in wrapper_text
+        and "shell=True" not in wrapper_text
+        and "PROJECT_RULES_MARKER_ENV" in wrapper_text
+        and 'command == ["make", "test-project-rules"]' in wrapper_text
+        and 'TRUSTED_MAKE_CANDIDATES = (Path("/usr/bin/make"), Path("/bin/make"))' in wrapper_text
+        and "candidate.resolve(strict=True)" in wrapper_text
+        and "os.access(executable, os.X_OK)" in wrapper_text
+        and '"-C"' in wrapper_text
+        and '"-f"' in wrapper_text
+        and "child_command = _trusted_project_rules_command() if trusted_project_rules else command" in wrapper_text
+        and "child_env.pop(marker_env_name, None)" in wrapper_text
+        and 'PROJECT_RULES_COMMAND_ID = "make:test-project-rules:v1"' in wrapper_text
+        and "secrets.token_hex(32)" in wrapper_text
+        and 'f"project-rules-db-marker-{marker_nonce}.json"' in wrapper_text
+        and 'marker.get("nonce") == nonce' in wrapper_text
+        and 'marker.get("command_id") == command_id' in wrapper_text
+        and "except FileNotFoundError:" in wrapper_text
+        and "return 127" in wrapper_text
+        and "R1_MYSQL_PROJECT_RULES_DB_MARKER_VERIFIED" in wrapper_text,
+        "R1 wrapper 必须先隔离数据库/临时目录，再用 exact canonical argv + nonce/DB/command marker 验证 project-rules，并只终止自身子进程树",
+    )
+    for proof in (
+        "missing_env_result",
+        "missing_command_result",
+        "child_failure.returncode == 7",
+        "unrelated_script_argv.returncode == 0",
+        '"R1_MYSQL_PROJECT_RULES_DB_MARKER_VERIFIED" not in unrelated_script_argv.stdout',
+        'for invalid_mode in ("wrong_nonce", "wrong_database", "wrong_command")',
+        "absolute_fake.returncode == 0",
+        '"R1_MYSQL_PROJECT_RULES_DB_MARKER_VERIFIED" not in absolute_fake.stdout',
+        "absolute_marker_env",
+        'path_env["PATH"]',
+        'trusted_literal_make = _run_wrapper(["--", "make", "test-project-rules"]',
+        '"R1_MYSQL_PROJECT_RULES_DB_MARKER_VERIFIED" in trusted_literal_make.stdout',
+        "assert not path_sentinel.exists()",
+        "nonexistent.returncode == 127",
+        "R1_WRAPPER_CHILD_DB_OK",
+        "_assert_resources_cleaned",
+    ):
+        assert_true(proof in focused_text, f"R1 wrapper focused test 缺少证明: {proof}")
+    assert_true(
+        "test_stability_repair_r1_workflow_actions.py --with-mysql" in project_index
+        and "run_with_r1_mysql.py -- make test-project-rules" in project_index
+        and "test_stability_repair_r1_workflow_actions.py --with-mysql" in technical_plan,
+        "项目索引/技术计划中的 workflow/project-rules DB 命令必须显式进入隔离 MySQL 段",
+    )
+
+    marker_value = str(os.environ.get("R1_PROJECT_RULES_DB_MARKER") or "").strip()
+    if not marker_value:
+        return
+    from sqlalchemy import text
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    assert_true(os.environ.get("R1_MYSQL_WRAPPER_ACTIVE") == "1", "DB marker 只能由 R1 wrapper 激活")
+    database_url = str(os.environ.get("DATABASE_URL") or "").strip()
+    database_name = str(os.environ.get("R1_MYSQL_WRAPPER_DATABASE") or "").strip()
+    marker_nonce = str(os.environ.get("R1_PROJECT_RULES_DB_MARKER_NONCE") or "").strip()
+    command_id = str(os.environ.get("R1_PROJECT_RULES_COMMAND_ID") or "").strip()
+    assert_true(database_name.startswith("fbm_pipeline_r1_"), "wrapper database 必须使用安全 R1 前缀")
+    assert_true(len(marker_nonce) == 64, "project-rules marker 必须绑定 wrapper 一次性 nonce")
+    assert_true(command_id == "make:test-project-rules:v1", "project-rules marker 必须绑定规范命令身份")
+    assert_true(make_url(database_url).database == database_name, "child DATABASE_URL 必须指向 wrapper database")
+
+    async def verify_database() -> str | None:
+        engine = create_async_engine(database_url, pool_pre_ping=True)
+        try:
+            async with engine.connect() as connection:
+                return await connection.scalar(text("SELECT DATABASE()"))
+        finally:
+            await engine.dispose()
+
+    actual_database = asyncio.run(verify_database())
+    assert_true(actual_database == database_name, "project rules 必须真实连接 wrapper 创建的隔离 database")
+    marker_path = Path(marker_value).resolve()
+    assert_true(
+        marker_path.parent == Path(os.environ["DATA_DIR"]).resolve(),
+        "project rules DB marker 必须写入 wrapper 临时 DATA_DIR",
+    )
+    marker_path.write_text(
+        json.dumps({
+            "wrapper_active": True,
+            "database_name": database_name,
+            "database_check": True,
+            "nonce": marker_nonce,
+            "command_id": command_id,
+        }, sort_keys=True),
+        encoding="utf-8",
+    )
+    print(f"R1_MYSQL_PROJECT_RULES_DB_SEGMENT_OK: {database_name}")
 
 
 def test_category_conflict_only_overrides_conflict() -> None:
@@ -250,6 +365,8 @@ from app.models.status import (
     COMPLETED,
     FAILED,
     WORKFLOW_NODE_AUTO_SELECT_IMAGES,
+    WORKFLOW_NODE_AUTO_SELECT_COMPETITOR,
+    WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES,
     WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
     WORKFLOW_NODE_FLOW_DONE,
     WORKFLOW_NODE_IMAGE_ANALYSIS,
@@ -363,7 +480,6 @@ assert "等待视觉初筛任务" in visual_pending["action_reason"], visual_pen
 
 for node, action in [
     (WORKFLOW_NODE_AUTO_SELECT_IMAGES, "retry_auto_image_selection"),
-    (WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL, "retry_competitor_capture"),
     (WORKFLOW_NODE_IMAGE_ANALYSIS, "retry_image_analysis"),
     (WORKFLOW_NODE_LISTING_GENERATION, "retry_listing_generation"),
 ]:
@@ -372,6 +488,18 @@ for node, action in [
     assert view["primary_action"] == action, view
     assert action in view["allowed_actions"], view
     assert view["action_reason"] == "boom", view
+
+for node, expected_action, expected_correlation in [
+    (WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES, "open_task_center", "product:456:competitor_candidate_capture"),
+    (WORKFLOW_NODE_AUTO_SELECT_COMPETITOR, "open_task_center", "product:456:auto_competitor_selection"),
+    (WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL, "open_detail", None),
+]:
+    item = SimpleNamespace(id=456, workflow_node=node, workflow_status=WORKFLOW_STATUS_FAILED, workflow_error="boom")
+    view = build_product_workflow(item)
+    assert view["primary_action"] == expected_action, view
+    assert view["related_correlation_key"] == expected_correlation, view
+    assert "retry_competitor_capture" not in view["allowed_actions"], view
+    assert "restart_competitor_search" not in view["allowed_actions"], view
 
 legacy_failed_search = SimpleNamespace(
     id=457,
@@ -590,27 +718,48 @@ def test_product_overview_handles_uninitialized_workflow_bucket() -> None:
 
 def test_product_detail_uses_workflow_as_primary_display_source() -> None:
     product_detail_text = (ROOT / "frontend" / "src" / "pages" / "ProductDetail.tsx").read_text(encoding="utf-8")
+    unknown_action_component_text = (
+        ROOT / "frontend" / "src" / "workflow" / "ProductWorkflowUnknownAction.ts"
+    ).read_text(encoding="utf-8")
+    workflow_action_registry_text = (
+        ROOT / "frontend" / "src" / "workflow" / "productWorkflowActionRegistry.ts"
+    ).read_text(encoding="utf-8")
+    workflow_action_manifest = json.loads(
+        (ROOT / "contracts" / "product_workflow_actions.json").read_text(encoding="utf-8")
+    )
     product_flow_index = (ROOT / "docs" / "domain-index" / "product-flow.md").read_text(encoding="utf-8")
     default_tab_section = product_detail_text.split("const defaultProductDetailTab", 1)[1].split("const ProductDetail", 1)[0]
     poll_section = product_detail_text.split("// 自动轮询：任务运行中时每3秒刷新", 1)[1].split(
         "  useEffect(() => {\n    if (!product) return;\n    if (listingImageDraftProductId",
         1,
     )[0]
+    api_import_section = product_detail_text.split("import { getProduct", 1)[1].split("} from '../api';", 1)[0]
     run_action_section = product_detail_text.split("const runWorkflowAction", 1)[1].split("const renderWorkflowActionButton", 1)[0]
     render_action_section = product_detail_text.split("const renderWorkflowActionButton", 1)[1].split("const workflowSecondaryActions", 1)[0]
     top_action_section = product_detail_text.split("<Button icon={<ReloadOutlined />} onClick={fetchDetail}>刷新</Button>", 1)[1].split('<Popconfirm\n            title="确定删除此商品？"', 1)[0]
 
-    labels_match = re.search(
-        r"const WORKFLOW_ACTION_LABELS:[^{]+{(?P<body>.*?)};\nconst EXECUTABLE_WORKFLOW_ACTIONS",
-        product_detail_text,
-        re.S,
-    )
-    assert_true(labels_match is not None, "ProductDetail 必须集中声明前端已接通的 workflow action label")
-    executable_actions = set(re.findall(r"^\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*:", labels_match.group("body"), re.M))
-    handled_actions = set(re.findall(r"action === '([^']+)'", run_action_section))
+    manifest_api_clients = {
+        str(item["client_export"])
+        for item in workflow_action_manifest
+        if item.get("kind") == "api"
+    }
     assert_true(
-        executable_actions <= handled_actions,
-        f"ProductDetail 可执行 workflow action 必须都有真实 handler，缺失: {sorted(executable_actions - handled_actions)}",
+        all(f"{client}:" in workflow_action_registry_text for client in manifest_api_clients)
+        and "PRODUCT_WORKFLOW_API_CLIENT_BINDINGS[definition.client_export]" in workflow_action_registry_text
+        and "EXPECTED_PRODUCT_WORKFLOW_API_CLIENTS" in workflow_action_registry_text,
+        "workflow action registry 必须把 manifest client_export 绑定到真实 API，并独立校验 action/client 契约",
+    )
+    assert_true(
+        "PRODUCT_WORKFLOW_ACTIONS" in workflow_action_registry_text
+        and "dispatchProductWorkflowAction" in product_detail_text
+        and "getProductWorkflowAction" in product_detail_text
+        and "ProductWorkflowActionHandlers" not in product_detail_text
+        and "retryProductAutoImageSelection" not in api_import_section
+        and "retryProductCompetitorSearch" not in api_import_section
+        and "retryProductCompetitorVisualMatch" not in api_import_section
+        and "PRODUCT_DETAIL_WORKFLOW_CALLSITE_IDS[definition.client_export]" in run_action_section
+        and "dispatchProductWorkflowAction(action" in run_action_section,
+        "ProductDetail 必须通过共享 workflow action registry/dispatcher 消费机器契约，不能逐 action 手工绑定 API client",
     )
 
     assert_true(
@@ -655,15 +804,17 @@ def test_product_detail_uses_workflow_as_primary_display_source() -> None:
         "ProductDetail 顶部状态提示必须 workflow 优先；旧 paused/running/error 提示只能作为 legacy fallback",
     )
     assert_true(
-        "EXECUTABLE_WORKFLOW_ACTIONS" in product_detail_text
-        and "const isExecutableWorkflowAction" in product_detail_text
-        and ".filter((action: string) => isExecutableWorkflowAction(action))" in product_detail_text,
-        "ProductDetail 只能渲染当前前端已接通的 workflow action，不能把未知 action 显示成无效按钮",
+        "reportUnknownProductWorkflowAction(action)" in render_action_section
+        and '<ProductWorkflowUnknownAction action={action} surface="product-detail" />' in render_action_section
+        and "productWorkflowActionDiagnostic(action)" in unknown_action_component_text
+        and "当前版本无法执行" in unknown_action_component_text,
+        "ProductDetail 未知 workflow action 必须显式禁用并输出可诊断信息，不能静默消失",
     )
     assert_true(
-        "if (!isExecutableWorkflowAction(action)) return null;" in render_action_section
+        "if (!definition)" in render_action_section
+        and "ProductWorkflowUnknownAction" in render_action_section
         and "{hasWorkflow && renderWorkflowActionButton(workflow?.primary_action, workflow?.primary_action_label, true)}" in top_action_section,
-        "ProductDetail primary workflow action 也必须经过可执行白名单，未知 action 不能显示成假按钮",
+        "ProductDetail primary workflow action 必须经过 registry 检查，未知 action 不能显示成可点击假按钮",
     )
     for legacy_button_guard in (
         "{!hasWorkflow && product.status === 'failed'",
@@ -1314,7 +1465,12 @@ def test_gigab2b_alphanumeric_product_id_url_is_supported() -> None:
     create_page_text = (ROOT / "frontend" / "src" / "pages" / "CreateProduct.tsx").read_text(encoding="utf-8")
     assert_true("请输入竞品ASIN" not in create_page_text, "创建任务不能强制要求竞品 ASIN")
     assert_true("请输入UPC码" not in create_page_text, "创建任务不能强制要求 UPC")
-    assert_true("error?.response?.data?.detail" in create_page_text, "创建失败时必须展示后端具体原因")
+    assert_true(
+        "runMutationWithUX(" in create_page_text
+        and "onError: (errorMessage) => message.error(errorMessage)" in create_page_text
+        and "form.resetFields" not in create_page_text,
+        "创建失败必须通过统一 apiErrorMessage runner 展示具体原因，并保留当前表单",
+    )
 
 
 def test_upc_pool_is_source_of_new_task_upcs() -> None:
@@ -1375,10 +1531,11 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
         "服务启动必须恢复遗留 running/interrupted 离线任务，而不是只依赖内存态",
     )
     assert_true(
-        "def _catalog_export_payload" in offline_api_text
-        and "step.result_json" in offline_api_text
+        "def _catalog_effective_record" in offline_api_text
+        and "load_newest_material_catalog_step_results" in offline_api_text
+        and "_catalog_record_and_step_result" in offline_api_text
         and "path.parent.mkdir(parents=True, exist_ok=True)" in offline_api_text,
-        "导出下载必须能从任务或步骤结果恢复，并在本地缓存缺失时创建目录后从 OSS 恢复",
+        "导出下载必须从任务 summary 或共享 newest-material step result 恢复，并在本地缓存缺失时创建目录后从 OSS 恢复",
     )
     assert_true(
         "listCatalogExportFiles" in catalog_page_text
@@ -1397,7 +1554,7 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
     )
     assert_true(
         "_collect_export_file_category" in products_api_text
-        and "_catalog_export_file_row(task)" in products_api_text
+        and "_catalog_export_file_row(task, offline_projection.records_by_id[task.id])" in products_api_text
         and "task_result = await db.execute(" in products_api_text,
         "导出中心已导出类目筛选也必须从 catalog_export 文件/任务结果聚合，不能沿用已导出商品聚合",
     )
@@ -1629,7 +1786,7 @@ def test_catalog_export_uses_snapshot_and_reuses_orphan_zip() -> None:
     catalog_page_text = (ROOT / "frontend" / "src" / "pages" / "CatalogList.tsx").read_text(encoding="utf-8")
 
     assert_true(
-        "_catalog_export_file_row(task)" in products_api_text
+        "_catalog_export_file_row(task, offline_projection.records_by_id[task.id])" in products_api_text
         and "task_result = await db.execute(" in products_api_text
         and "_collect_export_file_category" in products_api_text,
         "导出中心已导出类目筛选必须从导出文件/任务结果聚合",
@@ -1662,7 +1819,7 @@ def test_export_listing_aplus_new_task_runtime_creation_paths() -> None:
     )
 
 
-def test_amazon_export_binds_upc_after_prechecks_and_rolls_back() -> None:
+def test_amazon_export_binds_upc_after_prechecks_and_keeps_caller_transaction() -> None:
     products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
     step10_text = (ROOT / "backend" / "app" / "pipeline" / "step10_amazon_template.py").read_text(encoding="utf-8")
 
@@ -1671,7 +1828,9 @@ def test_amazon_export_binds_upc_after_prechecks_and_rolls_back() -> None:
         and "await ensure_product_upc(db, product)" in products_text,
         "catalog export 必须保留模板语义字段检查和 UPC 绑定步骤",
     )
-    step10_section = step10_text.split("async def run_amazon_template", 1)[1].split("output_path = Path(template_result", 1)[0]
+    step10_section = step10_text.split("async def run_amazon_template_in_session", 1)[1].split(
+        "async def run_amazon_template(product_id", 1
+    )[0]
     assert_true(
         step10_section.index("if not pd.item_code:") < step10_section.index("await ensure_product_upc(db, product)")
         and step10_section.index("if not pd.listing_title or not pd.listing_bullets:") < step10_section.index("await ensure_product_upc(db, product)")
@@ -1679,9 +1838,49 @@ def test_amazon_export_binds_upc_after_prechecks_and_rolls_back() -> None:
         "Step10 单品模板必须先通过 item_code/Listing/语义字段检查，再绑定 UPC",
     )
     assert_true(
-        "template_result = await asyncio.to_thread(_build_amazon_template_file" in step10_section
-        and "except Exception:\n            await db.rollback()" in step10_section,
-        "Step10 模板文件生成失败必须 rollback 未提交的 UPC 绑定",
+        "template_result = await asyncio.to_thread(" in step10_section
+        and "_build_amazon_template_file" in step10_section
+        and "await db.flush()" in step10_section
+        and "await db.commit()" not in step10_section
+        and "await db.rollback()" not in step10_section
+        and "except Exception" not in step10_section,
+        "Step10 in-session 路径必须只 flush，由调用方统一 commit/rollback，且不得把未知异常伪装为业务失败",
+    )
+    direct_step10_section = step10_text.split("async def run_amazon_template(product_id", 1)[1]
+    assert_true(
+        "await run_amazon_template_in_session(db, product)" in direct_step10_section
+        and direct_step10_section.count("await db.commit()") == 1,
+        "Step10 直接调用入口必须复用 in-session 路径并且只 commit 一次",
+    )
+    catalog_builder_section = products_text.split("async def build_catalog_export_zip", 1)[1].split(
+        "async def _export_catalog_items", 1
+    )[0]
+    assert_true(
+        "await run_amazon_template_in_session(db, product)" in catalog_builder_section
+        and "await run_amazon_template(product.id)" not in catalog_builder_section
+        and "await db.commit()" not in catalog_builder_section
+        and "await db.rollback()" not in catalog_builder_section,
+        "catalog export builder 必须复用调用方 session，不得内部 commit/rollback 或另开 Step10 事务",
+    )
+    assert_true(
+        catalog_builder_section.count("async with db.begin_nested():") == 1
+        and "except CatalogExportRowBusinessError as exc:" in catalog_builder_section
+        and "await db.refresh(catalog)" in catalog_builder_section
+        and "await db.refresh(product)" in catalog_builder_section
+        and "await db.refresh(pd)" in catalog_builder_section
+        and "except Exception" not in catalog_builder_section,
+        "catalog export 每行 DB 变更必须由 savepoint 隔离；业务失败只回滚当前行并在 async 上下文 refresh expired ORM，未知异常必须逃逸",
+    )
+    sync_export_section = products_text.split("async def _export_catalog_items", 1)[1].split(
+        '@router.post("/catalog/export")', 1
+    )[0]
+    assert_true(
+        sync_export_section.index("await build_catalog_export_zip(catalog_items, db)")
+        < sync_export_section.index("await db.commit()")
+        and sync_export_section.index("except CatalogExportBuildError as exc:")
+        < sync_export_section.index("await db.commit()")
+        and sync_export_section.count("await db.commit()") == 1,
+        "旧同步 catalog export API 必须仅在 builder 成功后由 caller commit 一次，业务失败不得提交",
     )
 
 
@@ -1773,11 +1972,18 @@ def test_task_runtime_v1_uses_new_tables_and_keeps_old_offline_tasks_compatibili
     database_text = (ROOT / "backend" / "app" / "database.py").read_text(encoding="utf-8")
     spec_text = (ROOT / "docs" / "superpowers" / "specs" / "2026-06-13-task-runtime-giga-pull-design.md").read_text(encoding="utf-8")
     task_runs_api = (ROOT / "backend" / "app" / "api" / "task_runs.py").read_text(encoding="utf-8")
+    products_api = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    catalog_export_status_text = (ROOT / "backend" / "app" / "task_runtime" / "catalog_export_status.py").read_text(encoding="utf-8")
+    catalog_export_workers = (ROOT / "backend" / "app" / "task_runtime" / "catalog_export_workers.py").read_text(encoding="utf-8")
+    offline_tasks_service = (ROOT / "backend" / "app" / "services" / "offline_tasks.py").read_text(encoding="utf-8")
     offline_tasks_api = (ROOT / "backend" / "app" / "api" / "offline_tasks.py").read_text(encoding="utf-8")
+    schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
     runtime_scheduler = (ROOT / "backend" / "app" / "task_runtime" / "scheduler.py").read_text(encoding="utf-8")
     giga_workers = (ROOT / "backend" / "app" / "task_runtime" / "giga_pull_workers.py").read_text(encoding="utf-8")
     giga_planner = (ROOT / "backend" / "app" / "task_planners" / "giga_pull.py").read_text(encoding="utf-8")
     frontend_api = (ROOT / "frontend" / "src" / "api" / "index.ts").read_text(encoding="utf-8")
+    offline_task_center_text = (ROOT / "frontend" / "src" / "pages" / "OfflineTaskCenter.tsx").read_text(encoding="utf-8")
+    catalog_export_r1_test = (ROOT / "scripts" / "test_stability_repair_r1_catalog_export.py").read_text(encoding="utf-8")
     product_list = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
     task_run_center_text = (ROOT / "frontend" / "src" / "pages" / "TaskRunCenter.tsx").read_text(encoding="utf-8")
     main_layout = (ROOT / "frontend" / "src" / "components" / "MainLayout.tsx").read_text(encoding="utf-8")
@@ -1941,6 +2147,12 @@ def test_task_runtime_v1_uses_new_tables_and_keeps_old_offline_tasks_compatibili
         "任务中心 list API 的 display_status 筛选必须 SQL 化并保留 base_total/filtered_total；stale_running/waiting_dependency/planned 只能作为详情诊断态，列表必须明确拒绝",
     )
     task_runs_list_filter_section = task_runs_api.split("def _superseded_sql_condition", 1)[1].split("def _step_response", 1)[0]
+    catalog_export_terminal_projection_section = catalog_export_status_text.split(
+        "async def load_catalog_effective_terminal_projection", 1
+    )[1].split("def _nonempty_string", 1)[0]
+    catalog_export_effective_condition_section = catalog_export_status_text.split(
+        "def projected_task_run_status_condition", 1
+    )[1]
     assert_true(
         "exists(" not in task_runs_list_filter_section
         and "_running_step_exists" not in task_runs_list_filter_section
@@ -1950,8 +2162,303 @@ def test_task_runtime_v1_uses_new_tables_and_keeps_old_offline_tasks_compatibili
         "任务中心列表筛选必须依赖 task_runs 已落表字段，不能保留 correlated EXISTS/NOT EXISTS 或 step 子查询 helper",
     )
     assert_true(
-        "TaskRun.status.in_((RUN_STATUS_SUCCEEDED, RUN_STATUS_CANCELED))" in task_runs_api,
-        "任务中心 history 默认视图必须使用轻量终态/superseded 条件，避免小数据量历史页出现十几秒级延迟",
+        "projected_task_run_status_condition(RUN_STATUS_SUCCEEDED, projection)" in task_runs_api
+        and "_canceled_sql_condition()" in task_runs_api
+        and "select(owner_model.id, owner_model.status, payload_column)" in catalog_export_terminal_projection_section
+        and "owner_model.task_type == CATALOG_EXPORT_TASK_TYPE" in catalog_export_terminal_projection_section
+        and "load_newest_material_catalog_step_results(" in catalog_export_terminal_projection_section
+        and "project_catalog_effective_terminal_record(" in catalog_export_terminal_projection_section
+        and "TaskRun.id.in_(sorted(target_ids))" in catalog_export_effective_condition_section
+        and "TaskRun.id.not_in(sorted(projection.authoritative_ids))" in catalog_export_effective_condition_section
+        and "json_extract" not in catalog_export_terminal_projection_section.lower()
+        and "json_valid" not in catalog_export_terminal_projection_section.lower()
+        and "json_extract" not in catalog_export_effective_condition_section.lower()
+        and "json_valid" not in catalog_export_effective_condition_section.lower()
+        and "exists(" not in catalog_export_status_text,
+        "任务中心 history/current/display filter 必须复用一次 Python validated terminal 投影后的 ID 集合，并保持 task_runs 单表 SQL；summary/step 解析不得退回 MySQL JSON 函数或分页后过滤",
+    )
+    catalog_export_file_row_section = products_api.split("def _catalog_export_file_row_from_run", 1)[1].split(
+        "def _template_status_for_catalog", 1
+    )[0]
+    offline_catalog_export_file_row_section = products_api.split("def _catalog_export_file_row", 1)[1].split(
+        "def _catalog_export_file_row_from_run", 1
+    )[0]
+    catalog_export_categories_section = products_api.split("async def list_catalog_export_categories", 1)[1].split(
+        '@router.get("/catalog/template-categories"', 1
+    )[0]
+    catalog_export_download_section = task_runs_api.split("async def download_task_run_result", 1)[1].split(
+        '@router.post("/{run_id}/retry-failed"', 1
+    )[0]
+    catalog_export_run_display_section = task_runs_api.split("def _run_display", 1)[1].split(
+        "def _run_list_display", 1
+    )[0]
+    catalog_export_run_list_display_section = task_runs_api.split("def _run_list_display", 1)[1].split(
+        "def _superseded_map", 1
+    )[0]
+    offline_catalog_export_download_section = offline_tasks_api.split(
+        "async def download_offline_task_result", 1
+    )[1].split('@router.post("/{task_id}/rerun"', 1)[0]
+    task_run_payload_selector_section = task_runs_api.split("def _catalog_effective_record", 1)[1].split(
+        "def _catalog_export_run_is_downloadable", 1
+    )[0]
+    offline_api_payload_selector_section = offline_tasks_api.split("def _catalog_effective_record", 1)[1].split(
+        "def _normalized_catalog_export_result_json", 1
+    )[0]
+    offline_task_response_schema_section = schemas_text.split("class OfflineTaskResponse", 1)[1].split(
+        "class OfflineTaskDetailResponse", 1
+    )[0]
+    offline_task_frontend_type_section = frontend_api.split("export interface OfflineTask {", 1)[1].split(
+        "export interface OfflineTaskDetail", 1
+    )[0]
+    offline_task_response_helpers_section = offline_tasks_api.split("def _task_response", 1)[1].split(
+        "def _product_bulk_advance_latest_result", 1
+    )[0]
+    offline_task_catalog_decorator_section = offline_tasks_api.split(
+        "def _decorate_catalog_export_response", 1
+    )[1].split("def _task_response", 1)[0]
+    offline_task_list_section = offline_tasks_api.split("async def list_offline_tasks", 1)[1].split(
+        '@router.post("/giga-inventory-sync"', 1
+    )[0]
+    list_task_runs_section = task_runs_api.split("async def list_task_runs", 1)[1].split(
+        '@router.post("/giga-pull"', 1
+    )[0]
+    assert_true(
+        "catalog_export_result_is_downloadable" in catalog_export_status_text
+        and "DOWNLOADABLE_RUN_STATUSES" in catalog_export_status_text
+        and "DOWNLOADABLE_PAYLOAD_STATUSES" in catalog_export_status_text
+        and "catalog_record: CatalogEffectiveTerminalRecord" in catalog_export_file_row_section
+        and "project_catalog_effective_terminal_record(" not in catalog_export_file_row_section
+        and 'task_status=catalog_record.effective_status' in catalog_export_file_row_section
+        and "can_download=catalog_export_result_is_downloadable(" in catalog_export_file_row_section
+        and "catalog_record: CatalogEffectiveTerminalRecord" in offline_catalog_export_file_row_section
+        and "project_catalog_effective_terminal_record(" not in offline_catalog_export_file_row_section
+        and 'task_status=catalog_record.effective_status' in offline_catalog_export_file_row_section
+        and 'catalog_record.effective_status in {"done", "partial_failed"}' in offline_catalog_export_file_row_section
+        and "effective_status=catalog_record.effective_status" in catalog_export_download_section
+        and "catalog_export_result_is_downloadable(" in catalog_export_download_section
+        and "if row.can_download:" in catalog_export_categories_section,
+        "TaskRun catalog export 的 Export Center、categories、download 必须消费同一 validated terminal record，外层状态与 artifact gate 不得分叉",
+    )
+    offline_ready_section = offline_tasks_service.split("def _catalog_export_result_ready", 1)[1].split(
+        "def _catalog_export_row_status", 1
+    )[0]
+    offline_executor_section = offline_tasks_service.split("async def _run_catalog_export_step", 1)[1].split(
+        "async def _execute_offline_task", 1
+    )[0]
+    payload_selector_section = catalog_export_status_text.split("def _select_catalog_export_payload_result", 1)[1].split(
+        "def _usable_http_url", 1
+    )[0]
+    catalog_export_parser_section = catalog_export_status_text.split(
+        "def _reject_nonstandard_json_constant", 1
+    )[1].split("def _is_material_catalog_export_payload", 1)[0]
+    catalog_export_batch_helper_section = catalog_export_status_text.split(
+        "async def load_newest_material_catalog_step_results", 1
+    )[1].split("async def load_catalog_effective_terminal_projection", 1)[0]
+    artifact_resolver_section = catalog_export_status_text.split("def resolve_catalog_export_artifact", 1)[1].split(
+        "def catalog_export_resolution_is_ready", 1
+    )[0]
+    assert_true(
+        '"artifact_available" in payload' in catalog_export_status_text
+        and "ARTIFACT_REFERENCE_FIELDS" in catalog_export_status_text
+        and "CANONICAL_OUTCOME_FIELDS" in catalog_export_status_text
+        and "class CatalogPayloadParseResult(NamedTuple):" in catalog_export_status_text
+        and "def _is_material_catalog_export_payload" in catalog_export_status_text
+        and "any(field in payload for field in ARTIFACT_REFERENCE_FIELDS)" in catalog_export_status_text
+        and "def _parse_catalog_export_payload_result" in catalog_export_status_text
+        and "def _parse_catalog_export_payload" in catalog_export_status_text
+        and "parse_constant=_reject_nonstandard_json_constant" in catalog_export_parser_section
+        and "parse_float=_parse_finite_json_float" in catalog_export_parser_section
+        and catalog_export_parser_section.count("except (MemoryError") >= 2
+        and "def _validate_catalog_export_raw_value" in catalog_export_parser_section
+        and "def _validated_catalog_export_raw_payload" in catalog_export_parser_section
+        and "CatalogPayloadParseResult({}, False, False, True)" in catalog_export_parser_section
+        and "_safe_response_text" not in catalog_export_parser_section
+        and "return _validated_catalog_export_raw_payload(parsed)" in catalog_export_parser_section
+        and "def _nonempty_string" in catalog_export_status_text
+        and "if not isinstance(value, str):" in catalog_export_status_text
+        and "if summary.json_valid and summary.material:" in payload_selector_section
+        and "if parsed.json_valid and parsed.material:" in payload_selector_section
+        and "authoritative_material = selected.json_valid and selected.material" in payload_selector_section
+        and "project_catalog_effective_terminal_record(" in task_run_payload_selector_section
+        and "payload = catalog_record.outcome" in offline_catalog_export_file_row_section
+        and "select_catalog_export_payload(" not in offline_catalog_export_file_row_section
+        and "normalize_catalog_export_response(" not in offline_catalog_export_file_row_section
+        and "project_catalog_effective_terminal_record(" not in offline_catalog_export_file_row_section
+        and "payload = catalog_record.outcome" in catalog_export_file_row_section
+        and "select_catalog_export_payload(" not in catalog_export_file_row_section
+        and "normalize_catalog_export_response(" not in catalog_export_file_row_section
+        and "project_catalog_effective_terminal_record(" not in catalog_export_file_row_section
+        and "project_catalog_effective_terminal_record(" in offline_api_payload_selector_section
+        and "resolve_catalog_export_artifact(" in offline_catalog_export_file_row_section
+        and "resolve_catalog_export_artifact(" in catalog_export_file_row_section
+        and "resolve_catalog_export_artifact(" in catalog_export_download_section
+        and "resolve_catalog_export_artifact(" in offline_catalog_export_download_section
+        and "resolve_catalog_export_artifact(" in offline_ready_section
+        and "existing_result = normalize_catalog_export_response(" in offline_executor_section
+        and "existing_result = normalize_catalog_export_response(" in catalog_export_workers
+        and offline_executor_section.count("_catalog_export_result_ready(existing_result)") >= 2,
+        "TaskRun/OfflineTask 必须保留 parse provenance，只有 parse-valid material 才能成为 authoritative；Export Center row builder 只能消费 shared record，不能再次 selector/normalize/project",
+    )
+    assert_true(
+        "test_summary_total_parser_and_legacy_projection_contract" in catalog_export_r1_test
+        and "test_catalog_export_response_provenance_contract" in catalog_export_r1_test
+        and "test_single_validated_catalog_export_outcome_contract" in catalog_export_r1_test
+        and "test_unsafe_valid_artifact_fails_all_catalog_consumers" in catalog_export_r1_test
+        and "MAX_SAFE_JSON_INTEGER + 1" in catalog_export_r1_test
+        and "unsafe_catalog_id = 2 ** 53" in catalog_export_r1_test
+        and 'assert expected["success_count"] == 0' in catalog_export_r1_test
+        and 'assert task_download.status_code == 400' in catalog_export_r1_test
+        and 'assert category not in exported_categories' in catalog_export_r1_test
+        and '"item_code": "\\ud800"' in catalog_export_r1_test
+        and '"item_code": {"nested": "unsafe"}' in catalog_export_r1_test
+        and '"status": "done", "reason": "ok"' in catalog_export_r1_test
+        and "R1 injected summary parser memory pressure" in catalog_export_r1_test
+        and "test_export_center_shared_effective_projection_contract" in catalog_export_r1_test
+        and "assert_shared_projection_queries(export_queries)" in catalog_export_r1_test
+        and "assert_shared_projection_queries(category_queries)" in catalog_export_r1_test
+        and '("interrupted_material", "interrupted")' in catalog_export_r1_test
+        and '("canceled_material", "canceled")' in catalog_export_r1_test
+        and '("paused_material", "paused")' in catalog_export_r1_test
+        and '"[" * 150' in catalog_export_r1_test
+        and '"[" * 10000' in catalog_export_r1_test
+        and '"json_valid" not in statement' in catalog_export_r1_test
+        and '"json_extract" not in statement' in catalog_export_r1_test,
+        "catalog export focused suite 必须覆盖 raw provenance、summary total parser 的深度/MemoryError 边界，并证明 legacy partial 投影查询不调用 MySQL JSON 函数",
+    )
+    catalog_export_run_gate_section = task_runs_api.split("def _catalog_export_run_is_downloadable", 1)[1].split(
+        "async def _load_run", 1
+    )[0]
+    assert_true(
+        'payload.get("artifact_available") is not True' in artifact_resolver_section
+        and "_inside_root(candidate, root)" in artifact_resolver_section
+        and "candidate.is_file()" in artifact_resolver_section
+        and "if object_key and filename:" in artifact_resolver_section
+        and "cache_path=cache_dir / filename" in artifact_resolver_section
+        and "fallback_url=redirect_url" in artifact_resolver_section
+        and "if redirect_url and filename:" in artifact_resolver_section
+        and "ARTIFACT_MODE_UNAVAILABLE" in artifact_resolver_section
+        and "ARTIFACT_MODE_LOCAL" in catalog_export_download_section
+        and "ARTIFACT_MODE_OBJECT_KEY" in catalog_export_download_section
+        and "ARTIFACT_MODE_REDIRECT" in catalog_export_download_section
+        and "payload.get(\"file_path\")" not in catalog_export_download_section
+        and "payload.get(\"oss_object_key\")" not in catalog_export_download_section
+        and "ARTIFACT_MODE_LOCAL" in offline_catalog_export_download_section
+        and "ARTIFACT_MODE_OBJECT_KEY" in offline_catalog_export_download_section
+        and "ARTIFACT_MODE_REDIRECT" in offline_catalog_export_download_section
+        and "payload.get(\"file_path\")" not in offline_catalog_export_download_section
+        and "payload.get(\"oss_object_key\")" not in offline_catalog_export_download_section,
+        "structured artifact resolver 必须按 allowed-root local -> object_key/cache-under-root -> validated redirect -> unavailable 排序；outside-root path 不能阻断 object_key，路由不得再次解释 payload source 字段",
+    )
+    assert_true(
+        "catalog_record.outcome" in catalog_export_run_gate_section
+        and "effective_status=catalog_record.effective_status" in catalog_export_run_gate_section
+        and "catalog_export_result_is_downloadable(" in catalog_export_run_gate_section
+        and "catalog_record=catalog_record" in catalog_export_run_display_section
+        and catalog_export_run_list_display_section.count("catalog_record=catalog_record") >= 2
+        and 'action != "download_result"' in catalog_export_run_display_section,
+        "TaskRun list/detail 的 download_result action 必须使用 validated outcome + effective-status/artifact combined gate；不能继续只凭 succeeded/partial 状态展示必然 400 的按钮",
+    )
+    assert_true(
+        "can_download: bool = False" in offline_task_response_schema_section
+        and "can_download: boolean;" in offline_task_frontend_type_section
+        and "def _decorate_catalog_export_response(" in offline_tasks_api
+        and offline_task_response_helpers_section.count(
+            "_decorate_catalog_export_response(task, response, catalog_step_result, catalog_record)"
+        ) == 2
+        and "outcome = catalog_record.outcome" in offline_task_catalog_decorator_section
+        and "response.status = catalog_record.effective_status" in offline_task_catalog_decorator_section
+        and "resolution = resolve_catalog_export_artifact(" in offline_task_catalog_decorator_section
+        and "response.can_download = _catalog_export_record_is_downloadable(catalog_record, resolution)" in offline_task_catalog_decorator_section
+        and "if not _catalog_export_record_is_downloadable(catalog_record, resolution):" in offline_catalog_export_download_section
+        and "response.result_json = _normalized_catalog_export_result_json(outcome)" in offline_task_catalog_decorator_section
+        and "if step.step_type == \"catalog_export_template\":" in offline_task_catalog_decorator_section
+        and "step.result_json = None" in offline_task_catalog_decorator_section
+        and "selectinload(OfflineTask.steps)" not in offline_task_list_section
+        and "record.can_download" in offline_task_center_text
+        and "['done', 'partial_failed'].includes(record.status)" not in offline_task_center_text,
+        "OfflineTask list/detail 和旧任务中心下载按钮必须消费 selector/resolver 派生的 can_download，不能再按终态猜测可下载性",
+    )
+    assert_true(
+        "async def load_newest_material_catalog_step_results" in catalog_export_status_text
+        and 'step_model.id.label("step_id")' in catalog_export_batch_helper_section
+        and 'step_model.result_json.label("result_json")' in catalog_export_batch_helper_section
+        and ".order_by(owner_column.asc(), step_model.id.desc())" in catalog_export_batch_helper_section
+        and catalog_export_batch_helper_section.count("await db.execute(") == 1
+        and "_parse_catalog_export_payload_result(result_json)" in catalog_export_batch_helper_section
+        and "if parsed.json_valid and parsed.material:" in catalog_export_batch_helper_section
+        and "if normalized_owner_id in selected:" in catalog_export_batch_helper_section
+        and "json_extract" not in catalog_export_batch_helper_section.lower()
+        and "json_valid(" not in catalog_export_batch_helper_section.lower()
+        and "json_table" not in catalog_export_batch_helper_section.lower()
+        and "row_number" not in catalog_export_batch_helper_section.lower()
+        and "selectinload" not in catalog_export_batch_helper_section.lower()
+        and "load_newest_material_catalog_step_results(" in task_runs_api
+        and "load_newest_material_catalog_step_results(" in offline_tasks_api
+        and "load_newest_material_catalog_step_results(" not in products_api
+        and "load_catalog_effective_terminal_projection(" in products_api
+        and "load_newest_material_catalog_step_results(" in offline_tasks_service
+        and "load_newest_material_catalog_step_results(" in catalog_export_workers
+        and "run.__dict__.get(\"steps\")" not in task_run_payload_selector_section
+        and "sorted(task.steps" not in offline_api_payload_selector_section
+        and "sorted(task.steps" not in offline_catalog_export_file_row_section
+        and "sorted(run.steps" not in catalog_export_file_row_section,
+        "TaskRun/OfflineTask selector 的 step 输入必须由共享 helper 单次批取 owner/id/result_json，并只在 Python 单解析器中按 step id DESC 选择；SQL 不得解释 JSON 或加载完整 ORM steps",
+    )
+    assert_true(
+        "load_catalog_effective_terminal_projection(" in list_task_runs_section
+        and "catalog_projection.records_by_id.get(run.id)" in list_task_runs_section
+        and "page_query.offset((page - 1) * page_size).limit(page_size)" in list_task_runs_section
+        and "selectinload(" not in list_task_runs_section,
+        "TaskRun list 必须在分页前加载一次 catalog effective projection ID sets，并将同一 records 复用于 response，不能分页后内存过滤或形成 N+1",
+    )
+    export_files_query_section = products_api.split("async def list_catalog_export_files", 1)[1].split(
+        '@router.get("/catalog/export-categories"', 1
+    )[0]
+    assert_true(
+        list_task_runs_section.count("load_catalog_effective_terminal_projection(") == 1
+        and "_display_status_sql_condition(display_status, catalog_projection)" in list_task_runs_section
+        and "catalog_projection," in list_task_runs_section
+        and export_files_query_section.count("load_catalog_effective_terminal_projection(") == 2
+        and export_files_query_section.count("owner_kind=CATALOG_STEP_OWNER_TASK_RUN") == 1
+        and export_files_query_section.count("owner_kind=CATALOG_STEP_OWNER_OFFLINE_TASK") == 1
+        and "projected_task_run_status_condition(\"succeeded\", task_run_projection)" in export_files_query_section
+        and "projected_offline_task_status_condition(\"done\", offline_projection)" in export_files_query_section
+        and catalog_export_categories_section.count("load_catalog_effective_terminal_projection(") == 2
+        and catalog_export_categories_section.count("owner_kind=CATALOG_STEP_OWNER_TASK_RUN") == 1
+        and catalog_export_categories_section.count("owner_kind=CATALOG_STEP_OWNER_OFFLINE_TASK") == 1
+        and "projected_task_run_status_condition(\"succeeded\", task_run_projection)" in catalog_export_categories_section
+        and "projected_offline_task_status_condition(\"done\", offline_projection)" in catalog_export_categories_section
+        and "load_legacy_catalog_export_partial_run_ids" not in products_api
+        and "effective_succeeded_condition" not in products_api
+        and "effective_partial_condition" not in products_api
+        and "def load_legacy_catalog_export_partial_run_ids" not in catalog_export_status_text
+        and "def effective_succeeded_condition" not in catalog_export_status_text
+        and "def effective_partial_condition" not in catalog_export_status_text
+        and "interrupted" not in export_files_query_section
+        and "canceled" not in export_files_query_section
+        and "paused" not in export_files_query_section
+        and "interrupted" not in catalog_export_categories_section
+        and "canceled" not in catalog_export_categories_section
+        and "paused" not in catalog_export_categories_section,
+        "TaskRun list、Export Files、Categories 必须各自只加载一次 shared effective projection/owner kind，并用 projected terminal ID sets；不得保留 legacy helper 或把 interrupted/canceled/paused 复活进导出中心",
+    )
+    assert_true(
+        "selectinload(OfflineTask.steps)" not in export_files_query_section
+        and "selectinload(TaskRun.steps)" not in export_files_query_section
+        and "selectinload(OfflineTask.steps)" not in catalog_export_categories_section
+        and "selectinload(TaskRun.steps)" not in catalog_export_categories_section,
+        "OfflineTask list 与 Export Center rows/categories 不得为 payload selector 加载全部 steps，只能批量读取 newest material result",
+    )
+    assert_true(
+        "row = _catalog_export_file_row(task, offline_projection.records_by_id[task.id])" in catalog_export_categories_section
+        and "row = _catalog_export_file_row_from_run(run, task_run_projection.records_by_id[run.id])" in catalog_export_categories_section
+        and catalog_export_categories_section.count("if row.can_download:") >= 2,
+        "catalog export 类目聚合必须同时过滤不可下载的 OfflineTask 和 TaskRun，不能暴露 stale/explicit-unavailable 历史类目",
+    )
+    assert_true(
+        "status_code in {302, 303, 307, 308}" not in catalog_export_r1_test
+        and catalog_export_r1_test.count("status_code == 307") >= 3,
+        "catalog export URL-only 下载契约必须严格断言 HTTP 307，不能接受其它 redirect status",
     )
     superseded_sql_section = task_runs_api.split("def _superseded_sql_condition", 1)[1].split("def _apply_condition", 1)[0]
     assert_true(
@@ -1969,7 +2476,6 @@ def test_task_runtime_v1_uses_new_tables_and_keeps_old_offline_tasks_compatibili
         and "_cancel_requested_sql_condition" not in terminal_sql_section,
         "任务中心 succeeded/failed/interrupted/paused 等终态筛选必须直接读 task_runs.status，不能为了终态列表再查 task_steps",
     )
-    list_task_runs_section = task_runs_api.split("async def list_task_runs", 1)[1].split('@router.post("/giga-pull"', 1)[0]
     assert_true(
         "selectinload(" not in list_task_runs_section
         and "_load_runs_for_lineage" not in list_task_runs_section,
@@ -1990,14 +2496,316 @@ def test_task_runtime_v1_uses_new_tables_and_keeps_old_offline_tasks_compatibili
     )
 
 
-def test_task_run_display_status_behaviour_for_current_view() -> None:
+def test_catalog_export_frontend_structured_result_contract() -> None:
+    frontend_api = (ROOT / "frontend" / "src" / "api" / "index.ts").read_text(encoding="utf-8")
+    task_run_center = (ROOT / "frontend" / "src" / "pages" / "TaskRunCenter.tsx").read_text(encoding="utf-8")
+    catalog_list = (ROOT / "frontend" / "src" / "pages" / "CatalogList.tsx").read_text(encoding="utf-8")
+    offline_task_center = (ROOT / "frontend" / "src" / "pages" / "OfflineTaskCenter.tsx").read_text(encoding="utf-8")
+    backend_schemas = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
+    task_run_api = (ROOT / "backend" / "app" / "api" / "task_runs.py").read_text(encoding="utf-8")
+    offline_task_api = (ROOT / "backend" / "app" / "api" / "offline_tasks.py").read_text(encoding="utf-8")
+    products_api = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    catalog_status = (ROOT / "backend" / "app" / "task_runtime" / "catalog_export_status.py").read_text(encoding="utf-8")
+    playwright_config_path = ROOT / "frontend" / "playwright.catalog.r1.config.ts"
+    playwright_spec_path = ROOT / "frontend" / "tests" / "catalog-export.r1.spec.ts"
+    orchestrator_path = ROOT / "scripts" / "test_stability_repair_r1_catalog_frontend.py"
+    assert_true(playwright_config_path.is_file(), "catalog export 必须有独立真实 API Playwright config")
+    assert_true(playwright_spec_path.is_file(), "catalog export 必须有独立真实 API Playwright spec")
+    assert_true(orchestrator_path.is_file(), "catalog export 必须有隔离 MySQL/FastAPI/Vite orchestrator")
+    playwright_config = playwright_config_path.read_text(encoding="utf-8")
+    playwright_spec = playwright_spec_path.read_text(encoding="utf-8")
+    orchestrator = orchestrator_path.read_text(encoding="utf-8")
+
+    assert_true(
+        "export interface CatalogExportRow" in frontend_api
+        and "export interface CatalogExportResult" in frontend_api
+        and "catalog_export_result?: CatalogExportResult | null" in frontend_api
+        and "rows: CatalogExportRow[]" in frontend_api
+        and "catalog_id?: number | null" in frontend_api
+        and "seller_sku?: string | null" in frontend_api
+        and "reason?: string | null" in frontend_api,
+        "catalog export 前端 API 类型必须暴露结构化 result/rows，不能继续把 canonical payload 当 any 或只保留 summary_json",
+    )
+    assert_true(
+        "row_ordinal: number;" in frontend_api
+        and "class CatalogExportRowResponse(BaseModel):" in backend_schemas
+        and "row_ordinal: int = Field(..., ge=1)" in backend_schemas
+        and "class CatalogExportResultResponse(BaseModel):" in backend_schemas
+        and "catalog_export_result: CatalogExportResultResponse | None = None" in backend_schemas
+        and "rows: list[CatalogExportRowResponse] = Field(default_factory=list)" in backend_schemas,
+        "catalog export API 必须用显式 Pydantic result/row schema，并把 1-based row_ordinal 固化为响应契约",
+    )
+    assert_true(
+        "def normalize_catalog_export_response(payload: object) -> dict:" in catalog_status
+        and 'normalized: dict[str, object] = {"row_ordinal": row_ordinal}' in catalog_status
+        and "outcome = normalize_catalog_export_response(selected_payload)" in catalog_status
+        and "project_catalog_effective_terminal_record(" in task_run_api.split(
+            "def _catalog_effective_record", 1
+        )[1].split("def _catalog_export_run_is_downloadable", 1)[0]
+        and "project_catalog_effective_terminal_record(" in offline_task_api.split(
+            "def _catalog_effective_record", 1
+        )[1].split("def _normalized_catalog_export_result_json", 1)[0]
+        and "payload = catalog_record.outcome" in products_api.split(
+            "def _catalog_export_file_row(", 1
+        )[1].split("def _catalog_export_file_row_from_run", 1)[0]
+        and "payload = catalog_record.outcome" in products_api.split(
+            "def _catalog_export_file_row_from_run", 1
+        )[1].split("def _template_status_for_catalog", 1)[0],
+        "TaskRun、OfflineTask 负责生成 effective record；Export Files row builder 必须直接消费 record.outcome，不能各自临时清洗历史 payload",
+    )
+    task_run_download_guard = task_run_api.split("def _catalog_export_run_is_downloadable", 1)[1].split(
+        "async def _load_run", 1
+    )[0]
+    offline_export_file_builder = products_api.split("def _catalog_export_file_row(", 1)[1].split(
+        "def _catalog_export_file_row_from_run", 1
+    )[0]
+    task_run_export_file_builder = products_api.split("def _catalog_export_file_row_from_run(", 1)[1].split(
+        "def _template_status_for_catalog", 1
+    )[0]
+    assert_true(
+        "resolve_catalog_export_artifact(\n        catalog_record.outcome," in task_run_download_guard
+        and "select_catalog_export_payload" not in task_run_download_guard
+        and "payload = catalog_record.outcome" in offline_export_file_builder
+        and "select_catalog_export_payload" not in offline_export_file_builder
+        and "normalize_catalog_export_response" not in offline_export_file_builder
+        and "project_catalog_effective_terminal_record" not in offline_export_file_builder
+        and "resolve_catalog_export_artifact(\n        payload," in offline_export_file_builder
+        and 'catalog_record.effective_status in {"done", "partial_failed"}' in offline_export_file_builder
+        and "catalog_export_resolution_is_ready(resolution)" in offline_export_file_builder
+        and "payload = catalog_record.outcome" in task_run_export_file_builder
+        and "select_catalog_export_payload" not in task_run_export_file_builder
+        and "normalize_catalog_export_response" not in task_run_export_file_builder
+        and "project_catalog_effective_terminal_record" not in task_run_export_file_builder
+        and "resolve_catalog_export_artifact(\n        payload," in task_run_export_file_builder
+        and "can_download=catalog_export_result_is_downloadable(" in task_run_export_file_builder,
+        "下载/action/Export Center 必须共用 payload helper 产出的 validated outcome；raw selected payload 只能用于 provenance 选择，不能直接授权",
+    )
+    catalog_summary_branch = task_run_center.split("if (record.task_type === 'catalog_export')", 1)[1].split(
+        "if (record.display_reason || record.error_summary)", 1
+    )[0]
+    task_run_download_section = task_run_center.split("const downloadRun", 1)[1].split(
+        "const productBulkRowsTable", 1
+    )[0]
+    task_run_catalog_rows_section = task_run_center.split("const catalogExportRowsTable", 1)[1].split(
+        "const resetPage", 1
+    )[0]
+    assert_true(
+        "record.catalog_export_result" in task_run_center
+        and "task-run-catalog-summary-" in task_run_center
+        and "task-run-catalog-rows-" in task_run_center
+        and "task-run-download-" in task_run_center
+        and "summary_json" not in catalog_summary_branch
+        and "catalog_export_result?.filename" in task_run_download_section
+        and "parseJson" not in task_run_download_section
+        and "catalog_export_result?.rows" in task_run_catalog_rows_section
+        and "summary_json" not in task_run_catalog_rows_section
+        and "actions.includes('download_result')" in task_run_center,
+        "TaskRunCenter 必须直接消费 catalog_export_result，展示结构化计数/逐商品 rows，并提供稳定 E2E 选择器",
+    )
+    assert_true(
+        "const catalogRowKey = (runId: number, row: CatalogExportRow) => `${runId}-${row.row_ordinal}`;" in task_run_center
+        and "const catalogRowKey = (taskId: number, row: CatalogExportRow) => `${taskId}-${row.row_ordinal}`;" in offline_task_center
+        and "const catalogExportRowKey = (fileKey: string, row: CatalogExportRow) => `${fileKey}-${row.row_ordinal}`;" in catalog_list
+        and "row.catalog_id" not in task_run_center.split("const catalogRowKey", 1)[1].split("const runSummary", 1)[0]
+        and "row.item_code" not in task_run_center.split("const catalogRowKey", 1)[1].split("const runSummary", 1)[0]
+        and "row.catalog_id" not in catalog_list.split("const catalogExportRowKey", 1)[1].split(
+            "const catalogExportRowStatusTag", 1
+        )[0]
+        and "row.item_code" not in catalog_list.split("const catalogExportRowKey", 1)[1].split(
+            "const catalogExportRowStatusTag", 1
+        )[0],
+        "Catalog row React key/test id 必须只由外层 task/file key + response row_ordinal 构成，不能由 ID/Code 清洗派生",
+    )
+    offline_catalog_summary = offline_task_center.split("const resultSummary", 1)[1].split(
+        "const taskProgress", 1
+    )[0]
+    offline_catalog_rows = offline_task_center.split("const catalogExportRowsTable", 1)[1].split(
+        "const OfflineTaskCenter", 1
+    )[0]
+    offline_download = offline_task_center.split("const downloadTask", 1)[1].split("useEffect", 1)[0]
+    assert_true(
+        "record.catalog_export_result" in offline_catalog_summary
+        and "parseResult(record.result_json)" not in offline_catalog_summary.split(
+            "if (record.task_type === 'catalog_export')", 1
+        )[1].split("const result = liveResult(record)", 1)[0]
+        and "record.catalog_export_result?.rows" in offline_catalog_rows
+        and "parseResult" not in offline_catalog_rows
+        and "task.catalog_export_result?.filename" in offline_download
+        and "parseResult" not in offline_download
+        and "offline-task-catalog-summary-" in offline_task_center
+        and "offline-task-catalog-rows-" in offline_task_center
+        and "offline-task-catalog-row-reason-" in offline_task_center
+        and "offline-task-download-" in offline_task_center
+        and "offline-task-expand-" in offline_task_center
+        and "record.task_type === 'catalog_export' && record.can_download" in offline_task_center,
+        "OfflineTaskCenter 的 catalog summary/rows/filename 必须只读 typed catalog_export_result，下载只读 can_download，并提供稳定 E2E 选择器",
+    )
+    catalog_export_file_columns = catalog_list.split("const exportFileColumns", 1)[1].split(
+        "const templateFileStatusTag", 1
+    )[0]
+    assert_true(
+        "catalog-export-file-expand-" in catalog_list
+        and "catalog-export-file-row-reason-" in catalog_list
+        and "catalog-export-file-download-" in catalog_list
+        and "expandedRowRender: catalogExportRowsTable" in catalog_list
+        and "disabled={!record.can_download}" in catalog_export_file_columns
+        and "record.can_download ||" not in catalog_export_file_columns
+        and "record.task_status === 'partial_failed'" not in catalog_export_file_columns.split(
+            "data-testid={`catalog-export-file-download-", 1
+        )[1],
+        "Export Center 已导出列表必须支持结构化 rows 展开，并用稳定选择器验证后端 can_download 授权",
+    )
+    assert_true(
+        "page.route(" not in playwright_spec
+        and "routeFromHAR" not in playwright_spec
+        and "/task-runs?view=all" in playwright_spec
+        and "page.goto('/export-center')" in playwright_spec
+        and "page.on('pageerror'" in playwright_spec
+        and "page.on('console'" in playwright_spec
+        and "page.on('requestfailed'" in playwright_spec
+        and "page.waitForEvent('download')" in playwright_spec
+        and "R1_CATALOG_FRONTEND_STATE" in playwright_config
+        and "webServer" not in playwright_config,
+        "catalog export Playwright 必须访问真实页面/API并验证真实下载；禁止 page.route/HAR/mock API，浏览器错误必须显式捕获",
+    )
+    console_observer = playwright_spec.split("const observeBrowserFailures", 1)[1].split(
+        "test('catalog export structured results", 1
+    )[0]
+    acceptance_proof_requirements = {
+        "console_exact_allowlist": (
+            "new Set<string>([" in playwright_spec
+            and "Warning: [antd: compatible] antd v5 support React is 16 ~ 18. see https://u.ant.design/v5-for-19 for compatible."
+            in playwright_spec
+            and ".has(normalizedText)" in console_observer
+            and "message.type() !== 'error' && message.type() !== 'warning'" in console_observer
+            and ".includes(" not in console_observer
+            and ".startsWith(" not in console_observer
+            and ".test(" not in console_observer
+        ),
+        "list_detail_and_missing_rows": (
+            "page.waitForResponse" in playwright_spec
+            and "catalogResultEvidence" in playwright_spec
+            and "partialListEvidence" in playwright_spec
+            and "partialDetailEvidence" in playwright_spec
+            and "expect(partialDetailEvidence).toEqual(partialListEvidence)" in playwright_spec
+            and "`/api/task-runs/${state.partial_run_id}`" in playwright_spec
+            and "historical_missing_rows_run_id" in playwright_spec
+            and "`/api/task-runs/${state.historical_missing_rows_run_id}`" in playwright_spec
+            and "暂无逐商品结果" in playwright_spec
+        ),
+        "malformed_response_and_ordinal_pagination": (
+            "_malformed_catalog_response_payload" in orchestrator
+            and "malformed_run_id" in orchestrator
+            and "malformed_row_count" in orchestrator
+            and "expect(malformedDetailPayload.catalog_export_result).toEqual(malformedListRun.catalog_export_result)"
+            in playwright_spec
+            and "expect(exportFilesResponse.status()).toBe(200)" in playwright_spec
+            and "expect(exportCategoriesResponse.status()).toBe(200)" in playwright_spec
+            and "expect(malformedExportFile?.rows).toEqual(malformedListRun.catalog_export_result?.rows)" in playwright_spec
+            and "row_ordinal: number;" in playwright_spec
+            and "reasonTestIds(malformedRunReasonPrefix, [1, 2, 3, 4, 5, 6, 7, 8])" in playwright_spec
+            and "reasonTestIds(malformedRunReasonPrefix, [9, 10, 11, 12, 13, 14, 15])" in playwright_spec
+            and "reasonTestIds(malformedFileReasonPrefix, [1, 2, 3, 4, 5, 6, 7, 8])" in playwright_spec
+            and "reasonTestIds(malformedFileReasonPrefix, [9, 10, 11, 12, 13, 14, 15])" in playwright_spec
+            and "malformed_offline_task_id" in orchestrator
+            and "expect(malformedOfflineListTask?.catalog_export_result).toEqual(malformedListRun.catalog_export_result)" in playwright_spec
+            and "expect(JSON.parse(malformedOfflineListTask?.result_json || '{}')).toEqual(malformedListRun.catalog_export_result)" in playwright_spec
+            and "expect(offlineDetailPayload.steps?.every((step) => step.result_json === null)).toBe(true)" in playwright_spec
+            and "reasonTestIds(malformedOfflineReasonPrefix, [1, 2, 3, 4, 5, 6, 7, 8])" in playwright_spec
+            and "reasonTestIds(malformedOfflineReasonPrefix, [9, 10, 11, 12, 13, 14, 15])" in playwright_spec
+            and "expect(malformedOfflineExportFile?.rows).toEqual(malformedListRun.catalog_export_result?.rows)" in playwright_spec
+            and "duplicate first" in playwright_spec
+            and "duplicate second" in playwright_spec
+            and "A/B" in playwright_spec
+            and "A B" in playwright_spec
+            and "商品-甲" in playwright_spec
+        ),
+        "unsafe_valid_artifact_and_legacy_download": (
+            '"catalog_product_ids": [2 ** 53]' in orchestrator
+            and '"status": "done"' in orchestrator
+            and "unsafe_run_id" in orchestrator
+            and "unsafe_offline_task_id" in orchestrator
+            and "legacy_done_run_id" in orchestrator
+            and "catalogResultEvidence(unsafeListRun)" in playwright_spec
+            and "success_count: 0" in playwright_spec
+            and "failed_count: 1" in playwright_spec
+            and "catalog_id: null" in playwright_spec
+            and "expect(unsafeDownload).toBeDisabled()" in playwright_spec
+            and "expect(unsafeOfflineDownload).toBeDisabled()" in playwright_spec
+            and "expect(legacyDoneDownload).toBeEnabled()" in playwright_spec
+            and "expect(unsafeTaskDownloadResponse.status()).toBe(400)" in playwright_spec
+            and "expect(unsafeOfflineTaskDownloadResponse.status()).toBe(400)" in playwright_spec
+            and "item.category === state.unsafe_category" in playwright_spec
+        ),
+        "download_response_sha_and_length": (
+            "artifact_sha256" in playwright_spec
+            and "artifact_size" in playwright_spec
+            and "createHash('sha256')" in playwright_spec
+            and "content-type" in playwright_spec
+            and "content-disposition" in playwright_spec
+            and "`/api/task-runs/${state.partial_run_id}/download`" in playwright_spec
+            and "expect(downloadResponse.status()).toBe(200)" in playwright_spec
+            and "expect(downloadedBytes.length).toBe(state.artifact_size)" in playwright_spec
+            and ".digest('hex')).toBe(state.artifact_sha256)" in playwright_spec
+            and "artifact_sha256" in orchestrator
+            and "artifact_size" in orchestrator
+        ),
+    }
+    missing_acceptance_proofs = [
+        name for name, satisfied in acceptance_proof_requirements.items() if not satisfied
+    ]
+    assert_true(
+        not missing_acceptance_proofs,
+        "catalog export acceptance proof 缺失或过宽: " + ", ".join(missing_acceptance_proofs),
+    )
+    assert_true(
+        "isolated_r1_mysql(ROOT)" in orchestrator
+        and "_catalog_export_result_payload" in orchestrator
+        and 'str(BACKEND / ".venv" / "bin" / "uvicorn")' in orchestrator
+        and '"app.main:app"' in orchestrator
+        and '"--lifespan",\n                        "off",' in orchestrator
+        and '"npm",\n                        "run",\n                        "dev"' in orchestrator
+        and '"playwright"' in orchestrator
+        and "_wait_for_http(" in orchestrator
+        and "if process.poll() is not None:" in orchestrator
+        and "time.sleep(0.1)" in orchestrator
+        and "timeout=120.0," in orchestrator
+        and "finally:" in orchestrator
+        and "_stop_process(frontend_process" in orchestrator
+        and "_stop_process(backend_process)" in orchestrator
+        and "state_path.write_text" in orchestrator,
+        "catalog export browser orchestrator 必须在隔离 MySQL 上 seed canonical payload，直启 uvicorn 并条件等待冷启动，启动真实 Vite，且在 finally 清理进程/临时状态",
+    )
+
+
+def _load_task_runtime_display_module():
+    status_spec = importlib.util.spec_from_file_location(
+        "app.task_runtime.catalog_export_status",
+        ROOT / "backend" / "app" / "task_runtime" / "catalog_export_status.py",
+    )
+    assert_true(status_spec is not None and status_spec.loader is not None, "必须能加载 catalog export effective status helper")
+    status_module = importlib.util.module_from_spec(status_spec)
+    status_spec.loader.exec_module(status_module)
+    previous = sys.modules.get("app.task_runtime.catalog_export_status")
+    sys.modules["app.task_runtime.catalog_export_status"] = status_module
     spec = importlib.util.spec_from_file_location(
         "task_runtime_display",
         ROOT / "backend" / "app" / "task_runtime" / "display.py",
     )
     assert_true(spec is not None and spec.loader is not None, "必须能加载 task_runtime display helper")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if previous is None:
+            sys.modules.pop("app.task_runtime.catalog_export_status", None)
+        else:
+            sys.modules["app.task_runtime.catalog_export_status"] = previous
+    return module
+
+
+def test_task_run_display_status_behaviour_for_current_view() -> None:
+    module = _load_task_runtime_display_module()
     task_run_matches_display_filters = module.task_run_matches_display_filters
 
     assert_true(
@@ -2027,13 +2835,7 @@ def test_task_run_display_status_behaviour_for_current_view() -> None:
 
 
 def test_task_run_list_default_views_are_db_pageable() -> None:
-    spec = importlib.util.spec_from_file_location(
-        "task_runtime_display",
-        ROOT / "backend" / "app" / "task_runtime" / "display.py",
-    )
-    assert_true(spec is not None and spec.loader is not None, "必须能加载 task_runtime display helper")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    module = _load_task_runtime_display_module()
     task_run_list_is_db_pageable = module.task_run_list_is_db_pageable
 
     assert_true(
@@ -2097,7 +2899,7 @@ from app.api.task_runs import _display_status_sql_condition
 
 for value in ("stale_running", "waiting_dependency", "planned"):
     try:
-        _display_status_sql_condition(value)
+        _display_status_sql_condition(value, frozenset())
     except HTTPException as exc:
         assert exc.status_code == 400, (value, exc.status_code)
         assert "仅在详情诊断" in str(exc.detail), (value, exc.detail)
@@ -2163,9 +2965,14 @@ assert "cancel" not in display["available_actions"], display
 
 def test_runtime_security_startup_p0_boundaries() -> None:
     start_script = (ROOT / "scripts" / "start.sh").read_text(encoding="utf-8")
+    startup_env_reader = (ROOT / "scripts" / "read_startup_env.py").read_text(encoding="utf-8")
     readme_text = (ROOT / "README.md").read_text(encoding="utf-8")
     env_example = (ROOT / "backend" / ".env.example").read_text(encoding="utf-8")
     main_text = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+    vite_config = (ROOT / "frontend" / "vite.config.ts").read_text(encoding="utf-8")
+    vite_guard = (ROOT / "frontend" / "dev-api-write-guard.ts").read_text(encoding="utf-8")
+    frontend_package = (ROOT / "frontend" / "package.json").read_text(encoding="utf-8")
+    remote_harness = (ROOT / "scripts" / "test_stability_repair_r1_remote_guard.py").read_text(encoding="utf-8")
     config_text = (ROOT / "backend" / "app" / "config.py").read_text(encoding="utf-8")
     database_text = (ROOT / "backend" / "app" / "database.py").read_text(encoding="utf-8")
     aplus_upload = (ROOT / "backend" / "app" / "services" / "aplus_upload.py").read_text(encoding="utf-8")
@@ -2174,7 +2981,8 @@ def test_runtime_security_startup_p0_boundaries() -> None:
 
     assert_true(
         'BACKEND_HOST="$(read_env BACKEND_HOST 127.0.0.1)"' in start_script
-        and 'FRONTEND_HOST="$(read_env FRONTEND_HOST 127.0.0.1)"' in start_script
+        and 'DEFAULT_FRONTEND_HOST = "127.0.0.1"' in startup_env_reader
+        and 'npx vite --host "$FRONTEND_HOST"' in start_script
         and "--host 0.0.0.0" not in start_script
         and "--host 0.0.0.0" not in readme_text,
         "默认启动命令必须只监听 127.0.0.1，不能继续绑定 0.0.0.0",
@@ -2186,6 +2994,97 @@ def test_runtime_security_startup_p0_boundaries() -> None:
         and '@app.middleware("http")' in main_text
         and "request.method.upper() not in SAFE_HTTP_METHODS" in main_text,
         "mutating API 必须有本机访问或显式 dev token 边界，不能远程匿名写 .env/触发任务/文件操作",
+    )
+    assert_true(
+        'FRONTEND_HOST="$(read_env FRONTEND_HOST' not in start_script
+        and "is_loopback_host" not in start_script
+        and "--require-remote-token-transport" not in start_script
+        and 'exec "$PYTHON_BIN" "$ENV_READER" "$ENV_FILE" --' in start_script
+        and "FBM_STARTUP_ENV_PROOF_FD" in start_script
+        and 'read -r -u "$STARTUP_PROOF_FD"' in start_script
+        and "STARTUP_ENV_READY=1" in start_script
+        and 'if [ -z "${FRONTEND_HOST:-}" ]' in start_script
+        and 'DEV_API_WRITE_TOKEN="$("$PYTHON_BIN"' not in start_script
+        and 'API_DEV_TOKEN="$("$PYTHON_BIN"' not in start_script
+        and start_script.index('exec "$PYTHON_BIN" "$ENV_READER"') < start_script.index('"$PYTHON_BIN" -m app.database')
+        and 'API_DEV_TOKEN="$API_DEV_TOKEN" uvicorn' in start_script
+        and 'DEV_API_WRITE_TOKEN="$DEV_API_WRITE_TOKEN" FRONTEND_PORT=' in start_script,
+        "shell 首阶段不得自行判定 FRONTEND_HOST；service continuation 必须只使用helper proof注入的host/token快照",
+    )
+    assert_true(
+        "from dotenv import dotenv_values" in startup_env_reader
+        and startup_env_reader.count("dotenv_values(") == 1
+        and ".strip()" in startup_env_reader
+        and 'TOKEN_KEYS = ("DEV_API_WRITE_TOKEN", "API_DEV_TOKEN")' in startup_env_reader
+        and 'DEFAULT_FRONTEND_HOST = "127.0.0.1"' in startup_env_reader
+        and '"FRONTEND_HOST": frontend_host' in startup_env_reader
+        and "def is_loopback_host" in startup_env_reader
+        and "ipaddress.ip_address" in startup_env_reader
+        and "address.ipv4_mapped" in startup_env_reader
+        and "return address.is_loopback" in startup_env_reader
+        and 'if not is_loopback_host(snapshot["FRONTEND_HOST"])' in startup_env_reader
+        and "MAX_TOKEN_BYTES = 4096" in startup_env_reader
+        and "byte < 0x21 or byte > 0x7E" in startup_env_reader
+        and "hmac.compare_digest" in startup_env_reader
+        and "os.execvpe" in startup_env_reader
+        and "os.set_inheritable(read_fd, True)" in startup_env_reader
+        and "secrets.token_urlsafe(32)" in startup_env_reader
+        and "child_env.update(snapshot)" in startup_env_reader
+        and "print(read_startup" not in startup_env_reader
+        and "from app" not in startup_env_reader
+        and "import app" not in startup_env_reader
+        and "DATABASE_URL" not in startup_env_reader
+        and "httpx" not in startup_env_reader
+        and "requests" not in startup_env_reader,
+        "启动 helper 必须单次快照effective FRONTEND_HOST+双token，在helper内分类loopback/remote并绑定proof，不回显且不得加载应用、数据库或网络",
+    )
+    assert_true(
+        "createDevApiWriteGuard" in vite_config
+        and "enforce: 'pre'" in vite_config
+        and "server.middlewares.use('/api'" in vite_config
+        and "loadEnv(mode, process.cwd(), 'VITE_')" in vite_config
+        and "viteEnv.VITE_BACKEND_URL" in vite_config
+        and "viteEnv.VITE_FRONTEND_PORT" in vite_config
+        and "process.env.DEV_API_WRITE_TOKEN" in vite_config
+        and "VITE_DEV_API_WRITE_TOKEN" not in vite_config
+        and "request.socket.remoteAddress" in vite_guard
+        and "timingSafeEqual" in vite_guard
+        and "X-Forwarded-For" not in vite_guard
+        and "x-forwarded-for" not in vite_guard
+        and "REMOTE_DEV_READ_ONLY" in vite_guard
+        and "X-FBM-Proxy-Client" not in vite_guard
+        and "x-fbm-proxy-client" in vite_guard,
+        "Vite 必须在 proxy 前按原始 socket/调用方 token 拦截远程写，只加 remote marker且不信任转发头",
+    )
+    assert_true(
+        "REMOTE_PROXY_HEADER" in main_text
+        and "marked_remote" in main_text
+        and "hmac.compare_digest" in main_text
+        and "REMOTE_DEV_READ_ONLY" in main_text
+        and "X-Forwarded-For" not in main_text
+        and "Forwarded" not in main_text,
+        "FastAPI 必须对非本机或本机 remote marker 写请求独立做常量时间 token 校验并返回标准403",
+    )
+    assert_true(
+        "test:dev-api-write-guard" in frontend_package
+        and "_CountingProxyServer" in remote_harness
+        and "upstream_count" in remote_harness
+        and "_test_mismatched_tokens" in remote_harness
+        and "_test_vite_mode_env_compatibility" in remote_harness
+        and "_test_credential_precedence" in remote_harness
+        and '"A" * 4097' in remote_harness
+        and '"B" * 17000' in remote_harness
+        and '"Z" * 4096' in remote_harness
+        and '"中文令牌"' in remote_harness
+        and 'TOKEN_SEED' in remote_harness
+        and '"visible\\x7fdel"' in remote_harness
+        and '"internal space"' in remote_harness
+        and "R1_START_MUTATE_BEFORE_FILE" in remote_harness
+        and "R1_START_MUTATE_AFTER_FILE" in remote_harness
+        and "expected_frontend_host" in remote_harness
+        and "_test_startup_env_helper_units" in remote_harness
+        and "_scan_build_for_secret" in remote_harness,
+        "远程写保护必须保留可区分 proxy 前拒绝与后端二次拒绝的真实多进程验证入口",
     )
     assert_true(
         "STARTUP_RUN_DB_MAINTENANCE: bool = False" in config_text
@@ -2200,7 +3099,7 @@ def test_runtime_security_startup_p0_boundaries() -> None:
         "普通 API startup 不能默认 DDL/backfill/recover/kick；维护动作必须由显式配置开启",
     )
     assert_true(
-        "python -m app.database" in start_script
+        '"$PYTHON_BIN" -m app.database' in start_script
         and "async def run_schema_maintenance" in database_text
         and "asyncio.run(run_schema_maintenance())" in database_text,
         "本地一键启动必须显式执行可重复 schema maintenance，避免 ORM 新字段缺列导致商品 API 500",
@@ -2232,7 +3131,8 @@ def test_runtime_security_startup_p0_boundaries() -> None:
         "图片代理必须默认只开放业务目录/显式额外目录，结构化校验路径且不泄漏完整本机路径",
     )
     assert_true(
-        "API_DEV_TOKEN" in env_example
+        "DEV_API_WRITE_TOKEN" in env_example
+        and "API_DEV_TOKEN" in env_example
         and "STARTUP_RUN_DB_MAINTENANCE=false" in env_example
         and "EXTERNAL_HTTP_VERIFY_TLS=true" in env_example
         and "IMAGE_PROXY_EXTRA_ROOTS=" in env_example
@@ -2240,6 +3140,110 @@ def test_runtime_security_startup_p0_boundaries() -> None:
         and "STARTUP_RUN_DB_MAINTENANCE" in runtime_security_index,
         "P0 安全/启动边界改动必须同步 .env.example 和 runtime-security 索引",
     )
+
+
+def test_remote_mutation_d2a_foundation_contract() -> None:
+    frontend_root = ROOT / "frontend"
+    package = json.loads((frontend_root / "package.json").read_text(encoding="utf-8"))
+    scripts = package.get("scripts", {})
+    api_text = (frontend_root / "src" / "api" / "index.ts").read_text(encoding="utf-8")
+    runner_text = (frontend_root / "src" / "api" / "mutationRunner.ts").read_text(encoding="utf-8")
+    generated_text = (frontend_root / "src" / "api" / "mutationInventory.generated.ts").read_text(encoding="utf-8")
+    owner_text = (frontend_root / "src" / "api" / "mutationOwnerContract.ts").read_text(encoding="utf-8")
+    generator_text = (frontend_root / "scripts" / "generate-mutation-inventory.mjs").read_text(encoding="utf-8")
+    inventory_fixture_text = (frontend_root / "scripts" / "test-mutation-inventory.mjs").read_text(encoding="utf-8")
+    runtime_spec_text = (frontend_root / "tests" / "mutation-ux.r1.spec.ts").read_text(encoding="utf-8")
+    runtime_config_text = (frontend_root / "playwright.mutation.r1.config.ts").read_text(encoding="utf-8")
+    runtime_harness_text = (ROOT / "scripts" / "test_stability_repair_r1_mutation_frontend.py").read_text(encoding="utf-8")
+    workflow_registry_text = (
+        frontend_root / "src" / "workflow" / "productWorkflowActionRegistry.ts"
+    ).read_text(encoding="utf-8")
+
+    assert_true(
+        "npm run mutations:check" in scripts.get("contracts:check", "")
+        and "scripts/generate-mutation-inventory.mjs" in scripts.get("mutations:generate", "")
+        and "--check" in scripts.get("mutations:check", "")
+        and "test-mutation-inventory.mjs" in scripts.get("mutations:check", "")
+        and "test-mutation-foundation.mjs" in scripts.get("mutations:check", ""),
+        "D2a mutation freshness、AST fixture 和 foundation behavior 必须进入 frontend contract gate",
+    )
+    assert_true(
+        "REMOTE_READ_ONLY_MESSAGE" in api_text
+        and "isRemoteReadOnlyError" in api_text
+        and "apiErrorMessage" in api_text
+        and "api.interceptors.response.use" in api_text
+        and "fbmMutationCallsiteId" in api_text
+        and "return Promise.reject(error)" in api_text,
+        "真实 axios client 必须标准化 REMOTE_DEV_READ_ONLY 403、保留原错误并暴露 config-only callsite metadata",
+    )
+    assert_true(
+        "runMutationWithUX" in runner_text
+        and "finally" in runner_text
+        and "owners.clearLoading()" in runner_text,
+        "mutation runner 必须在 finally 清理登记的 loading owner 并让原 operation 结果/错误透传",
+    )
+    assert_true(
+        "typescript" in generator_text
+        and "DEFAULT_REQUIRED_ROOTS" in generator_text
+        and "src/pages" in generator_text
+        and "src/components" in generator_text
+        and "src/hooks" in generator_text
+        and "statSync(candidate).isFile()" in generator_text
+        and "ts.isFunctionDeclaration(statement)" in generator_text,
+        "mutation inventory 必须使用 TypeScript AST、覆盖 variable/function export、验证必扫 roots、扫描 owner 目录并拒绝把目录误当模块",
+    )
+    assert_true(
+        "PRODUCT_WORKFLOW_API_CLIENT_BINDINGS" in workflow_registry_text
+        and "dispatchProductWorkflowAction" in workflow_registry_text
+        and "WORKFLOW_BINDINGS_EXPORT" in generator_text
+        and "collectWorkflowRegistry" in generator_text
+        and "workflowDispatcherBoundExecuteCall" in generator_text
+        and "expressionTaints" in generator_text
+        and "workflowOwnerKeys" in generator_text
+        and "via: 'direct' | 'workflow_registry'" in generated_text
+        and "retryProductAutoImageSelection|frontend/src/pages/ProductDetail.tsx|runWorkflowAction" in generated_text
+        and "retryProductAutoImageSelection|frontend/src/pages/ProductList.tsx|runProductWorkflowAction" in generated_text,
+        "D2b inventory 必须证明 registry lookup 到 binding.execute 实际 call callee 的 alias 链，再展开不同页面 dispatcher owner",
+    )
+    assert_true(
+        "satisfies Record<MutationCallsiteId, MutationOwnerContract>" in owner_text
+        and "OWNER_CONTRACT_FIELDS" in generator_text
+        and "staticNonEmptyString" in generator_text
+        and "d2b_static_wrapper_coverage: 'enabled'" in generated_text
+        and "d2b_runtime_playwright_coverage: 'enabled'" in generated_text
+        and "observedRuntimeIds" in runtime_spec_text
+        and "mutationInventory.map((item) => item.id).sort()" in runtime_spec_text
+        and "await import('/src/api/index.ts')" in runtime_spec_text
+        and "config.fbmMutationCallsiteId" in runtime_spec_text
+        and "await route.continue()" in runtime_spec_text
+        and "workers: 1" in runtime_config_text
+        and "capture_output=True" in runtime_harness_text
+        and "stack.upstream_count == 0" in runtime_harness_text
+        and "stack.backend_count() == 0" in runtime_harness_text,
+        "D2b 必须校验全量六字段 owner contract、静态 wrapper 集合和 test-only Playwright runtime 集合，并保持真实远程 guard 的 0 写入边界",
+    )
+    assert_true(
+        "import * as apiClients" in inventory_fixture_text
+        and "import * as workflowRegistry" in inventory_fixture_text
+        and "export function functionSave()" in inventory_fixture_text
+        and "renamedWorkflowRetry" in inventory_fixture_text
+        and "void PRODUCT_WORKFLOW_API_CLIENT_BINDINGS" in inventory_fixture_text
+        and "void renamedBinding" in inventory_fixture_text
+        and "void renamedExecute" in inventory_fixture_text
+        and "unrelatedExecute" in inventory_fixture_text
+        and "missing fields: catch_policy" in inventory_fixture_text
+        and "must be a non-empty static string" in inventory_fixture_text
+        and "unknown field extra_policy" in inventory_fixture_text,
+        "mutation AST fixture 必须固化 namespace、workflow 多 owner、execute 调用链 fail-closed、export function 与 malformed owner entry 证明",
+    )
+
+    result = subprocess.run(
+        ["npm", "run", "mutations:check"],
+        cwd=frontend_root,
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"D2b mutation contract 验证失败: {result.stderr or result.stdout}")
 
 
 def test_runtime_security_helpers_behaviour() -> None:
@@ -2253,12 +3257,20 @@ class Client:
         self.host = host
 
 assert main._is_local_client(Client("127.0.0.1"))
+assert main._is_local_client(Client("127.255.1.2"))
 assert main._is_local_client(Client("::1"))
+assert main._is_local_client(Client("::ffff:127.0.0.1"))
+assert main._is_local_client(Client("[::1]"))
 assert not main._is_local_client(Client("192.168.1.10"))
+assert not main._is_local_client(Client("2001:db8::7"))
 assert main._has_valid_dev_token(SimpleNamespace(headers={"X-FBM-Dev-Token": "secret"}), "secret")
 assert main._has_valid_dev_token(SimpleNamespace(headers={"Authorization": "Bearer secret"}), "secret")
+assert main._has_valid_dev_token(SimpleNamespace(headers={"X-FBM-Dev-Token": "secret", "Authorization": "Bearer bad"}), "secret")
+assert main._has_valid_dev_token(SimpleNamespace(headers={"X-FBM-Dev-Token": "   ", "Authorization": "Bearer secret"}), "secret")
 assert not main._has_valid_dev_token(SimpleNamespace(headers={}), "secret")
 assert not main._has_valid_dev_token(SimpleNamespace(headers={"X-FBM-Dev-Token": "bad"}), "secret")
+assert not main._has_valid_dev_token(SimpleNamespace(headers={"X-FBM-Dev-Token": "bad", "Authorization": "Bearer secret"}), "secret")
+assert not main._has_valid_dev_token(SimpleNamespace(headers={"X-FBM-Dev-Token": "错误"}), "secret")
 
 root = Path("/tmp/fbm-security-root").resolve()
 inside = root / "images" / "a.jpg"
@@ -2672,12 +3684,14 @@ def test_image_analysis_listing_e5_contract() -> None:
     products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
     workflow_text = (ROOT / "backend" / "app" / "product_tasks" / "workflow.py").read_text(encoding="utf-8")
     product_list_text = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
+    workflow_registry_text = (ROOT / "frontend" / "src" / "workflow" / "productWorkflowActionRegistry.ts").read_text(encoding="utf-8")
+    workflow_manifest = json.loads((ROOT / "contracts" / "product_workflow_actions.json").read_text(encoding="utf-8"))
 
     image_section = actions_text.split("class ProductImageAnalysisAction", 1)[1].split("class ProductListingGenerationAction", 1)[0]
     listing_section = actions_text.split("class ProductListingGenerationAction", 1)[1].split("async def _existing_active_run", 1)[0]
     retry_section = products_text.split("async def retry_step", 1)[1].split("async def run_product_from_step", 1)[0]
-    product_list_action_section = product_list_text.split("const renderPrimaryRowAction", 1)[1].split("const columns =", 1)[0]
     e5_sections = image_section + "\n" + listing_section
+    manifest_by_action = {item["action"]: item for item in workflow_manifest}
 
     assert_true(
         actions_text.count("_project_listing_completed(") == 2
@@ -2706,9 +3720,14 @@ def test_image_analysis_listing_e5_contract() -> None:
     assert_true(
         '"retry_image_analysis"' in workflow_text
         and '"retry_listing_generation"' in workflow_text
-        and "workflowAction === 'retry_image_analysis' || workflowAction === 'retry_listing_generation'" in product_list_action_section
-        and "await retryStep(product.id)" in product_list_action_section,
-        "workflow 暴露的 retry_image_analysis/retry_listing_generation 必须在 ProductList 映射到后端安全 retry，不能成为 ghost action",
+        and manifest_by_action["retry_image_analysis"]["client_export"] == "retryStep"
+        and manifest_by_action["retry_listing_generation"]["client_export"] == "retryStep"
+        and manifest_by_action["retry_image_analysis"]["route"] == "/api/products/{product_id}/retry"
+        and "retry_image_analysis: 'retryStep'" in workflow_registry_text
+        and "retry_listing_generation: 'retryStep'" in workflow_registry_text
+        and "PRODUCT_WORKFLOW_API_CLIENT_BINDINGS[definition.client_export]" in workflow_registry_text
+        and "runProductWorkflowAction(product, definition.action)" in product_list_text,
+        "workflow 暴露的 E5 retry 必须通过 manifest/typed registry 绑定后端 retryStep，不能由 ProductList 逐动作映射",
     )
     for forbidden in (
         "create_catalog_export_tasks",
@@ -5091,12 +6110,13 @@ def test_auto_image_selection_phase_b_contract() -> None:
     assert_true(
         "retryProductAutoImageSelection" in api_text
         and "/auto-image-selection/retry" in api_text
-        and "workflowAction === 'retry_auto_image_selection'" in product_list_text
-        and "workflowAction === 'manual_adjust_images'" in product_list_text
+        and "retry_auto_image_selection: 'retryProductAutoImageSelection'" in (
+            ROOT / "frontend" / "src" / "workflow" / "productWorkflowActionRegistry.ts"
+        ).read_text(encoding="utf-8")
+        and "runProductWorkflowAction(product, definition.action)" in product_list_text
         and "workflowAllowedActions.includes('manual_adjust_images')" in product_list_text
         and "手动调图" in product_list_text
-        and "openReviewPage('/products/image-review', product.id)" in product_list_text
-        and "product.current_step" not in product_list_text[product_list_text.find("workflowAction === 'retry_auto_image_selection'"):product_list_text.find("workflowAction === 'manual_adjust_images'")],
+        and "runProductWorkflowAction(product, 'manual_adjust_images')" in product_list_text,
         "商品列表必须消费后端 workflow action/allowed_actions，不能用 current_step/error_message 推导自动选图动作",
     )
     assert_true(
@@ -5386,10 +6406,14 @@ def test_auto_competitor_search_phase_a_contract() -> None:
     )
     assert_true(
         "retryProductCompetitorSearch" in frontend_api_text
-        and "start_competitor_search" in product_list_text
-        and "retry_competitor_search" in product_list_text
-        and "retryCompetitorSearch(product.id)" in product_list_text,
-        "商品列表必须消费后端 workflow action 启动/重试自动竞品搜索",
+        and "start_competitor_search: 'retryProductCompetitorSearch'" in (
+            ROOT / "frontend" / "src" / "workflow" / "productWorkflowActionRegistry.ts"
+        ).read_text(encoding="utf-8")
+        and "retry_competitor_search: 'retryProductCompetitorSearch'" in (
+            ROOT / "frontend" / "src" / "workflow" / "productWorkflowActionRegistry.ts"
+        ).read_text(encoding="utf-8")
+        and "runProductWorkflowAction(product, definition.action)" in product_list_text,
+        "商品列表必须通过 manifest/typed registry 消费自动竞品搜索 action，不能逐动作绑定 API client",
     )
     assert_true(
         "Amazon 自动竞品搜索 Phase A" in product_flow_index
@@ -5706,10 +6730,15 @@ def test_auto_competitor_visual_match_phase_b_contract() -> None:
     )
     assert_true(
         "retryProductCompetitorVisualMatch" in frontend_api_text
-        and "retry_competitor_visual_match" in product_list_text
-        and "retryCompetitorVisualMatch(product.id)" in product_list_text
-        and "restart_competitor_search" in product_list_text,
-        "商品列表必须消费后端视觉初筛 action 和重搜 action",
+        and "retry_competitor_visual_match: 'retryProductCompetitorVisualMatch'" in (
+            ROOT / "frontend" / "src" / "workflow" / "productWorkflowActionRegistry.ts"
+        ).read_text(encoding="utf-8")
+        and "restart_competitor_search: 'retryProductCompetitorSearch'" in (
+            ROOT / "frontend" / "src" / "workflow" / "productWorkflowActionRegistry.ts"
+        ).read_text(encoding="utf-8")
+        and "runProductWorkflowAction(product, definition.action)" in product_list_text
+        and "runProductWorkflowAction(product, 'restart_competitor_search')" in product_list_text,
+        "商品列表必须通过 manifest/typed registry 消费视觉初筛和重搜 action",
     )
     assert_true(
         "Amazon 竞品视觉初筛 Phase B" in product_flow_index
@@ -5919,16 +6948,21 @@ def test_auto_competitor_candidate_capture_and_selection_phase1_contract() -> No
         "E4A 自动选竞品必须使用 current-set deterministic scoring，success hook 才写 final facts 并创建/复用 image_analysis 且不自动启动真实图片分析",
     )
     assert_true(
-        "retry_competitor_candidate_capture" not in workflow_text
+        "retry_competitor_capture" not in workflow_text
+        and "retry_competitor_candidate_capture" not in workflow_text
         and "retry_auto_competitor_selection" not in workflow_text
         and "product:{product_id}:competitor_candidate_capture" in workflow_text
         and "product:{product_id}:auto_competitor_selection" in workflow_text
         and '"primary_action": "open_task_center"' in workflow_text
         and '"allowed_actions": ("open_task_center", "open_detail")' in workflow_text
         and '"primary_action": "open_detail"' in workflow_text
-        and '"allowed_actions": ("open_detail", "restart_competitor_search")' in workflow_text
+        and "TARGET_DETAIL_FAILURE_NODES" in workflow_text
+        and "task_run_creation_failed" in workflow_text
+        and actions_text.count('workflow_error=json_dumps({"code": "task_run_creation_failed"') == 2
+        and "任务执行失败，可在任务中心查看原因。" in workflow_text
+        and "任务执行失败，请在商品详情查看原因。" in workflow_text
         and "manual_select_competitor" not in workflow_text,
-        "Phase 1 workflow 只能暴露 open_detail/restart/open_task_center 等前端已支持安全动作，不能泄漏未实现 retry 或 manual action",
+        "详情失败 workflow 只能暴露有 correlation 的 task center 或商品详情，不能泄漏未实现 retry/manual action",
     )
     assert_true(
         "FixtureAmazonListingDetailAdapter" in detail_service_text
@@ -6320,6 +7354,7 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
 
 def main() -> int:
     tests = [
+        test_r1_mysql_wrapper_contract,
         test_category_conflict_only_overrides_conflict,
         test_template_mapping_changes_must_be_logged,
         test_real_asin_export_guard_is_present,
@@ -6350,15 +7385,17 @@ def main() -> int:
         test_product_bulk_advance_runs_in_task_run_queue,
         test_catalog_export_uses_snapshot_and_reuses_orphan_zip,
         test_export_listing_aplus_new_task_runtime_creation_paths,
-        test_amazon_export_binds_upc_after_prechecks_and_rolls_back,
+        test_amazon_export_binds_upc_after_prechecks_and_keeps_caller_transaction,
         test_tiktok_sales_channel_keeps_giga_source_and_uses_warehouse_inventory,
         test_giga_pull_tasks_expose_live_sku_progress_without_group_closure_during_pull,
         test_task_runtime_v1_uses_new_tables_and_keeps_old_offline_tasks_compatibility,
+        test_catalog_export_frontend_structured_result_contract,
         test_task_run_display_status_behaviour_for_current_view,
         test_task_run_list_default_views_are_db_pageable,
         test_task_run_shrink_route_rejects_diagnostic_list_filters,
         test_task_run_detail_keeps_stale_running_diagnostic_state,
         test_runtime_security_startup_p0_boundaries,
+        test_remote_mutation_d2a_foundation_contract,
         test_runtime_security_helpers_behaviour,
         test_failed_task_run_display_precedes_pending_steps,
         test_task_run_creation_responses_reload_created_runs,

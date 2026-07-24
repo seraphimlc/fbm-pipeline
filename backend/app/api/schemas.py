@@ -1,6 +1,6 @@
 from pydantic import BaseModel, Field
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 
 # ─── Products ───
@@ -148,6 +148,44 @@ class OfflineTaskStepResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class CatalogExportRowResponse(BaseModel):
+    row_ordinal: int = Field(..., ge=1)
+    catalog_id: int | None = None
+    product_id: int | None = None
+    item_code: str | None = None
+    seller_sku: str | None = None
+    category: str | None = None
+    status: str = "failed"
+    reason: str | None = None
+    template_file: str | None = None
+    output_file: str | None = None
+
+
+class CatalogExportResultResponse(BaseModel):
+    status: str = "failed"
+    artifact_available: bool | None = None
+    requested_count: int = Field(default=0, ge=0)
+    success_count: int = Field(default=0, ge=0)
+    exported_count: int = Field(default=0, ge=0)
+    skipped_count: int = Field(default=0, ge=0)
+    failed_count: int = Field(default=0, ge=0)
+    report_count: int = Field(default=0, ge=0)
+    filename: str | None = None
+    file_path: str | None = None
+    oss_object_key: str | None = None
+    oss_url: str | None = None
+    file_size: int | None = Field(default=None, ge=0)
+    category: str | None = None
+    categories: list[str] = Field(default_factory=list)
+    template_name: str | None = None
+    template_path: str | None = None
+    catalog_product_ids: list[int] = Field(default_factory=list)
+    rows: list[CatalogExportRowResponse] = Field(default_factory=list)
+    reason: str | None = None
+    report_filename: str | None = None
+    created_at: str | None = None
+
+
 class OfflineTaskResponse(BaseModel):
     id: int
     task_type: str
@@ -160,7 +198,9 @@ class OfflineTaskResponse(BaseModel):
     created_by: str | None = None
     payload_json: str | None = None
     result_json: str | None = None
+    catalog_export_result: CatalogExportResultResponse | None = None
     error_message: str | None = None
+    can_download: bool = False
     created_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
@@ -286,6 +326,7 @@ class TaskRunResponse(BaseModel):
     status: str
     payload_json: str | None = None
     summary_json: str | None = None
+    catalog_export_result: CatalogExportResultResponse | None = None
     created_by: str | None = None
     task_type_label: str | None = None
     object_type: str | None = None
@@ -745,6 +786,11 @@ class ProductResponse(BaseModel):
     source_data_source_id: int | None = None
     source_site: str | None = None
     source_batch_id: str | None = None
+    sales_channel: Literal["amazon", "tiktok"] = "amazon"
+    channel_status: str | None = None
+    channel_status_label: str | None = None
+    channel_status_reason: str | None = None
+    channel_capabilities: dict[str, bool] | None = None
     catalog_exported_at: datetime | None = None
     catalog_export_task_id: int | None = None
     status: str
@@ -1040,6 +1086,7 @@ class CatalogExportFileResponse(BaseModel):
     skipped_count: int = 0
     failed_count: int = 0
     report_count: int = 0
+    rows: list[CatalogExportRowResponse] = Field(default_factory=list)
     can_download: bool = False
     created_at: datetime | None = None
     finished_at: datetime | None = None
@@ -1347,6 +1394,7 @@ class WorkbenchOverview(BaseModel):
     asin_attention: int = 0
     aplus_failed: int = 0
     listing_high_risk: int = 0
+    channel_status_counts: dict[str, int] | None = None
 
 
 class StepLogResponse(BaseModel):

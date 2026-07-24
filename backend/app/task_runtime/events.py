@@ -28,7 +28,7 @@ async def emit_event(
     )
 
 
-async def update_step_progress(
+async def update_step_progress_in_session(
     db: AsyncSession,
     step: TaskStep,
     *,
@@ -52,5 +52,25 @@ async def update_step_progress(
             "progress_total": step.progress_total,
             **(data or {}),
         },
+    )
+    await db.flush()
+
+
+async def update_step_progress(
+    db: AsyncSession,
+    step: TaskStep,
+    *,
+    current: int,
+    total: int,
+    message: str | None = None,
+    data: dict[str, Any] | None = None,
+) -> None:
+    await update_step_progress_in_session(
+        db,
+        step,
+        current=current,
+        total=total,
+        message=message,
+        data=data,
     )
     await db.commit()

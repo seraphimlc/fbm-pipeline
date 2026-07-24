@@ -23,6 +23,7 @@ from app.task_runtime.constants import (
     STEP_STATUS_FAILED,
     STEP_STATUS_INTERRUPTED,
     STEP_STATUS_CANCELED,
+    STEP_STATUS_PARTIAL_FAILED,
     STEP_STATUS_PENDING,
     STEP_STATUS_READY,
     STEP_STATUS_RUNNING,
@@ -32,7 +33,12 @@ from app.task_runtime.events import emit_event
 from app.task_runtime.exceptions import TaskStepCanceled, TaskStepInterrupted
 from app.task_runtime.json_utils import json_dumps
 from app.task_runtime.json_utils import json_loads
-from app.task_runtime.registry import TaskContext, worker_for
+from app.task_runtime.registry import (
+    TaskContext,
+    TaskOutcomeContractError,
+    TaskWorkerOutcome,
+    worker_for,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -230,6 +236,93 @@ async def _refresh_group_and_run(db: AsyncSession, run_id: int) -> None:
     await db.commit()
 
 
+def _validate_catalog_export_outcome(outcome: TaskWorkerOutcome) -> None:
+    payload = outcome.payload
+    payload_status = str(payload.get("status") or "")
+    expected = {
+        "done": (RUN_STATUS_SUCCEEDED, "status"),
+        "partial_failed": (RUN_STATUS_PARTIAL_FAILED, "warning"),
+        "failed": (RUN_STATUS_FAILED, "error"),
+    }.get(payload_status)
+    if expected is None:
+        raise TaskOutcomeContractError(f"catalog export outcome status invalid: {payload_status or '(empty)'}")
+    if (outcome.terminal_status, outcome.event_type) != expected:
+        raise TaskOutcomeContractError(
+            "catalog export outcome terminal/event mismatch: "
+            f"payload={payload_status} terminal={outcome.terminal_status} event={outcome.event_type}"
+        )
+    requested = int(payload.get("requested_count") or 0)
+    success = int(payload.get("success_count") or 0)
+    skipped = int(payload.get("skipped_count") or 0)
+    failed = int(payload.get("failed_count") or 0)
+    rows = payload.get("rows")
+    if requested != success + skipped + failed:
+        raise TaskOutcomeContractError("catalog export outcome counts do not sum to requested_count")
+    if not isinstance(rows, list) or len(rows) != requested:
+        raise TaskOutcomeContractError("catalog export outcome rows do not match requested_count")
+
+
+async def _project_single_step_worker_outcome(
+    db: AsyncSession,
+    *,
+    run: TaskRun,
+    group: TaskGroup,
+    step: TaskStep,
+    outcome: TaskWorkerOutcome,
+) -> None:
+    if not outcome.propagate_single_step_run:
+        raise TaskOutcomeContractError("TaskWorkerOutcome without single-step propagation is not supported")
+    if run.task_type != "catalog_export" or step.step_type != "catalog_export_template":
+        raise TaskOutcomeContractError(
+            f"single-step propagation is only allowed for catalog export: run={run.task_type} step={step.step_type}"
+        )
+    group_ids = (
+        await db.execute(select(TaskGroup.id).where(TaskGroup.task_run_id == run.id))
+    ).scalars().all()
+    step_rows = (
+        await db.execute(select(TaskStep.id, TaskStep.task_group_id).where(TaskStep.task_run_id == run.id))
+    ).all()
+    if group_ids != [group.id] or step_rows != [(step.id, group.id)]:
+        raise TaskOutcomeContractError(
+            f"catalog export outcome requires exactly one run/group/step: groups={group_ids} steps={step_rows}"
+        )
+    _validate_catalog_export_outcome(outcome)
+
+    now = datetime.now()
+    payload_json = json_dumps(outcome.payload)
+    requested = int(outcome.payload.get("requested_count") or 0)
+    step.status = outcome.terminal_status
+    step.result_json = payload_json
+    step.error_message = outcome.event_message if outcome.terminal_status == STEP_STATUS_FAILED else None
+    step.progress_current = requested
+    step.progress_total = requested
+    step.locked_by = None
+    step.locked_until = None
+    step.heartbeat_at = now
+    step.finished_at = now
+    step.updated_at = now
+
+    group.status = outcome.terminal_status
+    group.summary_json = payload_json
+    group.progress_current = requested
+    group.progress_total = requested
+    group.finished_at = now
+    group.updated_at = now
+
+    run.status = outcome.terminal_status
+    run.summary_json = payload_json
+    run.finished_at = now
+    run.updated_at = now
+    await emit_event(
+        db,
+        step=step,
+        event_type=outcome.event_type,
+        message=outcome.event_message,
+        data=outcome.payload,
+    )
+    await db.commit()
+
+
 async def _execute_step(step_id: int, worker_id: str) -> bool:
     async with async_session() as db:
         result = await db.execute(
@@ -256,6 +349,15 @@ async def _execute_step(step_id: int, worker_id: str) -> bool:
             await db.refresh(run)
             if run.cancel_requested_at:
                 raise TaskStepCanceled(run.cancel_reason or "用户取消")
+            if isinstance(result_payload, TaskWorkerOutcome):
+                await _project_single_step_worker_outcome(
+                    db,
+                    run=run,
+                    group=group,
+                    step=step,
+                    outcome=result_payload,
+                )
+                return True
             now = datetime.now()
             step.status = STEP_STATUS_SUCCEEDED
             step.result_json = json_dumps(result_payload or {})

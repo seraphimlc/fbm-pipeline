@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -276,7 +278,13 @@ def build_product_workflow(product: Any, *, catalog_exported: bool | None = None
         primary_action=overrides.get("primary_action", view.default_primary_action),
         primary_action_label=overrides.get("primary_action_label", view.default_primary_action_label),
         allowed_actions=overrides.get("allowed_actions", view.default_allowed_actions),
-        action_reason=error or overrides.get("action_reason", view.default_action_reason),
+        action_reason=_action_reason(
+            node=node,
+            status=status,
+            error=error,
+            overrides=overrides,
+            default=view.default_action_reason,
+        ),
         color=overrides.get("color", view.default_color),
     )
 
@@ -374,6 +382,95 @@ def _legacy_failed_workflow_node(product: Any, error: str | None) -> str | None:
     return None
 
 
+TARGET_DETAIL_FAILURE_NODES = {
+    WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES,
+    WORKFLOW_NODE_AUTO_SELECT_COMPETITOR,
+    WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
+}
+
+
+def _related_correlation_key(product: Any, node: str) -> str | None:
+    product_id = getattr(product, "id", None)
+    if not product_id:
+        return None
+    if (
+        node in {WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES, WORKFLOW_NODE_AUTO_SELECT_COMPETITOR}
+        and _workflow_error_code(product) == "task_run_creation_failed"
+    ):
+        return None
+    if node == WORKFLOW_NODE_AUTO_SELECT_IMAGES:
+        return f"product:{product_id}:auto_image_selection"
+    if node == WORKFLOW_NODE_SEARCH_COMPETITOR and _is_auto_competitor_search(product):
+        return f"product:{product_id}:competitor_search"
+    if node == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS:
+        return f"product:{product_id}:competitor_visual_match"
+    if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES:
+        return f"product:{product_id}:competitor_candidate_capture"
+    if node == WORKFLOW_NODE_AUTO_SELECT_COMPETITOR:
+        return f"product:{product_id}:auto_competitor_selection"
+    if node == WORKFLOW_NODE_IMAGE_ANALYSIS:
+        return f"product:{product_id}:image_analysis"
+    if node == WORKFLOW_NODE_LISTING_GENERATION:
+        return f"product:{product_id}:listing_generation"
+    return None
+
+
+def _workflow_error_code(product: Any) -> str | None:
+    raw = str(getattr(product, "workflow_error", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        parsed = None
+    if isinstance(parsed, dict):
+        for key in ("error_type", "code"):
+            value = str(parsed.get(key) or "").strip()
+            if value:
+                return value
+    tokens = re.findall(r"(?<![A-Za-z0-9_])[a-z][a-z0-9_]+(?![A-Za-z0-9_])", raw)
+    return "adapter_not_configured" if "adapter_not_configured" in tokens else None
+
+
+def _failed_detail_navigation_overrides(
+    product: Any,
+    node: str,
+    *,
+    label: str,
+    work_status: str,
+) -> dict[str, Any]:
+    error_code = _workflow_error_code(product)
+    open_task_center = bool(_related_correlation_key(product, node))
+    if error_code == "adapter_not_configured":
+        action_reason = "当前版本尚未接入真实 Amazon 详情抓取，本商品已停止自动推进。"
+    elif open_task_center:
+        action_reason = "任务执行失败，可在任务中心查看原因。"
+    else:
+        action_reason = "任务执行失败，请在商品详情查看原因。"
+    return {
+        "label": label,
+        "work_status": work_status,
+        "primary_action": "open_task_center" if open_task_center else "open_detail",
+        "primary_action_label": "任务中心" if open_task_center else "查看",
+        "allowed_actions": ("open_task_center", "open_detail") if open_task_center else ("open_detail",),
+        "action_reason": action_reason,
+        "color": "error",
+    }
+
+
+def _action_reason(
+    *,
+    node: str,
+    status: str,
+    error: str | None,
+    overrides: dict[str, Any],
+    default: str,
+) -> str:
+    if status == WORKFLOW_STATUS_FAILED and node in TARGET_DETAIL_FAILURE_NODES:
+        return str(overrides.get("action_reason") or default)
+    return error or str(overrides.get("action_reason") or default)
+
+
 def _state(
     product: Any,
     *,
@@ -395,22 +492,7 @@ def _state(
     if primary_action and primary_action not in actions:
         actions.append(primary_action)
 
-    related_correlation_key = None
-    product_id = getattr(product, "id", None)
-    if product_id and stage == WORKFLOW_NODE_AUTO_SELECT_IMAGES:
-        related_correlation_key = f"product:{product_id}:auto_image_selection"
-    elif product_id and stage == WORKFLOW_NODE_SEARCH_COMPETITOR and _is_auto_competitor_search(product):
-        related_correlation_key = f"product:{product_id}:competitor_search"
-    elif product_id and stage == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS:
-        related_correlation_key = f"product:{product_id}:competitor_visual_match"
-    elif product_id and stage == WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES:
-        related_correlation_key = f"product:{product_id}:competitor_candidate_capture"
-    elif product_id and stage == WORKFLOW_NODE_AUTO_SELECT_COMPETITOR:
-        related_correlation_key = f"product:{product_id}:auto_competitor_selection"
-    elif product_id and stage == WORKFLOW_NODE_IMAGE_ANALYSIS:
-        related_correlation_key = f"product:{product_id}:image_analysis"
-    elif product_id and stage == WORKFLOW_NODE_LISTING_GENERATION:
-        related_correlation_key = f"product:{product_id}:listing_generation"
+    related_correlation_key = _related_correlation_key(product, stage)
 
     return {
         "stage": stage,
@@ -608,15 +690,12 @@ def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
             "color": "error",
         }
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL:
-        return {
-            "label": "竞品详情抓取失败",
-            "work_status": PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
-            "primary_action": "retry_competitor_capture",
-            "primary_action_label": "重新抓取",
-            "allowed_actions": ("retry_competitor_capture", "open_detail"),
-            "action_reason": "竞品详情抓取失败，可重新抓取或更换竞品",
-            "color": "error",
-        }
+        return _failed_detail_navigation_overrides(
+            product,
+            node,
+            label="竞品详情抓取失败",
+            work_status=PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
+        )
     if node == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS:
         return {
             "label": "竞品视觉初筛失败",
@@ -628,25 +707,19 @@ def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
             "color": "error",
         }
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES:
-        return {
-            "label": "候选竞品详情抓取失败",
-            "work_status": PRODUCT_WORK_STATUS_CAPTURE_DETAIL,
-            "primary_action": "open_detail",
-            "primary_action_label": "查看",
-            "allowed_actions": ("open_detail", "restart_competitor_search"),
-            "action_reason": "候选竞品详情抓取入口尚未启用，可查看商品或重新搜索竞品",
-            "color": "error",
-        }
+        return _failed_detail_navigation_overrides(
+            product,
+            node,
+            label="候选竞品详情抓取失败",
+            work_status=PRODUCT_WORK_STATUS_CAPTURE_DETAIL,
+        )
     if node == WORKFLOW_NODE_AUTO_SELECT_COMPETITOR:
-        return {
-            "label": "自动选竞品失败",
-            "work_status": PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
-            "primary_action": "open_detail",
-            "primary_action_label": "查看",
-            "allowed_actions": ("open_detail", "restart_competitor_search"),
-            "action_reason": "自动选竞品入口尚未启用，可查看商品或重新搜索竞品",
-            "color": "error",
-        }
+        return _failed_detail_navigation_overrides(
+            product,
+            node,
+            label="自动选竞品失败",
+            work_status=PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
+        )
     if node == WORKFLOW_NODE_IMAGE_ANALYSIS:
         return {
             "label": "图片分析失败",

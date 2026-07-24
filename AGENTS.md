@@ -43,3 +43,8 @@
 ## 新增类目模板
 
 新增类目模板按 `docs/add-category-template-sop.md` 执行，至少包含模板文件、映射 JSON、类目匹配逻辑、校验结果和一个样例商品生成检查。
+
+## 前端 Mutation 契约
+
+- `frontend/src/api/mutationInventory.generated.ts` 由 TypeScript AST 生成器维护，不手工编辑；mutation export、直接调用点、`productWorkflowActionRegistry.ts` 间接 binding/dispatcher owner 或 unused 分类变化后运行 `cd frontend && npm run mutations:generate`。workflow dispatcher 必须存在 `registry lookup -> binding.execute -> CallExpression` 的实际静态链路；每个 owner contract entry 必须保留六个非空静态字符串字段。
+- D2a 只建立标准 403、callsite metadata、runner、inventory 和 owner contract；在 D2b 完成页面迁移与静态/Playwright coverage 前，不得宣称生产调用点已经统一包装或已具备完整状态保留验证。

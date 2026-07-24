@@ -13,7 +13,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from openpyxl import Workbook, load_workbook
-from sqlalchemy import case, delete, select, func
+from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, selectinload
 from datetime import datetime
@@ -99,6 +99,17 @@ from app.product_tasks.work_status import (
     PRODUCT_WORKBENCH_STATUS_KEYS,
     get_product_work_status_definition,
 )
+from app.task_runtime.catalog_export_status import (
+    CATALOG_STEP_OWNER_OFFLINE_TASK,
+    CATALOG_STEP_OWNER_TASK_RUN,
+    CatalogEffectiveTerminalRecord,
+    catalog_export_resolution_is_ready,
+    catalog_export_result_is_downloadable,
+    load_catalog_effective_terminal_projection,
+    projected_offline_task_status_condition,
+    projected_task_run_status_condition,
+    resolve_catalog_export_artifact,
+)
 from app.pipeline.step2_pricing import run_pricing
 from app.pipeline.step3_keywords import run_keywords
 from app.pipeline.step4_category import run_category
@@ -113,8 +124,10 @@ from app.pipeline.step10_amazon_template import (
     _load_template_mapping,
     _offer_quantity,
     _representative_package,
+    AmazonTemplateBusinessError,
     ensure_amazon_template_semantic_fields,
     run_amazon_template,
+    run_amazon_template_in_session,
 )
 from app.services.material_assets import (
     IMAGE_EXTENSIONS,
@@ -147,6 +160,11 @@ from app.services.upc_pool import (
 from app.services.giga_openapi import GigaOpenApiError, GigaSyncOptions, sync_giga_products
 from app.services.product_protection import raise_if_auto_image_selection_protected, raise_if_image_selection_reset_protected
 from app.services.giga_product_drafts import upsert_product_drafts_from_giga_batch
+from app.services.tiktok_status import (
+    TIKTOK_CHANNEL_STATUSES,
+    build_tiktok_classification_cte,
+    tiktok_channel_status_fields,
+)
 from app.task_planners.aplus_generate import create_aplus_generate_runs
 from app.task_planners.product_bulk_advance import create_product_bulk_advance_run
 from app.task_planners.product_auto_image_selection import create_product_auto_image_selection_runs
@@ -225,6 +243,14 @@ class CatalogExportBuildError(Exception):
         super().__init__(message)
         self.message = message
         self.report_rows = report_rows or []
+
+
+class CatalogExportRowBusinessError(ValueError):
+    """Expected row-level validation/protection failure, never a system outage."""
+
+    def __init__(self, message: str, *, status: str = "失败"):
+        super().__init__(message)
+        self.status = status
 
 
 def _catalog_export_exception_status(exc: Exception) -> str:
@@ -541,16 +567,36 @@ def _count_material_images(material_dir: Path) -> int:
     return count
 
 
-def _build_list_item(product: Product) -> dict:
+def _build_list_item(
+    product: Product,
+    *,
+    sales_channel: str | None = "amazon",
+    channel_status: str | None = None,
+) -> dict:
+    normalized_sales_channel = str(sales_channel or "amazon").strip().lower()
+    if normalized_sales_channel not in {"amazon", "tiktok"}:
+        normalized_sales_channel = "amazon"
+    is_tiktok = normalized_sales_channel == "tiktok"
     catalog_exported = product.catalog_item and (product.catalog_item.exported_at or product.catalog_item.export_task_id)
-    workflow = _workflow_state(product, catalog_exported=bool(catalog_exported))
-    current_task_status = (
-        f"已导出，可在导出中心再次导出（任务 #{product.catalog_item.export_task_id}）"
-        if catalog_exported and product.catalog_item and product.catalog_item.export_task_id
-        else "已导出，可在导出中心再次导出"
-        if catalog_exported
-        else workflow["action_reason"]
-    )
+    channel_fields = tiktok_channel_status_fields(channel_status) if is_tiktok else tiktok_channel_status_fields(None)
+    if is_tiktok:
+        workflow = None
+        current_task_status = (
+            f"失败：{product.error_message}"
+            if product.status == FAILED and product.error_message
+            else channel_fields["channel_status_reason"]
+            or product.error_message
+            or product.status
+        )
+    else:
+        workflow = _workflow_state(product, catalog_exported=bool(catalog_exported))
+        current_task_status = (
+            f"已导出，可在导出中心再次导出（任务 #{product.catalog_item.export_task_id}）"
+            if catalog_exported and product.catalog_item and product.catalog_item.export_task_id
+            else "已导出，可在导出中心再次导出"
+            if catalog_exported
+            else workflow["action_reason"]
+        )
     return {
         "id": product.id,
         "source_url": product.gigab2b_url,
@@ -577,6 +623,8 @@ def _build_list_item(product: Product) -> dict:
         "source_data_source_id": product.source_data_source_id,
         "source_site": product.source_site,
         "source_batch_id": product.source_batch_id,
+        "sales_channel": normalized_sales_channel,
+        **channel_fields,
         "catalog_exported_at": product.catalog_item.exported_at if product.catalog_item else None,
         "catalog_export_task_id": product.catalog_item.export_task_id if product.catalog_item else None,
         "status": product.status,
@@ -1303,27 +1351,6 @@ def _catalog_has_export_file(product: Product | None, item: CatalogProduct | Non
     return bool((item.exported_at if item else None) or _catalog_existing_asin(product, item))
 
 
-def _catalog_export_task_payload(task: OfflineTask) -> dict:
-    payload = _json_loads(task.result_json, {})
-    if isinstance(payload, dict) and (
-        payload.get("filename") or payload.get("file_path") or payload.get("oss_object_key") or payload.get("rows")
-    ):
-        return payload
-    for step in sorted(task.steps, key=lambda item: item.id, reverse=True):
-        if step.step_type != "catalog_export_template":
-            continue
-        step_payload = _json_loads(step.result_json, {})
-        if isinstance(step_payload, dict) and (
-            step_payload.get("filename")
-            or step_payload.get("file_path")
-            or step_payload.get("oss_object_key")
-            or step_payload.get("rows")
-        ):
-            return step_payload
-    payload = _json_loads(task.payload_json, {})
-    return payload if isinstance(payload, dict) else {}
-
-
 def _catalog_export_datetime(value: object) -> datetime | None:
     if isinstance(value, datetime):
         return value
@@ -1335,138 +1362,100 @@ def _catalog_export_datetime(value: object) -> datetime | None:
         return None
 
 
-def _catalog_export_file_row(task: OfflineTask) -> CatalogExportFileResponse:
-    payload = _catalog_export_task_payload(task)
-    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
-    catalog_ids = [
-        int(item_id)
-        for item_id in payload.get("catalog_product_ids") or []
-        if str(item_id).isdigit()
-    ]
-    categories = [
-        str(category).strip()
-        for category in payload.get("categories") or []
-        if str(category).strip()
-    ]
-    if not categories:
-        categories = sorted({
-            str(row.get("category")).strip()
-            for row in rows
-            if isinstance(row, dict) and str(row.get("category") or "").strip()
-        })
-    success_count = int(payload.get("success_count") or payload.get("exported_count") or 0)
-    skipped_count = int(payload.get("skipped_count") or 0)
-    failed_count = int(payload.get("failed_count") or 0)
-    if rows and not (success_count or skipped_count or failed_count):
-        success_count = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "exported")
-        skipped_count = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "skipped")
-        failed_count = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "failed")
-    filename = str(payload.get("filename") or "").strip() or None
-    file_path = str(payload.get("file_path") or "").strip() or None
-    oss_url = str(payload.get("oss_url") or "").strip() or None
+def _catalog_export_file_row(
+    task: OfflineTask,
+    catalog_record: CatalogEffectiveTerminalRecord,
+) -> CatalogExportFileResponse:
+    payload = catalog_record.outcome
+    resolution = resolve_catalog_export_artifact(
+        payload,
+        allowed_export_root=settings.DATA_DIR / "exports",
+        object_cache_subdir=f"task_{task.id}",
+    )
+    response_payload = payload
+    rows = response_payload["rows"]
+    catalog_ids = response_payload["catalog_product_ids"]
+    categories = response_payload["categories"]
+    success_count = response_payload["success_count"]
+    skipped_count = response_payload["skipped_count"]
+    failed_count = response_payload["failed_count"]
     return CatalogExportFileResponse(
         task_id=task.id,
         task_source="offline_task",
-        task_status=str(payload.get("status") or task.status),
+        task_status=catalog_record.effective_status,
         title=task.title,
-        filename=filename,
-        file_path=file_path,
-        oss_url=oss_url,
-        file_size=payload.get("file_size"),
-        exported_at=_catalog_export_datetime(payload.get("created_at")) or task.finished_at or task.updated_at,
-        category=str(payload.get("category") or (categories[0] if categories else "")).strip() or None,
+        filename=response_payload["filename"],
+        file_path=response_payload["file_path"],
+        oss_url=response_payload["oss_url"],
+        file_size=response_payload["file_size"],
+        exported_at=_catalog_export_datetime(response_payload["created_at"]) or task.finished_at or task.updated_at,
+        category=response_payload["category"] or (categories[0] if categories else None),
         categories=categories,
         category_count=len(categories),
-        template_name=str(payload.get("template_name") or "").strip() or None,
+        template_name=response_payload["template_name"],
         catalog_product_ids=catalog_ids,
-        task_product_count=int(payload.get("requested_count") or len(catalog_ids)),
+        task_product_count=response_payload["requested_count"],
         file_product_count=success_count,
         success_count=success_count,
         exported_count=success_count,
         skipped_count=skipped_count,
         failed_count=failed_count,
-        report_count=int(payload.get("report_count") or len(rows)),
-        can_download=bool(filename or file_path or payload.get("oss_object_key")),
+        report_count=response_payload["report_count"],
+        rows=rows,
+        can_download=(
+            catalog_record.effective_status in {"done", "partial_failed"}
+            and catalog_export_resolution_is_ready(resolution)
+        ),
         created_at=task.created_at,
         finished_at=task.finished_at,
         updated_at=task.updated_at,
     )
 
 
-def _catalog_export_run_payload(run: TaskRun) -> dict:
-    payload = _json_loads(run.summary_json, {})
-    if isinstance(payload, dict) and (
-        payload.get("filename") or payload.get("file_path") or payload.get("oss_object_key") or payload.get("rows")
-    ):
-        return payload
-    for step in sorted(run.steps, key=lambda item: item.id, reverse=True):
-        if step.step_type != "catalog_export_template":
-            continue
-        step_payload = _json_loads(step.result_json, {})
-        if isinstance(step_payload, dict) and (
-            step_payload.get("filename")
-            or step_payload.get("file_path")
-            or step_payload.get("oss_object_key")
-            or step_payload.get("rows")
-        ):
-            return step_payload
-    payload = _json_loads(run.payload_json, {})
-    return payload if isinstance(payload, dict) else {}
-
-
-def _catalog_export_file_row_from_run(run: TaskRun) -> CatalogExportFileResponse:
-    payload = _catalog_export_run_payload(run)
-    rows = payload.get("rows") if isinstance(payload.get("rows"), list) else []
-    catalog_ids = [
-        int(item_id)
-        for item_id in payload.get("catalog_product_ids") or []
-        if str(item_id).isdigit()
-    ]
-    categories = [
-        str(category).strip()
-        for category in payload.get("categories") or []
-        if str(category).strip()
-    ]
-    if not categories:
-        categories = sorted({
-            str(row.get("category")).strip()
-            for row in rows
-            if isinstance(row, dict) and str(row.get("category") or "").strip()
-        })
-    success_count = int(payload.get("success_count") or payload.get("exported_count") or 0)
-    skipped_count = int(payload.get("skipped_count") or 0)
-    failed_count = int(payload.get("failed_count") or 0)
-    if rows and not (success_count or skipped_count or failed_count):
-        success_count = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "exported")
-        skipped_count = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "skipped")
-        failed_count = sum(1 for row in rows if isinstance(row, dict) and row.get("status") == "failed")
-    filename = str(payload.get("filename") or "").strip() or None
-    file_path = str(payload.get("file_path") or "").strip() or None
-    oss_url = str(payload.get("oss_url") or "").strip() or None
-    payload_status = str(payload.get("status") or "").strip()
+def _catalog_export_file_row_from_run(
+    run: TaskRun,
+    catalog_record: CatalogEffectiveTerminalRecord,
+) -> CatalogExportFileResponse:
+    payload = catalog_record.outcome
+    resolution = resolve_catalog_export_artifact(
+        payload,
+        allowed_export_root=settings.DATA_DIR / "exports",
+        object_cache_subdir=f"task_run_{run.id}",
+    )
+    response_payload = payload
+    rows = response_payload["rows"]
+    catalog_ids = response_payload["catalog_product_ids"]
+    categories = response_payload["categories"]
+    success_count = response_payload["success_count"]
+    skipped_count = response_payload["skipped_count"]
+    failed_count = response_payload["failed_count"]
     return CatalogExportFileResponse(
         task_id=run.id,
         task_source="task_run",
-        task_status=payload_status or run.status,
+        task_status=catalog_record.effective_status,
         title=run.title,
-        filename=filename,
-        file_path=file_path,
-        oss_url=oss_url,
-        file_size=payload.get("file_size"),
-        exported_at=_catalog_export_datetime(payload.get("created_at")) or run.finished_at or run.updated_at,
-        category=str(payload.get("category") or (categories[0] if categories else "")).strip() or None,
+        filename=response_payload["filename"],
+        file_path=response_payload["file_path"],
+        oss_url=response_payload["oss_url"],
+        file_size=response_payload["file_size"],
+        exported_at=_catalog_export_datetime(response_payload["created_at"]) or run.finished_at or run.updated_at,
+        category=response_payload["category"] or (categories[0] if categories else None),
         categories=categories,
         category_count=len(categories),
-        template_name=str(payload.get("template_name") or "").strip() or None,
+        template_name=response_payload["template_name"],
         catalog_product_ids=catalog_ids,
-        task_product_count=int(payload.get("requested_count") or len(catalog_ids)),
+        task_product_count=response_payload["requested_count"],
         file_product_count=success_count,
         success_count=success_count,
         exported_count=success_count,
         skipped_count=skipped_count,
         failed_count=failed_count,
-        report_count=int(payload.get("report_count") or len(rows)),
-        can_download=bool(filename or file_path or payload.get("oss_object_key")),
+        report_count=response_payload["report_count"],
+        rows=rows,
+        can_download=catalog_export_result_is_downloadable(
+            effective_status=catalog_record.effective_status,
+            resolution=resolution,
+        ),
         created_at=run.created_at,
         finished_at=run.finished_at,
         updated_at=run.updated_at,
@@ -2627,6 +2616,24 @@ async def get_workbench_overview(
     db: AsyncSession = Depends(get_db),
 ):
     """工作台概览：用于顶部快速发现需要处理的任务和商品。"""
+    selected_data_source = await db.get(ProductDataSource, data_source_id) if data_source_id else None
+    if selected_data_source and str(selected_data_source.sales_channel or "amazon").lower() == "tiktok":
+        classification = build_tiktok_classification_cte(data_source_id=data_source_id)
+        count_rows = (
+            await db.execute(
+                select(classification.c.channel_status, func.count(classification.c.product_id))
+                .group_by(classification.c.channel_status)
+            )
+        ).all()
+        channel_status_counts = {status: 0 for status in TIKTOK_CHANNEL_STATUSES}
+        for channel_status, count in count_rows:
+            if channel_status in channel_status_counts:
+                channel_status_counts[str(channel_status)] = int(count or 0)
+        return WorkbenchOverview(
+            total_products=sum(channel_status_counts.values()),
+            channel_status_counts=channel_status_counts,
+        )
+
     product_query = select(Product).options(
         load_only(
             Product.id,
@@ -2780,6 +2787,7 @@ async def list_products(
     page_size: int = Query(20, ge=1, le=100),
     status: str | None = None,
     work_status: str | None = Query(None),
+    channel_status: str | None = Query(None),
     item_id: str | None = None,
     sku_code: str | None = None,
     data_source_id: int | None = Query(None, ge=1),
@@ -2790,8 +2798,22 @@ async def list_products(
     db: AsyncSession = Depends(get_db),
 ):
     """商品任务列表（分页）"""
+    if channel_status and work_status:
+        raise HTTPException(400, "TikTok 渠道状态不能与 Amazon 工作状态同时筛选")
     if work_status and work_status not in PRODUCT_LIST_WORK_STATUS_KEYS:
         raise HTTPException(400, f"不支持的工作状态筛选：{work_status}")
+    if channel_status and channel_status not in TIKTOK_CHANNEL_STATUSES:
+        raise HTTPException(400, f"不支持的 TikTok 渠道状态筛选：{channel_status}")
+
+    selected_data_source = await db.get(ProductDataSource, data_source_id) if data_source_id else None
+    is_tiktok_context = bool(
+        selected_data_source
+        and str(selected_data_source.sales_channel or "amazon").strip().lower() == "tiktok"
+    )
+    if channel_status and not data_source_id:
+        raise HTTPException(400, "TikTok 渠道状态筛选必须指定 data_source_id")
+    if channel_status and not is_tiktok_context:
+        raise HTTPException(400, "channel_status 仅支持明确的 TikTok 数据源")
 
     query = (
         select(Product)
@@ -2823,9 +2845,25 @@ async def list_products(
                 CatalogProduct.export_task_id,
             ),
         )
-        .order_by(Product.updated_at.is_(None).asc(), Product.updated_at.desc(), Product.created_at.desc())
+        .order_by(
+            Product.updated_at.is_(None).asc(),
+            Product.updated_at.desc(),
+            Product.created_at.desc(),
+            Product.id.desc(),
+        )
     )
     count_query = select(func.count(Product.id))
+    classification = None
+    if is_tiktok_context:
+        classification = build_tiktok_classification_cte(data_source_id=data_source_id)
+        query = (
+            query.add_columns(classification.c.sales_channel, classification.c.channel_status)
+            .join(classification, classification.c.product_id == Product.id)
+        )
+        count_query = count_query.join(classification, classification.c.product_id == Product.id)
+        if channel_status:
+            query = query.where(classification.c.channel_status == channel_status)
+            count_query = count_query.where(classification.c.channel_status == channel_status)
 
     needs_product_data_join = bool(item_id or sku_code)
     if needs_product_data_join:
@@ -2889,9 +2927,49 @@ async def list_products(
     result = await db.execute(
         query.offset((page - 1) * page_size).limit(page_size)
     )
-    items = result.scalars().all()
+    if classification is not None:
+        list_items = [
+            _build_list_item(
+                product,
+                sales_channel=str(projected_sales_channel or "tiktok"),
+                channel_status=str(projected_channel_status),
+            )
+            for product, projected_sales_channel, projected_channel_status in result.all()
+        ]
+    else:
+        products = result.scalars().all()
+        if selected_data_source:
+            sales_channels = {
+                int(selected_data_source.id): str(selected_data_source.sales_channel or "amazon").lower()
+            }
+        else:
+            source_ids = sorted({
+                int(product.source_data_source_id)
+                for product in products
+                if product.source_data_source_id
+            })
+            sales_channels = {}
+            if source_ids:
+                source_rows = await db.execute(
+                    select(ProductDataSource.id, ProductDataSource.sales_channel)
+                    .where(ProductDataSource.id.in_(source_ids))
+                )
+                sales_channels = {
+                    int(source_id): str(source_channel or "amazon").lower()
+                    for source_id, source_channel in source_rows.all()
+                }
+        list_items = [
+            _build_list_item(
+                product,
+                sales_channel=sales_channels.get(int(product.source_data_source_id), "amazon")
+                if product.source_data_source_id
+                else "amazon",
+                channel_status=None,
+            )
+            for product in products
+        ]
 
-    return PaginatedResponse(items=[_build_list_item(item) for item in items], total=total, page=page, page_size=page_size)
+    return PaginatedResponse(items=list_items, total=total, page=page, page_size=page_size)
 
 
 @router.get("/image-review-queue", response_model=ProductImageReviewQueueResponse)
@@ -3671,23 +3749,45 @@ async def list_catalog_export_files(
     db: AsyncSession = Depends(get_db),
 ):
     """按导出文件/任务维度列出 Amazon 导入表历史记录。"""
+    offline_projection = await load_catalog_effective_terminal_projection(
+        db,
+        owner_kind=CATALOG_STEP_OWNER_OFFLINE_TASK,
+    )
+    task_run_projection = await load_catalog_effective_terminal_projection(
+        db,
+        owner_kind=CATALOG_STEP_OWNER_TASK_RUN,
+    )
     old_result = await db.execute(
         select(OfflineTask)
         .where(OfflineTask.task_type == "catalog_export")
-        .where(OfflineTask.status.in_(("done", "partial_failed", "failed")))
-        .options(selectinload(OfflineTask.steps))
+        .where(or_(
+            projected_offline_task_status_condition("done", offline_projection),
+            projected_offline_task_status_condition("partial_failed", offline_projection),
+            projected_offline_task_status_condition("failed", offline_projection),
+        ))
         .order_by(OfflineTask.id.desc())
     )
     new_result = await db.execute(
         select(TaskRun)
         .where(TaskRun.task_type == "catalog_export")
-        .where(TaskRun.status.in_(("succeeded", "failed", "interrupted")))
-        .options(selectinload(TaskRun.steps))
+        .where(or_(
+            projected_task_run_status_condition("succeeded", task_run_projection),
+            projected_task_run_status_condition("partial_failed", task_run_projection),
+            projected_task_run_status_condition("failed", task_run_projection),
+        ))
         .order_by(TaskRun.id.desc())
     )
+    old_tasks = old_result.scalars().all()
+    new_runs = new_result.scalars().all()
     rows = [
-        *[_catalog_export_file_row_from_run(run) for run in new_result.scalars().unique().all()],
-        *[_catalog_export_file_row(task) for task in old_result.scalars().unique().all()],
+        *[
+            _catalog_export_file_row_from_run(run, task_run_projection.records_by_id[run.id])
+            for run in new_runs
+        ],
+        *[
+            _catalog_export_file_row(task, offline_projection.records_by_id[task.id])
+            for task in old_tasks
+        ],
     ]
     normalized_category = str(category or "").strip()
     if normalized_category:
@@ -3711,24 +3811,44 @@ async def list_catalog_export_files(
 async def list_catalog_export_categories(db: AsyncSession = Depends(get_db)):
     """按已导出文件/任务维度聚合可选类目。"""
     exported_groups: dict[str, dict] = {}
+    offline_projection = await load_catalog_effective_terminal_projection(
+        db,
+        owner_kind=CATALOG_STEP_OWNER_OFFLINE_TASK,
+    )
+    task_run_projection = await load_catalog_effective_terminal_projection(
+        db,
+        owner_kind=CATALOG_STEP_OWNER_TASK_RUN,
+    )
     task_result = await db.execute(
         select(OfflineTask)
         .where(OfflineTask.task_type == "catalog_export")
-        .where(OfflineTask.status.in_(("done", "partial_failed", "failed")))
-        .options(selectinload(OfflineTask.steps))
+        .where(or_(
+            projected_offline_task_status_condition("done", offline_projection),
+            projected_offline_task_status_condition("partial_failed", offline_projection),
+            projected_offline_task_status_condition("failed", offline_projection),
+        ))
         .order_by(OfflineTask.id.desc())
     )
-    for task in task_result.scalars().unique().all():
-        _collect_export_file_category(exported_groups, _catalog_export_file_row(task))
+    tasks = task_result.scalars().all()
+    for task in tasks:
+        row = _catalog_export_file_row(task, offline_projection.records_by_id[task.id])
+        if row.can_download:
+            _collect_export_file_category(exported_groups, row)
     run_result = await db.execute(
         select(TaskRun)
         .where(TaskRun.task_type == "catalog_export")
-        .where(TaskRun.status.in_(("succeeded", "failed", "interrupted")))
-        .options(selectinload(TaskRun.steps))
+        .where(or_(
+            projected_task_run_status_condition("succeeded", task_run_projection),
+            projected_task_run_status_condition("partial_failed", task_run_projection),
+            projected_task_run_status_condition("failed", task_run_projection),
+        ))
         .order_by(TaskRun.id.desc())
     )
-    for run in run_result.scalars().unique().all():
-        _collect_export_file_category(exported_groups, _catalog_export_file_row_from_run(run))
+    runs = run_result.scalars().all()
+    for run in runs:
+        row = _catalog_export_file_row_from_run(run, task_run_projection.records_by_id[run.id])
+        if row.can_download:
+            _collect_export_file_category(exported_groups, row)
     return CatalogExportCategoriesResponse(
         pending=[],
         exported=_export_category_summaries(exported_groups),
@@ -3973,7 +4093,12 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
     source_ids = [item.source_product_id for item in catalog_items]
     product_result = await db.execute(
         select(Product)
-        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus))
+        .options(
+            selectinload(Product.data),
+            selectinload(Product.images),
+            selectinload(Product.aplus),
+            selectinload(Product.catalog_item),
+        )
         .where(Product.id.in_(source_ids))
     )
     products_by_id = {product.id: product for product in product_result.scalars().all()}
@@ -4017,26 +4142,7 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
             continue
         try:
             mapping = _load_template_mapping(product, pd)
-            category = pd.leaf_category or mapping.get("category_type") or item.leaf_category or "未分类"
-            template_path = _uploaded_category_template_path(str(category)) or Path(mapping["template_path"]).expanduser()
-            if not template_path.is_file():
-                raise FileNotFoundError(f"模板文件不存在: {template_path}")
-            if not _template_file_enabled(template_path):
-                raise ValueError(f"模板文件已停用: {template_path.name}")
-            key = str(template_path.expanduser().resolve())
-            group = grouped.setdefault(key, {
-                "template_path": template_path,
-                "categories": [],
-                "entries": [],
-            })
-            if str(category) not in group["categories"]:
-                group["categories"].append(str(category))
-            group["entries"].append({
-                "product": product,
-                "category": str(category),
-                "mapping": mapping,
-            })
-        except Exception as exc:
+        except ValueError as exc:
             report_rows.append({
                 **base_report,
                 "状态": _catalog_export_exception_status(exc),
@@ -4044,6 +4150,40 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                 "导出文件": None,
                 "原因": f"{type(exc).__name__}: {exc}",
             })
+            continue
+        category = pd.leaf_category or mapping.get("category_type") or item.leaf_category or "未分类"
+        template_path = _uploaded_category_template_path(str(category)) or Path(mapping["template_path"]).expanduser()
+        if not template_path.is_file():
+            report_rows.append({
+                **base_report,
+                "状态": "失败",
+                "模板文件": None,
+                "导出文件": None,
+                "原因": f"模板文件不存在: {template_path}",
+            })
+            continue
+        if not _template_file_enabled(template_path):
+            report_rows.append({
+                **base_report,
+                "状态": "失败",
+                "模板文件": str(template_path),
+                "导出文件": None,
+                "原因": f"模板文件已停用: {template_path.name}",
+            })
+            continue
+        key = str(template_path.expanduser().resolve())
+        group = grouped.setdefault(key, {
+            "template_path": template_path,
+            "categories": [],
+            "entries": [],
+        })
+        if str(category) not in group["categories"]:
+            group["categories"].append(str(category))
+        group["entries"].append({
+            "product": product,
+            "category": str(category),
+            "mapping": mapping,
+        })
 
     if not grouped:
         if report_rows and all("已有真实 ASIN" in str(row.get("原因") or "") for row in report_rows):
@@ -4062,7 +4202,22 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                 chunk = entries[chunk_index:chunk_index + 500]
                 wb = await asyncio.to_thread(load_workbook, template_path, keep_vba=True, data_only=False)
                 if "Template" not in wb.sheetnames:
-                    raise HTTPException(400, f"模板缺少 Template 工作表: {template_path}")
+                    for entry in chunk:
+                        product = entry["product"]
+                        pd = product.data
+                        catalog = catalog_by_source_id.get(product.id)
+                        report_rows.append({
+                            "商品资料ID": catalog.id if catalog else None,
+                            "商品ID": product.id,
+                            "商品Code": pd.item_code if pd else None,
+                            "Seller SKU": amazon_seller_sku_for_export(product, pd) if pd else None,
+                            "类目": entry["category"],
+                            "模板文件": str(template_path),
+                            "导出文件": None,
+                            "状态": "失败",
+                            "原因": f"模板缺少 Template 工作表: {template_path}",
+                        })
+                    continue
                 ws = wb["Template"]
                 _clear_template_data_rows(ws, len(chunk))
                 part = chunk_index // 500 + 1
@@ -4087,56 +4242,72 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                         "导出文件": export_name,
                     }
                     try:
-                        if not pd:
-                            raise ValueError("商品资料不存在")
-                        sku = _catalog_price_quantity_sku(catalog) if catalog else ""
-                        latest_inventory = latest_inventory_by_catalog_id.get(catalog.id) if catalog else None
-                        if sku and not latest_inventory:
-                            raise ValueError(f"最新 GIGA 库存快照未找到 SKU {sku}，已停止导出")
-                        stock_override = _catalog_stock_export_override(
-                            ws,
-                            mapping,
-                            catalog,
-                            latest_inventory.stock_qty if latest_inventory else None,
-                        )
-                        await ensure_amazon_template_semantic_fields(product, pd, mapping, template_path)
-                        await db.commit()
-                        source_path = _amazon_template_cache_path(pd)
-                        template_result = None
-                        if not source_path:
-                            template_result = await run_amazon_template(product.id)
-                            source_path = Path(template_result["path"]).expanduser()
-                            await db.refresh(product)
-                            if catalog:
-                                await db.refresh(catalog)
-                        if not product.upc:
+                        async with db.begin_nested():
+                            if not pd:
+                                raise CatalogExportRowBusinessError("商品资料不存在", status="跳过")
+                            sku = _catalog_price_quantity_sku(catalog) if catalog else ""
+                            latest_inventory = latest_inventory_by_catalog_id.get(catalog.id) if catalog else None
+                            if sku and not latest_inventory:
+                                raise CatalogExportRowBusinessError(
+                                    f"最新 GIGA 库存快照未找到 SKU {sku}，已停止导出",
+                                    status="跳过",
+                                )
                             try:
-                                await ensure_product_upc(db, product)
-                            except UpcPoolEmptyError as exc:
-                                raise ValueError(str(exc)) from exc
-                        if catalog and catalog.upc != product.upc:
-                            catalog.upc = product.upc
-                            catalog.updated_at = datetime.now()
-                        await db.flush()
-                        _copy_import_data_row(source_path, ws, row_number)
-                        _apply_catalog_export_row_overrides(ws, row_number, product, pd, mapping)
-                        if stock_override:
-                            quantity_col, stock_quantity = stock_override
-                            ws.cell(row_number, quantity_col).value = stock_quantity
-                        await db.commit()
+                                stock_override = _catalog_stock_export_override(
+                                    ws,
+                                    mapping,
+                                    catalog,
+                                    latest_inventory.stock_qty if latest_inventory else None,
+                                )
+                            except ValueError as exc:
+                                raise CatalogExportRowBusinessError(str(exc)) from exc
+                            await ensure_amazon_template_semantic_fields(product, pd, mapping, template_path)
+                            source_path = _amazon_template_cache_path(pd)
+                            template_result = None
+                            if not source_path:
+                                try:
+                                    template_result = await run_amazon_template_in_session(db, product)
+                                except AmazonTemplateBusinessError as exc:
+                                    raise CatalogExportRowBusinessError(str(exc)) from exc
+                                source_path = Path(template_result["path"]).expanduser()
+                            if not product.upc:
+                                try:
+                                    await ensure_product_upc(db, product)
+                                except UpcPoolEmptyError as exc:
+                                    raise CatalogExportRowBusinessError(str(exc)) from exc
+                            if catalog and catalog.upc != product.upc:
+                                catalog.upc = product.upc
+                                catalog.updated_at = datetime.now()
+                            await db.flush()
+                            if not source_path.is_file():
+                                raise CatalogExportRowBusinessError(f"已生成导入表格不存在: {source_path}")
+                            try:
+                                _copy_import_data_row(source_path, ws, row_number)
+                                _apply_catalog_export_row_overrides(ws, row_number, product, pd, mapping)
+                            except ValueError as exc:
+                                raise CatalogExportRowBusinessError(str(exc)) from exc
+                            if stock_override:
+                                quantity_col, stock_quantity = stock_override
+                                ws.cell(row_number, quantity_col).value = stock_quantity
+                    except CatalogExportRowBusinessError as exc:
+                        report_rows.append({
+                            **report_base,
+                            "状态": exc.status,
+                            "原因": f"{type(exc).__name__}: {exc}",
+                        })
+                        if catalog is not None:
+                            await db.refresh(catalog)
+                        if product is not None:
+                            await db.refresh(product)
+                        if pd is not None:
+                            await db.refresh(pd)
+                    else:
                         exported_in_workbook += 1
                         report_rows.append({
                             **report_base,
                             "状态": "已导出",
                             "原因": ("使用已生成表格" if template_result is None else "现场重新生成表格")
                             + (f"，数量按最新 GIGA 库存 {stock_override[1]} 覆盖" if stock_override else ""),
-                        })
-                    except Exception as exc:
-                        await db.rollback()
-                        report_rows.append({
-                            **report_base,
-                            "状态": _catalog_export_exception_status(exc),
-                            "原因": f"{type(exc).__name__}: {exc}",
                         })
 
                 if exported_in_workbook:
@@ -4158,6 +4329,7 @@ async def _export_catalog_items(catalog_items: list[CatalogProduct], db: AsyncSe
         zip_bytes, filename, _report_rows = await build_catalog_export_zip(catalog_items, db)
     except CatalogExportBuildError as exc:
         raise HTTPException(400, exc.message)
+    await db.commit()
     zip_stream = BytesIO(zip_bytes)
     return StreamingResponse(
         zip_stream,

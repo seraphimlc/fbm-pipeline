@@ -1,13 +1,13 @@
 import json
-from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.api.schemas import (
+    CatalogExportResultResponse,
     OfflineTaskBatchQueuedResponse,
     OfflineTaskCatalogExportRequest,
     OfflineTaskDetailResponse,
@@ -22,10 +22,33 @@ from app.models import OfflineTask, Product
 from app.models.status import COMPLETED
 from app.services.oss_uploader import download_private_file
 from app.services.offline_tasks import pause_offline_task, rerun_offline_task, resume_offline_task
+from app.task_runtime.catalog_export_status import (
+    ARTIFACT_MODE_LOCAL,
+    ARTIFACT_MODE_OBJECT_KEY,
+    ARTIFACT_MODE_REDIRECT,
+    CatalogEffectiveTerminalRecord,
+    CATALOG_STEP_OWNER_OFFLINE_TASK,
+    catalog_export_resolution_is_ready,
+    load_catalog_effective_terminal_projection,
+    load_newest_material_catalog_step_results,
+    project_catalog_effective_terminal_record,
+    projected_offline_task_status_condition,
+    resolve_catalog_export_artifact,
+)
 
 
 router = APIRouter(prefix="/api/offline-tasks", tags=["offline-tasks"])
 COMPLETED_TASK_STATUSES = {"done", "partial_failed"}
+
+
+def _catalog_export_record_is_downloadable(
+    catalog_record: CatalogEffectiveTerminalRecord,
+    resolution,
+) -> bool:
+    return (
+        catalog_record.effective_status in COMPLETED_TASK_STATUSES
+        and catalog_export_resolution_is_ready(resolution)
+    )
 
 
 async def _load_task_with_steps(db: AsyncSession, task_id: int) -> OfflineTask:
@@ -41,6 +64,13 @@ async def _load_task_with_steps(db: AsyncSession, task_id: int) -> OfflineTask:
     return task
 
 
+async def _load_task(db: AsyncSession, task_id: int) -> OfflineTask:
+    task = await db.get(OfflineTask, task_id)
+    if not task:
+        raise HTTPException(404, "任务不存在")
+    return task
+
+
 def _json_loads(value: str | None) -> dict:
     if not value:
         return {}
@@ -51,18 +81,105 @@ def _json_loads(value: str | None) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _task_response(task: OfflineTask) -> OfflineTaskResponse:
+def _catalog_effective_record(
+    task: OfflineTask,
+    catalog_step_result: object = None,
+    catalog_record: CatalogEffectiveTerminalRecord | None = None,
+) -> CatalogEffectiveTerminalRecord | None:
+    if task.task_type != "catalog_export":
+        return None
+    return catalog_record or project_catalog_effective_terminal_record(
+        owner_kind=CATALOG_STEP_OWNER_OFFLINE_TASK,
+        task_type=task.task_type,
+        status=task.status,
+        summary_json_or_dict=task.result_json,
+        step_result_json_or_dict=catalog_step_result,
+    )
+
+
+def _normalized_catalog_export_result_json(result: dict) -> str:
+    return json.dumps(
+        result,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _decorate_catalog_export_response(
+    task: OfflineTask,
+    response: OfflineTaskResponse | OfflineTaskDetailResponse,
+    catalog_step_result: object = None,
+    catalog_record: CatalogEffectiveTerminalRecord | None = None,
+) -> None:
+    if task.task_type != "catalog_export":
+        return
+    catalog_record = _catalog_effective_record(task, catalog_step_result, catalog_record)
+    assert catalog_record is not None
+    outcome = catalog_record.outcome
+    resolution = resolve_catalog_export_artifact(
+        outcome,
+        allowed_export_root=settings.DATA_DIR / "exports",
+        object_cache_subdir=f"task_{task.id}",
+    )
+    normalized = CatalogExportResultResponse.model_validate(
+        outcome
+    )
+    response.catalog_export_result = normalized
+    response.status = catalog_record.effective_status
+    response.result_json = _normalized_catalog_export_result_json(outcome)
+    response.can_download = _catalog_export_record_is_downloadable(catalog_record, resolution)
+    if isinstance(response, OfflineTaskDetailResponse):
+        for step in response.steps:
+            if step.step_type == "catalog_export_template":
+                step.result_json = None
+
+
+def _task_response(
+    task: OfflineTask,
+    catalog_step_result: object = None,
+    catalog_record: CatalogEffectiveTerminalRecord | None = None,
+) -> OfflineTaskResponse:
     response = OfflineTaskResponse.model_validate(task)
+    _decorate_catalog_export_response(task, response, catalog_step_result, catalog_record)
     if response.status in COMPLETED_TASK_STATUSES:
         response.error_message = None
     return response
 
 
-def _task_detail_response(task: OfflineTask) -> OfflineTaskDetailResponse:
+def _task_detail_response(
+    task: OfflineTask,
+    catalog_step_result: object = None,
+    catalog_record: CatalogEffectiveTerminalRecord | None = None,
+) -> OfflineTaskDetailResponse:
     response = OfflineTaskDetailResponse.model_validate(task)
+    _decorate_catalog_export_response(task, response, catalog_step_result, catalog_record)
     if response.status in COMPLETED_TASK_STATUSES:
         response.error_message = None
     return response
+
+
+async def _catalog_step_results_for_tasks(db: AsyncSession, tasks: list[OfflineTask]) -> dict[int, dict]:
+    return await load_newest_material_catalog_step_results(
+        db,
+        owner_kind=CATALOG_STEP_OWNER_OFFLINE_TASK,
+        owner_ids=[task.id for task in tasks if task.task_type == "catalog_export"],
+    )
+
+
+async def _catalog_record_and_step_result(
+    db: AsyncSession,
+    task: OfflineTask,
+) -> tuple[CatalogEffectiveTerminalRecord | None, object]:
+    projection = await load_catalog_effective_terminal_projection(
+        db,
+        owner_kind=CATALOG_STEP_OWNER_OFFLINE_TASK,
+        owner_ids=[task.id],
+    )
+    record = projection.records_by_id.get(task.id)
+    step_results = await _catalog_step_results_for_tasks(db, [] if record else [task])
+    return record, step_results.get(task.id)
 
 
 def _product_bulk_advance_latest_result(product: Product | None) -> tuple[str, str]:
@@ -127,19 +244,6 @@ async def _with_product_bulk_advance_progress(
     return response
 
 
-def _catalog_export_payload(task: OfflineTask) -> dict:
-    payload = _json_loads(task.result_json)
-    if payload.get("filename") or payload.get("file_path") or payload.get("oss_object_key"):
-        return payload
-    for step in sorted(task.steps, key=lambda item: item.id, reverse=True):
-        if step.step_type != "catalog_export_template" or step.status != "done":
-            continue
-        step_payload = _json_loads(step.result_json)
-        if step_payload.get("filename") or step_payload.get("file_path") or step_payload.get("oss_object_key"):
-            return step_payload
-    return payload
-
-
 @router.get("", response_model=PaginatedOfflineTasks)
 async def list_offline_tasks(
     page: int = Query(1, ge=1),
@@ -151,18 +255,34 @@ async def list_offline_tasks(
 ):
     query = select(OfflineTask).order_by(OfflineTask.id.desc())
     count_query = select(func.count(OfflineTask.id))
+    catalog_projection = await load_catalog_effective_terminal_projection(
+        db,
+        owner_kind=CATALOG_STEP_OWNER_OFFLINE_TASK,
+    )
     if task_type:
         query = query.where(OfflineTask.task_type == task_type)
         count_query = count_query.where(OfflineTask.task_type == task_type)
     if status:
-        query = query.where(OfflineTask.status == status)
-        count_query = count_query.where(OfflineTask.status == status)
+        if status in {"done", "partial_failed", "failed"}:
+            status_condition = projected_offline_task_status_condition(status, catalog_projection)
+        else:
+            status_condition = OfflineTask.status == status
+        query = query.where(status_condition)
+        count_query = count_query.where(status_condition)
     total_result = await db.execute(count_query)
     result = await db.execute(query.offset((page - 1) * page_size).limit(page_size))
     tasks = result.scalars().all()
+    catalog_step_results = await _catalog_step_results_for_tasks(
+        db,
+        [task for task in tasks if task.id not in catalog_projection.records_by_id],
+    )
     responses = []
     for task in tasks:
-        response = _task_response(task)
+        response = _task_response(
+            task,
+            catalog_step_results.get(task.id),
+            catalog_projection.records_by_id.get(task.id),
+        )
         if include_progress:
             response = await _with_product_bulk_advance_progress(db, response)
         responses.append(response)
@@ -201,39 +321,48 @@ async def create_catalog_export_offline_tasks(
 @router.get("/{task_id}", response_model=OfflineTaskDetailResponse)
 async def get_offline_task(task_id: int, db: AsyncSession = Depends(get_db)):
     task = await _load_task_with_steps(db, task_id)
-    response = _task_detail_response(task)
+    catalog_record, catalog_step_result = await _catalog_record_and_step_result(db, task)
+    response = _task_detail_response(task, catalog_step_result, catalog_record)
     return await _with_product_bulk_advance_progress(db, response)
 
 
 @router.get("/{task_id}/download")
 async def download_offline_task_result(task_id: int, db: AsyncSession = Depends(get_db)):
-    task = await _load_task_with_steps(db, task_id)
+    task = await _load_task(db, task_id)
     if task.task_type != "catalog_export":
         raise HTTPException(400, "当前任务没有可下载的导出文件")
-    payload = _catalog_export_payload(task)
-    file_path = str(payload.get("file_path") or "").strip()
-    filename = str(payload.get("filename") or Path(file_path).name or f"catalog_export_{task_id}.zip")
-    object_key = str(payload.get("oss_object_key") or "").strip()
-    if file_path.lower().startswith(("http://", "https://")):
-        file_path = ""
-    if not file_path:
-        if not object_key:
-            raise HTTPException(400, "导出文件尚未生成")
-        file_path = str(settings.DATA_DIR / "exports" / f"task_{task_id}" / filename)
-    path = Path(file_path).expanduser().resolve()
-    export_root = (settings.DATA_DIR / "exports").resolve()
-    if export_root not in path.parents:
-        raise HTTPException(400, "导出文件路径非法")
-    if not path.is_file():
-        if object_key:
-            try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                download_private_file(object_key, path)
-            except Exception as exc:
-                raise HTTPException(404, f"导出文件本地缓存不存在，且从 OSS 下载失败: {type(exc).__name__}: {exc}")
-        else:
-            raise HTTPException(404, "导出文件不存在，可能已被清理")
-    return FileResponse(path, media_type="application/zip", filename=filename)
+    catalog_record, catalog_step_result = await _catalog_record_and_step_result(db, task)
+    catalog_record = _catalog_effective_record(task, catalog_step_result, catalog_record)
+    assert catalog_record is not None
+    resolution = resolve_catalog_export_artifact(
+        catalog_record.outcome,
+        allowed_export_root=settings.DATA_DIR / "exports",
+        object_cache_subdir=f"task_{task_id}",
+    )
+    if not _catalog_export_record_is_downloadable(catalog_record, resolution):
+        raise HTTPException(400, "导出任务没有可下载的成功结果")
+    if resolution.mode == ARTIFACT_MODE_REDIRECT and resolution.redirect_url:
+        return RedirectResponse(resolution.redirect_url)
+    if resolution.mode == ARTIFACT_MODE_LOCAL and resolution.local_path:
+        return FileResponse(
+            resolution.local_path,
+            media_type="application/zip",
+            filename=resolution.filename or resolution.local_path.name,
+        )
+    if resolution.mode == ARTIFACT_MODE_OBJECT_KEY and resolution.object_key and resolution.cache_path:
+        try:
+            resolution.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            download_private_file(resolution.object_key, resolution.cache_path)
+        except Exception as exc:
+            if resolution.fallback_url:
+                return RedirectResponse(resolution.fallback_url)
+            raise HTTPException(404, f"导出文件本地缓存不存在，且从 OSS 下载失败: {type(exc).__name__}: {exc}")
+        return FileResponse(
+            resolution.cache_path,
+            media_type="application/zip",
+            filename=resolution.filename or resolution.cache_path.name,
+        )
+    raise HTTPException(400, "导出文件尚未生成")
 
 
 @router.post("/{task_id}/rerun", response_model=OfflineTaskDetailResponse)
@@ -243,7 +372,8 @@ async def rerun_offline_task_api(task_id: int, db: AsyncSession = Depends(get_db
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     task = await _load_task_with_steps(db, task.id)
-    return _task_detail_response(task)
+    catalog_record, catalog_step_result = await _catalog_record_and_step_result(db, task)
+    return _task_detail_response(task, catalog_step_result, catalog_record)
 
 
 @router.post("/{task_id}/pause", response_model=OfflineTaskDetailResponse)
@@ -253,7 +383,8 @@ async def pause_offline_task_api(task_id: int, db: AsyncSession = Depends(get_db
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     task = await _load_task_with_steps(db, task.id)
-    return _task_detail_response(task)
+    catalog_record, catalog_step_result = await _catalog_record_and_step_result(db, task)
+    return _task_detail_response(task, catalog_step_result, catalog_record)
 
 
 @router.post("/{task_id}/resume", response_model=OfflineTaskDetailResponse)
@@ -263,4 +394,5 @@ async def resume_offline_task_api(task_id: int, db: AsyncSession = Depends(get_d
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     task = await _load_task_with_steps(db, task.id)
-    return _task_detail_response(task)
+    catalog_record, catalog_step_result = await _catalog_record_and_step_result(db, task)
+    return _task_detail_response(task, catalog_step_result, catalog_record)

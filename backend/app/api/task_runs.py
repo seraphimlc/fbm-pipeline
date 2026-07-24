@@ -3,7 +3,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from sqlalchemy import and_, func, not_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -16,6 +16,7 @@ from app.api.schemas import (
     OfflineTaskGigaDynamicSyncRequest,
     OfflineTaskGigaPullRequest,
     PaginatedTaskRuns,
+    CatalogExportResultResponse,
     TaskRunBatchQueuedResponse,
     TaskRunDetailResponse,
     TaskRunResponse,
@@ -43,12 +44,28 @@ from app.task_runtime.constants import (
     STEP_STATUS_CANCELED,
     STEP_STATUS_FAILED,
     STEP_STATUS_INTERRUPTED,
+    STEP_STATUS_PARTIAL_FAILED,
     STEP_STATUS_PENDING,
     STEP_STATUS_READY,
     STEP_STATUS_RUNNING,
     STEP_STATUS_SUCCEEDED,
 )
 from app.task_runtime.actions import action_for
+from app.task_runtime.catalog_export_status import (
+    ARTIFACT_MODE_LOCAL,
+    ARTIFACT_MODE_OBJECT_KEY,
+    ARTIFACT_MODE_REDIRECT,
+    CatalogEffectiveTerminalProjection,
+    CatalogEffectiveTerminalRecord,
+    CATALOG_STEP_OWNER_TASK_RUN,
+    catalog_export_result_is_downloadable,
+    effective_task_run_status,
+    load_catalog_effective_terminal_projection,
+    load_newest_material_catalog_step_results,
+    project_catalog_effective_terminal_record,
+    projected_task_run_status_condition,
+    resolve_catalog_export_artifact,
+)
 from app.task_runtime.display import compute_task_run_display
 from app.task_runtime.events import emit_event
 from app.task_runtime.scheduler import kick_task_runtime, recover_task_runtime, retry_failed_steps, retry_step
@@ -211,6 +228,8 @@ def _step_display(step: TaskStep, *, superseded: bool = False) -> dict:
         status, reason, actions = "waiting_dependency", "等待前置步骤完成", []
     elif step.status == STEP_STATUS_FAILED:
         status, reason, actions = "failed", f"失败：{error_summary or '请查看错误详情'}", ["retry_step"]
+    elif step.status == STEP_STATUS_PARTIAL_FAILED:
+        status, reason, actions = "partial_failed", "部分完成，存在未导出商品", ["copy_error"]
     elif step.status == STEP_STATUS_INTERRUPTED:
         status, reason, actions = "interrupted", "任务未完成，可重试", ["retry_step"]
     elif step.status == STEP_STATUS_CANCELED:
@@ -229,13 +248,53 @@ def _step_display(step: TaskStep, *, superseded: bool = False) -> dict:
     }
 
 
-def _run_display(run: TaskRun, *, superseded_by_run_id: int | None) -> dict:
-    display = compute_task_run_display(run, superseded_by_run_id=superseded_by_run_id)
+def _run_display(
+    run: TaskRun,
+    *,
+    superseded_by_run_id: int | None,
+    catalog_step_result: object = None,
+    catalog_record: CatalogEffectiveTerminalRecord | None = None,
+) -> dict:
+    catalog_record = _catalog_effective_record(run, catalog_step_result, catalog_record)
+    display = compute_task_run_display(
+        run,
+        superseded_by_run_id=superseded_by_run_id,
+        effective_status=catalog_record.effective_status if catalog_record else None,
+        effective_error_summary=(
+            str(catalog_record.outcome.get("reason") or "")
+            if catalog_record and catalog_record.effective_status == RUN_STATUS_FAILED
+            else None
+        ),
+    )
+    if run.task_type == "catalog_export" and not _catalog_export_run_is_downloadable(
+        run,
+        catalog_step_result,
+        catalog_record=catalog_record,
+    ):
+        display["available_actions"] = [
+            action for action in display.get("available_actions") or [] if action != "download_result"
+        ]
     return _display_payload_from_detail(run, display, superseded_by_run_id=superseded_by_run_id)
 
 
-def _run_list_display(run: TaskRun, *, superseded_by_run_id: int | None) -> dict:
-    error_summary = _summary_error(run.summary_json)
+def _run_list_display(
+    run: TaskRun,
+    *,
+    superseded_by_run_id: int | None,
+    catalog_step_result: object = None,
+    catalog_record: CatalogEffectiveTerminalRecord | None = None,
+) -> dict:
+    catalog_record = _catalog_effective_record(run, catalog_step_result, catalog_record)
+    error_summary = (
+        _compact_error(str(catalog_record.outcome.get("reason") or ""))
+        if catalog_record and catalog_record.effective_status == RUN_STATUS_FAILED
+        else None
+    ) or _summary_error(run.summary_json)
+    run_status = catalog_record.effective_status if catalog_record else effective_task_run_status(
+        task_type=run.task_type,
+        status=run.status,
+        summary_json=run.summary_json,
+    )
     if superseded_by_run_id:
         status = "superseded"
         reason = f"已创建新任务 #{superseded_by_run_id}"
@@ -252,37 +311,48 @@ def _run_list_display(run: TaskRun, *, superseded_by_run_id: int | None) -> dict
         status = "running"
         reason = "任务执行中"
         actions = ["view_detail", "refresh", "cancel"]
-    elif run.status == RUN_STATUS_FAILED:
+    elif run_status == RUN_STATUS_FAILED:
         status = "failed"
         reason = f"失败：{error_summary or '请查看错误详情'}"
         actions = ["view_detail", "retry_failed_steps", "copy_error", "refresh"]
-    elif run.status == RUN_STATUS_PARTIAL_FAILED:
+    elif run_status == RUN_STATUS_PARTIAL_FAILED:
         status = "partial_failed"
         reason = "部分完成，存在失败项"
-        actions = ["view_detail", "retry_failed_steps", "copy_error", "refresh"]
         if run.task_type == "catalog_export":
-            actions.insert(1, "download_result")
-    elif run.status == RUN_STATUS_INTERRUPTED:
+            actions = ["view_detail", "copy_error", "refresh"]
+            if _catalog_export_run_is_downloadable(
+                run,
+                catalog_step_result,
+                catalog_record=catalog_record,
+            ):
+                actions.insert(1, "download_result")
+        else:
+            actions = ["view_detail", "retry_failed_steps", "copy_error", "refresh"]
+    elif run_status == RUN_STATUS_INTERRUPTED:
         status = "interrupted"
         reason = "任务未完成，可重试"
         actions = ["view_detail", "retry_failed_steps", "refresh"]
-    elif run.status == RUN_STATUS_PAUSED:
+    elif run_status == RUN_STATUS_PAUSED:
         status = "paused"
         reason = "任务已挂起"
         actions = ["view_detail", "refresh"]
-    elif run.status == RUN_STATUS_CANCELED:
+    elif run_status == RUN_STATUS_CANCELED:
         status = "canceled"
         reason = "用户已取消"
         actions = ["view_detail", "copy_error"] if error_summary else ["view_detail"]
-    elif run.status == RUN_STATUS_SUCCEEDED:
+    elif run_status == RUN_STATUS_SUCCEEDED:
         status = "succeeded"
         reason = "生成子任务提交完成" if run.task_type == "product_bulk_advance" else "任务完成"
         actions = ["view_detail", "refresh"]
-        if run.task_type == "catalog_export":
+        if run.task_type == "catalog_export" and _catalog_export_run_is_downloadable(
+            run,
+            catalog_step_result,
+            catalog_record=catalog_record,
+        ):
             actions.insert(0, "download_result")
     else:
-        status = run.status
-        reason = run.status or "任务状态未知"
+        status = run_status
+        reason = run_status or "任务状态未知"
         actions = ["view_detail", "refresh"]
 
     progress_total = 1 if status in {"queued", "running", "succeeded", "canceled", "superseded"} else 0
@@ -315,10 +385,30 @@ def _superseded_map(runs: list[TaskRun]) -> dict[int, int]:
     return {run.id: run.superseded_by_run_id for run in runs if run.superseded_by_run_id}
 
 
-def _run_response(run: TaskRun, superseded_by_run_id: int | None = None, *, list_view: bool = False) -> TaskRunResponse:
+def _run_response(
+    run: TaskRun,
+    superseded_by_run_id: int | None = None,
+    *,
+    list_view: bool = False,
+    catalog_step_result: object = None,
+    catalog_record: CatalogEffectiveTerminalRecord | None = None,
+) -> TaskRunResponse:
+    catalog_record = _catalog_effective_record(run, catalog_step_result, catalog_record)
     response = TaskRunResponse.model_validate(run)
+    response.status = catalog_record.effective_status if catalog_record else effective_task_run_status(
+        task_type=run.task_type,
+        status=run.status,
+        summary_json=run.summary_json,
+    )
+    if catalog_record:
+        response.catalog_export_result = CatalogExportResultResponse.model_validate(catalog_record.outcome)
     display_fn = _run_list_display if list_view else _run_display
-    display = display_fn(run, superseded_by_run_id=superseded_by_run_id)
+    display = display_fn(
+        run,
+        superseded_by_run_id=superseded_by_run_id,
+        catalog_step_result=catalog_step_result,
+        catalog_record=catalog_record,
+    )
     for key, value in display.items():
         setattr(response, key, value)
     return response
@@ -332,8 +422,13 @@ def _apply_condition(query, count_query, condition):
     return query.where(condition), count_query.where(condition)
 
 
-def _apply_view_filter(query, count_query, view: str):
-    history = _history_display_sql_condition()
+def _apply_view_filter(
+    query,
+    count_query,
+    view: str,
+    projection: CatalogEffectiveTerminalProjection,
+):
+    history = _history_display_sql_condition(projection)
     if view == "current":
         return _apply_condition(query, count_query, not_(history))
     if view == "history":
@@ -357,14 +452,18 @@ def _canceled_sql_condition():
     )
 
 
-def _history_display_sql_condition():
+def _history_display_sql_condition(projection: CatalogEffectiveTerminalProjection):
     return or_(
         _superseded_sql_condition(),
-        TaskRun.status.in_((RUN_STATUS_SUCCEEDED, RUN_STATUS_CANCELED)),
+        and_(projected_task_run_status_condition(RUN_STATUS_SUCCEEDED, projection), not_(_superseded_sql_condition())),
+        _canceled_sql_condition(),
     )
 
 
-def _display_status_sql_condition(display_status: str | None):
+def _display_status_sql_condition(
+    display_status: str | None,
+    projection: CatalogEffectiveTerminalProjection,
+):
     if not display_status:
         return None
     superseded = _superseded_sql_condition()
@@ -378,11 +477,14 @@ def _display_status_sql_condition(display_status: str | None):
         return and_(not_(superseded), TaskRun.cancel_requested_at.is_(None), TaskRun.status == RUN_STATUS_RUNNING)
     if display_status == "queued":
         return and_(not_(superseded), TaskRun.cancel_requested_at.is_(None), TaskRun.status == RUN_STATUS_PENDING)
+    if display_status == "partial_failed":
+        return and_(not_(superseded), projected_task_run_status_condition(RUN_STATUS_PARTIAL_FAILED, projection))
+    if display_status == "succeeded":
+        return and_(not_(superseded), projected_task_run_status_condition(RUN_STATUS_SUCCEEDED, projection))
+    if display_status == "failed":
+        return and_(not_(superseded), projected_task_run_status_condition(RUN_STATUS_FAILED, projection))
     status_map = {
-        "failed": RUN_STATUS_FAILED,
-        "partial_failed": RUN_STATUS_PARTIAL_FAILED,
         "interrupted": RUN_STATUS_INTERRUPTED,
-        "succeeded": RUN_STATUS_SUCCEEDED,
         "paused": RUN_STATUS_PAUSED,
     }
     if display_status in status_map:
@@ -445,17 +547,42 @@ def _json_loads(value: str | None) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _catalog_export_payload(run: TaskRun) -> dict:
-    payload = _json_loads(run.summary_json)
-    if payload.get("filename") or payload.get("file_path") or payload.get("oss_object_key"):
-        return payload
-    for step in sorted(run.steps, key=lambda item: item.id, reverse=True):
-        if step.step_type != "catalog_export_template":
-            continue
-        step_payload = _json_loads(step.result_json)
-        if step_payload.get("filename") or step_payload.get("file_path") or step_payload.get("oss_object_key"):
-            return step_payload
-    return payload
+def _catalog_effective_record(
+    run: TaskRun,
+    catalog_step_result: object = None,
+    catalog_record: CatalogEffectiveTerminalRecord | None = None,
+) -> CatalogEffectiveTerminalRecord | None:
+    if run.task_type != "catalog_export":
+        return None
+    return catalog_record or project_catalog_effective_terminal_record(
+        owner_kind=CATALOG_STEP_OWNER_TASK_RUN,
+        task_type=run.task_type,
+        status=run.status,
+        summary_json_or_dict=run.summary_json,
+        step_result_json_or_dict=catalog_step_result,
+    )
+
+
+def _catalog_export_run_is_downloadable(
+    run: TaskRun,
+    catalog_step_result: object = None,
+    *,
+    catalog_record: CatalogEffectiveTerminalRecord | None = None,
+) -> bool:
+    if run.task_type != "catalog_export":
+        return False
+    catalog_record = _catalog_effective_record(run, catalog_step_result, catalog_record)
+    if not catalog_record:
+        return False
+    resolution = resolve_catalog_export_artifact(
+        catalog_record.outcome,
+        allowed_export_root=settings.DATA_DIR / "exports",
+        object_cache_subdir=f"task_run_{run.id}",
+    )
+    return catalog_export_result_is_downloadable(
+        effective_status=catalog_record.effective_status,
+        resolution=resolution,
+    )
 
 
 async def _load_run(db: AsyncSession, run_id: int) -> TaskRun:
@@ -476,13 +603,47 @@ async def _load_run(db: AsyncSession, run_id: int) -> TaskRun:
     return _sort_run_detail(run)
 
 
+async def _load_run_base(db: AsyncSession, run_id: int) -> TaskRun:
+    run = await db.get(TaskRun, run_id)
+    if not run:
+        raise HTTPException(404, "任务不存在")
+    return run
+
+
 async def _reload_created_runs_for_response(db: AsyncSession, runs: list[TaskRun]) -> list[TaskRun]:
     return [await _load_run(db, run.id) for run in runs]
 
 
-def _decorate_detail_response(run: TaskRun, superseded_by_run_id: int | None = None) -> TaskRunDetailResponse:
+async def _catalog_step_results_for_runs(db: AsyncSession, runs: list[TaskRun]) -> dict[int, dict]:
+    return await load_newest_material_catalog_step_results(
+        db,
+        owner_kind=CATALOG_STEP_OWNER_TASK_RUN,
+        owner_ids=[run.id for run in runs if run.task_type == "catalog_export"],
+    )
+
+
+def _decorate_detail_response(
+    run: TaskRun,
+    superseded_by_run_id: int | None = None,
+    *,
+    catalog_step_result: object = None,
+    catalog_record: CatalogEffectiveTerminalRecord | None = None,
+) -> TaskRunDetailResponse:
+    catalog_record = _catalog_effective_record(run, catalog_step_result, catalog_record)
     response = TaskRunDetailResponse.model_validate(run)
-    for key, value in _run_display(run, superseded_by_run_id=superseded_by_run_id).items():
+    response.status = catalog_record.effective_status if catalog_record else effective_task_run_status(
+        task_type=run.task_type,
+        status=run.status,
+        summary_json=run.summary_json,
+    )
+    if catalog_record:
+        response.catalog_export_result = CatalogExportResultResponse.model_validate(catalog_record.outcome)
+    for key, value in _run_display(
+        run,
+        superseded_by_run_id=superseded_by_run_id,
+        catalog_step_result=catalog_step_result,
+        catalog_record=catalog_record,
+    ).items():
         setattr(response, key, value)
     superseded = bool(superseded_by_run_id)
     for group_response, group in zip(response.groups, run.groups, strict=False):
@@ -501,6 +662,29 @@ def _decorate_detail_response(run: TaskRun, superseded_by_run_id: int | None = N
             for key, value in _step_display(step, superseded=superseded).items():
                 setattr(step_response, key, value)
     return response
+
+
+async def _decorate_detail_response_with_catalog_step(
+    db: AsyncSession,
+    run: TaskRun,
+    superseded_by_run_id: int | None = None,
+) -> TaskRunDetailResponse:
+    catalog_projection = await load_catalog_effective_terminal_projection(
+        db,
+        owner_kind=CATALOG_STEP_OWNER_TASK_RUN,
+        owner_ids=[run.id],
+    )
+    catalog_record = catalog_projection.records_by_id.get(run.id)
+    catalog_step_results = await _catalog_step_results_for_runs(
+        db,
+        [] if catalog_record else [run],
+    )
+    return _decorate_detail_response(
+        run,
+        superseded_by_run_id=superseded_by_run_id,
+        catalog_step_result=catalog_step_results.get(run.id),
+        catalog_record=catalog_record,
+    )
 
 
 @router.get("", response_model=PaginatedTaskRuns)
@@ -546,9 +730,18 @@ async def list_task_runs(
             base_query = base_query.where(TaskRun.title.like(like))
             count_query = count_query.where(TaskRun.title.like(like))
 
-    display_condition = _display_status_sql_condition(display_status)
+    catalog_projection = await load_catalog_effective_terminal_projection(
+        db,
+        owner_kind=CATALOG_STEP_OWNER_TASK_RUN,
+    )
+    display_condition = _display_status_sql_condition(display_status, catalog_projection)
 
-    page_query, base_count_query = _apply_view_filter(base_query, count_query, view)
+    page_query, base_count_query = _apply_view_filter(
+        base_query,
+        count_query,
+        view,
+        catalog_projection,
+    )
     base_total_result = await db.execute(base_count_query)
     base_total = base_total_result.scalar() or 0
     page_count_query = base_count_query
@@ -561,9 +754,19 @@ async def list_task_runs(
     result = await db.execute(page_query.offset((page - 1) * page_size).limit(page_size))
     page_runs = result.scalars().unique().all()
     superseded = _superseded_map(page_runs)
+    catalog_step_results = await _catalog_step_results_for_runs(
+        db,
+        [run for run in page_runs if run.id not in catalog_projection.records_by_id],
+    )
     return PaginatedTaskRuns(
         items=[
-            _run_response(run, superseded_by_run_id=superseded.get(run.id) or run.superseded_by_run_id, list_view=True)
+            _run_response(
+                run,
+                superseded_by_run_id=superseded.get(run.id) or run.superseded_by_run_id,
+                list_view=True,
+                catalog_step_result=catalog_step_results.get(run.id),
+                catalog_record=catalog_projection.records_by_id.get(run.id),
+            )
             for run in page_runs
         ],
         total=filtered_total,
@@ -625,7 +828,11 @@ async def create_catalog_export_task_runs(
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     runs = await _reload_created_runs_for_response(db, runs)
-    return TaskRunBatchQueuedResponse(runs=[_run_response(run) for run in runs], errors=errors)
+    catalog_step_results = await _catalog_step_results_for_runs(db, runs)
+    return TaskRunBatchQueuedResponse(
+        runs=[_run_response(run, catalog_step_result=catalog_step_results.get(run.id)) for run in runs],
+        errors=errors,
+    )
 
 
 @router.post("/aplus-generate", response_model=TaskRunBatchQueuedResponse)
@@ -687,38 +894,63 @@ async def create_lingxing_aplus_publish_task_runs(
 async def get_task_run(run_id: int, db: AsyncSession = Depends(get_db)):
     run = await _load_run(db, run_id)
     superseded = _superseded_map([run])
-    return _decorate_detail_response(run, superseded_by_run_id=superseded.get(run.id))
+    return await _decorate_detail_response_with_catalog_step(
+        db,
+        run,
+        superseded_by_run_id=superseded.get(run.id),
+    )
 
 
 @router.get("/{run_id}/download")
 async def download_task_run_result(run_id: int, db: AsyncSession = Depends(get_db)):
-    run = await _load_run(db, run_id)
+    run = await _load_run_base(db, run_id)
     if run.task_type != "catalog_export":
         raise HTTPException(400, "当前新任务没有可下载的导出文件")
-    payload = _catalog_export_payload(run)
-    file_path = str(payload.get("file_path") or "").strip()
-    filename = str(payload.get("filename") or Path(file_path).name or f"catalog_export_run_{run_id}.zip")
-    object_key = str(payload.get("oss_object_key") or "").strip()
-    if file_path.lower().startswith(("http://", "https://")):
-        file_path = ""
-    if not file_path:
-        if not object_key:
-            raise HTTPException(400, "导出文件尚未生成")
-        file_path = str(settings.DATA_DIR / "exports" / f"task_run_{run_id}" / filename)
-    path = Path(file_path).expanduser().resolve()
-    export_root = (settings.DATA_DIR / "exports").resolve()
-    if export_root not in path.parents:
-        raise HTTPException(400, "导出文件路径非法")
-    if not path.is_file():
-        if object_key:
-            try:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                download_private_file(object_key, path)
-            except Exception as exc:
-                raise HTTPException(404, f"导出文件本地缓存不存在，且从 OSS 下载失败: {type(exc).__name__}: {exc}")
-        else:
-            raise HTTPException(404, "导出文件不存在，可能已被清理")
-    return FileResponse(path, media_type="application/zip", filename=filename)
+    catalog_projection = await load_catalog_effective_terminal_projection(
+        db,
+        owner_kind=CATALOG_STEP_OWNER_TASK_RUN,
+        owner_ids=[run.id],
+    )
+    catalog_record = catalog_projection.records_by_id.get(run.id)
+    catalog_step_results = await _catalog_step_results_for_runs(db, [] if catalog_record else [run])
+    catalog_record = _catalog_effective_record(
+        run,
+        catalog_step_results.get(run.id),
+        catalog_record,
+    )
+    assert catalog_record is not None
+    resolution = resolve_catalog_export_artifact(
+        catalog_record.outcome,
+        allowed_export_root=settings.DATA_DIR / "exports",
+        object_cache_subdir=f"task_run_{run_id}",
+    )
+    if not catalog_export_result_is_downloadable(
+        effective_status=catalog_record.effective_status,
+        resolution=resolution,
+    ):
+        raise HTTPException(400, "导出任务没有可下载的成功结果")
+    if resolution.mode == ARTIFACT_MODE_REDIRECT and resolution.redirect_url:
+        return RedirectResponse(resolution.redirect_url)
+    if resolution.mode == ARTIFACT_MODE_LOCAL and resolution.local_path:
+        return FileResponse(
+            resolution.local_path,
+            media_type="application/zip",
+            filename=resolution.filename or resolution.local_path.name,
+        )
+    if resolution.mode == ARTIFACT_MODE_OBJECT_KEY and resolution.object_key and resolution.cache_path:
+        try:
+            resolution.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            download_private_file(resolution.object_key, resolution.cache_path)
+        except Exception as exc:
+            if resolution.fallback_url:
+                return RedirectResponse(resolution.fallback_url)
+            raise HTTPException(404, f"导出文件本地缓存不存在，且从 OSS 下载失败: {type(exc).__name__}: {exc}")
+        return FileResponse(
+            resolution.cache_path,
+            media_type="application/zip",
+            filename=resolution.filename or resolution.cache_path.name,
+        )
+    raise HTTPException(400, "导出文件尚未生成")
 
 
 @router.post("/{run_id}/retry-failed", response_model=TaskRunDetailResponse)
@@ -737,7 +969,11 @@ async def retry_failed_task_run_steps(run_id: int, db: AsyncSession = Depends(ge
         raise HTTPException(400, str(exc))
     refreshed = await _load_run(db, run_id)
     refreshed_superseded = _superseded_map([refreshed])
-    return _decorate_detail_response(refreshed, superseded_by_run_id=refreshed_superseded.get(run_id))
+    return await _decorate_detail_response_with_catalog_step(
+        db,
+        refreshed,
+        superseded_by_run_id=refreshed_superseded.get(run_id),
+    )
 
 
 @router.post("/steps/{step_id}/retry", response_model=TaskStepResponse)
@@ -765,7 +1001,11 @@ async def retry_task_step(step_id: int, db: AsyncSession = Depends(get_db)):
 @router.post("/{run_id}/wake", response_model=TaskRunDetailResponse)
 async def wake_task_run(run_id: int, db: AsyncSession = Depends(get_db)):
     run = await _load_run(db, run_id)
-    response = _decorate_detail_response(run, superseded_by_run_id=_superseded_map([run]).get(run.id))
+    response = await _decorate_detail_response_with_catalog_step(
+        db,
+        run,
+        superseded_by_run_id=_superseded_map([run]).get(run.id),
+    )
     if response.display_status not in {"queued", "stale_running"}:
         raise HTTPException(400, f"当前任务状态不能唤醒: {response.display_status_label}")
     if response.display_status == "stale_running":
@@ -773,13 +1013,17 @@ async def wake_task_run(run_id: int, db: AsyncSession = Depends(get_db)):
     kick_task_runtime()
     await _emit_task_run_event(db, run, step=run.steps[0] if run.steps else None, event_type="action", message="用户唤醒执行器")
     await db.commit()
-    return _decorate_detail_response(await _load_run(db, run_id))
+    return await _decorate_detail_response_with_catalog_step(db, await _load_run(db, run_id))
 
 
 @router.post("/{run_id}/cancel", response_model=TaskRunDetailResponse)
 async def cancel_task_run(run_id: int, body: dict = Body(default_factory=dict), db: AsyncSession = Depends(get_db)):
     run = await _load_run(db, run_id)
-    response = _decorate_detail_response(run, superseded_by_run_id=_superseded_map([run]).get(run.id))
+    response = await _decorate_detail_response_with_catalog_step(
+        db,
+        run,
+        superseded_by_run_id=_superseded_map([run]).get(run.id),
+    )
     if response.display_status in {"succeeded", "failed", "partial_failed", "superseded", "canceled"}:
         raise HTTPException(400, f"当前任务状态不能取消: {response.display_status_label}")
     now = datetime.now()
@@ -811,13 +1055,17 @@ async def cancel_task_run(run_id: int, body: dict = Body(default_factory=dict), 
         await _emit_task_run_event(db, run, step=run.steps[0] if run.steps else None, event_type="action", message=f"用户取消任务：{reason}")
     run.updated_at = now
     await db.commit()
-    return _decorate_detail_response(await _load_run(db, run_id))
+    return await _decorate_detail_response_with_catalog_step(db, await _load_run(db, run_id))
 
 
 @router.post("/{run_id}/mark-interrupted", response_model=TaskRunDetailResponse)
 async def mark_task_run_interrupted(run_id: int, body: dict = Body(default_factory=dict), db: AsyncSession = Depends(get_db)):
     run = await _load_run(db, run_id)
-    response = _decorate_detail_response(run, superseded_by_run_id=_superseded_map([run]).get(run.id))
+    response = await _decorate_detail_response_with_catalog_step(
+        db,
+        run,
+        superseded_by_run_id=_superseded_map([run]).get(run.id),
+    )
     if response.display_status != "stale_running":
         raise HTTPException(400, f"当前任务状态不能标记中断: {response.display_status_label}")
     now = datetime.now()
@@ -837,4 +1085,4 @@ async def mark_task_run_interrupted(run_id: int, body: dict = Body(default_facto
     run.status = RUN_STATUS_INTERRUPTED
     run.updated_at = now
     await db.commit()
-    return _decorate_detail_response(await _load_run(db, run_id))
+    return await _decorate_detail_response_with_catalog_step(db, await _load_run(db, run_id))

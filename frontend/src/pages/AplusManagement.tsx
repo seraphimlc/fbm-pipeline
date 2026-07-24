@@ -4,6 +4,7 @@ import { EyeOutlined, ExportOutlined, PictureOutlined, RedoOutlined, ReloadOutli
 import { useNavigate } from 'react-router-dom';
 import { createAplusGenerateBatch, getProduct, listCatalogProducts } from '../api';
 import type { CatalogProduct, ProductDetail } from '../api';
+import { runMutationWithUX } from '../api/mutationRunner.ts';
 
 const { Title, Text } = Typography;
 
@@ -119,21 +120,25 @@ const AplusManagement: React.FC = () => {
       return;
     }
     setSubmitting(true);
-    try {
-      const { data } = await createAplusGenerateBatch(ids, force);
-      if (data.started) {
-        message.success(`已创建任务中心任务：${data.started} 个商品生成 A+`);
-      }
-      if (data.errors?.length) {
-        message.warning(data.errors.slice(0, 3).join('；'));
-      }
-      setSelectedIds([]);
-      await fetchItems();
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || 'A+生成任务创建失败');
-    } finally {
-      setSubmitting(false);
-    }
+    await runMutationWithUX(
+      'createAplusGenerateBatch|frontend/src/pages/AplusManagement.tsx|submitGenerate',
+      async (metadata) => {
+        const { data } = await createAplusGenerateBatch(ids, force, metadata);
+        if (data.started) {
+          message.success(`已创建任务中心任务：${data.started} 个商品生成 A+`);
+        }
+        if (data.errors?.length) {
+          message.warning(data.errors.slice(0, 3).join('；'));
+        }
+        setSelectedIds([]);
+        await fetchItems();
+      },
+      {
+        errorFallback: 'A+生成任务创建失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setSubmitting(false),
+      },
+    ).catch(() => undefined);
   };
 
   const columns = [

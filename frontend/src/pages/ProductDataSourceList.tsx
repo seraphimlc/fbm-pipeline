@@ -8,6 +8,7 @@ import {
   updateProductDataSource,
 } from '../api';
 import type { ProductDataSource } from '../api';
+import { runMutationWithUX } from '../api/mutationRunner.ts';
 
 const { Title, Text } = Typography;
 
@@ -28,6 +29,7 @@ const ProductDataSourceList: React.FC = () => {
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<ProductDataSource | null>(null);
   const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
   const [form] = Form.useForm();
 
   const fetchItems = async () => {
@@ -70,35 +72,58 @@ const ProductDataSourceList: React.FC = () => {
   const save = async () => {
     const values = await form.validateFields();
     setSaving(true);
-    try {
-      const payload = {
-        ...values,
-        client_secret: values.client_secret?.trim() || undefined,
-      };
-      if (editing) {
-        await updateProductDataSource(editing.id, payload);
-        message.success('店铺已更新');
-      } else {
-        await createProductDataSource(payload);
-        message.success('店铺已创建');
-      }
-      setModalOpen(false);
-      await fetchItems();
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '保存店铺失败');
-    } finally {
-      setSaving(false);
+    const payload = {
+      ...values,
+      client_secret: values.client_secret?.trim() || undefined,
+    };
+    if (editing) {
+      await runMutationWithUX(
+        'updateProductDataSource|frontend/src/pages/ProductDataSourceList.tsx|save',
+        async (metadata) => {
+          await updateProductDataSource(editing.id, payload, metadata);
+          message.success('店铺已更新');
+          setModalOpen(false);
+          await fetchItems();
+        },
+        {
+          errorFallback: '保存店铺失败',
+          onError: (errorMessage) => message.error(errorMessage),
+          clearLoading: () => setSaving(false),
+        },
+      ).catch(() => undefined);
+    } else {
+      await runMutationWithUX(
+        'createProductDataSource|frontend/src/pages/ProductDataSourceList.tsx|save',
+        async (metadata) => {
+          await createProductDataSource(payload, metadata);
+          message.success('店铺已创建');
+          setModalOpen(false);
+          await fetchItems();
+        },
+        {
+          errorFallback: '保存店铺失败',
+          onError: (errorMessage) => message.error(errorMessage),
+          clearLoading: () => setSaving(false),
+        },
+      ).catch(() => undefined);
     }
   };
 
   const remove = async (record: ProductDataSource) => {
-    try {
-      const { data } = await deleteProductDataSource(record.id);
-      message.success(data.enabled ? '店铺已删除' : '店铺已有同步记录，已停用');
-      await fetchItems();
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '删除店铺失败');
-    }
+    setDeletingId(record.id);
+    await runMutationWithUX(
+      'deleteProductDataSource|frontend/src/pages/ProductDataSourceList.tsx|remove',
+      async (metadata) => {
+        const { data } = await deleteProductDataSource(record.id, metadata);
+        message.success(data.enabled ? '店铺已删除' : '店铺已有同步记录，已停用');
+        await fetchItems();
+      },
+      {
+        errorFallback: '删除店铺失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setDeletingId(null),
+      },
+    ).catch(() => undefined);
   };
 
   return (
@@ -142,7 +167,7 @@ const ProductDataSourceList: React.FC = () => {
                   cancelText="取消"
                   onConfirm={() => remove(record)}
                 >
-                  <Button size="small" danger>{record.enabled ? '停用' : '删除'}</Button>
+                  <Button size="small" danger loading={deletingId === record.id}>{record.enabled ? '停用' : '删除'}</Button>
                 </Popconfirm>
               </Space>
             ),

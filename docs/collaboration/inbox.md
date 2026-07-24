@@ -26,6 +26,15 @@
 
 ## Current Action Board
 
+### MSG-20260724-001 - STATUS / Stability Repair R1 Ready To Commit
+
+- From: 若命（agentKey: `ruoming`）
+- To: ALL
+- Status: PASS / READY_TO_COMMIT
+- Related: `docs/superpowers/specs/2026-07-22-stability-repair-r1-prd.md`, `docs/superpowers/specs/2026-07-22-stability-repair-r1-technical-plan.md`
+
+R1 implementation、独立工程评审、UX/QA 与全套收口验证均已通过；提交范围已独立复核并排除协作框架改写、历史 Amazon/A+ 任务、`tmp/` 和测试产物。下一步仅做 scoped commit/push；分域 E2E orchestrator 取代单一聚合入口是已接受的非阻塞残余。
+
 ### MSG-20260703-002 - REQUEST / ROLE_TEMPLATE_REWORK / MULTI_AGENT_COLLABORATION_ROLES
 
 - From: 镜花（agentKey: `jinghua`）

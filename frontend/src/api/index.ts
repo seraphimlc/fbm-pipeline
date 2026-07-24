@@ -1,11 +1,67 @@
-import axios from 'axios';
+import axios, { type AxiosError, type AxiosRequestConfig } from 'axios';
+
+declare module 'axios' {
+  interface AxiosRequestConfig {
+    fbmMutationCallsiteId?: string;
+  }
+}
+
+export const REMOTE_READ_ONLY_MESSAGE = '当前是远程只读访问';
+
+export type MutationMetadataConfig = Pick<AxiosRequestConfig, 'fbmMutationCallsiteId'>;
+
+const mutationRequestConfig = (
+  metadata: MutationMetadataConfig | undefined,
+  existing: AxiosRequestConfig = {},
+): AxiosRequestConfig => ({
+  ...existing,
+  ...(metadata?.fbmMutationCallsiteId
+    ? { fbmMutationCallsiteId: metadata.fbmMutationCallsiteId }
+    : {}),
+});
+
+interface ApiErrorPayload {
+  code?: unknown;
+  detail?: unknown;
+}
+
+export function isRemoteReadOnlyError(error: unknown): error is AxiosError<ApiErrorPayload> {
+  if (!axios.isAxiosError<ApiErrorPayload>(error) || error.response?.status !== 403) return false;
+  const data = error.response.data;
+  return Boolean(data && typeof data === 'object' && data.code === 'REMOTE_DEV_READ_ONLY');
+}
+
+export function apiErrorMessage(error: unknown, fallback: string): string {
+  if (isRemoteReadOnlyError(error)) return REMOTE_READ_ONLY_MESSAGE;
+  if (axios.isAxiosError<ApiErrorPayload>(error)) {
+    const detail = error.response?.data?.detail;
+    if (typeof detail === 'string' && detail.trim()) return detail;
+  }
+  if (error instanceof Error && error.message.trim()) return error.message;
+  return fallback;
+}
 
 const api = axios.create({
   baseURL: '/api',
   timeout: 30000,
 });
 
+api.interceptors.response.use(
+  (response) => response,
+  (error: unknown) => {
+    if (isRemoteReadOnlyError(error)) error.message = REMOTE_READ_ONLY_MESSAGE;
+    return Promise.reject(error);
+  },
+);
+
 // ─── Types ───
+
+export type TikTokChannelStatus = 'failed' | 'draft' | 'missing_required_info' | 'unsupported';
+
+export interface ChannelCapabilities {
+  export_supported: boolean;
+  publish_supported: boolean;
+}
 
 export interface Product {
   id: number;
@@ -36,6 +92,11 @@ export interface Product {
   source_data_source_id?: number | null;
   source_site?: string | null;
   source_batch_id?: string | null;
+  sales_channel: 'amazon' | 'tiktok';
+  channel_status?: TikTokChannelStatus | null;
+  channel_status_label?: string | null;
+  channel_status_reason?: string | null;
+  channel_capabilities?: ChannelCapabilities | null;
   catalog_exported_at?: string | null;
   catalog_export_task_id?: number | null;
   status: string;
@@ -287,6 +348,44 @@ export interface PaginatedCatalogProducts {
   page_size: number;
 }
 
+export interface CatalogExportRow {
+  row_ordinal: number;
+  catalog_id?: number | null;
+  product_id?: number | null;
+  item_code?: string | null;
+  seller_sku?: string | null;
+  category?: string | null;
+  status?: 'exported' | 'skipped' | 'failed' | string | null;
+  reason?: string | null;
+  template_file?: string | null;
+  output_file?: string | null;
+}
+
+export interface CatalogExportResult {
+  status: 'done' | 'partial_failed' | 'failed' | string;
+  artifact_available?: boolean | null;
+  requested_count?: number | null;
+  success_count?: number | null;
+  exported_count?: number | null;
+  skipped_count?: number | null;
+  failed_count?: number | null;
+  report_count?: number | null;
+  filename?: string | null;
+  file_path?: string | null;
+  oss_object_key?: string | null;
+  oss_url?: string | null;
+  file_size?: number | null;
+  category?: string | null;
+  categories?: string[] | null;
+  template_name?: string | null;
+  template_path?: string | null;
+  catalog_product_ids?: number[] | null;
+  rows?: CatalogExportRow[] | null;
+  reason?: string | null;
+  report_filename?: string | null;
+  created_at?: string | null;
+}
+
 export interface CatalogExportFile {
   task_id: number;
   task_source: 'offline_task' | 'task_run' | string;
@@ -309,6 +408,7 @@ export interface CatalogExportFile {
   skipped_count: number;
   failed_count: number;
   report_count: number;
+  rows: CatalogExportRow[];
   can_download: boolean;
   created_at: string | null;
   finished_at: string | null;
@@ -584,7 +684,7 @@ export interface TikTokProductDetail {
   id: number;
   item_code: string | null;
   title: string | null;
-  status: string;
+  status: TikTokChannelStatus;
   source_status: string;
   source_site: string | null;
   source_batch_id: string | null;
@@ -644,7 +744,9 @@ export interface OfflineTask {
   created_by: string | null;
   payload_json: string | null;
   result_json: string | null;
+  catalog_export_result?: CatalogExportResult | null;
   error_message: string | null;
+  can_download: boolean;
   created_at: string | null;
   started_at: string | null;
   finished_at: string | null;
@@ -746,6 +848,7 @@ export interface TaskRun {
   status: string;
   payload_json: string | null;
   summary_json: string | null;
+  catalog_export_result?: CatalogExportResult | null;
   created_by: string | null;
   task_type_label?: string | null;
   object_type?: string | null;
@@ -926,6 +1029,7 @@ export interface WorkbenchOverview {
   asin_attention: number;
   aplus_failed: number;
   listing_high_risk: number;
+  channel_status_counts?: Record<TikTokChannelStatus, number> | null;
 }
 
 export interface UpcPoolSummary {
@@ -1204,10 +1308,10 @@ export const STATUS_COLORS: Record<string, string> = {
 
 // ─── API calls ───
 
-export const createProduct = (data: { gigab2b_url: string; competitor_asin?: string; upc?: string; brand?: string }) =>
-  api.post<Product>('/products', data);
+export const createProduct = (data: { gigab2b_url: string; competitor_asin?: string; upc?: string; brand?: string }, metadata?: MutationMetadataConfig) =>
+  api.post<Product>('/products', data, mutationRequestConfig(metadata));
 
-export const listProducts = (params?: { page?: number; page_size?: number; status?: string; work_status?: string; item_id?: string; sku_code?: string; data_source_id?: number; competitor_asin?: string; upc?: string; created_from?: string; created_to?: string }) =>
+export const listProducts = (params?: { page?: number; page_size?: number; status?: string; work_status?: string; channel_status?: TikTokChannelStatus; item_id?: string; sku_code?: string; data_source_id?: number; competitor_asin?: string; upc?: string; created_from?: string; created_to?: string }) =>
   api.get<PaginatedProducts>('/products', { params });
 
 export const listProductImageReviewQueue = (params?: { data_source_id?: number; limit?: number }) =>
@@ -1219,23 +1323,23 @@ export const getProductImageReviewDetail = (productId: number, params?: { image_
 export const downloadImportTemplate = () =>
   api.get<Blob>('/products/import/template', { responseType: 'blob' });
 
-export const importProducts = (file: File) => {
+export const importProducts = (file: File, metadata?: MutationMetadataConfig) => {
   const formData = new FormData();
   formData.append('file', file);
-  return api.post<{ created: number; skipped: number; skipped_details: string[]; errors: string[]; product_ids: number[] }>('/products/import', formData, {
+  return api.post<{ created: number; skipped: number; skipped_details: string[]; errors: string[]; product_ids: number[] }>('/products/import', formData, mutationRequestConfig(metadata, {
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: 120000,
-  });
+  }));
 };
 
-export const bulkStartPipelines = (productIds: number[]) =>
-  api.post<BulkStartResult>('/products/bulk-start', { product_ids: productIds }, { timeout: 120000 });
+export const bulkStartPipelines = (productIds: number[], metadata?: MutationMetadataConfig) =>
+  api.post<BulkStartResult>('/products/bulk-start', { product_ids: productIds }, mutationRequestConfig(metadata, { timeout: 120000 }));
 
-export const autoStartReadyGeneration = (params?: { data_source_id?: number; limit?: number }) =>
-  api.post<BulkStartResult>('/products/auto-start-ready-generation', null, { params, timeout: 120000 });
+export const autoStartReadyGeneration = (params?: { data_source_id?: number; limit?: number }, metadata?: MutationMetadataConfig) =>
+  api.post<BulkStartResult>('/products/auto-start-ready-generation', null, mutationRequestConfig(metadata, { params, timeout: 120000 }));
 
-export const createProductBulkAdvanceTask = (productIds: number[]) =>
-  api.post<TaskRun>('/products/bulk-advance-task', { product_ids: productIds }, { timeout: 120000 });
+export const createProductBulkAdvanceTask = (productIds: number[], metadata?: MutationMetadataConfig) =>
+  api.post<TaskRun>('/products/bulk-advance-task', { product_ids: productIds }, mutationRequestConfig(metadata, { timeout: 120000 }));
 
 export const createProductBulkAdvanceTaskByFilter = (params: {
   status?: string;
@@ -1248,7 +1352,7 @@ export const createProductBulkAdvanceTaskByFilter = (params: {
   created_to?: string;
   sku_keyword?: string;
   limit?: number;
-}) => api.post<TaskRun>('/products/bulk-advance-task/by-filter', params, { timeout: 120000 });
+}, metadata?: MutationMetadataConfig) => api.post<TaskRun>('/products/bulk-advance-task/by-filter', params, mutationRequestConfig(metadata, { timeout: 120000 }));
 
 export const getWorkbenchOverview = (params?: { data_source_id?: number }) =>
   api.get<WorkbenchOverview>('/products/overview', { params });
@@ -1256,8 +1360,8 @@ export const getWorkbenchOverview = (params?: { data_source_id?: number }) =>
 export const listUpcPool = (params?: { page?: number; page_size?: number; status?: string; q?: string }) =>
   api.get<PaginatedUpcPoolItems>('/products/upc-pool', { params });
 
-export const importUpcPool = (text: string) =>
-  api.post<{ added: number; duplicated: number; invalid: string[]; summary: UpcPoolSummary }>('/products/upc-pool/import', { text });
+export const importUpcPool = (text: string, metadata?: MutationMetadataConfig) =>
+  api.post<{ added: number; duplicated: number; invalid: string[]; summary: UpcPoolSummary }>('/products/upc-pool/import', { text }, mutationRequestConfig(metadata));
 
 export const listCategoryOptions = () =>
   api.get<{ items: CategoryOption[] }>('/products/category-options');
@@ -1300,45 +1404,45 @@ export const listCatalogTemplateFiles = () =>
 export const downloadCatalogTemplateFile = (fileId: string) =>
   api.get<Blob>(`/products/catalog/template-files/${fileId}/download`, { responseType: 'blob', timeout: 300000 });
 
-export const updateCatalogTemplateFileStatus = (fileId: string, enabled: boolean) =>
-  api.patch<CatalogTemplateFileSummary>(`/products/catalog/template-files/${fileId}/status`, { enabled });
+export const updateCatalogTemplateFileStatus = (fileId: string, enabled: boolean, metadata?: MutationMetadataConfig) =>
+  api.patch<CatalogTemplateFileSummary>(`/products/catalog/template-files/${fileId}/status`, { enabled }, mutationRequestConfig(metadata));
 
-export const deleteCatalogTemplateFile = (fileId: string) =>
-  api.delete<CatalogTemplateFileSummary[]>(`/products/catalog/template-files/${fileId}`);
+export const deleteCatalogTemplateFile = (fileId: string, metadata?: MutationMetadataConfig) =>
+  api.delete<CatalogTemplateFileSummary[]>(`/products/catalog/template-files/${fileId}`, mutationRequestConfig(metadata));
 
 export const downloadCatalogCategoryTemplate = (category: string) =>
   api.get<Blob>('/products/catalog/category-template-download', { params: { category }, responseType: 'blob', timeout: 300000 });
 
-export const createCatalogExportTaskRuns = (ids: number[]) =>
-  api.post<TaskRunBatchQueuedResult>('/task-runs/catalog-export', { catalog_product_ids: ids }, { timeout: 30000 });
+export const createCatalogExportTaskRuns = (ids: number[], metadata?: MutationMetadataConfig) =>
+  api.post<TaskRunBatchQueuedResult>('/task-runs/catalog-export', { catalog_product_ids: ids }, mutationRequestConfig(metadata, { timeout: 30000 }));
 
-export const exportCatalogProducts = (ids: number[]) =>
-  api.post<Blob>('/products/catalog/export', ids, { responseType: 'blob', timeout: 300000 });
+export const exportCatalogProducts = (ids: number[], metadata?: MutationMetadataConfig) =>
+  api.post<Blob>('/products/catalog/export', ids, mutationRequestConfig(metadata, { responseType: 'blob', timeout: 300000 }));
 
-export const exportCatalogProductsByCategory = (category: string) =>
-  api.post<Blob>('/products/catalog/export-by-category', { category }, { responseType: 'blob', timeout: 300000 });
+export const exportCatalogProductsByCategory = (category: string, metadata?: MutationMetadataConfig) =>
+  api.post<Blob>('/products/catalog/export-by-category', { category }, mutationRequestConfig(metadata, { responseType: 'blob', timeout: 300000 }));
 
-export const uploadCatalogCategoryTemplate = (category: string, file: File) => {
+export const uploadCatalogCategoryTemplate = (category: string, file: File, metadata?: MutationMetadataConfig) => {
   const formData = new FormData();
   formData.append('category', category);
   formData.append('file', file);
-  return api.post<CatalogTemplateUploadResult>('/products/catalog/category-template-upload', formData, {
+  return api.post<CatalogTemplateUploadResult>('/products/catalog/category-template-upload', formData, mutationRequestConfig(metadata, {
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: 120000,
-  });
+  }));
 };
 
-export const exportInventoryUpdateTemplate = (ids: number[]) =>
-  api.post<Blob>('/products/catalog/inventory-template/export', ids, { responseType: 'blob', timeout: 300000 });
+export const exportInventoryUpdateTemplate = (ids: number[], metadata?: MutationMetadataConfig) =>
+  api.post<Blob>('/products/catalog/inventory-template/export', ids, mutationRequestConfig(metadata, { responseType: 'blob', timeout: 300000 }));
 
-export const updateCatalogAsin = (catalogId: number, amazonAsin: string) =>
-  api.post<CatalogProduct>(`/products/catalog/${catalogId}/asin`, { amazon_asin: amazonAsin });
+export const updateCatalogAsin = (catalogId: number, amazonAsin: string, metadata?: MutationMetadataConfig) =>
+  api.post<CatalogProduct>(`/products/catalog/${catalogId}/asin`, { amazon_asin: amazonAsin }, mutationRequestConfig(metadata));
 
-export const clearCatalogAsin = (catalogId: number) =>
-  api.delete<CatalogProduct>(`/products/catalog/${catalogId}/asin`);
+export const clearCatalogAsin = (catalogId: number, metadata?: MutationMetadataConfig) =>
+  api.delete<CatalogProduct>(`/products/catalog/${catalogId}/asin`, mutationRequestConfig(metadata));
 
-export const createInventorySyncBatch = (catalogProductIds?: number[]) =>
-  api.post<InventorySyncBatch>('/products/catalog/inventory-sync', { catalog_product_ids: catalogProductIds || null }, { timeout: 120000 });
+export const createInventorySyncBatch = (catalogProductIds?: number[], metadata?: MutationMetadataConfig) =>
+  api.post<InventorySyncBatch>('/products/catalog/inventory-sync', { catalog_product_ids: catalogProductIds || null }, mutationRequestConfig(metadata, { timeout: 120000 }));
 
 export const listInventorySyncBatches = (params?: { page?: number; page_size?: number }) =>
   api.get<PaginatedInventorySyncBatches>('/products/inventory-sync-batches', { params });
@@ -1346,20 +1450,20 @@ export const listInventorySyncBatches = (params?: { page?: number; page_size?: n
 export const listGigaBatches = (params?: { page?: number; page_size?: number; site?: string; data_source_id?: number; status?: string }) =>
   api.get<PaginatedGigaSyncBatches>('/giga/batches', { params });
 
-export const syncMissingGigaProducts = (body: { site?: string; data_source_id: number; task_id?: string | null; current_category?: string | null; page_size?: number | null; max_pages?: number | null }) =>
-  api.post<GigaProductSyncResult>('/giga/sync-missing', body, { timeout: 600000 });
+export const syncMissingGigaProducts = (body: { site?: string; data_source_id: number; task_id?: string | null; current_category?: string | null; page_size?: number | null; max_pages?: number | null }, metadata?: MutationMetadataConfig) =>
+  api.post<GigaProductSyncResult>('/giga/sync-missing', body, mutationRequestConfig(metadata, { timeout: 600000 }));
 
-export const syncMissingGigaProductsBackground = (body: { site?: string; data_source_id: number; task_id?: string | null; current_category?: string | null; page_size?: number | null; max_pages?: number | null }) =>
-  api.post<GigaSyncQueuedResult>('/giga/sync-missing/background', body, { timeout: 30000 });
+export const syncMissingGigaProductsBackground = (body: { site?: string; data_source_id: number; task_id?: string | null; current_category?: string | null; page_size?: number | null; max_pages?: number | null }, metadata?: MutationMetadataConfig) =>
+  api.post<GigaSyncQueuedResult>('/giga/sync-missing/background', body, mutationRequestConfig(metadata, { timeout: 30000 }));
 
-export const createGigaPullTaskRuns = (body: { data_source_ids: number[]; current_category?: string | null; page_size?: number | null; max_pages?: number | null }) =>
-  api.post<TaskRunBatchQueuedResult>('/task-runs/giga-pull', body, { timeout: 30000 });
+export const createGigaPullTaskRuns = (body: { data_source_ids: number[]; current_category?: string | null; page_size?: number | null; max_pages?: number | null }, metadata?: MutationMetadataConfig) =>
+  api.post<TaskRunBatchQueuedResult>('/task-runs/giga-pull', body, mutationRequestConfig(metadata, { timeout: 30000 }));
 
-export const createGigaInventorySyncTaskRuns = (body: { data_source_ids: number[]; sku_codes?: string[] | null }) =>
-  api.post<TaskRunBatchQueuedResult>('/task-runs/giga-inventory-sync', body, { timeout: 30000 });
+export const createGigaInventorySyncTaskRuns = (body: { data_source_ids: number[]; sku_codes?: string[] | null }, metadata?: MutationMetadataConfig) =>
+  api.post<TaskRunBatchQueuedResult>('/task-runs/giga-inventory-sync', body, mutationRequestConfig(metadata, { timeout: 30000 }));
 
-export const createGigaPriceSyncTaskRuns = (body: { data_source_ids: number[]; sku_codes?: string[] | null }) =>
-  api.post<TaskRunBatchQueuedResult>('/task-runs/giga-price-sync', body, { timeout: 30000 });
+export const createGigaPriceSyncTaskRuns = (body: { data_source_ids: number[]; sku_codes?: string[] | null }, metadata?: MutationMetadataConfig) =>
+  api.post<TaskRunBatchQueuedResult>('/task-runs/giga-price-sync', body, mutationRequestConfig(metadata, { timeout: 30000 }));
 
 export const listOfflineTasks = (params?: { page?: number; page_size?: number; task_type?: string; status?: string; include_progress?: boolean }) =>
   api.get<PaginatedOfflineTasks>('/offline-tasks', { params });
@@ -1367,14 +1471,14 @@ export const listOfflineTasks = (params?: { page?: number; page_size?: number; t
 export const getOfflineTask = (id: number) =>
   api.get<OfflineTaskDetail>(`/offline-tasks/${id}`);
 
-export const rerunOfflineTask = (id: number) =>
-  api.post<OfflineTaskDetail>(`/offline-tasks/${id}/rerun`);
+export const rerunOfflineTask = (id: number, metadata?: MutationMetadataConfig) =>
+  api.post<OfflineTaskDetail>(`/offline-tasks/${id}/rerun`, null, mutationRequestConfig(metadata));
 
-export const pauseOfflineTask = (id: number) =>
-  api.post<OfflineTaskDetail>(`/offline-tasks/${id}/pause`);
+export const pauseOfflineTask = (id: number, metadata?: MutationMetadataConfig) =>
+  api.post<OfflineTaskDetail>(`/offline-tasks/${id}/pause`, null, mutationRequestConfig(metadata));
 
-export const resumeOfflineTask = (id: number) =>
-  api.post<OfflineTaskDetail>(`/offline-tasks/${id}/resume`);
+export const resumeOfflineTask = (id: number, metadata?: MutationMetadataConfig) =>
+  api.post<OfflineTaskDetail>(`/offline-tasks/${id}/resume`, null, mutationRequestConfig(metadata));
 
 export const downloadOfflineTaskResult = (id: number) =>
   api.get<Blob>(`/offline-tasks/${id}/download`, { responseType: 'blob', timeout: 300000 });
@@ -1388,20 +1492,20 @@ export const listTaskRuns = (params?: { page?: number; page_size?: number; view?
 export const getTaskRun = (id: number) =>
   api.get<TaskRunDetail>(`/task-runs/${id}`);
 
-export const retryFailedTaskRunSteps = (id: number) =>
-  api.post<TaskRunDetail>(`/task-runs/${id}/retry-failed`);
+export const retryFailedTaskRunSteps = (id: number, metadata?: MutationMetadataConfig) =>
+  api.post<TaskRunDetail>(`/task-runs/${id}/retry-failed`, null, mutationRequestConfig(metadata));
 
-export const retryTaskStep = (id: number) =>
-  api.post<TaskStep>(`/task-runs/steps/${id}/retry`);
+export const retryTaskStep = (id: number, metadata?: MutationMetadataConfig) =>
+  api.post<TaskStep>(`/task-runs/steps/${id}/retry`, null, mutationRequestConfig(metadata));
 
-export const wakeTaskRun = (id: number) =>
-  api.post<TaskRunDetail>(`/task-runs/${id}/wake`);
+export const wakeTaskRun = (id: number, metadata?: MutationMetadataConfig) =>
+  api.post<TaskRunDetail>(`/task-runs/${id}/wake`, null, mutationRequestConfig(metadata));
 
-export const cancelTaskRun = (id: number, reason?: string) =>
-  api.post<TaskRunDetail>(`/task-runs/${id}/cancel`, { reason });
+export const cancelTaskRun = (id: number, reason?: string, metadata?: MutationMetadataConfig) =>
+  api.post<TaskRunDetail>(`/task-runs/${id}/cancel`, { reason }, mutationRequestConfig(metadata));
 
-export const markTaskRunInterrupted = (id: number, reason?: string) =>
-  api.post<TaskRunDetail>(`/task-runs/${id}/mark-interrupted`, { reason });
+export const markTaskRunInterrupted = (id: number, reason?: string, metadata?: MutationMetadataConfig) =>
+  api.post<TaskRunDetail>(`/task-runs/${id}/mark-interrupted`, { reason }, mutationRequestConfig(metadata));
 
 export const listGigaItems = (params: { batch_id?: string; site?: string; data_source_id?: number; page?: number; page_size?: number; sku_code?: string }) =>
   api.get<PaginatedGigaItems>('/giga/items', { params });
@@ -1412,14 +1516,14 @@ export const listGigaSkus = (params: { batch_id: string; site?: string; data_sou
 export const listProductDataSources = (params?: { page?: number; page_size?: number; platform?: string; sales_channel?: string; site?: string; enabled?: boolean }) =>
   api.get<PaginatedProductDataSources>('/product-data-sources', { params });
 
-export const createProductDataSource = (body: Partial<ProductDataSource> & { name: string; site: string; client_secret?: string | null }) =>
-  api.post<ProductDataSource>('/product-data-sources', body);
+export const createProductDataSource = (body: Partial<ProductDataSource> & { name: string; site: string; client_secret?: string | null }, metadata?: MutationMetadataConfig) =>
+  api.post<ProductDataSource>('/product-data-sources', body, mutationRequestConfig(metadata));
 
-export const updateProductDataSource = (id: number, body: Partial<ProductDataSource> & { client_secret?: string | null }) =>
-  api.patch<ProductDataSource>(`/product-data-sources/${id}`, body);
+export const updateProductDataSource = (id: number, body: Partial<ProductDataSource> & { client_secret?: string | null }, metadata?: MutationMetadataConfig) =>
+  api.patch<ProductDataSource>(`/product-data-sources/${id}`, body, mutationRequestConfig(metadata));
 
-export const deleteProductDataSource = (id: number) =>
-  api.delete<ProductDataSource>(`/product-data-sources/${id}`);
+export const deleteProductDataSource = (id: number, metadata?: MutationMetadataConfig) =>
+  api.delete<ProductDataSource>(`/product-data-sources/${id}`, mutationRequestConfig(metadata));
 
 export const getTikTokProduct = (id: number | string) =>
   api.get<TikTokProductDetail>(`/tiktok/products/${id}`);
@@ -1427,11 +1531,11 @@ export const getTikTokProduct = (id: number | string) =>
 export const listGigaInventory = (params: { site: string; data_source_id?: number; page?: number; page_size?: number; sku_code?: string; availability_status?: string }) =>
   api.get<PaginatedGigaInventory>('/giga/inventory', { params });
 
-export const syncGigaInventory = (body: { batch_id: string; site: string; data_source_id: number; task_id?: string | null; sku_codes?: string[] | null }) =>
-  api.post<GigaInventorySyncResult>('/giga/inventory/sync', body, { timeout: 300000 });
+export const syncGigaInventory = (body: { batch_id: string; site: string; data_source_id: number; task_id?: string | null; sku_codes?: string[] | null }, metadata?: MutationMetadataConfig) =>
+  api.post<GigaInventorySyncResult>('/giga/inventory/sync', body, mutationRequestConfig(metadata, { timeout: 300000 }));
 
-export const syncGigaPrice = (body: { batch_id: string; site: string; data_source_id: number; task_id?: string | null; sku_codes?: string[] | null }) =>
-  api.post<GigaPriceSyncResult>('/giga/price/sync', body, { timeout: 300000 });
+export const syncGigaPrice = (body: { batch_id: string; site: string; data_source_id: number; task_id?: string | null; sku_codes?: string[] | null }, metadata?: MutationMetadataConfig) =>
+  api.post<GigaPriceSyncResult>('/giga/price/sync', body, mutationRequestConfig(metadata, { timeout: 300000 }));
 
 export const listGigaInventoryAlerts = (params: { site: string; data_source_id?: number; batch_id?: string; change_type?: string; page?: number; page_size?: number }) =>
   api.get<PaginatedGigaInventoryAlerts>('/giga/inventory/alerts', { params });
@@ -1442,8 +1546,8 @@ export const listGigaPriceAlerts = (params: { site: string; data_source_id?: num
 export const getInventorySyncBatch = (id: number) =>
   api.get<InventorySyncBatchDetail>(`/products/inventory-sync-batches/${id}`);
 
-export const createAsinSyncBatch = (catalogProductIds: number[], store = 'Andy店-US') =>
-  api.post<AsinSyncBatch>('/products/catalog/asin-sync', { catalog_product_ids: catalogProductIds, store }, { timeout: 120000 });
+export const createAsinSyncBatch = (catalogProductIds: number[], store = 'Andy店-US', metadata?: MutationMetadataConfig) =>
+  api.post<AsinSyncBatch>('/products/catalog/asin-sync', { catalog_product_ids: catalogProductIds, store }, mutationRequestConfig(metadata, { timeout: 120000 }));
 
 export const listAsinSyncBatches = (params?: { page?: number; page_size?: number }) =>
   api.get<PaginatedAsinSyncBatches>('/products/asin-sync-batches', { params });
@@ -1451,11 +1555,11 @@ export const listAsinSyncBatches = (params?: { page?: number; page_size?: number
 export const getAsinSyncBatch = (id: number) =>
   api.get<AsinSyncBatchDetail>(`/products/asin-sync-batches/${id}`);
 
-export const createAplusUploadBatch = (catalogProductIds: number[], store = 'Andy店-US', submitForApproval = true) =>
-  api.post<AplusUploadBatch>('/products/catalog/aplus-upload', { catalog_product_ids: catalogProductIds, store, submit_for_approval: submitForApproval }, { timeout: 120000 });
+export const createAplusUploadBatch = (catalogProductIds: number[], store = 'Andy店-US', submitForApproval = true, metadata?: MutationMetadataConfig) =>
+  api.post<AplusUploadBatch>('/products/catalog/aplus-upload', { catalog_product_ids: catalogProductIds, store, submit_for_approval: submitForApproval }, mutationRequestConfig(metadata, { timeout: 120000 }));
 
-export const createAplusGenerateBatch = (catalogProductIds: number[], force = false) =>
-  api.post<BulkStartResult>('/products/catalog/aplus-generate', { catalog_product_ids: catalogProductIds, force }, { timeout: 120000 });
+export const createAplusGenerateBatch = (catalogProductIds: number[], force = false, metadata?: MutationMetadataConfig) =>
+  api.post<BulkStartResult>('/products/catalog/aplus-generate', { catalog_product_ids: catalogProductIds, force }, mutationRequestConfig(metadata, { timeout: 120000 }));
 
 export const listAplusUploadBatches = (params?: { page?: number; page_size?: number }) =>
   api.get<PaginatedAplusUploadBatches>('/products/aplus-upload-batches', { params });
@@ -1480,71 +1584,71 @@ export const updateProduct = (id: number, data: Partial<Product> & {
   listing_primary_keyword?: string;
   main_image_path?: string | null;
   gallery_images?: string[];
-}) =>
-  api.patch<Product>(`/products/${id}`, data);
+}, metadata?: MutationMetadataConfig) =>
+  api.patch<Product>(`/products/${id}`, data, mutationRequestConfig(metadata));
 
 export const updateProductListingImages = (id: number, data: {
   main_image_path: string;
   gallery_images: string[];
-}) =>
-  api.put<ProductImage>(`/products/${id}/listing-images`, data);
+}, metadata?: MutationMetadataConfig) =>
+  api.put<ProductImage>(`/products/${id}/listing-images`, data, mutationRequestConfig(metadata));
 
-export const retryProductAutoImageSelection = (id: number) =>
-  api.post<Product>(`/products/${id}/auto-image-selection/retry`);
+export const retryProductAutoImageSelection = (id: number, metadata?: MutationMetadataConfig) =>
+  api.post<Product>(`/products/${id}/auto-image-selection/retry`, null, mutationRequestConfig(metadata));
 
-export const retryProductCompetitorSearch = (id: number) =>
-  api.post<Product>(`/products/${id}/competitor-search/retry`);
+export const retryProductCompetitorSearch = (id: number, metadata?: MutationMetadataConfig) =>
+  api.post<Product>(`/products/${id}/competitor-search/retry`, null, mutationRequestConfig(metadata));
 
-export const retryProductCompetitorVisualMatch = (id: number) =>
-  api.post<Product>(`/products/${id}/competitor-visual-match/retry`);
+export const retryProductCompetitorVisualMatch = (id: number, metadata?: MutationMetadataConfig) =>
+  api.post<Product>(`/products/${id}/competitor-visual-match/retry`, null, mutationRequestConfig(metadata));
 
-export const confirmProduct = (id: number) =>
-  api.post<Product>(`/products/${id}/confirm`);
+export const confirmProduct = (id: number, metadata?: MutationMetadataConfig) =>
+  api.post<Product>(`/products/${id}/confirm`, null, mutationRequestConfig(metadata));
 
-export const deleteProduct = (id: number) =>
-  api.delete(`/products/${id}`);
+export const deleteProduct = (id: number, metadata?: MutationMetadataConfig) =>
+  api.delete(`/products/${id}`, mutationRequestConfig(metadata));
 
-export const refreshProductFromGiga = (id: number, data?: { data_source_id?: number | null; item_code?: string | null; sku_codes?: string[] }) =>
-  api.post<Product>(`/products/${id}/refresh-giga`, data || {});
+export const refreshProductFromGiga = (id: number, data?: { data_source_id?: number | null; item_code?: string | null; sku_codes?: string[] }, metadata?: MutationMetadataConfig) =>
+  api.post<Product>(`/products/${id}/refresh-giga`, data || {}, mutationRequestConfig(metadata));
 
-export const restartPipeline = (id: number) =>
-  api.post<Product>(`/products/${id}/restart`);
+export const restartPipeline = (id: number, metadata?: MutationMetadataConfig) =>
+  api.post<Product>(`/products/${id}/restart`, null, mutationRequestConfig(metadata));
 
-export const retryStep = (id: number) =>
-  api.post<Product>(`/products/${id}/retry`);
+export const retryStep = (id: number, metadata?: MutationMetadataConfig) =>
+  api.post<Product>(`/products/${id}/retry`, null, mutationRequestConfig(metadata));
 
-export const runProductFromStep = (id: number, startStep = 5) =>
-  api.post<Product>(`/products/${id}/run-from-step`, null, { params: { start_step: startStep } });
+export const runProductFromStep = (id: number, startStep = 5, metadata?: MutationMetadataConfig) =>
+  api.post<Product>(`/products/${id}/run-from-step`, null, mutationRequestConfig(metadata, { params: { start_step: startStep } }));
 
-export const resumePipeline = (id: number) =>
-  api.post<Product>(`/products/${id}/resume`);
+export const resumePipeline = (id: number, metadata?: MutationMetadataConfig) =>
+  api.post<Product>(`/products/${id}/resume`, null, mutationRequestConfig(metadata));
 
-export const runPipelineStep = (id: number, step: number) =>
-  api.post<{ status: string; step: number; data: unknown }>(`/products/${id}/step/${step}`, null, { timeout: 240000 });
+export const runPipelineStep = (id: number, step: number, metadata?: MutationMetadataConfig) =>
+  api.post<{ status: string; step: number; data: unknown }>(`/products/${id}/step/${step}`, null, mutationRequestConfig(metadata, { timeout: 240000 }));
 
-export const pausePipeline = (id: number) =>
-  api.post<Product>(`/products/${id}/pause`);
+export const pausePipeline = (id: number, metadata?: MutationMetadataConfig) =>
+  api.post<Product>(`/products/${id}/pause`, null, mutationRequestConfig(metadata));
 
-export const openProductFile = (id: number, path?: string, directory?: boolean) =>
-  api.post<{ status: string; path: string }>(`/products/${id}/files/open`, null, { params: { path, directory } });
+export const openProductFile = (id: number, path?: string, directory?: boolean, metadata?: MutationMetadataConfig) =>
+  api.post<{ status: string; path: string }>(`/products/${id}/files/open`, null, mutationRequestConfig(metadata, { params: { path, directory } }));
 
-export const extractProductZip = (id: number, path: string) =>
-  api.post<{ status: string; extracted_dir: string; files: string[] }>(`/products/${id}/files/extract`, null, { params: { path } });
+export const extractProductZip = (id: number, path: string, metadata?: MutationMetadataConfig) =>
+  api.post<{ status: string; extracted_dir: string; files: string[] }>(`/products/${id}/files/extract`, null, mutationRequestConfig(metadata, { params: { path } }));
 
-export const regenerateAplusModule = (id: number, data: { module_position: number; reason: string }) =>
-  api.post<{ status: string; message: string; module_position: number; task_id: number }>(`/products/${id}/aplus/regenerate`, data);
+export const regenerateAplusModule = (id: number, data: { module_position: number; reason: string }, metadata?: MutationMetadataConfig) =>
+  api.post<{ status: string; message: string; module_position: number; task_id: number }>(`/products/${id}/aplus/regenerate`, data, mutationRequestConfig(metadata));
 
-export const retryAplusRegeneration = (id: number) =>
-  api.post<{ status: string; message: string; task_ids: number[]; module_positions: number[] }>(`/products/${id}/aplus/regenerate/retry`);
+export const retryAplusRegeneration = (id: number, metadata?: MutationMetadataConfig) =>
+  api.post<{ status: string; message: string; task_ids: number[]; module_positions: number[] }>(`/products/${id}/aplus/regenerate/retry`, null, mutationRequestConfig(metadata));
 
-export const generateProductAplus = (id: number, force = false) =>
-  api.post<{ status: string; product_id: number; task_id?: number | null }>(`/products/${id}/aplus/generate`, null, { params: { force }, timeout: 120000 });
+export const generateProductAplus = (id: number, force = false, metadata?: MutationMetadataConfig) =>
+  api.post<{ status: string; product_id: number; task_id?: number | null }>(`/products/${id}/aplus/generate`, null, mutationRequestConfig(metadata, { params: { force }, timeout: 120000 }));
 
 export const getConfig = () =>
   api.get<SystemConfig>('/config');
 
-export const updateConfig = (data: SystemConfigUpdate) =>
-  api.patch<{ status: string; restart_required: boolean; env_file: string; updated_fields: string[] }>('/config', data);
+export const updateConfig = (data: SystemConfigUpdate, metadata?: MutationMetadataConfig) =>
+  api.patch<{ status: string; restart_required: boolean; env_file: string; updated_fields: string[] }>('/config', data, mutationRequestConfig(metadata));
 
 export const getHealth = () =>
   api.get<{ status: string; version: string }>('/health');

@@ -9,6 +9,7 @@ import {
   listProductDataSources,
 } from '../api';
 import type { GigaInventory, ProductDataSource } from '../api';
+import { runMutationWithUX } from '../api/mutationRunner.ts';
 
 const { Text, Title } = Typography;
 
@@ -147,17 +148,21 @@ const InventorySyncList: React.FC = () => {
       return;
     }
     setSyncing(true);
-    try {
-      const { data } = await createGigaInventorySyncTaskRuns({
-        data_source_ids: [selectedDataSourceId],
-      });
-      message.success(`已创建库存同步任务：${data.runs.map((run) => `#${run.id}`).join('、')}`);
-      navigate('/task-runs');
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '创建库存同步任务失败');
-    } finally {
-      setSyncing(false);
-    }
+    await runMutationWithUX(
+      'createGigaInventorySyncTaskRuns|frontend/src/pages/InventorySyncList.tsx|handleSync',
+      async (metadata) => {
+        const { data } = await createGigaInventorySyncTaskRuns({
+          data_source_ids: [selectedDataSourceId],
+        }, metadata);
+        message.success(`已创建库存同步任务：${data.runs.map((run) => `#${run.id}`).join('、')}`);
+        navigate('/task-runs');
+      },
+      {
+        errorFallback: '创建库存同步任务失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setSyncing(false),
+      },
+    ).catch(() => undefined);
   };
 
   const handlePriceSync = async () => {
@@ -166,17 +171,21 @@ const InventorySyncList: React.FC = () => {
       return;
     }
     setPriceSyncing(true);
-    try {
-      const { data } = await createGigaPriceSyncTaskRuns({
-        data_source_ids: [selectedDataSourceId],
-      });
-      message.success(`已创建价格同步任务：${data.runs.map((run) => `#${run.id}`).join('、')}`);
-      navigate('/task-runs');
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '创建价格同步任务失败');
-    } finally {
-      setPriceSyncing(false);
-    }
+    await runMutationWithUX(
+      'createGigaPriceSyncTaskRuns|frontend/src/pages/InventorySyncList.tsx|handlePriceSync',
+      async (metadata) => {
+        const { data } = await createGigaPriceSyncTaskRuns({
+          data_source_ids: [selectedDataSourceId],
+        }, metadata);
+        message.success(`已创建价格同步任务：${data.runs.map((run) => `#${run.id}`).join('、')}`);
+        navigate('/task-runs');
+      },
+      {
+        errorFallback: '创建价格同步任务失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setPriceSyncing(false),
+      },
+    ).catch(() => undefined);
   };
 
   const columns = [

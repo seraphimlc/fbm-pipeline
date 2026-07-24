@@ -3,7 +3,7 @@ import { useParams } from 'react-router-dom';
 import { Alert, Button, Descriptions, Image, Space, Spin, Table, Tag, Typography, message } from 'antd';
 import { ReloadOutlined } from '@ant-design/icons';
 import { getTikTokProduct } from '../api';
-import type { TikTokProductDetail, TikTokProductSku } from '../api';
+import type { TikTokChannelStatus, TikTokProductDetail, TikTokProductSku } from '../api';
 
 const { Title, Text } = Typography;
 
@@ -23,12 +23,16 @@ const moneyText = (value: number | null | undefined) => (
   value === null || value === undefined ? '-' : `USD ${Number(value).toFixed(2)}`
 );
 
-const statusTag = (status: string) => {
-  if (status === 'export_ready') return <Tag color="success">待导出</Tag>;
-  if (status === 'missing_required_info') return <Tag color="warning">待补资料</Tag>;
-  if (status === 'exported') return <Tag color="green">已导出</Tag>;
-  if (status === 'failed') return <Tag color="error">失败</Tag>;
-  return <Tag>{status || '草稿'}</Tag>;
+const STATUS_META: Record<TikTokChannelStatus, { color: string; label: string }> = {
+  failed: { color: 'error', label: '失败' },
+  draft: { color: 'default', label: '草稿' },
+  missing_required_info: { color: 'warning', label: '资料不完整' },
+  unsupported: { color: 'blue', label: '资料已齐 · 导出暂未接入' },
+};
+
+const statusTag = (status: TikTokChannelStatus) => {
+  const meta = STATUS_META[status];
+  return <Tag color={meta.color}>{meta.label}</Tag>;
 };
 
 const TikTokProductDetailPage: React.FC = () => {
@@ -146,6 +150,12 @@ const TikTokProductDetailPage: React.FC = () => {
           <Button icon={<ReloadOutlined />} loading={loading} onClick={loadDetail}>刷新</Button>
         </Space>
       </section>
+
+      <Alert
+        type="info"
+        showIcon
+        message="当前版本暂不支持 TikTok 导出或发布；不会生成文件，也不会提交到平台"
+      />
 
       {detail.missing_fields.length ? (
         <Alert

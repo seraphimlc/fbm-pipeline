@@ -9,12 +9,28 @@ import {
   CheckOutlined, DragOutlined, CopyOutlined, ExportOutlined,
   PictureOutlined,
 } from '@ant-design/icons';
-import { getProduct, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, generateProductAplus, runProductFromStep, updateProduct, updateProductListingImages, listCategoryOptions, retryProductAutoImageSelection, retryProductCompetitorSearch, retryProductCompetitorVisualMatch } from '../api';
+import { getProduct, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, generateProductAplus, runProductFromStep, updateProduct, updateProductListingImages, listCategoryOptions } from '../api';
 import type { CategoryOption, ProductDetail } from '../api';
+import type { MutationCallsiteId } from '../api/mutationInventory.generated.ts';
+import { runMutationWithUX } from '../api/mutationRunner.ts';
+import {
+  dispatchProductWorkflowAction,
+  getProductWorkflowAction,
+  reportUnknownProductWorkflowAction,
+  type ProductWorkflowApiClientExport,
+} from '../workflow/productWorkflowActionRegistry';
+import { ProductWorkflowUnknownAction } from '../workflow/ProductWorkflowUnknownAction';
 
 const { Title, Text } = Typography;
 const PRODUCT_LIST_RETURN_KEY = 'fbm.productList.returnPath';
 const DEFAULT_LISTING_IMAGE_LIMIT = 9;
+const PRODUCT_DETAIL_WORKFLOW_CALLSITE_IDS = {
+  resumePipeline: 'resumePipeline|frontend/src/pages/ProductDetail.tsx|runWorkflowAction',
+  retryProductAutoImageSelection: 'retryProductAutoImageSelection|frontend/src/pages/ProductDetail.tsx|runWorkflowAction',
+  retryProductCompetitorSearch: 'retryProductCompetitorSearch|frontend/src/pages/ProductDetail.tsx|runWorkflowAction',
+  retryProductCompetitorVisualMatch: 'retryProductCompetitorVisualMatch|frontend/src/pages/ProductDetail.tsx|runWorkflowAction',
+  retryStep: 'retryStep|frontend/src/pages/ProductDetail.tsx|runWorkflowAction',
+} satisfies Record<ProductWorkflowApiClientExport, MutationCallsiteId>;
 
 const APLUS_REGEN_ACTIVE_STATUSES = ['queued', 'planning', 'scripting', 'imaging', 'regen_queued', 'regen_script_running', 'regen_image_running'];
 const APLUS_REGEN_RETRYABLE_STATUSES = ['regen_failed', 'regen_interrupted'];
@@ -41,22 +57,6 @@ const WORKFLOW_STEP_GROUPS = [
   { key: 'listing', title: 'Listing文案', nodes: ['listing_generation'] },
   { key: 'export', title: '待导出', nodes: ['flow_done'] },
 ];
-const WORKFLOW_ACTION_LABELS: Record<string, string> = {
-  open_image_review: '确认图片',
-  manual_adjust_images: '手动调图',
-  open_task_center: '任务中心',
-  open_export_center: '导出中心',
-  retry_auto_image_selection: '重试自动选图',
-  start_competitor_search: '开始搜索',
-  retry_competitor_search: '重试 Amazon 搜索',
-  restart_competitor_search: '重新搜索竞品',
-  retry_competitor_visual_match: '重试视觉初筛',
-  retry_image_analysis: '重试图片分析',
-  retry_listing_generation: '重试 Listing',
-  retry: '重试',
-  resume: '继续',
-};
-const EXECUTABLE_WORKFLOW_ACTIONS = new Set(Object.keys(WORKFLOW_ACTION_LABELS));
 const PRODUCT_NON_RUNNING_STATUSES = [
   'created',
   'completed',
@@ -98,6 +98,9 @@ const imgUrl = (localPath: string | null | undefined) => {
   return `/api/images/${localPath}`;
 };
 const isRemoteUrl = (value: string | null | undefined) => /^https?:\/\//i.test(String(value || ''));
+const fileOpenOperationKey = (path?: string | null, directory = false) => (
+  `${directory ? 'directory' : 'file'}:${String(path || '')}`
+);
 
 const parseJson = (value: string | null | undefined, fallback: any = null) => {
   if (!value) return fallback;
@@ -234,7 +237,6 @@ const buildWorkflowPipelineSteps = (workflow: any) => {
     };
   });
 };
-const isExecutableWorkflowAction = (action?: string | null) => Boolean(action && EXECUTABLE_WORKFLOW_ACTIONS.has(action));
 const defaultProductDetailTab = (detail: ProductDetail | null | undefined) => {
   if (!detail) return 'basic';
 
@@ -333,6 +335,8 @@ const ProductDetail: React.FC = () => {
   const [listingPrimaryKeywordInput, setListingPrimaryKeywordInput] = useState('');
   const [listingSaving, setListingSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [fileOpening, setFileOpening] = useState<string | null>(null);
+  const [zipExtractingPath, setZipExtractingPath] = useState<string | null>(null);
   const [imageOrderSaving, setImageOrderSaving] = useState(false);
   const [imageDragPayload, setImageDragPayload] = useState<any | null>(null);
   const [listingImageDraftPaths, setListingImageDraftPaths] = useState<string[]>([]);
@@ -416,15 +420,19 @@ const ProductDetail: React.FC = () => {
 
   const handleDelete = async () => {
     setDeleting(true);
-    try {
-      await deleteProduct(product.id);
-      message.success('商品已删除');
-      navigate(backTarget);
-    } catch (error: any) {
-      message.error(error?.response?.data?.detail || '删除失败');
-    } finally {
-      setDeleting(false);
-    }
+    await runMutationWithUX(
+      'deleteProduct|frontend/src/pages/ProductDetail.tsx|handleDelete',
+      async (metadata) => {
+        await deleteProduct(product.id, metadata);
+        message.success('商品已删除');
+        navigate(backTarget);
+      },
+      {
+        errorFallback: '删除失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setDeleting(false),
+      },
+    ).catch(() => undefined);
   };
   const videoFolder = product.video_folder;
   const aplusFolder = product.aplus_folder;
@@ -708,13 +716,25 @@ const ProductDetail: React.FC = () => {
   ].filter(Boolean);
 
   const openPath = async (path?: string, directory = false) => {
-    try {
-      await openProductFile(product.id, path, directory);
-      message.success('已打开');
-    } catch {
-      message.error('打开失败');
-    }
+    const operationKey = fileOpenOperationKey(path, directory);
+    setFileOpening(operationKey);
+    await runMutationWithUX(
+      'openProductFile|frontend/src/pages/ProductDetail.tsx|openPath',
+      async (metadata) => {
+        await openProductFile(product.id, path, directory, metadata);
+        message.success('已打开');
+      },
+      {
+        errorFallback: '打开失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setFileOpening(null),
+      },
+    ).catch(() => undefined);
   };
+
+  const isFileOpening = (path?: string | null, directory = false) => (
+    fileOpening === fileOpenOperationKey(path, directory)
+  );
 
   const copyText = async (value?: string | null) => {
     const text = String(value || '').trim();
@@ -728,13 +748,20 @@ const ProductDetail: React.FC = () => {
   };
 
   const extractZip = async (path: string) => {
-    try {
-      await extractProductZip(product.id, path);
-      message.success('已解压');
-      fetchDetail();
-    } catch {
-      message.error('解压失败');
-    }
+    setZipExtractingPath(path);
+    await runMutationWithUX(
+      'extractProductZip|frontend/src/pages/ProductDetail.tsx|extractZip',
+      async (metadata) => {
+        await extractProductZip(product.id, path, metadata);
+        message.success('已解压');
+        await fetchDetail();
+      },
+      {
+        errorFallback: '解压失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setZipExtractingPath(null),
+      },
+    ).catch(() => undefined);
   };
 
   const regenerateAplus = async () => {
@@ -745,72 +772,92 @@ const ProductDetail: React.FC = () => {
       return;
     }
     setRegenLoading(true);
-    try {
-      const { data: result } = await regenerateAplusModule(product.id, {
-        module_position: regenTarget.module_position,
-        reason,
-      });
-      message.success(result?.message || '已提交后台重新生成');
-      setRegenTarget(null);
-      setRegenReason('');
-      fetchDetail();
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || 'A+重新生成失败');
-    } finally {
-      setRegenLoading(false);
-    }
+    await runMutationWithUX(
+      'regenerateAplusModule|frontend/src/pages/ProductDetail.tsx|regenerateAplus',
+      async (metadata) => {
+        const { data: result } = await regenerateAplusModule(product.id, {
+          module_position: regenTarget.module_position,
+          reason,
+        }, metadata);
+        message.success(result?.message || '已提交后台重新生成');
+        setRegenTarget(null);
+        setRegenReason('');
+        await fetchDetail();
+      },
+      {
+        errorFallback: 'A+重新生成失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setRegenLoading(false),
+      },
+    ).catch(() => undefined);
   };
 
   const retryInterruptedAplus = async () => {
     setRegenRetryLoading(true);
-    try {
-      const { data: result } = await retryAplusRegeneration(product.id);
-      message.success(result?.message || '已重新排队 A+ 重新生图任务');
-      await fetchDetail();
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || 'A+重新生图重试失败');
-    } finally {
-      setRegenRetryLoading(false);
-    }
+    await runMutationWithUX(
+      'retryAplusRegeneration|frontend/src/pages/ProductDetail.tsx|retryInterruptedAplus',
+      async (metadata) => {
+        const { data: result } = await retryAplusRegeneration(product.id, metadata);
+        message.success(result?.message || '已重新排队 A+ 重新生图任务');
+        await fetchDetail();
+      },
+      {
+        errorFallback: 'A+重新生图重试失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setRegenRetryLoading(false),
+      },
+    ).catch(() => undefined);
   };
 
   const generateAplus = async (force = false) => {
     setAplusGenerateLoading(true);
-    try {
-      await generateProductAplus(product.id, force);
-      message.success(force ? '已创建任务中心任务：重新生成 A+' : '已创建任务中心任务：生成 A+');
-      await fetchDetail();
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || 'A+生成任务创建失败');
-    } finally {
-      setAplusGenerateLoading(false);
-    }
+    await runMutationWithUX(
+      'generateProductAplus|frontend/src/pages/ProductDetail.tsx|generateAplus',
+      async (metadata) => {
+        await generateProductAplus(product.id, force, metadata);
+        message.success(force ? '已创建任务中心任务：重新生成 A+' : '已创建任务中心任务：生成 A+');
+        await fetchDetail();
+      },
+      {
+        errorFallback: 'A+生成任务创建失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setAplusGenerateLoading(false),
+      },
+    ).catch(() => undefined);
   };
 
   const regenerateListing = async () => {
     setListingRegenerateLoading(true);
-    try {
-      await runProductFromStep(product.id, 6);
-      message.success('已提交任务中心：重新生成 Listing 文案，完成后会自动回到待导出');
-      await fetchDetail();
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || 'Listing 文案重新生成失败');
-    } finally {
-      setListingRegenerateLoading(false);
-    }
+    await runMutationWithUX(
+      'runProductFromStep|frontend/src/pages/ProductDetail.tsx|regenerateListing',
+      async (metadata) => {
+        await runProductFromStep(product.id, 6, metadata);
+        message.success('已提交任务中心：重新生成 Listing 文案，完成后会自动回到待导出');
+        await fetchDetail();
+      },
+      {
+        errorFallback: 'Listing 文案重新生成失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setListingRegenerateLoading(false),
+      },
+    ).catch(() => undefined);
   };
 
   const retryInterruptedPipeline = async () => {
     setPipelineRetryLoading(true);
-    try {
-      await runProductFromStep(product.id, Math.max(Number(product.current_step || 5), 5));
-      message.success('已提交任务中心：重试当前节点');
-      await fetchDetail();
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || '重试当前节点失败');
-    } finally {
-      setPipelineRetryLoading(false);
-    }
+    await runMutationWithUX(
+      'runProductFromStep|frontend/src/pages/ProductDetail.tsx|retryInterruptedPipeline',
+      async (metadata) => {
+        await runProductFromStep(product.id, Math.max(Number(product.current_step || 5), 5), metadata);
+        message.success('已提交任务中心：重试当前节点');
+        await fetchDetail();
+      },
+      {
+        errorFallback: '重试当前节点失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setPipelineRetryLoading(false),
+      },
+    ).catch(() => undefined);
   };
 
   const setDraftListingImagePaths = (paths: string[]) => {
@@ -826,20 +873,24 @@ const ProductDetail: React.FC = () => {
       return;
     }
     setImageOrderSaving(true);
-    try {
-      await updateProductListingImages(product.id, {
-        main_image_path: orderedPaths[0],
-        gallery_images: orderedPaths.slice(1),
-      });
-      message.success('商品图片已确认');
-      setListingImageDirty(false);
-      await fetchDetail();
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || '主图/副图保存失败');
-    } finally {
-      setImageOrderSaving(false);
-      setImageDragPayload(null);
-    }
+    await runMutationWithUX(
+      'updateProductListingImages|frontend/src/pages/ProductDetail.tsx|saveListingImagePaths',
+      async (metadata) => {
+        await updateProductListingImages(product.id, {
+          main_image_path: orderedPaths[0],
+          gallery_images: orderedPaths.slice(1),
+        }, metadata);
+        message.success('商品图片已确认');
+        setListingImageDirty(false);
+        setImageDragPayload(null);
+        await fetchDetail();
+      },
+      {
+        errorFallback: '主图/副图保存失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setImageOrderSaving(false),
+      },
+    ).catch(() => undefined);
   };
 
   const resetListingImageDraft = () => {
@@ -989,19 +1040,23 @@ const ProductDetail: React.FC = () => {
       return;
     }
     setCategorySaving(true);
-    try {
-      await updateProduct(product.id, {
-        categories: selected.categories,
-        leaf_category: selected.leaf_category,
-      });
-      message.success('类目已保存');
-      setCategoryEditOpen(false);
-      await fetchDetail();
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || '类目保存失败');
-    } finally {
-      setCategorySaving(false);
-    }
+    await runMutationWithUX(
+      'updateProduct|frontend/src/pages/ProductDetail.tsx|saveCategory',
+      async (metadata) => {
+        await updateProduct(product.id, {
+          categories: selected.categories,
+          leaf_category: selected.leaf_category,
+        }, metadata);
+        message.success('类目已保存');
+        setCategoryEditOpen(false);
+        await fetchDetail();
+      },
+      {
+        errorFallback: '类目保存失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setCategorySaving(false),
+      },
+    ).catch(() => undefined);
   };
 
   const openListingEditor = () => {
@@ -1023,39 +1078,47 @@ const ProductDetail: React.FC = () => {
       return;
     }
     setListingSaving(true);
-    try {
-      await updateProduct(product.id, {
-        listing_title: listingTitleInput.trim(),
-        listing_bullets: listingBulletsInput,
-        listing_description: listingDescriptionInput.trim(),
-        listing_search_terms: listingSearchTermsInput.trim(),
-        listing_title_zh: listingTitleZhInput.trim(),
-        listing_bullets_zh: listingBulletsZhInput,
-        listing_description_zh: listingDescriptionZhInput.trim(),
-        listing_search_terms_zh: listingSearchTermsZhInput.trim(),
-        listing_primary_keyword: listingPrimaryKeywordInput.trim(),
-      });
-      message.success('Listing 已保存');
-      setListingEditOpen(false);
-      await fetchDetail();
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || 'Listing 保存失败');
-    } finally {
-      setListingSaving(false);
-    }
+    await runMutationWithUX(
+      'updateProduct|frontend/src/pages/ProductDetail.tsx|saveListing',
+      async (metadata) => {
+        await updateProduct(product.id, {
+          listing_title: listingTitleInput.trim(),
+          listing_bullets: listingBulletsInput,
+          listing_description: listingDescriptionInput.trim(),
+          listing_search_terms: listingSearchTermsInput.trim(),
+          listing_title_zh: listingTitleZhInput.trim(),
+          listing_bullets_zh: listingBulletsZhInput,
+          listing_description_zh: listingDescriptionZhInput.trim(),
+          listing_search_terms_zh: listingSearchTermsZhInput.trim(),
+          listing_primary_keyword: listingPrimaryKeywordInput.trim(),
+        }, metadata);
+        message.success('Listing 已保存');
+        setListingEditOpen(false);
+        await fetchDetail();
+      },
+      {
+        errorFallback: 'Listing 保存失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setListingSaving(false),
+      },
+    ).catch(() => undefined);
   };
 
   const doRestart = async () => {
     setRestartLoading(true);
-    try {
-      await restartPipeline(product.id);
-      await fetchDetail();
-      message.success('已重新开始');
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || '重新开始失败');
-    } finally {
-      setRestartLoading(false);
-    }
+    await runMutationWithUX(
+      'restartPipeline|frontend/src/pages/ProductDetail.tsx|doRestart',
+      async (metadata) => {
+        await restartPipeline(product.id, metadata);
+        await fetchDetail();
+        message.success('已重新开始');
+      },
+      {
+        errorFallback: '重新开始失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setRestartLoading(false),
+      },
+    ).catch(() => undefined);
   };
 
   const openImageReview = () => {
@@ -1063,46 +1126,55 @@ const ProductDetail: React.FC = () => {
   };
 
   const runWorkflowAction = async (action?: string | null) => {
-    if (!action || action === 'open_detail') return;
-    if (action === 'open_image_review' || action === 'manual_adjust_images') {
-      openImageReview();
+    if (!action) return;
+    const definition = getProductWorkflowAction(action);
+    if (!definition) {
+      await dispatchProductWorkflowAction(action, { productId: product.id, navigate });
       return;
     }
-    if (action === 'open_task_center') {
-      const correlationKey = workflow?.related_correlation_key;
-      navigate(correlationKey ? `/task-runs?correlation_key=${encodeURIComponent(correlationKey)}` : '/task-runs');
-      return;
-    }
-    if (action === 'open_export_center') {
-      navigate('/export-center');
-      return;
-    }
-    setPipelineRetryLoading(true);
-    try {
-      if (action === 'retry_auto_image_selection') {
-        await retryProductAutoImageSelection(product.id);
-      } else if (action === 'start_competitor_search' || action === 'retry_competitor_search' || action === 'restart_competitor_search') {
-        await retryProductCompetitorSearch(product.id);
-      } else if (action === 'retry_competitor_visual_match') {
-        await retryProductCompetitorVisualMatch(product.id);
-      } else if (action === 'retry_image_analysis' || action === 'retry_listing_generation' || action === 'retry') {
-        await retryStep(product.id);
-      } else if (action === 'resume') {
-        await resumePipeline(product.id);
-      } else {
-        return;
+    const isApiAction = definition.kind === 'api';
+    if (isApiAction) setPipelineRetryLoading(true);
+    if (!isApiAction) {
+      try {
+        await dispatchProductWorkflowAction(action, {
+          productId: product.id,
+          relatedCorrelationKey: workflow?.related_correlation_key,
+          navigate,
+        });
+      } catch (e: any) {
+        message.error(e?.response?.data?.detail || '操作失败');
       }
-      message.success(workflow?.primary_action_label ? `已提交：${workflow.primary_action_label}` : '已提交处理');
-      await fetchDetail();
-    } catch (e: any) {
-      message.error(e?.response?.data?.detail || '操作失败');
-    } finally {
-      setPipelineRetryLoading(false);
+      return;
     }
+    await runMutationWithUX(
+      PRODUCT_DETAIL_WORKFLOW_CALLSITE_IDS[definition.client_export],
+      async (metadata) => {
+        const result = await dispatchProductWorkflowAction(action, {
+          productId: product.id,
+          relatedCorrelationKey: workflow?.related_correlation_key,
+          mutationMetadata: metadata,
+          navigate,
+        });
+        if (result.status !== 'handled') return;
+        message.success(workflow?.primary_action_label ? `已提交：${workflow.primary_action_label}` : '已提交处理');
+        await fetchDetail();
+      },
+      {
+        errorFallback: '操作失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setPipelineRetryLoading(false),
+      },
+    ).catch(() => undefined);
   };
 
   const renderWorkflowActionButton = (action?: string | null, label?: string | null, primary = false) => {
-    if (!isExecutableWorkflowAction(action)) return null;
+    if (!action) return null;
+    const definition = getProductWorkflowAction(action);
+    if (!definition) {
+      reportUnknownProductWorkflowAction(action);
+      return <ProductWorkflowUnknownAction action={action} surface="product-detail" />;
+    }
+    if (action === 'open_detail') return null;
     const icon = action === 'open_task_center' || action === 'resume' ? <PlayCircleOutlined /> : <RedoOutlined />;
     return (
       <Button
@@ -1111,14 +1183,13 @@ const ProductDetail: React.FC = () => {
         loading={pipelineRetryLoading}
         onClick={() => runWorkflowAction(action)}
       >
-        {label || WORKFLOW_ACTION_LABELS[action!] || '处理'}
+        {label || definition.default_label}
       </Button>
     );
   };
 
   const workflowSecondaryActions = (workflow?.allowed_actions || [])
     .filter((action: string) => action && action !== workflow?.primary_action && action !== 'open_detail')
-    .filter((action: string) => isExecutableWorkflowAction(action))
     .filter((action: string, index: number, actions: string[]) => actions.indexOf(action) === index);
 
   const packageColumns = [
@@ -1136,7 +1207,7 @@ const ProductDetail: React.FC = () => {
       title: '压缩包',
       dataIndex: 'name',
       render: (name, record) => (
-        <Button type="link" icon={<FileZipOutlined />} onClick={() => openPath(record.path)} style={{ padding: 0 }}>
+        <Button type="link" icon={<FileZipOutlined />} loading={isFileOpening(record.path)} disabled={isFileOpening(record.path)} onClick={() => openPath(record.path)} style={{ padding: 0 }}>
           {name}
         </Button>
       ),
@@ -1163,8 +1234,8 @@ const ProductDetail: React.FC = () => {
       width: 220,
       render: (_, record) => (
         <Space size="small">
-          <Button size="small" icon={<InboxOutlined />} onClick={() => extractZip(record.path)}>解压</Button>
-          <Button size="small" icon={<FolderOpenOutlined />} disabled={!record.extracted_exists} onClick={() => openPath(record.extracted_dir)}>文件夹</Button>
+          <Button size="small" icon={<InboxOutlined />} loading={zipExtractingPath === record.path} onClick={() => extractZip(record.path)}>解压</Button>
+          <Button size="small" icon={<FolderOpenOutlined />} loading={isFileOpening(record.extracted_dir)} disabled={!record.extracted_exists || isFileOpening(record.extracted_dir)} onClick={() => openPath(record.extracted_dir)}>文件夹</Button>
         </Space>
       ),
     },
@@ -1181,8 +1252,8 @@ const ProductDetail: React.FC = () => {
     { title: '更新时间', dataIndex: 'updated_at', width: 180, render: (value) => value ? new Date(value).toLocaleString('zh-CN') : '-' },
     { title: '操作', width: 240, render: (_, record) => (
       <Space size="small">
-        <Button size="small" icon={<FileExcelOutlined />} onClick={() => openPath(record.path)}>打开文件</Button>
-        <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(record.path, true)}>打开文件夹</Button>
+        <Button size="small" icon={<FileExcelOutlined />} loading={isFileOpening(record.path)} disabled={isFileOpening(record.path)} onClick={() => openPath(record.path)}>打开文件</Button>
+        <Button size="small" icon={<FolderOpenOutlined />} loading={isFileOpening(record.path, true)} disabled={isFileOpening(record.path, true)} onClick={() => openPath(record.path, true)}>打开文件夹</Button>
       </Space>
     ) },
   ];
@@ -1231,9 +1302,9 @@ const ProductDetail: React.FC = () => {
                 打开URL
               </Button>
             ) : (
-              <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(record.path, record.directory)}>打开</Button>
+              <Button size="small" icon={<FolderOpenOutlined />} loading={isFileOpening(record.path, record.directory)} disabled={isFileOpening(record.path, record.directory)} onClick={() => openPath(record.path, record.directory)}>打开</Button>
             )}
-            {localPath && !record.directory && <Button size="small" onClick={() => openPath(localPath, true)}>文件夹</Button>}
+            {localPath && !record.directory && <Button size="small" loading={isFileOpening(localPath, true)} disabled={isFileOpening(localPath, true)} onClick={() => openPath(localPath, true)}>文件夹</Button>}
           </Space>
         );
       },
@@ -1490,7 +1561,7 @@ const ProductDetail: React.FC = () => {
                 <Descriptions.Item label="素材目录">
                   {data?.material_dir ? (
                     <Space>
-                      <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(data.material_dir)}>打开</Button>
+                      <Button size="small" icon={<FolderOpenOutlined />} loading={isFileOpening(data.material_dir)} disabled={isFileOpening(data.material_dir)} onClick={() => openPath(data.material_dir)}>打开</Button>
                       <Button size="small" icon={<CopyOutlined />} onClick={() => copyText(data.material_dir)}>复制</Button>
                     </Space>
                   ) : '-'}
@@ -1499,7 +1570,7 @@ const ProductDetail: React.FC = () => {
                   {videoFolder?.exists ? (
                     <Space wrap>
                       <Tag color="processing">{videoFolder.file_count} 个视频</Tag>
-                      <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(videoFolder.path)}>打开</Button>
+                      <Button size="small" icon={<FolderOpenOutlined />} loading={isFileOpening(videoFolder.path)} disabled={isFileOpening(videoFolder.path)} onClick={() => openPath(videoFolder.path)}>打开</Button>
                       <Button size="small" icon={<CopyOutlined />} onClick={() => copyText(videoFolder.path)}>复制</Button>
                     </Space>
                   ) : <Text type="secondary">暂无</Text>}
@@ -1508,7 +1579,7 @@ const ProductDetail: React.FC = () => {
                   {aplusFolder?.exists ? (
                     <Space wrap>
                       <Tag color="success">{aplusFolder.file_count} 张</Tag>
-                      <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(aplusFolder.path)}>打开</Button>
+                      <Button size="small" icon={<FolderOpenOutlined />} loading={isFileOpening(aplusFolder.path)} disabled={isFileOpening(aplusFolder.path)} onClick={() => openPath(aplusFolder.path)}>打开</Button>
                       <Button size="small" icon={<CopyOutlined />} onClick={() => copyText(aplusFolder.path)}>复制</Button>
                     </Space>
                   ) : <Text type="secondary">未生成</Text>}
@@ -2217,7 +2288,7 @@ const ProductDetail: React.FC = () => {
                     key={batch.sheet_path}
                     size="small"
                     title={`分析批次 ${batch.sheet_page || ''}`}
-                    extra={!isVirtualImageBatch(batch) ? <Button size="small" icon={<FolderOpenOutlined />} onClick={() => openPath(batch.sheet_path)}>打开</Button> : null}
+                    extra={!isVirtualImageBatch(batch) ? <Button size="small" icon={<FolderOpenOutlined />} loading={isFileOpening(batch.sheet_path)} disabled={isFileOpening(batch.sheet_path)} onClick={() => openPath(batch.sheet_path)}>打开</Button> : null}
                   >
                     {!isVirtualImageBatch(batch) && analysisBatchDisplayUrl(batch) ? (
                       <Image src={analysisBatchDisplayUrl(batch)} width={360} alt={`分析图 ${batch.sheet_page || ''}`} style={{ marginBottom: 12 }} />
@@ -2646,21 +2717,77 @@ const ProductDetail: React.FC = () => {
           {hasWorkflow && renderWorkflowActionButton(workflow?.primary_action, workflow?.primary_action_label, true)}
           {hasWorkflow && workflowSecondaryActions.map((action: string) => (
             <React.Fragment key={action}>
-              {renderWorkflowActionButton(action, WORKFLOW_ACTION_LABELS[action])}
+              {renderWorkflowActionButton(action)}
             </React.Fragment>
           ))}
           {!hasWorkflow && product.status === 'failed' && !isLegacyGigaBrowserCollectError && !isCompetitorSearchFailed && (
-            <Button icon={<RedoOutlined />} onClick={async () => { await retryStep(product.id); fetchDetail(); }}>
+            <Button
+              icon={<RedoOutlined />}
+              loading={pipelineRetryLoading}
+              onClick={async () => {
+                setPipelineRetryLoading(true);
+                await runMutationWithUX(
+                  'retryStep|frontend/src/pages/ProductDetail.tsx|ProductDetail',
+                  async (metadata) => {
+                    await retryStep(product.id, metadata);
+                    await fetchDetail();
+                  },
+                  {
+                    errorFallback: '重试失败',
+                    onError: (errorMessage) => message.error(errorMessage),
+                    clearLoading: () => setPipelineRetryLoading(false),
+                  },
+                ).catch(() => undefined);
+              }}
+            >
               重试
             </Button>
           )}
           {!hasWorkflow && product.status === 'paused' && (
-            <Button type="primary" icon={<PlayCircleOutlined />} onClick={async () => { await resumePipeline(product.id); fetchDetail(); }}>
+            <Button
+              type="primary"
+              icon={<PlayCircleOutlined />}
+              loading={pipelineRetryLoading}
+              onClick={async () => {
+                setPipelineRetryLoading(true);
+                await runMutationWithUX(
+                  'resumePipeline|frontend/src/pages/ProductDetail.tsx|ProductDetail|1',
+                  async (metadata) => {
+                    await resumePipeline(product.id, metadata);
+                    await fetchDetail();
+                  },
+                  {
+                    errorFallback: '继续失败',
+                    onError: (errorMessage) => message.error(errorMessage),
+                    clearLoading: () => setPipelineRetryLoading(false),
+                  },
+                ).catch(() => undefined);
+              }}
+            >
               继续
             </Button>
           )}
           {!hasWorkflow && product.status === 'pending_review' && (
-            <Button type="primary" icon={<PlayCircleOutlined />} onClick={async () => { await resumePipeline(product.id); fetchDetail(); }}>
+            <Button
+              type="primary"
+              icon={<PlayCircleOutlined />}
+              loading={pipelineRetryLoading}
+              onClick={async () => {
+                setPipelineRetryLoading(true);
+                await runMutationWithUX(
+                  'resumePipeline|frontend/src/pages/ProductDetail.tsx|ProductDetail|2',
+                  async (metadata) => {
+                    await resumePipeline(product.id, metadata);
+                    await fetchDetail();
+                  },
+                  {
+                    errorFallback: '继续失败',
+                    onError: (errorMessage) => message.error(errorMessage),
+                    clearLoading: () => setPipelineRetryLoading(false),
+                  },
+                ).catch(() => undefined);
+              }}
+            >
               继续
             </Button>
           )}
@@ -2680,7 +2807,25 @@ const ProductDetail: React.FC = () => {
             </Button>
           )}
           {!hasWorkflow && isPipelineRunning && (
-            <Button icon={<PauseOutlined />} onClick={async () => { await pausePipeline(product.id); fetchDetail(); }}>
+            <Button
+              icon={<PauseOutlined />}
+              loading={pipelineRetryLoading}
+              onClick={async () => {
+                setPipelineRetryLoading(true);
+                await runMutationWithUX(
+                  'pausePipeline|frontend/src/pages/ProductDetail.tsx|ProductDetail|1',
+                  async (metadata) => {
+                    await pausePipeline(product.id, metadata);
+                    await fetchDetail();
+                  },
+                  {
+                    errorFallback: '挂起失败',
+                    onError: (errorMessage) => message.error(errorMessage),
+                    clearLoading: () => setPipelineRetryLoading(false),
+                  },
+                ).catch(() => undefined);
+              }}
+            >
               挂起
             </Button>
           )}
@@ -2690,9 +2835,23 @@ const ProductDetail: React.FC = () => {
               description="挂起后不会继续执行后续自动流程，之后可以点继续恢复。"
               okText="挂起"
               cancelText="取消"
-              onConfirm={async () => { await pausePipeline(product.id); fetchDetail(); }}
+              onConfirm={async () => {
+                setPipelineRetryLoading(true);
+                await runMutationWithUX(
+                  'pausePipeline|frontend/src/pages/ProductDetail.tsx|ProductDetail|2',
+                  async (metadata) => {
+                    await pausePipeline(product.id, metadata);
+                    await fetchDetail();
+                  },
+                  {
+                    errorFallback: '挂起失败',
+                    onError: (errorMessage) => message.error(errorMessage),
+                    clearLoading: () => setPipelineRetryLoading(false),
+                  },
+                ).catch(() => undefined);
+              }}
             >
-              <Button icon={<PauseOutlined />}>挂起</Button>
+              <Button icon={<PauseOutlined />} loading={pipelineRetryLoading}>挂起</Button>
             </Popconfirm>
           )}
           {!hasWorkflow && canRestartProduct && (
@@ -2703,7 +2862,7 @@ const ProductDetail: React.FC = () => {
               cancelText="取消"
               onConfirm={() => doRestart()}
             >
-              <Button icon={<RedoOutlined />}>重新开始流程</Button>
+              <Button icon={<RedoOutlined />} loading={restartLoading}>重新开始流程</Button>
             </Popconfirm>
           )}
           <Popconfirm

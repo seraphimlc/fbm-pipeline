@@ -15,7 +15,21 @@ class TaskContext:
     step: TaskStep
 
 
-TaskWorker = Callable[[TaskContext], Awaitable[dict[str, Any] | None]]
+@dataclass(frozen=True)
+class TaskWorkerOutcome:
+    payload: dict[str, Any]
+    terminal_status: str
+    event_type: str
+    event_message: str
+    propagate_single_step_run: bool = False
+
+
+class TaskOutcomeContractError(RuntimeError):
+    """Raised when a worker outcome cannot be projected safely by the scheduler."""
+
+
+TaskWorkerResult = dict[str, Any] | TaskWorkerOutcome | None
+TaskWorker = Callable[[TaskContext], Awaitable[TaskWorkerResult]]
 
 _workers: dict[str, TaskWorker] = {}
 
