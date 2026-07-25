@@ -1,7 +1,7 @@
 # Project Index
 
 状态：当前项目导航索引
-更新：2026-06-19
+更新：2026-07-25
 
 本文只做“找路”，不替代代码事实。每次任务先用本文定位领域，再读取对应 `docs/domain-index/*.md`，最后用 `git status --short`、`rg` 和关键文件片段核实当前实现。
 
@@ -23,7 +23,7 @@
 | GIGA 拉品、商品池、库存/价格同步、数据源配置 | `docs/domain-index/data-sources.md` | `backend/app/api/giga.py`, `backend/app/services/giga_openapi.py`, `backend/app/task_planners/giga_pull.py` |
 | Amazon 导出、导出中心、导入模板、类目映射、Step 10 | `docs/domain-index/export-flow.md` | `frontend/src/pages/CatalogList.tsx`, `backend/app/task_planners/catalog_export.py`, `backend/app/pipeline/amazon_export/`, `backend/app/pipeline/step10_amazon_template.py` |
 | 页面路由、导航、前端接口消费、交互入口 | `docs/domain-index/frontend-pages.md` | `frontend/src/App.tsx`, `frontend/src/api/index.ts`, `frontend/src/components/MainLayout.tsx` |
-| 启动边界、本地访问保护、TLS、文件/图片代理 | `docs/domain-index/runtime-security.md` | `scripts/start.sh`, `backend/app/main.py`, `backend/app/config.py`, `backend/app/database.py` |
+| 启动边界、本地访问保护、TLS、文件/图片代理、integration hardening source binding 与可执行 Legacy inventory | `docs/domain-index/runtime-security.md` | `scripts/start.sh`, `backend/app/main.py`, `backend/app/config.py`, `backend/app/database.py`, `scripts/integration_hardening/` |
 | 协作规则、角色、消息、review/QA 文档、multi-agent-collaboration skill | `docs/domain-index/collaboration.md` | `docs/collaboration.md`, `docs/collaboration/inbox.md`, `/Users/liuchang/.codex/skills/multi-agent-collaboration/` |
 | 文档整理、文档重写、索引维护 | `docs/README.md`, `docs/collaboration/playbooks/context-indexing.md` | `docs/documentation-rewrite-brief.md`, `docs/project-index.md`, `docs/domain-index/` |
 | 模板类目映射 | `docs/domain-index/export-flow.md` | `backend/app/pipeline/template_mappings/`, `docs/template-mapping-spec.md`, `docs/template-mapping-change-log.md` |
@@ -40,6 +40,7 @@
 
 ## 常用验证入口
 
+- R0 已将 I1 command manifest skeleton 与 I3 non-runnable MySQL skeleton 从 active candidate 删除；既有 pure-contract 结果仅作历史证据，当前 integration-hardening gate 不再指向它们。
 - 后端健康检查：`GET /api/health`
 - 任务中心列表：`GET /api/task-runs`
 - 商品列表：`GET /api/products`
@@ -47,6 +48,10 @@
 - GIGA 商品池：`GET /api/giga/items`
 - 库存页面接口：`GET /api/giga/inventory`
 - 前端页面：`http://localhost:3190/products`, `http://localhost:3190/task-runs`, `http://localhost:3190/export-center`
+- Integration hardening database source manifest 纯数据合同：`python3 scripts/testing/test_integration_hardening_database_source_manifest.py`（只验证 canonical source/backup facts、detached digest 与 source-side empty proof；不执行 capture/dump/restore，不证明真实同快照或 restore 成功，也不代表 Phase 0 PASS）
+- Legacy inventory focused core：`/usr/bin/python3 -B scripts/testing/test_integration_hardening_legacy_inventory.py`（只读纯分类；锁定 candidate/capture/workflow 物理行 exactly-once ownership、模板 metadata/Catalog confirmed/A+ attribution preserve-first、manual review 与 records hash）
+- Legacy inventory 非空 MySQL fixture：`/usr/bin/python3 -B scripts/testing/test_integration_hardening_legacy_inventory_mysql.py`（只分配本轮 owned 的随机 `fbm_pipeline_ih_*` source/target schema，执行 6 表/6 projection dump/restore 对账、可信源码身份、TaskRun/TaskStep 完整状态 digest、Step 10 文件/目录与 symlink fail-closed 观测、collision/load/import 负向样本和 owned-only cleanup；不连接应用 DATABASE_URL）
+- Legacy inventory 可执行 summary（手工入口，非追加 gate）：`/usr/bin/python3 -B scripts/integration_hardening/legacy_migration.py --fixture-e2e`（内嵌 deterministic `records` + `records_sha256`、实际 HEAD/dirty status/source-file hashes 与 cleanup；历史命令名仅为兼容 primary command，本切片不执行 migration apply）
 
 ## 硬边界
 

@@ -2274,6 +2274,54 @@ assert not main._path_is_within_roots(outside, [root])
     assert_true(result.returncode == 0, f"P0 security helper 行为验证失败: {result.stderr or result.stdout}")
 
 
+def test_integration_hardening_database_source_manifest_contract_gate() -> None:
+    focused_test = (
+        ROOT
+        / "scripts"
+        / "testing"
+        / "test_integration_hardening_database_source_manifest.py"
+    )
+    assert_true(
+        focused_test.is_file(),
+        "必须保留 integration hardening database source manifest focused contract gate",
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", str(focused_test)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert_true(
+        result.returncode == 0,
+        "integration hardening database source manifest focused contract gate 失败: "
+        f"{result.stderr or result.stdout}",
+    )
+
+
+def test_integration_hardening_legacy_inventory_executable_gate() -> None:
+    focused_test = (
+        ROOT
+        / "scripts"
+        / "testing"
+        / "test_integration_hardening_legacy_inventory.py"
+    )
+    assert_true(
+        focused_test.is_file(),
+        "必须保留可执行 Legacy inventory focused behavior gate",
+    )
+    result = subprocess.run(
+        ["/usr/bin/python3", "-B", str(focused_test)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert_true(
+        result.returncode == 0,
+        "可执行 Legacy inventory focused behavior gate 失败: "
+        f"{result.stderr or result.stdout}",
+    )
+
+
 def test_failed_task_run_display_precedes_pending_steps() -> None:
     code = r'''
 from types import SimpleNamespace
@@ -3153,6 +3201,8 @@ def main() -> int:
         test_task_run_detail_keeps_stale_running_diagnostic_state,
         test_runtime_security_startup_p0_boundaries,
         test_runtime_security_helpers_behaviour,
+        test_integration_hardening_database_source_manifest_contract_gate,
+        test_integration_hardening_legacy_inventory_executable_gate,
         test_failed_task_run_display_precedes_pending_steps,
         test_task_run_creation_responses_reload_created_runs,
         test_product_action_backfill_updates_only_task_run_metadata,
