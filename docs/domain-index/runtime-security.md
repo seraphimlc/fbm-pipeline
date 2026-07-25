@@ -7,7 +7,6 @@
 - 外部 HTTP TLS 校验和本地文件/图片代理边界。
 - Integration hardening database source manifest、detached digest 与 backup provenance 的纯数据合同边界。
 - 可执行 Legacy inventory 的临时 schema、backup/restore、分类与清理边界。
-- R0 已退休的 I1 command manifest / I3 non-runnable MySQL skeleton 历史证据边界。
 
 ## 当前口径
 
@@ -16,7 +15,6 @@
 - 普通 API startup 不应自动执行 DDL/backfill/index rebuild/task kick；相关行为由 `STARTUP_RUN_DB_MAINTENANCE`、`STARTUP_RUN_BACKFILLS`、`STARTUP_RECOVER_TASKS`、`STARTUP_KICK_TASK_RUNTIME` 显式开启。
 - 外部 token-bearing 请求默认开启 TLS verify；私有代理应配置 `EXTERNAL_HTTP_CA_BUNDLE`，不要默认关闭校验。
 - 文件/图片代理默认只开放 `PRODUCT_BASE_DIR`，额外目录必须通过 `IMAGE_PROXY_EXTRA_ROOTS` 显式配置；不默认开放 `~/Documents` 或 `/tmp`。
-- I1 command manifest 与 I3 non-runnable MySQL skeleton 曾完成 pure-contract 验证，但已按 R0 从 active candidate 删除其实现、focused tests 和 project-rule registrations；这些结果只作历史评审证据，不再是当前入口或 gate。
 - Integration hardening database source manifest 是只接收 dict/bytes 的纯 stdlib 数据合同：校验 canonical manifest body、detached digest、backup hash binding 与 source-side legacy empty proof；它不连接 MySQL、不读取 env、不执行 capture/dump/restore，也不证明 backup 与 manifest 已真实来自同一快照、restore 成功或 Phase 0 PASS。通过 source-side empty proof 后仍需后续 restore 逐项一致性验证。
 - `IH-R1-LEGACY-INVENTORY` 已提供首个真正可执行的只读路径：纯 core 让 candidate group 只拥有 candidate/capture 行、legacy Product workflow 独立成记录，并以 `Counter` 对全部物理 source row 做 exactly-once fail-closed；`succeeded` 且无候选固定进入 manual review。精确 `batch/site/item_code` Product 匹配同时读取真实 ASIN、Amazon template path/generated/fill-summary/warnings、Catalog confirmed/export/A+ 与可稳定归属的成功 A+ item，存在不可逆 downstream facts 时只允许 `audit_only`，current competitor conflict 仍为 `review_required`。成功 A+ item 缺 Product/Catalog 或 Catalog/Product 不一致时固定进入 `review_required`，不能降为 interrupted/audit-only。
 - Legacy fixture manifest/restore 绑定 `products`、`product_data`、`catalog_products`、`aplus_upload_items`、candidate、capture 共 6 表及 6 个 decision projections。`legacy_migration.py` 输出 deterministic `records` + `records_sha256`、实际 HEAD、clean/dirty status paths、runtime source-file hashes；运行时实测范围仅为 `git/mysql/mysqldump` subprocess、本机 `127.0.0.1:3306`、fixture `task_runs/task_steps` delta、隔离 `DATA_DIR`/Step 10 output delta 和 cleanup。external network/browser 没有 Python runtime monitor，只能标为 `observed=false / static_review_only`，不得伪装成运行时零值。
@@ -52,10 +50,8 @@
 
 ## 相关文档
 
-- `docs/superpowers/specs/2026-06-17-p0-security-startup-triage-prd.md`
-- `docs/collaboration/reviews/2026-06-17-whole-project-code-audit-rerun.md`
-- `docs/collaboration/reviews/2026-06-17-whole-project-code-review.md`
 - `docs/superpowers/specs/2026-07-25-integration-hardening-plan-status-review.md`
+- `docs/superpowers/specs/2026-07-25-legacy-real-backup-inventory-technical-design.md`
 - `docs/configuration.md`
 - `docs/runbook.md`
 

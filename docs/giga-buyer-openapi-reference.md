@@ -37,7 +37,7 @@
 3. 用 HMAC-SHA256 计算字符串 1。
 4. 将 hex digest 做 base64，得到 `sign`。
 
-项目实现位置：[backend/app/services/giga_openapi.py](/Users/liuchang/Documents/gitproject/fbm-pipeline/backend/app/services/giga_openapi.py)
+项目实现位置：`backend/app/services/giga_openapi.py`
 
 ### 通用响应
 
@@ -171,9 +171,9 @@ Path: `/b2b-overseas-api/v1/buyer/product/price/v1`
 项目口径：
 
 - `effective_price = exclusivePrice -> discountedPrice -> price`
-- 价格事实表：[giga_prices](/Users/liuchang/Documents/gitproject/fbm-pipeline/backend/app/models/models.py:462)
-- 价格告警表：[giga_price_alerts](/Users/liuchang/Documents/gitproject/fbm-pipeline/backend/app/models/models.py:500)
-- 同步脚本：[scripts/giga_price_sync.py](/Users/liuchang/Documents/gitproject/fbm-pipeline/scripts/giga_price_sync.py)
+- 价格事实表：`giga_prices`（`backend/app/models/models.py`）
+- 价格告警表：`giga_price_alerts`（`backend/app/models/models.py`）
+- 同步脚本：`scripts/giga_price_sync.py`
 
 ## 库存接口
 
@@ -203,9 +203,9 @@ Path: `/b2b-overseas-api/v1/buyer/inventory/quantity/v2`
 项目口径：
 
 - `stock_qty` 优先取大于 0 的 `sellerAvailableInventory`，否则取大于 0 的 `totalBuyerAvailableInventory`，否则为 0 或可解析非正数。
-- 库存事实表：[giga_inventory](/Users/liuchang/Documents/gitproject/fbm-pipeline/backend/app/models/models.py:534)
-- 库存告警表：[giga_inventory_alerts](/Users/liuchang/Documents/gitproject/fbm-pipeline/backend/app/models/models.py:553)
-- 同步脚本：[scripts/giga_inventory_sync.py](/Users/liuchang/Documents/gitproject/fbm-pipeline/scripts/giga_inventory_sync.py)
+- 库存事实表：`giga_inventory`（`backend/app/models/models.py`）
+- 库存告警表：`giga_inventory_alerts`（`backend/app/models/models.py`）
+- 同步脚本：`scripts/giga_inventory_sync.py`
 
 ## 发货订单接口
 

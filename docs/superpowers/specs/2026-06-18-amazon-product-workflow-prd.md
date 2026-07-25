@@ -510,7 +510,7 @@ StyleSnap / 搜索竞品长期合理方案是 Chrome 客户端插件模式，当
 
 决策记录：
 
-- `docs/superpowers/specs/2026-06-17-stylesnap-client-extension-decision.md`
+- 浏览器/竞品搜索当前口径见 `docs/domain-index/product-flow.md`。
 
 本 PRD 不实现插件，也不继续强化后端 AppleScript 控 Chrome 为长期方向。
 

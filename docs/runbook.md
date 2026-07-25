@@ -1,6 +1,6 @@
 # FBM Pipeline 操作与故障手册
 
-状态：候选背景，待按 `docs/documentation-rewrite-brief.md` 重写；启动/安全边界以 `docs/domain-index/runtime-security.md` 和 P0 PRD 为准。
+状态：当前操作参考；启动和安全边界以 `docs/domain-index/runtime-security.md` 与当前代码为准。
 
 这份手册用于日常运营、排错和后续代码分析。先定位步骤，再看对应处理方式。
 
@@ -12,7 +12,7 @@ make check
 
 检查内容包括模板映射校验、项目规则回归检查和后端代码编译。
 
-主链路 QA gate 见 `docs/main-flow-qa-checklist.md`。观止验收时必须基于磁盘 diff、命令输出、数据库事实、接口响应、页面行为或导出样例给出 `PASS / NEEDS_FIX / BLOCKED`，不能只依赖执行者报告。
+QA 必须按当前任务的验收标准组织证据，并基于磁盘 diff、命令输出、数据库事实、接口响应、页面行为或导出样例给出 `PASS / NEEDS_FIX / BLOCKED`，不能只依赖执行者报告。
 
 ## Step 1 商品采集
 
@@ -111,7 +111,7 @@ make check
 - `/products` 商品工作台负责商品处理入口和下一步动作。
 - `/products/{id}` 商品详情负责选图、选择竞品、抓竞品详情、Listing/图片分析；首屏不应被竞品候选等非首屏请求阻塞。
 - `/export-center` 导出中心是任务工作台，负责人工创建导出任务、查看历史任务和下载产物。
-- `/offline-tasks` 任务中心是任务事实源，导出任务结果以 `result_json.rows` 和导出报告为准。
+- `/task-runs` 是当前任务事实中心；`/offline-tasks` 仅保留未迁移历史任务。导出任务结果以当前 task result 和导出报告为准。
 
 状态口径：
 

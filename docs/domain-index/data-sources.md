@@ -38,10 +38,7 @@
 ## 相关文档
 
 - `docs/giga-buyer-openapi-reference.md`
-- `docs/giga-inventory-sync.md`
 - `docs/configuration.md`
-- `docs/item-workbench-redesign-plan.md`
-- `docs/superpowers/specs/2026-06-13-task-runtime-giga-pull-design.md`
 
 ## 验证入口
 

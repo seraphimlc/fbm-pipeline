@@ -19,7 +19,7 @@ alwaysApply: true
 
 - 所有日常对话、新会话和 heartbeat 都适用上下文预算；不要为了显得“接上上下文”而默认携带或复述完整历史。
 - 每次请求的最小启动上下文是当前用户消息、`git status --short`、`AGENTS.md` 和 `docs/collaboration/inbox.md` 中与当前身份相关的消息；不要默认整篇读取所有协作文档。
-- `docs/collaboration.md` 只在首次进入项目、身份/协作规约不确定、规则变化或用户明确要求时补读；`docs/codex-cold-start.md` 只在完整冷启动、环境不熟、长时间缺席或复杂 handoff 时补读。
+- `docs/collaboration.md` 只在首次进入项目、身份/协作规约不确定、规则变化或用户明确要求时补读；环境或运行入口不熟时按 `docs/README.md` 路由到配置、runbook 或对应 domain index。
 - 读取长文件时先用 `rg` 定位目标消息、标题或文件路径，再只读取相关段落和引用链；不要把完整 inbox、完整日志、完整导出样例或大段商品数据塞进上下文。
 - 日常回复保持短小：只回答当前问题需要的结论、文件路径、命令和下一步；不要把旧 handoff、长聊天记录、完整测试输出或大段代码作为背景复述。
 - 跨会话消息保持短小：结论写在 inbox，长证据放文件路径、命令名、截图路径或 handoff 链接；没有当前身份待办时保持安静或返回 `DONT_NOTIFY`。

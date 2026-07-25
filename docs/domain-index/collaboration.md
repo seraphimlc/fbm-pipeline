@@ -5,7 +5,7 @@
 - 若命、听云、观止、镜花、清秋五个正式身份及其职责边界。
 - 单会话固定子 Agent 池、人工多会话、任务/结果交接和持久 inbox。
 - `multi-agent-collaboration` skill 的项目生成结果、校验入口和防回流合同。
-- review、QA 和 handoff 文档的证据定位；这些文档不是协作运行时方法源。
+- 当前协作运行时文件、身份路由与持久 inbox。
 
 ## 当前口径
 
@@ -13,7 +13,7 @@
 - 单会话模式由若命持有用户上下文，听云、观止、镜花、清秋使用各自独立运行时上下文；禁止同一上下文冒认其它正式身份。
 - 运行时优先直接派工和回执；只有需要跨上下文持久保存的 assignment、blocker、result 或 handoff 才写 `docs/collaboration/inbox.md`。
 - inbox 是当前行动板，不是聊天历史或归档库；没有活跃消息时保留空的 `Open Messages`。
-- `docs/collaboration/topic-tree.md`、`docs/collaboration/playbooks/`、霜弦角色和旧 inbox archives 已退休，不得再作为运行时来源恢复。
+- 正式身份严格等于 registry 的五角色 allowlist；任何额外身份、角色文件或协作子目录都不得成为运行时来源。
 - 专业方法由正式角色按任务加载对应 capability skill；不要把 PRD、技术方案、review 或 QA 方法重新集中复制到协作框架。
 
 ## 关键入口
@@ -23,7 +23,6 @@
 - 角色身份：`docs/collaboration/roles/`
 - 正式注册表：`docs/collaboration/agent-registry.json`
 - 生成清单：`docs/collaboration/manifest.json`
-- review/QA 证据：`docs/collaboration/reviews/`
 - skill：`/Users/liuchang/.codex/skills/multi-agent-collaboration/SKILL.md`
 - 初始化/校验：`/Users/liuchang/.codex/skills/multi-agent-collaboration/scripts/init_collaboration.py`
 
@@ -45,11 +44,11 @@
 
 - 身份或职责不一致：核对 registry、对应 role 文件和 skill 模板，不凭运行时昵称推断身份。
 - 要读当前下一步：只看 inbox 中发给当前 `agentKey` 的活跃消息。
-- 要查历史实现证据：在 `docs/collaboration/reviews/` 或明确 handoff 路径中限定搜索。
+- 要查历史实现证据：使用 Git 历史，不在当前协作目录保存 review archive。
 - 要修改可复用协作模型：先改本机 skill 源并验证，再刷新项目生成文件；不要只手改生成角色文件。
 
 ## 维护规则
 
 - 正式角色、权限、运行时握手、handoff、inbox 或生成文件结构变化时更新本文。
 - 普通业务流程、PRD 模板、技术方案方法、QA 方法和代码评审方法不写入本索引。
-- 不恢复退休 topic tree、playbooks、霜弦身份、旧 framework archive 或 inbox archive。
+- 协作目录只能包含 manifest、registry、五个 role 文件和 team inbox；不得增加未注册运行时来源或 archive。

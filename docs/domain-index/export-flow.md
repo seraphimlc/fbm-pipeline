@@ -38,9 +38,6 @@
 - `docs/template-mapping-spec.md`
 - `docs/template-mapping-change-log.md`
 - `docs/add-category-template-sop.md`
-- `docs/main-flow-user-path.md`
-- `docs/main-flow-qa-checklist.md`
-- `docs/superpowers/specs/2026-06-16-task-center-state-action-prd.md`
 
 ## 验证入口
 

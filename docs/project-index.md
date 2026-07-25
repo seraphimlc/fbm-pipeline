@@ -18,14 +18,14 @@
 |---|---|---|
 | 任务中心、新任务框架、任务状态、重试/取消/恢复、异步任务 | `docs/domain-index/task-runtime.md` | `frontend/src/pages/TaskRunCenter.tsx`, `backend/app/api/task_runs.py`, `backend/app/task_runtime/` |
 | 老离线任务、历史任务页面、尚未迁移任务 | `docs/domain-index/task-runtime.md` | `frontend/src/pages/OfflineTaskCenter.tsx`, `backend/app/api/offline_tasks.py`, `backend/app/services/offline_tasks.py` |
-| 商品列表、商品详情、图片选择、竞品选择、商品状态流转 | `docs/domain-index/product-flow.md` | `docs/superpowers/specs/2026-06-18-amazon-product-workflow-prd.md`, `docs/superpowers/specs/2026-06-19-amazon-auto-image-competitor-selection-prd.md`, `docs/superpowers/specs/2026-06-19-amazon-auto-image-selection-prd.md`, `docs/superpowers/specs/2026-06-19-amazon-auto-competitor-selection-prd.md`, `frontend/src/pages/ProductList.tsx`, `frontend/src/pages/ProductDetail.tsx`, `backend/app/api/products.py` |
+| 商品列表、商品详情、图片选择、竞品选择、商品状态流转 | `docs/domain-index/product-flow.md` | `docs/superpowers/specs/2026-06-18-amazon-product-workflow-prd.md`, `docs/superpowers/specs/2026-06-19-amazon-auto-image-selection-prd.md`, `docs/superpowers/specs/2026-06-19-amazon-auto-competitor-selection-prd.md`, `frontend/src/pages/ProductList.tsx`, `frontend/src/pages/ProductDetail.tsx`, `backend/app/api/products.py` |
 | TikTok 商品详情/铺货链路 | `docs/domain-index/product-flow.md`, `docs/domain-index/data-sources.md` | `frontend/src/pages/TikTokProductDetail.tsx`, `backend/app/api/tiktok.py` |
 | GIGA 拉品、商品池、库存/价格同步、数据源配置 | `docs/domain-index/data-sources.md` | `backend/app/api/giga.py`, `backend/app/services/giga_openapi.py`, `backend/app/task_planners/giga_pull.py` |
 | Amazon 导出、导出中心、导入模板、类目映射、Step 10 | `docs/domain-index/export-flow.md` | `frontend/src/pages/CatalogList.tsx`, `backend/app/task_planners/catalog_export.py`, `backend/app/pipeline/amazon_export/`, `backend/app/pipeline/step10_amazon_template.py` |
 | 页面路由、导航、前端接口消费、交互入口 | `docs/domain-index/frontend-pages.md` | `frontend/src/App.tsx`, `frontend/src/api/index.ts`, `frontend/src/components/MainLayout.tsx` |
 | 启动边界、本地访问保护、TLS、文件/图片代理、integration hardening source binding 与可执行 Legacy inventory | `docs/domain-index/runtime-security.md` | `scripts/start.sh`, `backend/app/main.py`, `backend/app/config.py`, `backend/app/database.py`, `scripts/integration_hardening/` |
-| 协作规则、角色、消息、review/QA 文档、multi-agent-collaboration skill | `docs/domain-index/collaboration.md` | `docs/collaboration.md`, `docs/collaboration/inbox.md`, `/Users/liuchang/.codex/skills/multi-agent-collaboration/` |
-| 文档整理、文档重写、索引维护 | `docs/README.md`, `docs/domain-index/collaboration.md` | `docs/documentation-rewrite-brief.md`, `docs/project-index.md`, `docs/domain-index/` |
+| 协作规则、角色、消息、multi-agent-collaboration skill | `docs/domain-index/collaboration.md` | `docs/collaboration.md`, `docs/collaboration/inbox.md`, `/Users/liuchang/.codex/skills/multi-agent-collaboration/` |
+| 文档整理、索引维护 | `docs/README.md`, `docs/domain-index/collaboration.md` | `docs/project-index.md`, `docs/domain-index/` |
 | 模板类目映射 | `docs/domain-index/export-flow.md` | `backend/app/pipeline/template_mappings/`, `docs/template-mapping-spec.md`, `docs/template-mapping-change-log.md` |
 
 ## 关键运行入口
@@ -40,7 +40,6 @@
 
 ## 常用验证入口
 
-- R0 已将 I1 command manifest skeleton 与 I3 non-runnable MySQL skeleton 从 active candidate 删除；既有 pure-contract 结果仅作历史证据，当前 integration-hardening gate 不再指向它们。
 - 后端健康检查：`GET /api/health`
 - 任务中心列表：`GET /api/task-runs`
 - 商品列表：`GET /api/products`

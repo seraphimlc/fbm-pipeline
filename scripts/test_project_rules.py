@@ -216,8 +216,7 @@ def test_amazon_workflow_t2_service_projection_and_write_rules() -> None:
         "Amazon workflow T2 node/action 映射不得新增导出、catalog export、Amazon upload 主流程节点或导出动作",
     )
     assert_true(
-        "Product Workflow Service" in product_flow_index
-        and "backend/app/product_tasks/workflow.py" in product_flow_index,
+        "backend/app/product_tasks/workflow.py" in product_flow_index,
         "新增 Amazon workflow 核心 service 后必须同步 product-flow domain index",
     )
 
@@ -364,8 +363,8 @@ def test_amazon_workflow_t3_image_selection_reset_and_initialization_rules() -> 
         "手动创建、Excel 导入和 GIGA draft 新建路径必须初始化 select_images/pending",
     )
     assert_true(
-        "Amazon workflow T3" in product_flow_index
-        and "search_competitor/pending" in product_flow_index,
+        "search_competitor/pending" in product_flow_index
+        and "不得自动启动竞品搜索" in product_flow_index,
         "T3 改变图片确认 workflow 行为后必须同步 product-flow domain index",
     )
 
@@ -579,8 +578,7 @@ def test_amazon_workflow_t4_competitor_search_rules() -> None:
         "选竞品页面只能做 workflow 字段读取和轻量显示判断，不能继续靠 error_message 正则判断主状态",
     )
     assert_true(
-        "Amazon workflow T4" in product_flow_index
-        and "get_stylesnap_token/pending" in product_flow_index
+        "get_stylesnap_token/pending" in product_flow_index
         and "select_competitor/pending" in product_flow_index,
         "T4 改变搜索竞品 workflow 后必须同步 product-flow domain index",
     )
@@ -714,8 +712,7 @@ def test_amazon_workflow_t5_competitor_capture_rules() -> None:
         "T5 destructive reset 只能清当前派生态，不得删除文件实体或清 Amazon 模板输出证据",
     )
     assert_true(
-        "Amazon workflow T5" in product_flow_index
-        and "capture_competitor_detail/processing" in product_flow_index
+        "capture_competitor_detail/processing" in product_flow_index
         and "image_analysis/processing" in product_flow_index
         and "不写 task run" in product_flow_index,
         "T5 改变选择竞品/抓详情 workflow 后必须同步 product-flow domain index",
@@ -1172,7 +1169,6 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
     task_runs_api_text = (ROOT / "backend" / "app" / "api" / "task_runs.py").read_text(encoding="utf-8")
     task_center_text = (ROOT / "frontend" / "src" / "pages" / "OfflineTaskCenter.tsx").read_text(encoding="utf-8")
     task_run_center_text = (ROOT / "frontend" / "src" / "pages" / "TaskRunCenter.tsx").read_text(encoding="utf-8")
-    task_center_spec_text = (ROOT / "docs" / "superpowers" / "specs" / "2026-06-03-offline-task-center.md").read_text(encoding="utf-8")
     main_text = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
     product_bulk_planner_text = (ROOT / "backend" / "app" / "task_planners" / "product_bulk_advance.py").read_text(encoding="utf-8")
 
@@ -1335,9 +1331,8 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
     )
     assert_true(
         "download_images=False" in offline_text
-        and "GIGA 主数据拉取只保存商品、SKU、库存、价格和图片 URL 候选" in task_center_spec_text
-        and "自动继续执行该 batch 的图片下载步骤" not in task_center_spec_text
-        and "giga_image_download` 仅用于历史任务兼容" in task_center_spec_text,
+        and "Legacy helper for old GIGA image download tasks" in offline_text
+        and "new pull tasks keep image URLs and download selected images on demand" in offline_text,
         "拉品后不能再表达为全量下载 GIGA 图片；旧图片下载任务只能作为历史兼容",
     )
     assert_true(
@@ -1784,7 +1779,6 @@ def test_giga_pull_tasks_expose_live_sku_progress_without_group_closure_during_p
 def test_task_runtime_v1_uses_new_tables_and_keeps_old_offline_tasks_compatibility() -> None:
     models_text = (ROOT / "backend" / "app" / "models" / "models.py").read_text(encoding="utf-8")
     database_text = (ROOT / "backend" / "app" / "database.py").read_text(encoding="utf-8")
-    spec_text = (ROOT / "docs" / "superpowers" / "specs" / "2026-06-13-task-runtime-giga-pull-design.md").read_text(encoding="utf-8")
     task_runs_api = (ROOT / "backend" / "app" / "api" / "task_runs.py").read_text(encoding="utf-8")
     offline_tasks_api = (ROOT / "backend" / "app" / "api" / "offline_tasks.py").read_text(encoding="utf-8")
     runtime_scheduler = (ROOT / "backend" / "app" / "task_runtime" / "scheduler.py").read_text(encoding="utf-8")
@@ -1856,18 +1850,6 @@ def test_task_runtime_v1_uses_new_tables_and_keeps_old_offline_tasks_compatibili
         and "ix_task_steps_ready_claim" in database_text
         and "ix_task_step_events_run_created" in database_text,
         "新任务调度框架 V1 必须通过 MySQL ensure index 支持列表、组顺序、ready claim 和 events 查询",
-    )
-    assert_true(
-        "backend/app/services/offline_tasks.py" in spec_text
-        and "其它离线任务" in spec_text
-        and "暂时继续走旧 `offline_tasks` 框架" in spec_text,
-        "旧 offline_tasks 框架必须保留给未迁移任务，GIGA 拉品新框架不能破坏库存/价格/A+/导出/批量推进",
-    )
-    assert_true(
-        "plan\n  -> details chunks\n  -> inventory chunks\n  -> price chunks\n  -> finalize\n  -> aggregate\n  -> materialize" in spec_text
-        and "不做 item/group 闭包聚合" in spec_text
-        and "这里才处理关联 SKU / 变体聚合" in spec_text,
-        "GIGA 拉品 V1 必须保持先 SKU snapshot 后统一聚合，不能在拉取 chunk 阶段做 item/group closure",
     )
     assert_true(
         'APIRouter(prefix="/api/task-runs"' in task_runs_api
@@ -3206,7 +3188,10 @@ def test_multi_agent_collaboration_core_contract() -> None:
         collaboration_root / "inbox.md",
     }
     for required in required_files:
-        assert_true(required.is_file(), f"multi-agent-collaboration 缺少必需文件: {required}")
+        assert_true(
+            required.is_file() and not required.is_symlink(),
+            f"multi-agent-collaboration 必需文件必须是项目内 regular file: {required}",
+        )
 
     manifest = json.loads((collaboration_root / "manifest.json").read_text(encoding="utf-8"))
     assert_true(
@@ -3281,9 +3266,13 @@ def test_multi_agent_collaboration_core_contract() -> None:
     )
 
     role_dir = collaboration_root / "roles"
-    actual_role_files = {path.stem for path in role_dir.glob("*.md")}
+    assert_true(role_dir.is_dir() and not role_dir.is_symlink(), "项目 role 目录必须是 regular directory")
     expected_role_keys = {agent_key for agent_key, _, _ in expected_roles}
-    assert_true(actual_role_files == expected_role_keys, "项目 role 目录不得保留未注册正式身份")
+    expected_role_entries = {f"{agent_key}.md" for agent_key in expected_role_keys}
+    actual_role_entries = {path.name for path in role_dir.iterdir()}
+    assert_true(actual_role_entries == expected_role_entries, "项目 role 目录必须严格等于 registry 五角色文件集合")
+    for role_entry in role_dir.iterdir():
+        assert_true(role_entry.is_file() and not role_entry.is_symlink(), f"角色合同必须是 regular file: {role_entry}")
     for role in roles:
         agent_key = role["agentKey"]
         project_role = role_dir / f"{agent_key}.md"
@@ -3306,35 +3295,31 @@ def test_multi_agent_collaboration_core_contract() -> None:
             f"| `{agent_key}` | {display} |" in collaboration_text,
             f"协作 router 缺少正式角色: {agent_key}",
         )
+    router_role_rows = []
+    for line in collaboration_text.splitlines():
+        if not line.startswith("| `"):
+            continue
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) >= 2:
+            router_role_rows.append((cells[0].strip("`"), cells[1]))
+    assert_true(
+        router_role_rows == [(agent_key, display) for agent_key, display, _ in expected_roles],
+        "协作 router Roles 表必须与 registry 五角色集合和顺序完全一致",
+    )
     agents_text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
     assert_true(
-        "（若命、听云、观止、镜花、清秋）" in agents_text and "霜弦" not in agents_text,
+        "（若命、听云、观止、镜花、清秋）" in agents_text,
         "AGENTS.md 必须只列五个当前正式身份",
     )
 
     inbox_text = (collaboration_root / "inbox.md").read_text(encoding="utf-8")
     assert_true("## Open Messages" in inbox_text, "team profile inbox 必须保留 Open Messages")
     assert_true("CLOSED / EXAMPLE" not in inbox_text, "协作 inbox 不得保留初始化示例消息")
-    retired_paths = [
-        collaboration_root / "topic-tree.md",
-        collaboration_root / "playbooks",
-        collaboration_root / "playbooks" / "code-review.md",
-        collaboration_root / "playbooks" / "context-indexing.md",
-        collaboration_root / "playbooks" / "full-audit.md",
-        collaboration_root / "playbooks" / "qa.md",
-        role_dir / "shuangxian.md",
-        collaboration_root / "archive",
-        collaboration_root / "archive" / "legacy-framework-2026-07-22",
-    ]
-    for retired in retired_paths:
-        assert_true(
-            not retired.exists() and not retired.is_symlink(),
-            f"已退休协作路径不得回流（含 broken symlink）: {retired}",
-        )
-    archived_inboxes = list((collaboration_root / "archive").glob("inbox-*.md"))
+    expected_collaboration_entries = {"agent-registry.json", "inbox.md", "manifest.json", "roles"}
+    actual_collaboration_entries = {path.name for path in collaboration_root.iterdir()}
     assert_true(
-        not archived_inboxes,
-        "旧 inbox state 不得继续保留在项目中",
+        actual_collaboration_entries == expected_collaboration_entries,
+        "协作目录必须严格等于 manifest、registry、roles 和 team inbox，不得增加额外运行时来源或 archive",
     )
 
 

@@ -35,11 +35,11 @@ make frontend-build
 ## 项目规则与维护文档
 
 - `AGENTS.md`：项目级协作规则。
-- `docs/README.md`：docs 总入口、当前事实源和待重写文档清单。
+- `docs/README.md`：docs 总入口和当前维护文档清单。
 - `docs/project-index.md`：项目导航索引；定位代码、页面、API、表和验证入口时先读这里。
 - `docs/collaboration.md`：多 Codex 会话身份协作规约，可用于指定若命、听云、观止、镜花、清秋五个正式身份。
 - `docs/collaboration/inbox.md`：多会话之间的轻量任务、回执、阻塞和验收留言板。
-- 上下文预算：日常对话、新会话和 heartbeat 每轮优先使用当前用户消息、`AGENTS.md`、`git status --short` 和 inbox 相关消息；协作角色文档、冷启动文档、长 handoff 按需补读。
+- 上下文预算：日常对话、新会话和 heartbeat 每轮优先使用当前用户消息、`AGENTS.md`、`git status --short` 和 inbox 相关消息；协作角色文档和领域文档按需补读。
 - `.cursor/rules/projectRule.mdc`：Cursor Project Rule，默认全项目生效。
 - `docs/configuration.md`：正式配置归属、读取顺序和本地初始化规则。
 - `docs/template-mapping-spec.md`：Amazon 模板映射规范。
@@ -72,8 +72,8 @@ GIGA OpenAPI 拉品/图片
 → 图片分析
 → Listing 文案
 → CatalogProduct 待导出
-→ 用户在导出中心创建离线导出任务
-→ OfflineTask 生成 Amazon 导入表格 zip 和报告
+→ 用户在导出中心创建 Amazon 导出任务
+→ TaskRun / catalog export worker 生成 Amazon 导入表格 zip 和报告
 ```
 
 主页面：
@@ -81,7 +81,8 @@ GIGA OpenAPI 拉品/图片
 - `/products`：商品工作台，展示 Product 草稿和当前下一步动作。
 - `/products/{id}`：商品详情，处理选图、竞品、类目、图片分析和 Listing。
 - `/export-center`：导出中心，人工创建导出任务、查看历史任务和下载产物。
-- `/offline-tasks`：任务中心，查看 GIGA 拉品、库存/价格同步、A+生成、Amazon 导出等离线任务事实。
+- `/task-runs`：当前任务中心，查看已迁移任务的执行事实。
+- `/offline-tasks`：仅查看尚未迁移的历史离线任务。
 - `/inventory-sync`：GIGA 库存事实页；库存 0 不阻断商品进入待导出，导出首次导入表时写入 Quantity `0`。
 
 关键边界：
@@ -102,11 +103,12 @@ fbm-pipeline/
 │   │   ├── config.py        # 配置管理
 │   │   ├── database.py      # 数据库连接
 │   │   ├── models/          # SQLAlchemy 模型
-│   │   │   ├── models.py    # Product、CatalogProduct、OfflineTask、GIGA、ASIN、A+、UPC 等业务表
+│   │   │   ├── models.py    # Product、CatalogProduct、TaskRun、OfflineTask、GIGA、ASIN、A+、UPC 等业务表
 │   │   │   └── status.py    # Pipeline 步骤定义
 │   │   └── api/
 │   │       ├── products.py       # 商品、目录、导出、ASIN、库存、A+ 等接口
-│   │       ├── offline_tasks.py  # 离线任务创建、状态、下载、重跑、暂停/恢复
+│   │       ├── task_runs.py      # 当前任务创建、状态、事件和操作
+│   │       ├── offline_tasks.py  # 未迁移历史任务兼容
 │   │       ├── data_sources.py   # 商品数据源配置
 │   │       ├── giga.py           # GIGA 拉品、库存、价格、告警查询
 │   │       ├── amazon_stylesnap.py # Amazon 候选竞品搜索、选择、抓取
@@ -129,7 +131,8 @@ fbm-pipeline/
 │   │       ├── ProductList.tsx        # 商品工作台
 │   │       ├── ProductDetail.tsx      # 商品详情 + 主流程操作
 │   │       ├── CatalogList.tsx        # 导出中心
-│   │       ├── OfflineTaskCenter.tsx  # 离线任务中心
+│   │       ├── TaskRunCenter.tsx      # 当前任务中心
+│   │       ├── OfflineTaskCenter.tsx  # 未迁移历史任务中心
 │   │       ├── InventorySyncList.tsx  # 库存同步与库存事实
 │   │       ├── AplusManagement.tsx    # A+ 管理
 │   │       └── ProductDataSourceList.tsx # 商品数据源

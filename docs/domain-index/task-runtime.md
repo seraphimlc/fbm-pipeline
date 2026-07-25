@@ -11,12 +11,12 @@
 - 新任务中心使用 `task_runs/task_groups/task_steps/task_step_events`。
 - 旧 `offline_tasks` 和新 `task_runs` 不应混成同一个展示或状态语义。
 - 任务状态和可操作性以后端字段为准，前端不自行推导。
-- 2026-06-17 产品口径：任务中心是异步执行事实中心，商品流程是业务状态和操作中心；任务中心不能替代商品流程页面，也不能用任务状态反推商品状态。
-- 当前 `MSG-20260617-010/012` 收敛方向：本轮走收缩路线，列表/API/total 不支持 `stale_running/waiting_dependency/planned` 筛选；这些状态仅保留为详情诊断展示。
+- 任务中心是异步执行事实中心，商品流程是业务状态和操作中心；不能用任务状态反推商品状态。
+- 列表/API/total 不支持 `stale_running/waiting_dependency/planned` 筛选；这些状态仅保留为详情诊断展示。
 - 长耗时任务必须可追踪、可恢复、可重试，不塞进临时后台任务。
 - 商品域 ProductTaskAction 当前包含 `product_auto_image_selection`、`product_image_analysis`、`product_listing_generation`；自动选图阶段 A 通过 `backend/app/task_planners/product_auto_image_selection.py` 创建/复用 task run，不用裸后台任务承载主流程。
 - 高频列表接口不允许内存分页、假 total、重复 count 或复杂查询临时拼状态。
-- 本轮不启用 run-level projection route；列表接口不得用 projection 存储、step JOIN、`EXISTS`、子查询或内存分页补回 `stale_running/waiting_dependency/planned` 筛选。
+- 当前不启用 run-level projection route；列表接口不得用 projection 存储、step JOIN、`EXISTS`、子查询或内存分页补回不支持的筛选。
 
 ## 关键入口
 
@@ -41,12 +41,8 @@
 
 ## 相关文档
 
-- `docs/superpowers/specs/2026-06-13-task-runtime-giga-pull-design.md`
-- `docs/superpowers/specs/2026-06-16-task-center-state-action-prd.md`
-- `docs/superpowers/specs/2026-06-16-product-task-action-refactor-prd.md`
-- `docs/superpowers/specs/2026-06-03-offline-task-center.md`
 - `docs/collaboration.md`
-- `docs/main-flow-qa-checklist.md`
+- `docs/superpowers/specs/2026-06-19-amazon-auto-image-selection-prd.md`
 
 ## 验证入口
 
