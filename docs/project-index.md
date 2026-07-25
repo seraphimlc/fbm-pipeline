@@ -25,7 +25,7 @@
 | 页面路由、导航、前端接口消费、交互入口 | `docs/domain-index/frontend-pages.md` | `frontend/src/App.tsx`, `frontend/src/api/index.ts`, `frontend/src/components/MainLayout.tsx` |
 | 启动边界、本地访问保护、TLS、文件/图片代理、integration hardening source binding 与可执行 Legacy inventory | `docs/domain-index/runtime-security.md` | `scripts/start.sh`, `backend/app/main.py`, `backend/app/config.py`, `backend/app/database.py`, `scripts/integration_hardening/` |
 | 协作规则、角色、消息、review/QA 文档、multi-agent-collaboration skill | `docs/domain-index/collaboration.md` | `docs/collaboration.md`, `docs/collaboration/inbox.md`, `/Users/liuchang/.codex/skills/multi-agent-collaboration/` |
-| 文档整理、文档重写、索引维护 | `docs/README.md`, `docs/collaboration/playbooks/context-indexing.md` | `docs/documentation-rewrite-brief.md`, `docs/project-index.md`, `docs/domain-index/` |
+| 文档整理、文档重写、索引维护 | `docs/README.md`, `docs/domain-index/collaboration.md` | `docs/documentation-rewrite-brief.md`, `docs/project-index.md`, `docs/domain-index/` |
 | 模板类目映射 | `docs/domain-index/export-flow.md` | `backend/app/pipeline/template_mappings/`, `docs/template-mapping-spec.md`, `docs/template-mapping-change-log.md` |
 
 ## 关键运行入口

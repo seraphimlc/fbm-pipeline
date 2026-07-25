@@ -37,7 +37,7 @@ make frontend-build
 - `AGENTS.md`：项目级协作规则。
 - `docs/README.md`：docs 总入口、当前事实源和待重写文档清单。
 - `docs/project-index.md`：项目导航索引；定位代码、页面、API、表和验证入口时先读这里。
-- `docs/collaboration.md`：多 Codex 会话身份协作规约，可用于指定若命、听云、清秋、观止、霜弦等身份。
+- `docs/collaboration.md`：多 Codex 会话身份协作规约，可用于指定若命、听云、观止、镜花、清秋五个正式身份。
 - `docs/collaboration/inbox.md`：多会话之间的轻量任务、回执、阻塞和验收留言板。
 - 上下文预算：日常对话、新会话和 heartbeat 每轮优先使用当前用户消息、`AGENTS.md`、`git status --short` 和 inbox 相关消息；协作角色文档、冷启动文档、长 handoff 按需补读。
 - `.cursor/rules/projectRule.mdc`：Cursor Project Rule，默认全项目生效。

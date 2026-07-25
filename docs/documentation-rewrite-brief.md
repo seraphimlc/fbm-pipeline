@@ -22,7 +22,7 @@
 - `docs/project-index.md`
 - `docs/domain-index/*.md`
 - `docs/collaboration.md`
-- `docs/collaboration/playbooks/context-indexing.md`
+- `docs/domain-index/collaboration.md`
 - `docs/superpowers/specs/2026-06-17-p0-security-startup-triage-prd.md`
 - `docs/collaboration/reviews/2026-06-17-whole-project-code-audit-rerun.md`
 - 当前代码、命令输出、API/DB 只读事实和页面行为

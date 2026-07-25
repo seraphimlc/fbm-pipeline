@@ -3,7 +3,7 @@
 ## 工作方式
 
 - 先查看现有流程、映射 JSON、文档和配置，再修改代码。
-- 多 Codex 会话协作时，先确认身份和当前待办；如果用户指定身份（如若命、听云、清秋、观止、霜弦），按 `docs/collaboration.md` 的 `agentKey`、职责边界、交接格式和验证要求工作。
+- 多 Codex 会话协作时，先确认身份和当前待办；如果用户指定身份（若命、听云、观止、镜花、清秋），按 `docs/collaboration.md` 的 `agentKey`、职责边界、交接格式和验证要求工作。
 - 跨会话正式消息写入 `docs/collaboration/inbox.md`；复杂交接写入 `docs/codex-handoff-YYYY-MM-DD-*.md` 并在 inbox 留链接。
 - 未被明确指定身份时，不冒认其它 agent；按普通 Codex 执行当前任务。
 - 不要把用户已有商品数据、人工类目、真实 ASIN、已生成素材或模板输出整体覆盖掉；除非需求明确要求重建。

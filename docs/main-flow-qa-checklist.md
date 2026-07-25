@@ -1,6 +1,6 @@
 # Main Flow QA Checklist
 
-状态：历史 QA checklist / 候选背景；正式 QA 方法以 `docs/collaboration/playbooks/qa.md`，当前范围以最新 PRD/inbox 为准。
+状态：历史 QA checklist / 候选背景；执行时由观止按当前验收任务组织证据，范围以最新 PRD/任务为准。
 
 更新：2026-06-05
 

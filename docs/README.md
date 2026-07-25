@@ -11,7 +11,7 @@
 2. 需要定位代码、页面、API、表或验证入口时，读 `docs/project-index.md`。
 3. 根据问题类型只读一个或少数几个 `docs/domain-index/*.md`。
 4. 用 scoped `rg` 和关键文件片段核实当前实现。
-5. 复杂协作、review、QA 或全量审计再读 `docs/collaboration.md` 和对应 playbook。
+5. 复杂协作、review、QA 或全量审计再读 `docs/collaboration.md`，由绑定角色按任务加载对应能力方法。
 
 ## 当前事实源
 
@@ -19,7 +19,6 @@
 - 领域地图：`docs/domain-index/*.md`
 - 协作规则：`docs/collaboration.md`
 - 角色身份：`docs/collaboration/roles/*.md`
-- 执行手册：`docs/collaboration/playbooks/*.md`
 - 当前行动板：`docs/collaboration/inbox.md`
 - 当前 P0 修复 PRD：`docs/superpowers/specs/2026-06-17-p0-security-startup-triage-prd.md`
 - 代码审计证据：`docs/collaboration/reviews/2026-06-17-whole-project-code-audit-rerun.md`

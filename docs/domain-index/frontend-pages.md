@@ -41,8 +41,8 @@
 - `docs/domain-index/task-runtime.md`
 - `docs/domain-index/export-flow.md`
 - `docs/domain-index/data-sources.md`
-- `docs/collaboration/playbooks/qa.md`
-- `docs/collaboration/playbooks/code-review.md`
+- `docs/collaboration.md`
+- `docs/main-flow-qa-checklist.md`
 
 ## 验证入口
 

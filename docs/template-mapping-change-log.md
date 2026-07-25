@@ -99,7 +99,6 @@
   - `backend/app/services/offline_tasks.py`
   - `backend/app/pipeline/step1_collect.py`
   - `README.md`
-  - `docs/collaboration/topic-tree.md`
   - 旧 handoff：`docs/codex-handoff-2026-06-05-export-rule-layer-and-workflow.md`（已在 docs cleanup 中删除，仅作历史记录）
   - `docs/collaboration/inbox.md`
   - `docs/template-mapping-change-log.md`

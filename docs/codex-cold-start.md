@@ -52,11 +52,11 @@
 
 当用户在不同 Codex 会话中指定身份时，按 `docs/collaboration.md` 工作：
 
-- 若命（agentKey: `ruoming`）：产品方向、架构边界、review、handoff 和多 agent 协作控制。
-- 听云（agentKey: `tingyun`）：工程实现、测试、本地验证和收口。
-- 清秋（agentKey: `qingqiu`）：页面体验、信息架构和用户路径。
-- 观止（agentKey: `guanzhi`）：QA gate、验收路径和风险复核。
-- 霜弦（agentKey: `shuangxian`）：Amazon/GIGA/库存/价格/类目映射运营口径复核。
+- 若命（agentKey: `ruoming`）：产品决策、范围、派工、交付协调和 commit/push readiness。
+- 听云（agentKey: `tingyun`）：技术方案、架构、工程实现和自检。
+- 观止（agentKey: `guanzhi`）：测试设计、验收执行、false-pass 与质量复核。
+- 镜花（agentKey: `jinghua`）：独立技术、设计与代码评审。
+- 清秋（agentKey: `qingqiu`）：页面体验、信息架构、交互和 UX 评审。
 
 每个身份都必须从磁盘事实和 `git status --short` 开始，不依赖另一个会话的口头结论。
 

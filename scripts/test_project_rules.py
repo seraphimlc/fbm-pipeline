@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -3162,6 +3163,181 @@ asyncio.run(main())
     assert_true(result.returncode == 0, f"自动选图服务/action 行为验证失败: {result.stderr or result.stdout}")
 
 
+def test_multi_agent_collaboration_core_contract() -> None:
+    collaboration_root = ROOT / "docs" / "collaboration"
+
+    def parse_flat_front_matter(path: Path) -> dict[str, object]:
+        text = path.read_text(encoding="utf-8")
+        assert_true(text.startswith("---\n"), f"角色文件缺少 front matter: {path}")
+        marker = "\n---\n"
+        assert_true(marker in text[4:], f"角色文件 front matter 未闭合: {path}")
+        raw_front_matter = text[4:].split(marker, 1)[0]
+        parsed: dict[str, object] = {}
+        active_list: str | None = None
+        for raw_line in raw_front_matter.splitlines():
+            if raw_line.startswith("  - "):
+                assert_true(active_list is not None, f"角色 front matter 出现游离列表项: {path}")
+                value = raw_line[4:].strip()
+                assert_true(bool(value), f"角色 front matter 列表项不能为空: {path}")
+                current = parsed[active_list]
+                assert_true(isinstance(current, list), f"角色 front matter 列表类型错误: {path}")
+                current.append(value)
+                continue
+            assert_true(not raw_line.startswith((" ", "\t")), f"角色 front matter 只允许扁平字段: {path}")
+            key, separator, raw_value = raw_line.partition(":")
+            assert_true(separator == ":" and key and key not in parsed, f"角色 front matter 字段无效或重复: {path}")
+            value = raw_value.strip()
+            active_list = None
+            if not value:
+                parsed[key] = []
+                active_list = key
+            elif value == "true":
+                parsed[key] = True
+            elif value == "false":
+                parsed[key] = False
+            else:
+                parsed[key] = value
+        return parsed
+
+    required_files = {
+        ROOT / "docs" / "collaboration.md",
+        collaboration_root / "manifest.json",
+        collaboration_root / "agent-registry.json",
+        collaboration_root / "inbox.md",
+    }
+    for required in required_files:
+        assert_true(required.is_file(), f"multi-agent-collaboration 缺少必需文件: {required}")
+
+    manifest = json.loads((collaboration_root / "manifest.json").read_text(encoding="utf-8"))
+    assert_true(
+        set(manifest) == {
+            "schema",
+            "skill",
+            "profile",
+            "generated_date",
+            "runtime_entry",
+            "core_files",
+            "team_profile_additions",
+            "loading_policy",
+            "legacy_framework_files_are_not_runtime_sources",
+        },
+        "协作 manifest 字段集合必须保持封闭",
+    )
+    assert_true(manifest.get("schema") == 2, "协作 manifest 必须使用 schema 2")
+    assert_true(manifest.get("skill") == "multi-agent-collaboration", "协作 manifest skill 标识错误")
+    assert_true(manifest.get("profile") == "team", "FBM Pipeline 必须使用 team profile")
+    generated_date = manifest.get("generated_date")
+    assert_true(
+        isinstance(generated_date, str)
+        and len(generated_date) == 10
+        and generated_date[4] == "-"
+        and generated_date[7] == "-"
+        and generated_date.replace("-", "").isdigit(),
+        "协作 manifest generated_date 必须是 YYYY-MM-DD",
+    )
+    assert_true(manifest.get("runtime_entry") == "docs/collaboration.md", "协作运行时入口必须唯一")
+    assert_true(
+        manifest.get("core_files")
+        == [
+            "docs/collaboration.md",
+            "docs/collaboration/manifest.json",
+            "docs/collaboration/agent-registry.json",
+            "docs/collaboration/roles/*.md",
+        ],
+        "协作 manifest core_files 必须保持规范顺序",
+    )
+    assert_true(
+        manifest.get("team_profile_additions") == ["docs/collaboration/inbox.md"],
+        "team profile 只能追加持久 inbox",
+    )
+    assert_true(
+        manifest.get("loading_policy")
+        == "read runtime contract, current role, current task/relevant inbox, and only task-relevant project files",
+        "协作 manifest loading policy 不得漂移",
+    )
+    assert_true(
+        manifest.get("legacy_framework_files_are_not_runtime_sources") is True,
+        "旧协作框架必须明确标记为非运行时来源",
+    )
+
+    registry = json.loads((collaboration_root / "agent-registry.json").read_text(encoding="utf-8"))
+    assert_true(set(registry) == {"version", "controller", "allowed_child_agents", "roles"}, "协作 registry 字段集合必须保持封闭")
+    assert_true(registry.get("version") == 2, "协作 registry 必须使用 version 2")
+    expected_roles = [
+        ("ruoming", "若命", "controller"),
+        ("tingyun", "听云", "tech_lead_implementer"),
+        ("guanzhi", "观止", "qa_test_design_and_audit_gate"),
+        ("jinghua", "镜花", "engineering_review_gate"),
+        ("qingqiu", "清秋", "ux_flow_spec_and_review_gate"),
+    ]
+    roles = registry.get("roles")
+    assert_true(isinstance(roles, list), "协作 registry roles 必须是列表")
+    registered_roles = [(role.get("agentKey"), role.get("display"), role.get("role_type")) for role in roles]
+    assert_true(registry.get("controller") == "ruoming", "若命必须是协作 controller")
+    assert_true(registered_roles == expected_roles, "正式身份必须严格按顺序为五角色集合且不得重复")
+    assert_true(
+        registry.get("allowed_child_agents") == ["tingyun", "guanzhi", "jinghua", "qingqiu"],
+        "若命固定 child pool 必须是听云、观止、镜花、清秋",
+    )
+
+    role_dir = collaboration_root / "roles"
+    actual_role_files = {path.stem for path in role_dir.glob("*.md")}
+    expected_role_keys = {agent_key for agent_key, _, _ in expected_roles}
+    assert_true(actual_role_files == expected_role_keys, "项目 role 目录不得保留未注册正式身份")
+    for role in roles:
+        agent_key = role["agentKey"]
+        project_role = role_dir / f"{agent_key}.md"
+        expected_front_matter = {key: value for key, value in role.items() if key != "primary_responsibility"}
+        assert_true(
+            parse_flat_front_matter(project_role) == expected_front_matter,
+            f"项目角色 front matter 必须与 registry 完全一致: {agent_key}",
+        )
+
+    collaboration_text = (ROOT / "docs" / "collaboration.md").read_text(encoding="utf-8")
+    for invariant in (
+        "One runtime context binds exactly one formal role",
+        "Same-context role-play as another formal role is forbidden",
+        "## Task Handoff",
+        "## Result Handoff",
+    ):
+        assert_true(invariant in collaboration_text, f"协作内核缺少不变量: {invariant}")
+    for agent_key, display, _ in expected_roles:
+        assert_true(
+            f"| `{agent_key}` | {display} |" in collaboration_text,
+            f"协作 router 缺少正式角色: {agent_key}",
+        )
+    agents_text = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    assert_true(
+        "（若命、听云、观止、镜花、清秋）" in agents_text and "霜弦" not in agents_text,
+        "AGENTS.md 必须只列五个当前正式身份",
+    )
+
+    inbox_text = (collaboration_root / "inbox.md").read_text(encoding="utf-8")
+    assert_true("## Open Messages" in inbox_text, "team profile inbox 必须保留 Open Messages")
+    assert_true("CLOSED / EXAMPLE" not in inbox_text, "协作 inbox 不得保留初始化示例消息")
+    retired_paths = [
+        collaboration_root / "topic-tree.md",
+        collaboration_root / "playbooks",
+        collaboration_root / "playbooks" / "code-review.md",
+        collaboration_root / "playbooks" / "context-indexing.md",
+        collaboration_root / "playbooks" / "full-audit.md",
+        collaboration_root / "playbooks" / "qa.md",
+        role_dir / "shuangxian.md",
+        collaboration_root / "archive",
+        collaboration_root / "archive" / "legacy-framework-2026-07-22",
+    ]
+    for retired in retired_paths:
+        assert_true(
+            not retired.exists() and not retired.is_symlink(),
+            f"已退休协作路径不得回流（含 broken symlink）: {retired}",
+        )
+    archived_inboxes = list((collaboration_root / "archive").glob("inbox-*.md"))
+    assert_true(
+        not archived_inboxes,
+        "旧 inbox state 不得继续保留在项目中",
+    )
+
+
 def main() -> int:
     tests = [
         test_category_conflict_only_overrides_conflict,
@@ -3213,6 +3389,7 @@ def main() -> int:
         test_auto_image_selection_phase_a_contract,
         test_auto_image_selection_candidate_priority_behaviour,
         test_auto_image_selection_service_and_action_behaviour,
+        test_multi_agent_collaboration_core_contract,
     ]
     for test in tests:
         test()

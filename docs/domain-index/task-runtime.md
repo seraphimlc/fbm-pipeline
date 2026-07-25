@@ -45,9 +45,8 @@
 - `docs/superpowers/specs/2026-06-16-task-center-state-action-prd.md`
 - `docs/superpowers/specs/2026-06-16-product-task-action-refactor-prd.md`
 - `docs/superpowers/specs/2026-06-03-offline-task-center.md`
-- `docs/collaboration/playbooks/code-review.md`
-- `docs/collaboration/playbooks/full-audit.md`
-- `docs/collaboration/playbooks/qa.md`
+- `docs/collaboration.md`
+- `docs/main-flow-qa-checklist.md`
 
 ## 验证入口
 
