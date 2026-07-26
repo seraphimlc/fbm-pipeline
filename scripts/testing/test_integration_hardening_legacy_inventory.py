@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -618,6 +619,70 @@ class LegacyInventoryTests(unittest.TestCase):
                 mysqldump_binary="/opt/homebrew/bin/mysqldump",
                 host="db.example.com",
             )
+
+    def test_mysql_sql_consumers_disable_client_commands_without_affecting_mysqldump(
+        self,
+    ) -> None:
+        client = LocalMySQL(
+            mysql_binary="/opt/homebrew/bin/mysql",
+            mysqldump_binary="/opt/homebrew/bin/mysqldump",
+        )
+        observed: list[tuple[list[str], bytes | None]] = []
+
+        def record_run(
+            argv: list[str],
+            *args: object,
+            **kwargs: object,
+        ) -> subprocess.CompletedProcess[bytes]:
+            input_bytes = kwargs.get("input")
+            self.assertTrue(input_bytes is None or isinstance(input_bytes, bytes))
+            observed.append((list(argv), input_bytes))
+            stdout = b""
+            if Path(argv[0]).name == "mysql" and "--execute" in argv:
+                stdout = b"1\n"
+            elif Path(argv[0]).name == "mysqldump":
+                stdout = b"mysqldump  Ver 9.6.0\n" if "--version" in argv else b"dump\n"
+            return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr=b"")
+
+        source_schema = "fbm_pipeline_ih_0123456789abcdef_source"
+        target_schema = "fbm_pipeline_ih_0123456789abcdef_target"
+        fixture_sql = "CREATE TABLE `fixture_table` (`id` bigint);"
+        imported_sql = b"CREATE TABLE `restored_table` (`id` bigint);"
+        executed_sql = "SELECT COUNT(*) FROM `restored_table`;"
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_path = Path(temporary_directory)
+            import_path = temporary_path / "import.sql"
+            dump_path = temporary_path / "dump.sql"
+            import_path.write_bytes(imported_sql)
+
+            with mock.patch("subprocess.run", side_effect=record_run):
+                self.assertEqual(client.query_lines("SELECT 1"), ["1"])
+                client.load_fixture(source_schema, fixture_sql)
+                client.import_backup(target_schema, import_path)
+                client.execute_in_schema(target_schema, executed_sql)
+                client.dump_schema(source_schema, dump_path)
+
+        mysql_calls = [
+            (argv, input_bytes)
+            for argv, input_bytes in observed
+            if Path(argv[0]).name == "mysql"
+        ]
+        self.assertEqual(
+            [input_bytes for _, input_bytes in mysql_calls],
+            [None, fixture_sql.encode("utf-8"), imported_sql, executed_sql.encode("utf-8")],
+        )
+        for argv, _ in mysql_calls:
+            self.assertEqual(argv.count("--commands=OFF"), 1)
+            self.assertEqual(argv.count("--disable-named-commands"), 1)
+
+        mysqldump_calls = [
+            argv for argv, _ in observed if Path(argv[0]).name == "mysqldump"
+        ]
+        self.assertEqual(len(mysqldump_calls), 2)
+        for argv in mysqldump_calls:
+            self.assertNotIn("--commands=OFF", argv)
+            self.assertNotIn("--disable-named-commands", argv)
 
 
 if __name__ == "__main__":

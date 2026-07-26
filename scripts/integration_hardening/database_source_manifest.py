@@ -114,11 +114,17 @@ _GENERATION_ONE_DUMP_MODE_POLICY = {
 }
 _DUMP_MODES = frozenset(_GENERATION_ONE_DUMP_MODE_POLICY)
 _SNAPSHOT_POSITION_KINDS = frozenset(
-    {"mysql_gtid", "mysql_binlog", "storage_snapshot", "fixture_copy"}
+    {
+        "mysql_gtid",
+        "mysql_binlog",
+        "storage_snapshot",
+        "fixture_copy",
+        "historical_archive_sha256",
+    }
 )
 
 _ASCII_IDENTIFIER_RE = re.compile(r"[A-Za-z0-9_]+\Z")
-_FIXTURE_SOURCE_SCHEMA_RE = re.compile(r"fbm_pipeline_ih_[0-9a-f]{16}_source\Z")
+_PROTECTED_SOURCE_SCHEMA_RE = re.compile(r"fbm_pipeline_ih_[0-9a-f]{16}_source\Z")
 _LOWER_SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _UTC_MICROSECOND_RE = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{6}Z\Z"
@@ -372,6 +378,8 @@ def _validate_snapshot_position(value: Any, *, path: str) -> dict:
         raise ContractError(f"{path}.kind: unsupported snapshot position kind")
     position = _require_printable_ascii(value["value"], path=f"{path}.value")
     _reject_sensitive_or_url(position, path=f"{path}.value")
+    if value["kind"] == "historical_archive_sha256":
+        _require_lower_sha256(position, path=f"{path}.value")
     return value
 
 
@@ -446,7 +454,7 @@ def _validate_consistency_proof(proof: Any, backup: dict, source: dict) -> None:
                 )
             return
         if proof_mode == "fixture_quiesced_logical_backup":
-            if _FIXTURE_SOURCE_SCHEMA_RE.fullmatch(source["source_schema"]) is None:
+            if _PROTECTED_SOURCE_SCHEMA_RE.fullmatch(source["source_schema"]) is None:
                 raise ContractError(
                     "$.source.source_schema: fixture proof requires a protected temporary source schema"
                 )
@@ -463,6 +471,32 @@ def _validate_consistency_proof(proof: Any, backup: dict, source: dict) -> None:
             if proof["storage_snapshot_id"] is not None:
                 raise ContractError(
                     "$.consistency_proof.storage_snapshot_id: fixture proof requires null"
+                )
+            return
+        if proof_mode == "historical_archive_restored_quiesced_logical_backup":
+            if _PROTECTED_SOURCE_SCHEMA_RE.fullmatch(source["source_schema"]) is None:
+                raise ContractError(
+                    "$.source.source_schema: historical archive proof requires a protected temporary source schema"
+                )
+            if backup_position["kind"] != "historical_archive_sha256":
+                raise ContractError(
+                    "$.backup.snapshot_position.kind: historical archive proof requires historical_archive_sha256"
+                )
+            _require_lower_sha256(
+                backup_position["value"],
+                path="$.backup.snapshot_position.value",
+            )
+            if proof["writer_quiesced"] is not True:
+                raise ContractError(
+                    "$.consistency_proof.writer_quiesced: historical archive proof requires true"
+                )
+            if proof["global_read_lock_held"] is not False:
+                raise ContractError(
+                    "$.consistency_proof.global_read_lock_held: historical archive proof requires false"
+                )
+            if proof["storage_snapshot_id"] is not None:
+                raise ContractError(
+                    "$.consistency_proof.storage_snapshot_id: historical archive proof requires null"
                 )
             return
         raise ContractError("$.consistency_proof.proof_mode: invalid logical proof mode")

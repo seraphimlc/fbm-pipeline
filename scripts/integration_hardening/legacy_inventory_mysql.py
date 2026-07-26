@@ -126,6 +126,12 @@ class LocalMySQL:
             f"--user={self.user}",
         ]
 
+    def _mysql_argv(self) -> list[str]:
+        return self._connection_argv(self.mysql_binary) + [
+            "--commands=OFF",
+            "--disable-named-commands",
+        ]
+
     def _run(
         self,
         argv: list[str],
@@ -158,7 +164,7 @@ class LocalMySQL:
         return result
 
     def query_lines(self, sql: str) -> list[str]:
-        argv = self._connection_argv(self.mysql_binary) + [
+        argv = self._mysql_argv() + [
             "--batch",
             "--raw",
             "--skip-column-names",
@@ -170,7 +176,7 @@ class LocalMySQL:
         return [line for line in text.splitlines() if line]
 
     def execute_sql(self, sql: str) -> None:
-        argv = self._connection_argv(self.mysql_binary)
+        argv = self._mysql_argv()
         self._run(argv, input_bytes=sql.encode("utf-8"))
 
     def list_protected_schemas(self) -> list[str]:
@@ -348,12 +354,12 @@ class LocalMySQL:
 
     def import_backup(self, schema: str, backup_path: Path) -> None:
         schema = _protected_schema(schema)
-        argv = self._connection_argv(self.mysql_binary) + [schema]
+        argv = self._mysql_argv() + [schema]
         self._run(argv, input_bytes=backup_path.read_bytes(), timeout=120)
 
     def execute_in_schema(self, schema: str, sql: str) -> None:
         schema = _protected_schema(schema)
-        argv = self._connection_argv(self.mysql_binary) + [schema]
+        argv = self._mysql_argv() + [schema]
         self._run(argv, input_bytes=sql.encode("utf-8"))
 
 
@@ -481,10 +487,11 @@ def verify_source_restore(source: dict[str, Any], restored: dict[str, Any]) -> d
     }
 
 
-def build_source_manifest(
+def _build_source_manifest(
     *,
     source_schema: str,
-    database_copy_id: str,
+    snapshot_position: dict[str, str],
+    proof_mode: str,
     server_facts: dict[str, str],
     verification_snapshot: dict[str, Any],
     backup_path: Path,
@@ -499,7 +506,6 @@ def build_source_manifest(
             "sha256": backup_sha256,
         }
     ]
-    snapshot_position = {"kind": "fixture_copy", "value": database_copy_id}
     table_snapshots = []
     for table in MANIFEST_TABLES:
         facts = verification_snapshot["tables"][table]
@@ -554,7 +560,7 @@ def build_source_manifest(
             "snapshot_position": dict(snapshot_position),
         },
         "consistency_proof": {
-            "proof_mode": "fixture_quiesced_logical_backup",
+            "proof_mode": proof_mode,
             "manifest_snapshot_position": dict(snapshot_position),
             "writer_quiesced": True,
             "global_read_lock_held": False,
@@ -563,6 +569,57 @@ def build_source_manifest(
     }
     serialize_database_source_manifest_body(body)
     return body
+
+
+def build_source_manifest(
+    *,
+    source_schema: str,
+    database_copy_id: str,
+    server_facts: dict[str, str],
+    verification_snapshot: dict[str, Any],
+    backup_path: Path,
+    backup_sha256: str,
+    tool_version: str,
+) -> dict[str, Any]:
+    """Build the unchanged fixture-only source manifest."""
+
+    return _build_source_manifest(
+        source_schema=source_schema,
+        snapshot_position={"kind": "fixture_copy", "value": database_copy_id},
+        proof_mode="fixture_quiesced_logical_backup",
+        server_facts=server_facts,
+        verification_snapshot=verification_snapshot,
+        backup_path=backup_path,
+        backup_sha256=backup_sha256,
+        tool_version=tool_version,
+    )
+
+
+def build_historical_archive_source_manifest(
+    *,
+    source_schema: str,
+    historical_archive_sha256: str,
+    server_facts: dict[str, str],
+    verification_snapshot: dict[str, Any],
+    backup_path: Path,
+    backup_sha256: str,
+    tool_version: str,
+) -> dict[str, Any]:
+    """Bind a restored historical archive to its source snapshot and canonical dump."""
+
+    return _build_source_manifest(
+        source_schema=source_schema,
+        snapshot_position={
+            "kind": "historical_archive_sha256",
+            "value": historical_archive_sha256,
+        },
+        proof_mode="historical_archive_restored_quiesced_logical_backup",
+        server_facts=server_facts,
+        verification_snapshot=verification_snapshot,
+        backup_path=backup_path,
+        backup_sha256=backup_sha256,
+        tool_version=tool_version,
+    )
 
 
 def verify_manifest_and_backup(

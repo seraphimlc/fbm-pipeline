@@ -10,6 +10,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -233,6 +234,21 @@ def valid_fixture_body() -> dict:
     body["backup"]["snapshot_position"] = copy.deepcopy(position)
     body["consistency_proof"] = {
         "proof_mode": "fixture_quiesced_logical_backup",
+        "manifest_snapshot_position": copy.deepcopy(position),
+        "writer_quiesced": True,
+        "global_read_lock_held": False,
+        "storage_snapshot_id": None,
+    }
+    return body
+
+
+def valid_historical_archive_body() -> dict:
+    body = valid_logical_body()
+    body["source"]["source_schema"] = "fbm_pipeline_ih_0123456789abcdef_source"
+    position = {"kind": "historical_archive_sha256", "value": "c" * 64}
+    body["backup"]["snapshot_position"] = copy.deepcopy(position)
+    body["consistency_proof"] = {
+        "proof_mode": "historical_archive_restored_quiesced_logical_backup",
         "manifest_snapshot_position": copy.deepcopy(position),
         "writer_quiesced": True,
         "global_read_lock_held": False,
@@ -825,6 +841,97 @@ class DatabaseSourceManifestContractTests(unittest.TestCase):
                     target = target[component]
                 target[path[-1]] = value
                 self.assert_contract_error(mutated)
+
+    def test_historical_archive_proof_binds_raw_archive_hash_and_protected_source(self) -> None:
+        body = valid_historical_archive_body()
+        self.assertEqual(self.module.validate_database_source_manifest_body(body), body)
+        body_bytes = self.module.serialize_database_source_manifest_body(body)
+        self.assertEqual(
+            self.module.parse_and_verify_database_source_manifest(
+                body_bytes,
+                matching_digest(body_bytes),
+            ),
+            body,
+        )
+
+        mutations = (
+            (("backup", "snapshot_position", "kind"), "fixture_copy"),
+            (("backup", "snapshot_position", "value"), "not-a-sha256"),
+            (("consistency_proof", "proof_mode"), "fixture_quiesced_logical_backup"),
+            (("consistency_proof", "writer_quiesced"), False),
+            (("consistency_proof", "global_read_lock_held"), True),
+            (("consistency_proof", "storage_snapshot_id"), "archive-copy"),
+            (("consistency_proof", "manifest_snapshot_position", "value"), "d" * 64),
+            (("source", "source_schema"), "fbm_pipeline"),
+        )
+        for path, value in mutations:
+            with self.subTest(path=path):
+                mutated = valid_historical_archive_body()
+                target = mutated
+                for component in path[:-1]:
+                    target = target[component]
+                target[path[-1]] = value
+                self.assert_contract_error(mutated)
+
+        fixture = valid_fixture_body()
+        self.assertEqual(self.module.validate_database_source_manifest_body(fixture), fixture)
+
+    def test_historical_archive_manifest_builder_selects_archive_proof_without_changing_fixture_builder(self) -> None:
+        from integration_hardening.legacy_inventory_mysql import (
+            build_historical_archive_source_manifest,
+            build_source_manifest,
+        )
+
+        oracle = valid_historical_archive_body()
+        verification_snapshot = {
+            "tables": {
+                item["table_name"]: {
+                    "row_count": item["row_count"],
+                    "primary_key_min": item["primary_key_min"],
+                    "primary_key_max": item["primary_key_max"],
+                    "canonical_checksum_sha256": item["canonical_checksum_sha256"],
+                }
+                for item in oracle["table_snapshots"]
+            },
+            "projections": {
+                item["projection_id"]: {
+                    "row_count": item["row_count"],
+                    "canonical_checksum_sha256": item["canonical_checksum_sha256"],
+                }
+                for item in oracle["projection_snapshots"]
+            },
+        }
+        dump_path = mock.Mock()
+        dump_path.stat.return_value = SimpleNamespace(st_size=4096)
+        common = {
+            "source_schema": "fbm_pipeline_ih_0123456789abcdef_source",
+            "server_facts": oracle["source"],
+            "verification_snapshot": verification_snapshot,
+            "backup_path": dump_path,
+            "backup_sha256": "a" * 64,
+            "tool_version": "mysqldump 9.6.0",
+        }
+        historical = build_historical_archive_source_manifest(
+            historical_archive_sha256="c" * 64,
+            **common,
+        )
+        self.assertEqual(
+            historical["backup"]["snapshot_position"],
+            {"kind": "historical_archive_sha256", "value": "c" * 64},
+        )
+        self.assertEqual(
+            historical["consistency_proof"]["proof_mode"],
+            "historical_archive_restored_quiesced_logical_backup",
+        )
+        fixture = build_source_manifest(database_copy_id="fixture-copy-01", **common)
+        self.assertEqual(
+            fixture["backup"]["snapshot_position"],
+            {"kind": "fixture_copy", "value": "fixture-copy-01"},
+        )
+        self.assertEqual(
+            fixture["consistency_proof"]["proof_mode"],
+            "fixture_quiesced_logical_backup",
+        )
 
     def test_physical_consistency_matrix_requires_atomic_storage_snapshot(self) -> None:
         mutations = (
