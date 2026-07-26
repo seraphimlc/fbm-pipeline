@@ -1,12 +1,12 @@
 # FBM Pipeline 集成加固技术方案状态复查与精简路线图
 
-状态：IH-R0_PRUNE_COMPLETE / IH-R1_FIXTURE_GATE_PASS；继续替代原技术方案的直接实施授权
-日期：2026-07-25
+状态：IH-R0_PRUNE_COMPLETE / IH-R1_HISTORICAL_RUNNER_REVIEW_QA_COMPLETE / REAL_INVENTORY_NOT_EXECUTED
+更新：2026-07-26
 Owner：若命（agentKey: `ruoming`）
 原技术方案 SHA256：`1a24d17c754e82fdd030a54ca326cba5bb17c57e08af314a229b256bafba969c`
 产品基线 SHA256：`91e03e2e1f1ed0f8819a08b9538f2fa0fec40f7a343891700607df931c90b0c6`
-候选分支：`codex/integration-hardening-candidate@dc61ad112767e7b27ec9521b46be76c4c162ad02`
-来源范围：`dc61ad112767e7b27ec9521b46be76c4c162ad02..3c57810ed84a8dc91196841e314674cdc242b399`
+候选分支基点：`codex/integration-hardening-candidate@4ba2a1a616f5304d812791d7ac768733f7a4d1bf`
+当前交付范围：上述基点加已完成实现、代码评审与 QA 的 pending changes；最终提交 SHA 在提交前不自引用。
 
 ## 1. 复查结论
 
@@ -22,22 +22,22 @@ Owner：若命（agentKey: `ruoming`）
 
 ### 2.1 已完成
 
-- 已从 `origin/main@dc61ad1` 建立独立候选分支，原来源分支和原工作区未被改写。
+- 独立候选分支当前以 `4ba2a1a616f5304d812791d7ac768733f7a4d1bf` 为基点；本轮仍未 stage/commit/push。
 - IH-P0-I1、I2、I3 曾完成 pure-contract 验证：18/18、31/31、17/17 focused tests 通过；I1 证明不可执行 command skeleton 默认关闭，I2 证明 source manifest canonical body、detached digest 和 backup hash 字段可以一致绑定，I3 证明 setup/marker/lifecycle/ready/cleanup 的纯值合同具有判别性。
 - R0 已把 I1 command manifest skeleton 与 I3 non-runnable MySQL skeleton 的活跃实现、focused tests 和 project-rule registrations 从候选删除；I1/I3 结果只保留为历史评审证据。I2 source-manifest binding 与可执行 Legacy inventory 保留。
-- `IH-R1-LEGACY-INVENTORY` 已完成可执行 fixture gate：非空 backup、全新隔离 MySQL restore、6 表 source/restore 对账、逐 source-ID inventory、preserve-first 分类、tamper 负向、重复运行、source identity、Task/Step 10 副作用观察和 owned-resource cleanup 均通过。
-- R0 收缩后的 active candidate gate：Legacy core 20/20、I2 31/31、MySQL E2E 7/7；R0 前的 I1 18/18、I3 17/17 只作历史证据，不再作为候选测试入口。
+- `IH-R1-LEGACY-INVENTORY` 的 fixture 路径和 historical-backup runner 已完成实现、独立代码评审与 QA：clean-HEAD/SQL sanitizer、旧列 compatibility、source/canonical dump/target 一致性、私有原子 evidence、命令观测和 owned-resource cleanup 均已闭环。
+- 当前 focused 结果：Legacy core 21/21、I2 source manifest 33/33、backup/profile pure 20/20、sanitizer 15/15、MySQL E2E 15/15。项目规则仍只有 I2 与 Legacy 两个顶层 integration-hardening gate；Legacy gate 内顺序执行 core、backup/profile pure 和 sanitizer。
 - fixture primary evidence：33 个 candidate/capture/workflow 物理 source row exactly-once，25 条 records，8 条 `review_required`；`records_sha256=a00ecce1e2fd792cda20c22f628bc317ec436d3e401ebb949aa0a4b06d11acde`，`source_row_ownership_sha256=6b6deb8702a4f0f74d96b7922ea3fa3e807ee65736a78409f1e1b1462189af88`。
 - 来源提交 `3c57810` 已有但尚未组装进当前候选的能力包括：LOCAL Chrome adapter 与默认关闭配置、Lingxing listing/publish 基础链路、Amazon 导出 Seller SKU 双 mirror、分域 R1 脚本。
 
 ### 2.2 不能算完成
 
-- 当前候选 HEAD 仍是 `origin/main@dc61ad1`，工作树是未提交的 `dirty_review_candidate`；`3c57810` 不是当前 HEAD 的祖先，A1-A10 产品/运行时层均未组装。
-- R1 通过的是非空 fixture backup gate，不是任何真实业务备份 inventory；不能据此判断真实 legacy 数据为 0 或非 0，也不能据此批准 R2。
+- 当前基点是 `4ba2a1a`，其上 reviewed pending changes 尚未形成最终提交；A1-A10 产品/运行时层仍未组装。
+- 指定 54.5MB 真实备份尚未执行 restore inventory；现有 PASS 只证明 runner 合同和合成/fixture 行为，不能判断真实 legacy 数据为 0 或非 0，也不能批准 R2。
 - `lingxing_recovery.py`、`step10_contract.py`、`candidate_evidence.py` 和 `evidence_command.py` 仍不存在；Lingxing once-only、Step 10 no-overwrite 和最终 R1 尚未验证。
 - 当前 change log 没有 `change_set_id=IH-20260724-STEP10-SELLER-SKU`。
 - 当前候选没有 durable publish intent、`result_unknown`、legacy reconciliation/apply 或最终 evidence runner。
-- 全量 `make test-project-rules PYTHON=/usr/bin/python3` 仍因既有 `backend/.venv/bin/python` 缺失而中断；当前只保留 I2、Legacy executable 两个 targeted project-rule gates，focused gate 仅为 Legacy core、I2、MySQL E2E，不把全量命令写成 PASS。
+- 当前只保留 I2、Legacy executable 两个 targeted project-rule gates；Legacy gate 已纳入 core、backup/profile pure 与 sanitizer，MySQL E2E 继续作为独立 focused runtime 验证。全量项目规则必须以实际命令结果为准，不由 focused PASS 代替。
 
 ### 2.3 当前威胁模型
 
@@ -54,8 +54,8 @@ Owner：若命（agentKey: `ruoming`）
 | 5. Lingxing recovery | `KEEP_REQUIRED` | 来源分支已有 `uploading -> save_draft -> draft_saved` 基础链路和默认关闭 flag | durable intent、scope 唯一开放意图、`result_unknown`、统一重试保护、独立 provider 故障注入、显式人工处置 | 全局 `closed_safe` TaskStep/Group/Run 状态删除；外呼前安全失败沿用现有终态；真实 query、自动阴性解锁和稳定窗口后置 |
 | 6. Step 10 | `KEEP_REQUIRED / SIMPLIFY` | 来源分支已有 item_code 作为导出 SKU、成功后 Product/Catalog mirror 基础 | 三阶段 SKU 决策、真实 ASIN 禁止重导出、exact change-set、temp+fsync+no-clobber、hash/size、existing-output sentinel | recording writer 全字段闭包与大型 output journal 不作为前置；先禁用不安全 reuse 和完成最小原子发布，真实 crash 仍有缺口时再加最小 journal；历史自动 mirror repair 后置到 inventory 后 |
 | 7. Flags | `KEEP_REQUIRED` | LOCAL Chrome、Lingxing create/listing、submit 默认关闭在来源分支已有 | 保留默认关闭和 fail-closed；增加单一 create kill switch 与写入口重验 | 不增加无启动入口的 migration startup flag；negative stability 配置等真实 query 存在后再加 |
-| 8. Primary commands | `SIMPLIFY` | I1 静态 command inventory 仅保留历史证据；Legacy fixture primary command 已完成 | Lingxing、Step 10、Final R1 各保留一个可执行入口和统一最小 JSON summary；Legacy 真实备份入口需单独授权后扩展 | 删除 I1 active manifest/loader/gate、broker capability envelope、descriptor/FD transport 和未实现时的精确 17-command 顺序冻结 |
-| 9. Trusted source / final gate | `DROP_MOST` | R1 已绑定实际 HEAD、dirty status、8 个运行源码 hash、隔离 DB/temp 和 owned cleanup；尚非 final gate | 最终仍需 detached clean worktree 或 `git archive`、外置 evidence、secret scan、开始/结束 clean 检查 | 删除 root broker/reaper、四 OS principal、cgroup/Seatbelt、自研 Rust Git verifier、anchor service、Ed25519 轮换、WAL、two-phase PASS、root installer；恶意代码隔离后置为独立项目 |
+| 8. Primary commands | `SIMPLIFY` | I1 静态 command inventory 仅保留历史证据；Legacy fixture 与 historical-backup runner 已完成 | Lingxing、Step 10、Final R1 各保留一个可执行入口和统一最小 JSON summary；真实 Legacy 命令必须使用 clean HEAD、固定 backup SHA 和外置私有 evidence | 删除 I1 active manifest/loader/gate、broker capability envelope、descriptor/FD transport 和未实现时的精确 17-command 顺序冻结 |
+| 9. Trusted source / final gate | `DROP_MOST` | R1 已绑定实际 HEAD、dirty status、9 个运行源码 hash、隔离 DB/temp 和 owned cleanup；尚非 final gate | 最终仍需 detached clean worktree 或 `git archive`、外置 evidence、secret scan、开始/结束 clean 检查 | 删除 root broker/reaper、四 OS principal、cgroup/Seatbelt、自研 Rust Git verifier、anchor service、Ed25519 轮换、WAL、two-phase PASS、root installer；恶意代码隔离后置为独立项目 |
 | 10. 实施蓝图 | `REPLACE` | I1/I2/I3 pure-contract 历史验证完成，R1 fixture gate 完成 | active candidate 只保留 I2 与可执行 Legacy inventory；按本文第 4 节从真实备份决策或 R3 checkpoint 继续 | I1/I3 active skeleton 与 gate 已按 R0 删除；原 Phases 1-6 不能按旧 gate 直接推进 |
 | 11. 发布与回退 | `KEEP_REQUIRED` | flags 默认关闭的基础存在于来源分支 | 数据库备份/恢复、cohort、真实外部 canary 单独授权、forward repair | 不把代码合并和真实外部启用绑定；不要求特权 evidence service |
 | 12. 评审重点 | `KEEP_REQUIRED` | 已完成本轮架构与验证价值复查 | legacy 不覆盖、Lingxing 不重复、Step 10 不覆盖、证据不假绿 | 增加威胁模型与运维可执行性审查；不再把安全机制数量当成质量 |
@@ -68,12 +68,12 @@ Owner：若命（agentKey: `ruoming`）
 - 状态：`PRUNE_COMPLETE`。停止继续扩展 command/broker/MySQL pure skeleton。
 - I2 的 source manifest/backup binding 作为下一片输入保留并收敛；canonical JSON 公共核只保留 I2/R1 caller 使用的部分。
 - I1 command manifest skeleton 与 I3 non-runnable MySQL skeleton 的实现、focused tests 和 project-rule registrations 已从 active candidate 删除；既有 pure-contract 结果只作历史证据。
-- 当前 integration-hardening candidate gate 仅为 Legacy core、I2 source-manifest binding、Legacy MySQL E2E；不再把 I1/I3 当候选测试入口。
+- 当前 integration-hardening 顶层 project-rule gate 仅为 I2 source-manifest binding 与 Legacy；Legacy gate 内顺序执行 core、backup/profile pure 和 sanitizer，MySQL E2E 作为独立 focused runtime 验证；不再把 I1/I3 当候选测试入口。
 - 本阶段不宣布任何 PRD AC、Phase 0 或 merge-ready。
 
 ### R1：可执行 Legacy 只读 inventory 与 backup/restore verification
 
-状态：`FIXTURE_GATE_PASS`；真实业务备份 inventory 尚未授权、尚未执行。
+状态：`HISTORICAL_RUNNER_REVIEW_QA_COMPLETE`；指定 54.5MB 真实业务备份 inventory 尚未执行。
 
 先回答“真实旧数据到底有多少、是否需要迁移”，再建设 migration/API/UI。
 
@@ -86,7 +86,7 @@ Owner：若命（agentKey: `ruoming`）
 
 ### R2：条件式 Legacy apply 与 compatibility
 
-状态：`NOT_AUTHORIZED`；必须先有单独授权的真实业务备份 inventory 结果。
+状态：`NOT_AUTHORIZED`；必须先取得指定真实业务备份 inventory 结果，再由用户根据结果明确决定是否进入 R2。
 
 - 仅在 R1 证明存在需迁移数据时实施。
 - 使用 additive reconciliation/run 账本和最少 Product blocker 字段；是否需要独立 evidence 表、review API/UI 由 inventory 规模和冲突类型决定。
@@ -118,27 +118,26 @@ Owner：若命（agentKey: `ruoming`）
 ### R6：Final R1 与发布证据
 
 - 使用固定 candidate SHA 的 detached clean worktree；开始/结束都检查 clean。
-- 使用隔离 MySQL、真实 FastAPI/Vite/Playwright Chromium、现有分域 R1、compile/build、remote guard、secret scan 和资源清理；其中 integration-hardening candidate gate 只执行 Legacy core、I2 source-manifest binding、Legacy MySQL E2E。
+- 使用隔离 MySQL、真实 FastAPI/Vite/Playwright Chromium、现有分域 R1、compile/build、remote guard、secret scan 和资源清理；其中两个顶层 integration-hardening project-rule gate 固定为 I2 与 Legacy，Legacy gate 内执行 core、backup/profile pure 和 sanitizer，MySQL E2E 作为独立 focused runtime gate。
 - 记录实际命令、cwd、runtime/source hash、退出码、测试计数、数据库、PID/port/temp、artifact SHA256 和未覆盖范围。
 - 最终 manifest 在候选外原子写入并附 detached SHA256；崩溃只产生 `incomplete`，不产生 PASS。
 - LOCAL Chrome adapter 未改且 flag=false 时只做静态/fail-closed 回归；真实 LOCAL Chrome smoke 仅在启用前或用户授权 canary 时执行，Playwright Chromium不能替代它。
 
 ## 5. 当前实施状态与下一决策
 
-`IH-R1-LEGACY-INVENTORY` 的 fixture 实施、规格复审、代码质量复审和 QA 已闭环。它证明 inventory/restore verification 路径可以在受控非空样本上运行并对假绿、误删和保护事实 fail closed；不证明真实业务数据规模，也不执行迁移。
+`IH-R1-LEGACY-INVENTORY` 的 fixture 与 historical-backup runner 实现、代码质量复审和 QA 已闭环。它证明 inventory/restore verification 可以在受控合成历史形态上运行并对假绿、误删、证据残留和保护事实 fail closed；指定 54.5MB 真实备份仍未执行，因此不证明真实业务数据规模，也不执行迁移。
 
 本轮明确不做：migration apply、业务 schema 变更、review API/UI、A1-A10 source assembly、LOCAL Chrome、Amazon/Lingxing/GIGA/OSS 外部调用、真实商品/模板输出/历史任务修改、stage/commit/push。
 
 下一决策分两条，不能混淆：
 
-1. 若要决定 R2，必须由用户单独授权一个只读真实业务备份 inventory，明确 backup 路径/来源、允许的临时 schema 和证据保留位置；真实结果为 0 时取消 apply/API/UI，非 0 时再按冲突规模设计 R2。
+1. 若要决定 R2，按已评审的 clean-HEAD 命令合同执行指定真实备份 inventory，并把完整 records 仅保存在 worktree 外私有 evidence；真实结果为 0 时取消 apply/API/UI，非 0 时再按冲突规模设计 R2。R2 在该结果和后续决策前保持 `NOT_AUTHORIZED`。
 2. 若暂不提供真实备份，应先把当前 R1 作为独立可回滚 checkpoint 收口，再进入 R3 source assembly；不得在未提交的 R1 工作树上继续叠加来源 stack。
 
 ## 6. Review gate
 
-- 镜花已对本文内容 SHA256 `022e00e2f2c15e95dbacbf644caca901d5f2767d97ba3fb0fdfeb03eb5852458` 完成独立复审：`PASS`，P0/P1/P2 均为 0；确认原技术方案 findings 已关闭，`IH-R1-LEGACY-INVENTORY` 可以直接派工。
-- 听云已完成 R1 实现和三轮根因返工；R0 收缩后 active candidate gate 为 core 20/20、I2 31/31、MySQL E2E 7/7，未 stage/commit/push。
+- 镜花已完成 historical-backup runner 的设计与最终代码复审：`PASS`，确认 single outer-finally ownership、完整命令观测和 post-cleanup 原子 evidence 边界闭合。
+- 听云已完成 runner 实现和根因返工；当前 focused 结果为 core 21/21、I2 33/33、backup/profile pure 20/20、sanitizer 15/15、MySQL E2E 15/15，未 stage/commit/push。
 - I1 18/18、I3 17/17 是 R0 前历史 pure-contract evidence；对应 active implementation、focused tests 和 project-rule registrations 已删除，不再参与候选 gate。
-- 镜花最终规格复审 `PASS`、代码质量复审 `PASS`，P0/P1/P2 均为 0；确认 schema ownership、TaskRun/TaskStep 完整状态快照和 Step 10 目录/symlink 观察已闭合。
-- 观止最终 `QA / PASS`，A-G 矩阵全部通过，P0/P1/P2 均为 0；最终 protected schema 与临时目录 residue 为空。
-- Gate 含义仅为 `IH-R1_FIXTURE_GATE_PASS`；不代表真实业务备份已盘点、R2 已授权、legacy migration/PRD AC/merge-ready 或提交许可。
+- 观止最终 `QA / PASS`；pure failure matrix、合成 historical restore、source/target 对账、stdout 隐私、evidence no-clobber/可恢复失败和 protected-schema residue 均通过。
+- Gate 含义为 `IH-R1_HISTORICAL_RUNNER_GATE_PASS`；不代表 54.5MB 真实业务备份已盘点、R2 已授权、legacy migration/PRD AC/merge-ready 或提交许可。

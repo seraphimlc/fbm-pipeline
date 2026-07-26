@@ -6,11 +6,12 @@ import hashlib
 import os
 import stat
 import subprocess
+import uuid
 from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
-from .common import canonical_sha256_hex
+from .common import canonical_json_bytes, canonical_sha256_hex
 
 
 class LegacyRunEvidenceError(RuntimeError):
@@ -21,6 +22,7 @@ SOURCE_FILE_RELATIVE_PATHS = (
     "scripts/integration_hardening/__init__.py",
     "scripts/integration_hardening/common.py",
     "scripts/integration_hardening/database_source_manifest.py",
+    "scripts/integration_hardening/legacy_backup_sanitizer.py",
     "scripts/integration_hardening/legacy_inventory.py",
     "scripts/integration_hardening/legacy_inventory_fixture.py",
     "scripts/integration_hardening/legacy_inventory_mysql.py",
@@ -106,6 +108,7 @@ def build_source_identity(
     supplied_candidate_sha: str = "",
     source_files: Iterable[str] = SOURCE_FILE_RELATIVE_PATHS,
     observer: CommandObservations | None = None,
+    require_clean: bool = False,
 ) -> dict[str, Any]:
     """Bind the claim to actual HEAD, porcelain status and exact runtime source bytes."""
 
@@ -142,6 +145,8 @@ def build_source_identity(
         status_entries.append({"status": line[:2], "path": line[3:]})
     tracked_changes = sum(entry["status"] != "??" for entry in status_entries)
     untracked_paths = sum(entry["status"] == "??" for entry in status_entries)
+    if require_clean and status_entries:
+        raise LegacyRunEvidenceError("candidate source must be a clean Git worktree")
 
     source_hashes = []
     for relative_path in sorted(set(source_files)):
@@ -168,6 +173,254 @@ def build_source_identity(
         },
         "source_files": source_hashes,
     }
+
+
+def _git_worktree_roots(
+    repo_root: Path,
+    *,
+    observer: CommandObservations | None = None,
+) -> tuple[Path, ...]:
+    output = _git(
+        repo_root,
+        ["worktree", "list", "--porcelain"],
+        observer=observer,
+    )
+    roots = []
+    for line in output.splitlines():
+        if not line.startswith("worktree "):
+            continue
+        raw_path = line[len("worktree ") :]
+        if not raw_path:
+            raise LegacyRunEvidenceError("git returned an empty worktree path")
+        roots.append(Path(raw_path).resolve(strict=True))
+    if not roots:
+        raise LegacyRunEvidenceError("git returned no worktree roots")
+    return tuple(roots)
+
+
+def validate_evidence_output_path(
+    repo_root: Path,
+    output_path: Path,
+    *,
+    observer: CommandObservations | None = None,
+) -> Path:
+    """Validate an absent private evidence path outside every Git worktree."""
+
+    output_path = Path(output_path)
+    if not output_path.is_absolute() or output_path.name in {"", ".", ".."}:
+        raise LegacyRunEvidenceError("evidence output must be an absolute file path")
+    parent = output_path.parent
+    try:
+        parent_stat = parent.lstat()
+    except OSError as exc:
+        raise LegacyRunEvidenceError("evidence parent must already exist") from exc
+    if stat.S_ISLNK(parent_stat.st_mode):
+        raise LegacyRunEvidenceError("evidence parent must not be a symbolic link")
+    if not stat.S_ISDIR(parent_stat.st_mode):
+        raise LegacyRunEvidenceError("evidence parent must be a directory")
+    if parent_stat.st_uid != os.getuid():
+        raise LegacyRunEvidenceError("evidence parent must be owned by the current user")
+    if stat.S_IMODE(parent_stat.st_mode) != 0o700:
+        raise LegacyRunEvidenceError("evidence parent permissions must be exactly 0700")
+    try:
+        output_path.lstat()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise LegacyRunEvidenceError("unable to inspect evidence output path") from exc
+    else:
+        raise LegacyRunEvidenceError("evidence output already exists; clobber is forbidden")
+
+    resolved_parent = parent.resolve(strict=True)
+    resolved_output = resolved_parent / output_path.name
+    for worktree_root in _git_worktree_roots(repo_root, observer=observer):
+        try:
+            resolved_output.relative_to(worktree_root)
+        except ValueError:
+            continue
+        raise LegacyRunEvidenceError("evidence output must be outside every Git worktree")
+    return resolved_output
+
+
+def write_private_evidence(
+    repo_root: Path,
+    output_path: Path,
+    payload: dict[str, Any],
+    *,
+    observer: CommandObservations | None = None,
+    prevalidated_output_path: Path | None = None,
+) -> dict[str, Any]:
+    """Validate canonical bytes privately, then atomically publish without clobber."""
+
+    if type(payload) is not dict:
+        raise LegacyRunEvidenceError("evidence payload must be an object")
+    if "evidence_sha256" in payload:
+        raise LegacyRunEvidenceError("evidence payload must not contain its own digest")
+    if prevalidated_output_path is None:
+        safe_output = validate_evidence_output_path(
+            repo_root,
+            output_path,
+            observer=observer,
+        )
+    else:
+        safe_output = Path(prevalidated_output_path)
+        if (
+            not safe_output.is_absolute()
+            or safe_output.name in {"", ".", ".."}
+            or safe_output.name != Path(output_path).name
+        ):
+            raise LegacyRunEvidenceError("prevalidated evidence output path is invalid")
+    payload_bytes = canonical_json_bytes(payload)
+    parent_flags = os.O_RDONLY
+    parent_flags |= getattr(os, "O_CLOEXEC", 0)
+    parent_flags |= getattr(os, "O_DIRECTORY", 0)
+    parent_flags |= getattr(os, "O_NOFOLLOW", 0)
+    temporary_flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+    temporary_flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    parent_descriptor = -1
+    temporary_descriptor = -1
+    temporary_name = f".{safe_output.name}.{uuid.uuid4().hex}.tmp"
+    owned_inode: tuple[int, int] | None = None
+    published = False
+    completed = False
+
+    def entry_stat(name: str) -> os.stat_result | None:
+        try:
+            return os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+
+    def unlink_owned(name: str) -> bool:
+        if owned_inode is None or parent_descriptor < 0:
+            return True
+        for _attempt in range(3):
+            current = entry_stat(name)
+            if current is None:
+                return True
+            if (current.st_dev, current.st_ino) != owned_inode:
+                return False
+            try:
+                os.unlink(name, dir_fd=parent_descriptor)
+                return True
+            except FileNotFoundError:
+                return True
+            except OSError:
+                continue
+        return False
+
+    def unlink_owned_once(name: str) -> None:
+        current = entry_stat(name)
+        if (
+            current is None
+            or owned_inode is None
+            or (current.st_dev, current.st_ino) != owned_inode
+        ):
+            raise LegacyRunEvidenceError(
+                "private evidence temporary ownership changed before unlink"
+            )
+        try:
+            os.unlink(name, dir_fd=parent_descriptor)
+        except OSError as exc:
+            raise LegacyRunEvidenceError(
+                "unable to remove private evidence temporary file"
+            ) from exc
+
+    try:
+        parent_descriptor = os.open(safe_output.parent, parent_flags)
+        parent_stat = os.fstat(parent_descriptor)
+        if (
+            not stat.S_ISDIR(parent_stat.st_mode)
+            or parent_stat.st_uid != os.getuid()
+            or stat.S_IMODE(parent_stat.st_mode) != 0o700
+        ):
+            raise LegacyRunEvidenceError(
+                "prevalidated evidence parent is no longer private"
+            )
+        if entry_stat(safe_output.name) is not None:
+            raise LegacyRunEvidenceError(
+                "evidence output already exists; clobber is forbidden"
+            )
+
+        temporary_descriptor = os.open(
+            temporary_name,
+            temporary_flags,
+            0o600,
+            dir_fd=parent_descriptor,
+        )
+        os.fchmod(temporary_descriptor, 0o600)
+        created_stat = os.fstat(temporary_descriptor)
+        owned_inode = (created_stat.st_dev, created_stat.st_ino)
+        offset = 0
+        while offset < len(payload_bytes):
+            written = os.write(temporary_descriptor, payload_bytes[offset:])
+            if written <= 0:
+                raise LegacyRunEvidenceError("unable to write complete evidence output")
+            offset += written
+        os.fsync(temporary_descriptor)
+        actual_stat = os.fstat(temporary_descriptor)
+        os.lseek(temporary_descriptor, 0, os.SEEK_SET)
+        actual_chunks = []
+        while True:
+            chunk = os.read(temporary_descriptor, 64 * 1024)
+            if chunk == b"":
+                break
+            actual_chunks.append(chunk)
+        actual_bytes = b"".join(actual_chunks)
+        if (
+            not stat.S_ISREG(actual_stat.st_mode)
+            or (actual_stat.st_dev, actual_stat.st_ino) != owned_inode
+            or actual_stat.st_uid != os.getuid()
+            or stat.S_IMODE(actual_stat.st_mode) != 0o600
+            or actual_stat.st_size != len(payload_bytes)
+            or actual_bytes != payload_bytes
+        ):
+            raise LegacyRunEvidenceError(
+                "evidence output verification did not match canonical payload"
+            )
+
+        try:
+            os.link(
+                temporary_name,
+                safe_output.name,
+                src_dir_fd=parent_descriptor,
+                dst_dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileExistsError as exc:
+            raise LegacyRunEvidenceError(
+                "evidence output already exists; clobber is forbidden"
+            ) from exc
+        published = True
+        final_stat = entry_stat(safe_output.name)
+        if final_stat is None or (final_stat.st_dev, final_stat.st_ino) != owned_inode:
+            raise LegacyRunEvidenceError("evidence publish verification failed")
+        os.fsync(parent_descriptor)
+        unlink_owned_once(temporary_name)
+        os.fsync(parent_descriptor)
+        completed = True
+        return {
+            "evidence_sha256": hashlib.sha256(actual_bytes).hexdigest(),
+            "size_bytes": actual_stat.st_size,
+        }
+    except LegacyRunEvidenceError:
+        raise
+    except OSError as exc:
+        raise LegacyRunEvidenceError(
+            "unable to write, verify, or publish private evidence output"
+        ) from exc
+    finally:
+        if temporary_descriptor >= 0:
+            os.close(temporary_descriptor)
+        if parent_descriptor >= 0:
+            if not completed:
+                if published:
+                    unlink_owned(safe_output.name)
+                unlink_owned(temporary_name)
+                try:
+                    os.fsync(parent_descriptor)
+                except OSError:
+                    pass
+            os.close(parent_descriptor)
 
 
 def snapshot_directory(root: Path) -> list[dict[str, Any]]:

@@ -1,9 +1,11 @@
 # Legacy 真实备份只读 Inventory 技术增量
 
-状态：READY_FOR_REREVIEW
+状态：IMPLEMENTATION_CODE_REVIEW_QA_COMPLETE / REAL_RUN_NOT_EXECUTED
 日期：2026-07-25
+更新：2026-07-26
 Owner：听云（agentKey: `tingyun`）
-产品授权：用户已授权真实备份只读 inventory、受保护临时 schema、证据落盘、后续评审通过后的实现/执行/提交/推送
+交付边界：runner 实现、代码评审和 QA 已完成；本文不执行指定 54.5MB 备份，不授权 migration apply、R2、stage/commit/push。
+候选基点：`codex/integration-hardening-candidate@4ba2a1a616f5304d812791d7ac768733f7a4d1bf` 加 reviewed pending changes；最终提交 SHA 在提交前不自引用。
 
 ## 1. 结论
 
@@ -48,6 +50,29 @@ Owner：听云（agentKey: `tingyun`）
 - `fbm_pipeline_ih_<16-lower-hex>_target`
 
 schema collision 在创建任何 schema 前失败。
+
+### 3.1 Clean-HEAD 真实命令合同
+
+以下参数集合是唯一真实执行合同；执行前工作树必须为空。`EVIDENCE_OUTPUT` 必须替换为所有 Git worktree 外、已存在且权限严格为 `0700` 的私有目录中的不存在文件：
+
+```bash
+test -z "$(git status --porcelain=v1 --untracked-files=all)"
+CANDIDATE_SHA="$(git rev-parse --verify HEAD)"
+EVIDENCE_OUTPUT="<ABSOLUTE_PRIVATE_0700_DIR_OUTSIDE_ALL_WORKTREES>/legacy-real-backup-inventory.json"
+env -u DATABASE_URL -u MYSQL_PWD -u MYSQL_TEST_LOGIN_FILE \
+  /usr/bin/python3 -B scripts/integration_hardening/legacy_migration.py \
+  --backup-inventory \
+  --backup-path /Users/liuchang/Documents/gitproject/fbm-pipeline/tmp/db-backups/fbm_pipeline_before_clear_20260612_151753.sql \
+  --expected-backup-sha256 b608c6a1f3200ea2df6b4e3f438f1db00bd22eb185bbecb5986e84c9778c4663 \
+  --evidence-output "$EVIDENCE_OUTPUT" \
+  --candidate-sha "$CANDIDATE_SHA" \
+  --mysql-binary /opt/homebrew/bin/mysql \
+  --mysqldump-binary /opt/homebrew/bin/mysqldump \
+  --host 127.0.0.1 --port 3306 --user root \
+  --allow-passwordless-local
+```
+
+该命令只允许本机 isolated MySQL 和本轮随机 protected source/target；不得读取应用连接配置、登录文件或环境密码。每次 mysql/mysqldump 调用（含 version probe）都必须同时带 `--no-defaults --no-login-paths`。当前 B2c 只登记合同，不运行命令。
 
 ## 4. 离线备份安全校验
 
@@ -127,7 +152,9 @@ Step 10 继续使用隔离 `DATA_DIR` 和目录快照，新增、删除、修改
 
 - parent 必须已存在、non-symlink、当前用户所有且权限严格为 `0700`
 - output 必须不存在
-- 使用 `O_CREAT|O_EXCL|O_NOFOLLOW` 创建为 `0600`
+- cleanup 成功后再次用 observer 验证最终 output 路径，再固化完整 `git/mysql/mysqldump` 命令计数；writer 接收该 prevalidated path，不再启动 subprocess
+- 先在同一 parent 以唯一 `O_CREAT|O_EXCL|O_NOFOLLOW` 临时文件写入 `0600` canonical bytes，完成 file fsync、same-FD reread、owner/mode/size/bytes 校验后，才用 no-clobber hardlink 原子发布 final 并 fsync parent
+- 任一 write/fsync/reread/link/parent-fsync/unlink 失败，仅按本轮 inode ownership 清理临时/最终链接；不得删除 pre-existing/raced final，同一路径在本轮 owned artifact 清理后可重试
 - 禁止位于任一 Git worktree
 - 完整 records、ASIN、item_code 只能进入该私有文件
 
@@ -144,7 +171,9 @@ Step 10 继续使用隔离 `DATA_DIR` 和目录快照，新增、删除、修改
 
 evidence 文件是“不含自身摘要字段”的 canonical JSON payload。文件以固定 UTF-8 canonical bytes 写入并 fsync 后，对实际落盘的完整字节计算 SHA-256；该 `evidence_sha256` 只进入 stdout 成功摘要，不写回 evidence 文件，也不生成可覆盖的隐式 sidecar。验证者以文件全部字节为唯一 preimage 重算。
 
-stdout 成功摘要只允许：status、scope、classification counts、record count、backup/source/target/records/evidence digests、cleanup success。失败摘要只允许 error code、phase、cleanup success 和脱敏消息；不得输出 full records、ASIN、item_code、凭据、备份正文或原始 MySQL stderr。
+以下运行期合同从 `parse_args` 成功且 backup runner 启动后生效。stderr 进度只允许固定 allowlist 阶段并逐行 flush：`preflight`、`source_import`、`source_inventory`、`canonical_dump`、`target_import`、`verification`、`cleanup`、`evidence_write`、`completed`；不得包含路径、schema、records、ASIN、item_code、凭据或原始错误文本。progress write/flush 是 best-effort，任何 I/O 异常都不得阻断 preflight/cleanup、覆盖 primary failure，或在 evidence 已发布后推翻成功。stdout 只在最终输出一个 compact JSON 行：成功摘要只允许 status、scope、classification counts、record count、backup/source/target/records/evidence digests、cleanup success；普通失败摘要只允许 error code、phase、cleanup success 和脱敏消息；primary 与 cleanup 同时失败时，顶层 `error_code=cleanup_failed`，并仅追加稳定的 `primary_error_code` 与 `cleanup_failed=true`。
+
+`--help` 和 usage error 发生在 runner 启动前，保留标准 argparse 的 stdout/stderr 与 exit 0/2 语义，不属于上述 fixed phase/compact JSON/隐私合同。argparse 不是秘密脱敏边界；调用者不得把密码、token 或其它秘密放入 argv。
 
 ## 9. 错误与 cleanup
 
@@ -169,14 +198,14 @@ stdout 成功摘要只允许：status、scope、classification counts、record c
 
 每个 schema 都有 `creation_attempted`、`create_returned_success` 和 `observed_present` 状态。collision preflight 通过后、发出 CREATE 前即建立 cleanup reservation。若 CREATE 在服务端生效后客户端断连、超时或返回错误，运行器重新列出 protected schemas；发现精确名称时标记 `observed_present=true`。即使 reconciliation 查询也失败，finally 仍可对该 preflight-absent、非用户提供的精确随机名称执行 `DROP DATABASE IF EXISTS`，并记录 reconciliation/cleanup 证据，防止未知结果漏清理。
 
-创建 source 后的所有异常进入同一个 `finally`。主错误保留为 `primary_error_code`；CREATE 结果未知不能覆盖主错误。cleanup 再失败时附加 `cleanup_failed=true`。cleanup 失败优先决定最终失败，即使 inventory 与证据内容已经生成也不能返回成功。
+创建 source 后的所有异常进入同一个 `finally`。主错误保留为稳定、脱敏的 `primary_error_code`；CREATE 结果未知不能覆盖主错误。cleanup 再失败时附加 `cleanup_failed=true`。cleanup 失败优先决定最终失败，即使 inventory 与证据内容已经生成也不能返回成功；若没有 primary failure，则保持普通 `cleanup_failed` compact 摘要，不伪造 primary 字段。
 
-## 10. 实现蓝图
+## 10. 已完成实现落点
 
 - `scripts/integration_hardening/legacy_migration.py`
-  - 新模式参数、`run_backup_inventory()`、compact stdout 和稳定错误 phase/code。
+  - 新模式参数、`run_backup_inventory()`、best-effort 固定 flushed stderr progress、最终单行 compact stdout 和稳定单/双错误 phase/code。
 - `scripts/integration_hardening/legacy_inventory_mysql.py`
-  - 流式 import/dump、列 introspection、compatibility projection、task absence sentinel、schema creation reconciliation 与 owned cleanup reservation。
+  - 流式 import/dump、全客户端 `--no-defaults --no-login-paths`、列 introspection、compatibility projection、task absence sentinel、schema creation reconciliation 与 owned cleanup reservation。
 - 新增 `scripts/integration_hardening/legacy_backup_sanitizer.py`
   - SQL tokenizer、MySQL executable comment 展开、session SET/ALTER KEYS allowlist、client meta-command/危险语句/跨 schema 拒绝、fd metadata/hash 稳定性。
 - `scripts/integration_hardening/database_source_manifest.py`
@@ -185,10 +214,10 @@ stdout 成功摘要只允许：status、scope、classification counts、record c
   - 私有 no-clobber writer、evidence digest、stdout/error 脱敏。
 - `scripts/testing/test_integration_hardening_legacy_inventory_mysql.py`
   - backup 模式 MySQL E2E、workflow 缺列兼容、task absence、source/target/cleanup。
-- 新增或扩展 focused pure tests
+- `scripts/testing/test_integration_hardening_legacy_backup_inventory.py`
   - CLI 互斥/必填、sanitizer 绕过矩阵（含 executable comment 与 client meta-command）、hash/file-swap/symlink、historical/fixture manifest 分流、compatibility profile、evidence 固定字节向量/权限/no-clobber/stdout 隐私、CREATE unknown result reconciliation、primary+cleanup error。
 - `scripts/test_project_rules.py`
-  - 保持 I2/Legacy 两个 active targeted gate；扩展现有 Legacy gate，不增加已退休 command skeleton。
+  - 保持 I2/Legacy 两个 active targeted gate；现有 Legacy gate 顺序执行 core、backup/profile pure 和 sanitizer，不增加已退休 command skeleton。
 - `docs/domain-index/runtime-security.md`、`docs/project-index.md`
   - 新增真实备份入口、证据范围、验证命令和不连接远端的边界。
 - 本文与状态复查文档
@@ -205,4 +234,4 @@ stdout 成功摘要只允许：status、scope、classification counts、record c
 - historical manifest 不出现 fixture proof/position；原 fixture manifest 和 focused tests 保持原结果。
 - 故障注入模拟 CREATE 服务端生效后客户端报错，精确 schema 仍被 reconciliation/cleanup 删除，主错误保留。
 - 不连接 `visitworld.me`，不读取应用 `DATABASE_URL`，不启动 LOCAL Chrome、FastAPI、Vite、Playwright 或外部平台调用。
-- 镜花设计/代码评审与观止 QA 均 PASS 后，才允许执行指定真实备份并据结果决定 R2。
+- 镜花设计/代码评审与观止 QA 已 PASS；指定真实备份 restore inventory 仍未执行。取得真实结果后才能决定 R2，完整 records 不得写入文档或 stdout。

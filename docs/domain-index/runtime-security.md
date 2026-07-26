@@ -18,6 +18,7 @@
 - Integration hardening database source manifest 是只接收 dict/bytes 的纯 stdlib 数据合同：校验 canonical manifest body、detached digest、backup hash binding 与 source-side legacy empty proof；它不连接 MySQL、不读取 env、不执行 capture/dump/restore，也不证明 backup 与 manifest 已真实来自同一快照、restore 成功或 Phase 0 PASS。通过 source-side empty proof 后仍需后续 restore 逐项一致性验证。
 - `IH-R1-LEGACY-INVENTORY` 已提供首个真正可执行的只读路径：纯 core 让 candidate group 只拥有 candidate/capture 行、legacy Product workflow 独立成记录，并以 `Counter` 对全部物理 source row 做 exactly-once fail-closed；`succeeded` 且无候选固定进入 manual review。精确 `batch/site/item_code` Product 匹配同时读取真实 ASIN、Amazon template path/generated/fill-summary/warnings、Catalog confirmed/export/A+ 与可稳定归属的成功 A+ item，存在不可逆 downstream facts 时只允许 `audit_only`，current competitor conflict 仍为 `review_required`。成功 A+ item 缺 Product/Catalog 或 Catalog/Product 不一致时固定进入 `review_required`，不能降为 interrupted/audit-only。
 - Legacy fixture manifest/restore 绑定 `products`、`product_data`、`catalog_products`、`aplus_upload_items`、candidate、capture 共 6 表及 6 个 decision projections。`legacy_migration.py` 输出 deterministic `records` + `records_sha256`、实际 HEAD、clean/dirty status paths、runtime source-file hashes；运行时实测范围仅为 `git/mysql/mysqldump` subprocess、本机 `127.0.0.1:3306`、fixture `task_runs/task_steps` delta、隔离 `DATA_DIR`/Step 10 output delta 和 cleanup。external network/browser 没有 Python runtime monitor，只能标为 `observed=false / static_review_only`，不得伪装成运行时零值。
+- `--backup-inventory` historical-backup runner 的实现、代码评审和 QA 已完成：只接受 clean HEAD、固定 SHA 的安全 SQL、`127.0.0.1:3306` passwordless-local 显式授权和 worktree 外 `0700` parent；mysql/mysqldump 全部显式禁用 defaults/login paths，stderr 只输出固定并逐行 flush 的阶段，stdout 只输出最终单行 compact JSON；完整 records 只写入原子 no-clobber 的 `0600` canonical evidence。54.5MB 指定真实备份尚未恢复盘点，R2 在真实结果和后续决策前仍为 `NOT_AUTHORIZED`。
 - Legacy inventory 当前只执行 inventory/restore verification，不执行 migration apply，不写真实业务 schema，不读取应用 `DATABASE_URL`，不创建 TaskRun，不启动浏览器，不访问外部平台，不生成 Step 10 输出，也不代表 legacy migration、AC-1、Phase 0 或 merge-ready 已完成。
 
 ## 关键入口
@@ -39,6 +40,8 @@
 - Legacy inventory deterministic fixture：`scripts/integration_hardening/legacy_inventory_fixture.py`
 - Integration hardening database source manifest focused gate：`scripts/testing/test_integration_hardening_database_source_manifest.py`
 - Legacy inventory focused core gate：`scripts/testing/test_integration_hardening_legacy_inventory.py`
+- Legacy historical-backup runner pure gate：`scripts/testing/test_integration_hardening_legacy_backup_inventory.py`
+- Legacy backup sanitizer focused gate：`scripts/testing/test_integration_hardening_legacy_backup_sanitizer.py`
 - Legacy inventory non-empty MySQL E2E gate：`scripts/testing/test_integration_hardening_legacy_inventory_mysql.py`
 
 ## 关键流程
@@ -61,6 +64,7 @@
 - 项目规则：`make test-project-rules`
 - Integration hardening database source manifest contract：`python3 scripts/testing/test_integration_hardening_database_source_manifest.py`（纯数据校验；不执行 capture/dump/restore，不代表同快照、restore 或 Phase 0 PASS）
 - Legacy inventory focused core：`/usr/bin/python3 -B scripts/testing/test_integration_hardening_legacy_inventory.py`
+- Legacy historical-backup runner pure contract：`/usr/bin/python3 -B scripts/testing/test_integration_hardening_legacy_backup_inventory.py`（不读取或恢复真实备份）
 - Legacy inventory non-empty MySQL fixture：`/usr/bin/python3 -B scripts/testing/test_integration_hardening_legacy_inventory_mysql.py`（覆盖独立 schema allocation/load/import、owned-only cleanup、TaskRun/TaskStep state digest 与 Step 10 directory/symlink guard）
 - Legacy inventory executable summary：`/usr/bin/python3 -B scripts/integration_hardening/legacy_migration.py --fixture-e2e`
 - 后端编译：`make backend-compile`

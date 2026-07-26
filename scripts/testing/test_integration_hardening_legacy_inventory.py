@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import os
 import subprocess
 import sys
 import tempfile
@@ -628,6 +629,7 @@ class LegacyInventoryTests(unittest.TestCase):
             mysqldump_binary="/opt/homebrew/bin/mysqldump",
         )
         observed: list[tuple[list[str], bytes | None]] = []
+        observed_environments: list[dict[str, str]] = []
 
         def record_run(
             argv: list[str],
@@ -637,6 +639,7 @@ class LegacyInventoryTests(unittest.TestCase):
             input_bytes = kwargs.get("input")
             self.assertTrue(input_bytes is None or isinstance(input_bytes, bytes))
             observed.append((list(argv), input_bytes))
+            observed_environments.append(dict(kwargs.get("env", {})))
             stdout = b""
             if Path(argv[0]).name == "mysql" and "--execute" in argv:
                 stdout = b"1\n"
@@ -656,12 +659,27 @@ class LegacyInventoryTests(unittest.TestCase):
             dump_path = temporary_path / "dump.sql"
             import_path.write_bytes(imported_sql)
 
-            with mock.patch("subprocess.run", side_effect=record_run):
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "DATABASE_URL": "mysql://application.invalid/private",
+                    "MYSQL_PWD": "private-password",
+                    "MYSQL_TEST_LOGIN_FILE": "/private/login-path.cnf",
+                },
+            ), mock.patch("subprocess.run", side_effect=record_run):
                 self.assertEqual(client.query_lines("SELECT 1"), ["1"])
                 client.load_fixture(source_schema, fixture_sql)
                 client.import_backup(target_schema, import_path)
                 client.execute_in_schema(target_schema, executed_sql)
                 client.dump_schema(source_schema, dump_path)
+
+        for argv, _ in observed:
+            self.assertEqual(argv.count("--no-defaults"), 1)
+            self.assertEqual(argv.count("--no-login-paths"), 1)
+        for environment in observed_environments:
+            self.assertNotIn("DATABASE_URL", environment)
+            self.assertNotIn("MYSQL_PWD", environment)
+            self.assertNotIn("MYSQL_TEST_LOGIN_FILE", environment)
 
         mysql_calls = [
             (argv, input_bytes)

@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 import importlib.util
 
@@ -84,6 +86,167 @@ def test_template_mapping_changes_must_be_logged() -> None:
         and "backend/app/pipeline/step10_amazon_template.py" in log_text,
         "类目映射修改记录必须覆盖映射 JSON 和 Step10 类目/字段逻辑",
     )
+
+
+def test_official_make_python_gates_fail_closed_for_invalid_interpreters() -> None:
+    makefile = ROOT / "Makefile"
+    with tempfile.TemporaryDirectory(prefix="fbm-make-python-sanity-") as temp_dir:
+        temp_root = Path(temp_dir)
+        scripts_dir = temp_root / "scripts"
+        scripts_dir.mkdir()
+        backend_bin = temp_root / "backend" / ".venv" / "bin"
+        backend_bin.mkdir(parents=True)
+        backend_app = temp_root / "backend" / "app"
+        backend_app.mkdir()
+        (backend_app / "probe.py").write_text("VALUE = 1\n", encoding="utf-8")
+        frontend = temp_root / "frontend"
+        frontend.mkdir()
+        execution_log = temp_root / "execution.log"
+        (scripts_dir / "validate_template_mappings.py").write_text(
+            "from pathlib import Path\n"
+            "with Path('execution.log').open('a', encoding='utf-8') as stream:\n"
+            "    stream.write('validate\\n')\n",
+            encoding="utf-8",
+        )
+        (scripts_dir / "test_project_rules.py").write_text(
+            "from pathlib import Path\n"
+            "with Path('execution.log').open('a', encoding='utf-8') as stream:\n"
+            "    stream.write('project-rules\\n')\n",
+            encoding="utf-8",
+        )
+        fake_bin = temp_root / "bin"
+        fake_bin.mkdir()
+        fake_npm = fake_bin / "npm"
+        fake_npm.write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' npm >> \"$EXECUTION_LOG\"\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        fake_npm.chmod(0o700)
+        environment = dict(os.environ)
+        environment["PATH"] = f"{fake_bin}:{environment.get('PATH', '')}"
+        environment["EXECUTION_LOG"] = str(execution_log)
+
+        def write_interpreter(path: Path, body: str | None) -> None:
+            if path.exists():
+                path.unlink()
+            if body is None:
+                path.write_bytes(b"")
+            else:
+                path.write_text(body, encoding="utf-8")
+            path.chmod(0o700)
+
+        real_python = Path(sys.executable).resolve()
+        empty_interpreter = temp_root / "empty-python"
+        write_interpreter(empty_interpreter, None)
+        nonzero_interpreter = temp_root / "nonzero-python"
+        write_interpreter(nonzero_interpreter, "#!/bin/sh\nexit 7\n")
+        command_marker_interpreter = temp_root / "command-marker-python"
+        write_interpreter(
+            command_marker_interpreter,
+            "#!/bin/sh\n"
+            'if [ "$1" = "-c" ]; then printf %s "FBM_PIPELINE_PYTHON_OK"; fi\n'
+            "exit 0\n",
+        )
+        wrong_marker_interpreter = temp_root / "wrong-marker-python"
+        write_interpreter(
+            wrong_marker_interpreter,
+            '#!/bin/sh\nprintf %s "wrong-python-probe"\nexit 0\n',
+        )
+
+        backend_python = backend_bin / "python"
+        backend_python.symlink_to(real_python)
+
+        def run_make(target: str, python: Path) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [
+                    "make",
+                    "--no-print-directory",
+                    "-f",
+                    str(makefile),
+                    target,
+                    f"PYTHON={python}",
+                ],
+                cwd=temp_root,
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+            )
+
+        python_targets = (
+            "validate-template-mappings",
+            "test-project-rules",
+            "backend-compile",
+            "check",
+            "full-check",
+        )
+        for interpreter in (
+            empty_interpreter,
+            nonzero_interpreter,
+            command_marker_interpreter,
+            wrong_marker_interpreter,
+        ):
+            for target in python_targets:
+                result = run_make(target, interpreter)
+                assert_true(
+                    result.returncode != 0,
+                    f"{target} must reject invalid PYTHON={interpreter.name}",
+                )
+                assert_true(
+                    "Python sanity check failed" in result.stderr
+                    and "set PYTHON=/usr/bin/python3" in result.stderr,
+                    f"{target} must return an actionable Python sanity error",
+                )
+
+        backend_targets = ("test-project-rules", "check", "full-check")
+        backend_python.unlink()
+        for target in backend_targets:
+            result = run_make(target, real_python)
+            assert_true(result.returncode != 0, f"{target} must require backend venv Python")
+            assert_true(
+                "backend/.venv/bin/python" in result.stderr
+                and "create the backend venv" in result.stderr,
+                f"{target} must explain how to repair a missing backend venv Python",
+            )
+
+        write_interpreter(backend_python, None)
+        for target in backend_targets:
+            result = run_make(target, real_python)
+            assert_true(result.returncode != 0, f"{target} must reject empty backend Python")
+            assert_true(
+                "backend/.venv/bin/python" in result.stderr
+                and "create the backend venv" in result.stderr,
+                f"{target} must explain how to repair an empty backend venv Python",
+            )
+
+        backend_python.unlink()
+        backend_python.symlink_to(real_python)
+        (backend_app / "probe.py").write_text("def broken(:\n", encoding="utf-8")
+        compile_failure = run_make("backend-compile", real_python)
+        assert_true(
+            compile_failure.returncode != 0
+            and "SyntaxError" in (compile_failure.stderr + compile_failure.stdout),
+            "backend-compile must execute real Python compileall and reject invalid syntax",
+        )
+        (backend_app / "probe.py").write_text("VALUE = 1\n", encoding="utf-8")
+        if execution_log.exists():
+            execution_log.unlink()
+        for target in python_targets:
+            result = run_make(target, real_python)
+            assert_true(
+                result.returncode == 0,
+                f"{target} must accept real Python execution: {result.stderr or result.stdout}",
+            )
+        execution_lines = execution_log.read_text(encoding="utf-8").splitlines()
+        assert_true(
+            execution_lines.count("validate") == 3
+            and execution_lines.count("project-rules") == 3
+            and execution_lines.count("npm") == 1,
+            "successful Make gates must execute their real downstream recipes",
+        )
 
 
 def test_real_asin_export_guard_is_present() -> None:
@@ -2282,27 +2445,33 @@ def test_integration_hardening_database_source_manifest_contract_gate() -> None:
 
 
 def test_integration_hardening_legacy_inventory_executable_gate() -> None:
-    focused_test = (
+    focused_tests = (
+        ROOT / "scripts" / "testing" / "test_integration_hardening_legacy_inventory.py",
         ROOT
         / "scripts"
         / "testing"
-        / "test_integration_hardening_legacy_inventory.py"
+        / "test_integration_hardening_legacy_backup_inventory.py",
+        ROOT
+        / "scripts"
+        / "testing"
+        / "test_integration_hardening_legacy_backup_sanitizer.py",
     )
-    assert_true(
-        focused_test.is_file(),
-        "必须保留可执行 Legacy inventory focused behavior gate",
-    )
-    result = subprocess.run(
-        ["/usr/bin/python3", "-B", str(focused_test)],
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-    )
-    assert_true(
-        result.returncode == 0,
-        "可执行 Legacy inventory focused behavior gate 失败: "
-        f"{result.stderr or result.stdout}",
-    )
+    for focused_test in focused_tests:
+        assert_true(
+            focused_test.is_file(),
+            f"必须保留可执行 Legacy inventory focused gate: {focused_test.name}",
+        )
+        result = subprocess.run(
+            ["/usr/bin/python3", "-B", str(focused_test)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        assert_true(
+            result.returncode == 0,
+            f"可执行 Legacy inventory focused gate 失败 ({focused_test.name}): "
+            f"{result.stderr or result.stdout}",
+        )
 
 
 def test_failed_task_run_display_precedes_pending_steps() -> None:
@@ -3327,6 +3496,7 @@ def main() -> int:
     tests = [
         test_category_conflict_only_overrides_conflict,
         test_template_mapping_changes_must_be_logged,
+        test_official_make_python_gates_fail_closed_for_invalid_interpreters,
         test_real_asin_export_guard_is_present,
         test_amazon_workflow_t1_fields_and_enums_exist,
         test_amazon_workflow_t2_service_projection_and_write_rules,

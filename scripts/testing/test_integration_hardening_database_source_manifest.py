@@ -1329,6 +1329,31 @@ class DatabaseSourceManifestContractTests(unittest.TestCase):
                 self.assertNotIn("shell=True", section)
                 self.assertEqual(source.count(f"        {gate_name},"), 1)
 
+        legacy_start = source.index(
+            "def test_integration_hardening_legacy_inventory_executable_gate"
+        )
+        legacy_end = source.find("\ndef ", legacy_start + 1)
+        legacy_section = source[legacy_start:] if legacy_end < 0 else source[
+            legacy_start:legacy_end
+        ]
+        self.assertIn(
+            '"test_integration_hardening_legacy_inventory.py"',
+            legacy_section,
+        )
+        self.assertIn(
+            '"test_integration_hardening_legacy_backup_inventory.py"',
+            legacy_section,
+        )
+        self.assertIn(
+            '"test_integration_hardening_legacy_backup_sanitizer.py"',
+            legacy_section,
+        )
+        self.assertIn("for focused_test in focused_tests:", legacy_section)
+        self.assertEqual(
+            legacy_section.count('["/usr/bin/python3", "-B", str(focused_test)]'),
+            1,
+        )
+
         negative_path_cases = (
             "scripts/integration_hardening/candidate_command_manifest.json",
             "scripts/testing/test_integration_hardening_manifest.py",

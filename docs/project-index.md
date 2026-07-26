@@ -1,7 +1,7 @@
 # Project Index
 
 状态：当前项目导航索引
-更新：2026-07-25
+更新：2026-07-26
 
 本文只做“找路”，不替代代码事实。每次任务先用本文定位领域，再读取对应 `docs/domain-index/*.md`，最后用 `git status --short`、`rg` 和关键文件片段核实当前实现。
 
@@ -49,8 +49,10 @@
 - 前端页面：`http://localhost:3190/products`, `http://localhost:3190/task-runs`, `http://localhost:3190/export-center`
 - Integration hardening database source manifest 纯数据合同：`python3 scripts/testing/test_integration_hardening_database_source_manifest.py`（只验证 canonical source/backup facts、detached digest 与 source-side empty proof；不执行 capture/dump/restore，不证明真实同快照或 restore 成功，也不代表 Phase 0 PASS）
 - Legacy inventory focused core：`/usr/bin/python3 -B scripts/testing/test_integration_hardening_legacy_inventory.py`（只读纯分类；锁定 candidate/capture/workflow 物理行 exactly-once ownership、模板 metadata/Catalog confirmed/A+ attribution preserve-first、manual review 与 records hash）
-- Legacy inventory 非空 MySQL fixture：`/usr/bin/python3 -B scripts/testing/test_integration_hardening_legacy_inventory_mysql.py`（只分配本轮 owned 的随机 `fbm_pipeline_ih_*` source/target schema，执行 6 表/6 projection dump/restore 对账、可信源码身份、TaskRun/TaskStep 完整状态 digest、Step 10 文件/目录与 symlink fail-closed 观测、collision/load/import 负向样本和 owned-only cleanup；不连接应用 DATABASE_URL）
+- Legacy historical-backup runner 纯合同：`/usr/bin/python3 -B scripts/testing/test_integration_hardening_legacy_backup_inventory.py`（验证 clean HEAD、离线 SQL sanitizer、旧列 compatibility、私有原子 evidence、no-clobber/失败恢复、固定 flushed stderr 阶段和最终单行 compact JSON stdout；不读取或恢复 54.5MB 真实备份）
+- Legacy inventory 非空 MySQL fixture/合成历史备份：`/usr/bin/python3 -B scripts/testing/test_integration_hardening_legacy_inventory_mysql.py`（只分配本轮 owned 的随机 `fbm_pipeline_ih_*` source/target schema，执行 source/canonical dump/target 对账、Task/Step 10 sentinel、命令证据和 cleanup；不连接应用 DATABASE_URL）
 - Legacy inventory 可执行 summary（手工入口，非追加 gate）：`/usr/bin/python3 -B scripts/integration_hardening/legacy_migration.py --fixture-e2e`（内嵌 deterministic `records` + `records_sha256`、实际 HEAD/dirty status/source-file hashes 与 cleanup；历史命令名仅为兼容 primary command，本切片不执行 migration apply）
+- 真实备份 clean-HEAD 命令合同与私有证据边界：`docs/superpowers/specs/2026-07-25-legacy-real-backup-inventory-technical-design.md`（runner 实现、代码评审和 QA 已完成；54.5MB 恢复 inventory 尚未执行，R2 仍待真实结果）
 
 ## 硬边界
 
