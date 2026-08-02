@@ -7,6 +7,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models import Product, TaskGroup, TaskRun, TaskStep
 from app.models.status import COMPLETED
+from app.pipeline.customer_mindset import load_customer_mindset
 from app.pipeline.engine import _assert_step_prerequisites, is_running
 from app.task_runtime.constants import STEP_STATUS_READY
 from app.task_runtime.json_utils import json_dumps
@@ -23,9 +24,35 @@ def _generation_start_step(product: Product) -> int:
     return max(product.current_step or 5, 5)
 
 
-async def _prerequisite_error(product_id: int, start_step: int) -> str | None:
+def _customer_mindset_ready(product: Product) -> bool:
+    if not product.data or not product.data.customer_mindset:
+        return False
     try:
-        await _assert_step_prerequisites(product_id, start_step)
+        return load_customer_mindset(product.data.customer_mindset, required=True) is not None
+    except RuntimeError:
+        return False
+
+
+def _generation_target(product: Product, start_step: int) -> str:
+    if start_step <= 5:
+        return "image_analysis"
+    if _customer_mindset_ready(product):
+        return "listing_generation"
+    return "customer_mindset"
+
+
+async def _prerequisite_error(
+    product_id: int,
+    start_step: int,
+    *,
+    require_customer_mindset: bool = True,
+) -> str | None:
+    try:
+        await _assert_step_prerequisites(
+            product_id,
+            start_step,
+            require_customer_mindset=require_customer_mindset,
+        )
     except Exception as exc:
         detail = getattr(exc, "detail", None)
         return str(detail or exc)
@@ -94,18 +121,27 @@ async def create_product_bulk_advance_run(
         if (product.current_step or 0) < 5:
             rows.append({**base_row, "status": "skipped", "reason": "尚未完成图片确认和竞品选择，不能批量进入生成"})
             continue
-        prerequisite_error = await _prerequisite_error(product.id, start_step)
+        prerequisite_error = await _prerequisite_error(
+            product.id,
+            start_step,
+            require_customer_mindset=False,
+        )
         if prerequisite_error:
             rows.append({**base_row, "status": "skipped", "reason": prerequisite_error})
             continue
 
+        generation_target = _generation_target(product, start_step)
+        reason_by_target = {
+            "image_analysis": "待提交图片分析子任务，完成后自动继续用户心智梳理",
+            "customer_mindset": "待提交用户心智梳理子任务，完成后自动继续 Listing",
+            "listing_generation": "用户心智梳理已完成，待提交 Listing 生成子任务",
+        }
         row = {
             **base_row,
             "status": "queued",
-            "reason": "待提交图片分析子任务，完成后由任务链路继续 Listing"
-            if start_step <= 5
-            else f"待提交 Step {start_step} 生成子任务",
+            "reason": reason_by_target[generation_target],
             "start_step": start_step,
+            "generation_target": generation_target,
         }
         rows.append(row)
         startable.append(row)
@@ -174,6 +210,7 @@ async def create_product_bulk_advance_run(
                     "product_id": row["product_id"],
                     "item_code": row.get("item_code"),
                     "start_step": row["start_step"],
+                    "generation_target": row["generation_target"],
                     "current_status": row.get("current_status"),
                     "current_step": row.get("current_step"),
                 }),

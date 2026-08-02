@@ -58,14 +58,17 @@ from app.models.status import (
     STEP5_LISTING,
     STEP6_CURATING,
     STEP6_DONE,
+    STEP_CUSTOMER_MINDSET,
     STEP_LABELS,
     STEP_STATUS_MAP,
     WORKFLOW_NODE_AUTO_SELECT_IMAGES,
     WORKFLOW_NODE_AUTO_SELECT_COMPETITOR,
     WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES,
     WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
+    WORKFLOW_NODE_CUSTOMER_MINDSET,
     WORKFLOW_NODE_FLOW_DONE,
     WORKFLOW_NODE_IMAGE_ANALYSIS,
+    WORKFLOW_NODE_KEYWORD_RESEARCH,
     WORKFLOW_NODE_LISTING_GENERATION,
     WORKFLOW_NODE_SEARCH_COMPETITOR,
     WORKFLOW_NODE_SELECT_COMPETITOR,
@@ -115,6 +118,11 @@ from app.pipeline.step3_keywords import run_keywords
 from app.pipeline.step4_category import run_category
 from app.pipeline.step5_listing import run_listing
 from app.pipeline.step6_image import run_image_analysis
+from app.pipeline.customer_mindset import (
+    customer_mindset_matches_product,
+    image_analysis_ready,
+    keyword_research_ready,
+)
 from app.pipeline.ride_on_category import RIDE_ON_CATEGORY_OPTIONS
 from app.pipeline.step10_amazon_template import (
     AMAZON_TEMPLATE_LOGIC_VERSION,
@@ -171,6 +179,7 @@ from app.task_planners.product_auto_image_selection import create_product_auto_i
 from app.task_planners.product_competitor_search import create_product_competitor_search_runs
 from app.task_planners.product_competitor_visual_match import create_product_competitor_visual_match_runs
 from app.task_planners.product_image_analysis import create_product_image_analysis_runs
+from app.task_planners.product_customer_mindset import create_product_customer_mindset_runs
 from app.task_planners.product_listing import create_product_listing_runs
 
 # Step runners indexed by step number
@@ -195,6 +204,7 @@ RUNNING_STATUSES = {
     "step4_category",
     "step5_listing",
     "step6_curating",
+    STEP_CUSTOMER_MINDSET,
 }
 
 APLUS_REGEN_ACTIVE_STATUSES = {"regen_queued", "regen_script_running", "regen_image_running"}
@@ -204,6 +214,8 @@ AUTO_START_READY_GENERATION_LIMIT = 100
 IMAGE_REVIEW_SELECTED_IMAGE_LIMIT = 9
 IMAGE_REVIEW_INITIAL_GALLERY_LIMIT = 36
 IMAGE_REVIEW_MAX_GALLERY_LIMIT = 200
+PRODUCT_HIGHLIGHT_MIN_COUNT = 3
+PRODUCT_HIGHLIGHT_MAX_COUNT = 5
 
 
 def _product_task_action_queued_stage(product: Product) -> str | None:
@@ -213,6 +225,8 @@ def _product_task_action_queued_stage(product: Product) -> str | None:
     step = int(product.current_step or 0)
     if product.status == STEP6_CURATING and step == 5:
         return "image_analysis"
+    if product.status == STEP_CUSTOMER_MINDSET and step == 6:
+        return "customer_mindset"
     if product.status == STEP5_LISTING and step == 6:
         return "listing_generation"
     return None
@@ -324,16 +338,112 @@ def _product_snapshot(product: Product) -> dict:
     return snapshot if isinstance(snapshot, dict) else {}
 
 
-async def _require_generation_prerequisites(db: AsyncSession, product: Product, start_step: int) -> None:
+def _customer_mindset_ready(product: Product) -> bool:
+    if not product.data or not product.data.customer_mindset:
+        return False
+    try:
+        return customer_mindset_matches_product(product.data.customer_mindset, product)
+    except RuntimeError:
+        return False
+
+
+def _listing_content_ready(product: Product) -> bool:
+    data = product.data
+    title = str(data.listing_title or "").strip() if data else ""
+    if not title or len(title) > settings.STEP5_TITLE_MAX_CHARS:
+        return False
+
+    highlights = _json_loads(
+        str(getattr(data, "listing_product_highlights", "") or ""),
+        None,
+    )
+    if not isinstance(highlights, list) or not PRODUCT_HIGHLIGHT_MIN_COUNT <= len(highlights) <= PRODUCT_HIGHLIGHT_MAX_COUNT:
+        return False
+    if any(
+        not str(item or "").strip()
+        or len(str(item).strip()) > settings.STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS
+        for item in highlights
+    ):
+        return False
+
+    bullets = _json_loads(str(data.listing_bullets or "").strip(), None)
+    if not isinstance(bullets, list) or len(bullets) != 5:
+        return False
+    return all(
+        str(item or "").strip()
+        and len(str(item).strip()) <= settings.STEP5_BULLET_MAX_CHARS
+        for item in bullets
+    )
+
+
+def _normalize_listing_title(value: Any) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if len(normalized) > settings.STEP5_TITLE_MAX_CHARS:
+        raise HTTPException(400, f"Listing 标题不能超过 {settings.STEP5_TITLE_MAX_CHARS} 个字符")
+    return normalized
+
+
+def _normalize_product_highlights(value: Any, *, label: str) -> list[str] | None:
+    if value is None:
+        return None
+    raw_items: Any = value
+    if isinstance(value, str):
+        text_value = value.strip()
+        if not text_value:
+            raw_items = []
+        elif text_value.startswith("["):
+            try:
+                raw_items = json.loads(text_value)
+            except json.JSONDecodeError as exc:
+                raise HTTPException(400, f"{label}必须是有效的 JSON 数组或每行一条文本") from exc
+        else:
+            raw_items = text_value.splitlines()
+    if not isinstance(raw_items, list):
+        raise HTTPException(400, f"{label}必须是 JSON 数组或每行一条文本")
+    if any(not isinstance(item, str) for item in raw_items):
+        raise HTTPException(400, f"{label}的每一条都必须是文本")
+
+    normalized = [" ".join(item.split()).strip() for item in raw_items if item.strip()]
+    if not PRODUCT_HIGHLIGHT_MIN_COUNT <= len(normalized) <= PRODUCT_HIGHLIGHT_MAX_COUNT:
+        raise HTTPException(
+            400,
+            f"{label}必须填写 {PRODUCT_HIGHLIGHT_MIN_COUNT}-{PRODUCT_HIGHLIGHT_MAX_COUNT} 条",
+        )
+    for index, item in enumerate(normalized, start=1):
+        if len(item) > settings.STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS:
+            raise HTTPException(
+                400,
+                f"{label}第 {index} 条不能超过 {settings.STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS} 个字符",
+            )
+    return normalized
+
+
+async def _require_generation_prerequisites(
+    db: AsyncSession,
+    product: Product,
+    start_step: int,
+    *,
+    require_customer_mindset: bool = True,
+) -> None:
     """Block a node from starting unless all previous business nodes are complete."""
     if start_step >= 5:
         if not product.images or not product.images.main_image_path:
             raise HTTPException(400, "不能进入图片分析：请先在详情页确认商品主图和 Listing 图片")
         if not product.competitor_asin:
             raise HTTPException(400, "不能进入图片分析：请先从候选竞品中选择一个参考竞品")
+        if not product.data or not keyword_research_ready(product.data.keywords_top):
+            raise HTTPException(400, "不能进入图片分析：请先完成关键词采集")
+        if product.data.suggested_price is None:
+            raise HTTPException(400, "不能进入图片分析：请先完成建议售价计算")
+        if not product.data.leaf_category:
+            raise HTTPException(400, "不能进入图片分析：请先完成 Amazon 类目匹配")
     if start_step >= 6:
-        if not product.images or not product.images.image_analysis:
+        if not product.images or not image_analysis_ready(product.images.image_analysis):
             raise HTTPException(400, "不能进入 Listing 文案：图片分析节点未完成")
+        if require_customer_mindset and not _customer_mindset_ready(product):
+            raise HTTPException(400, "不能进入 Listing 文案：用户心智梳理节点未完成")
     if start_step >= 7:
         raise HTTPException(400, "A+ 已从商品主流程拆出，请在 A+管理中单独生成")
 
@@ -677,7 +787,9 @@ def _failed_work_status_condition():
         WORKFLOW_NODE_AUTO_SELECT_IMAGES,
         WORKFLOW_NODE_SELECT_IMAGES,
         WORKFLOW_NODE_SELECT_COMPETITOR,
+        WORKFLOW_NODE_KEYWORD_RESEARCH,
         WORKFLOW_NODE_IMAGE_ANALYSIS,
+        WORKFLOW_NODE_CUSTOMER_MINDSET,
         WORKFLOW_NODE_LISTING_GENERATION,
         WORKFLOW_NODE_FLOW_DONE,
     )
@@ -815,7 +927,15 @@ def _ready_to_generate_condition():
             & (Product.workflow_status == WORKFLOW_STATUS_SUCCEEDED)
         )
         | (
+            (Product.workflow_node == WORKFLOW_NODE_KEYWORD_RESEARCH)
+            & Product.workflow_status.in_((WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_SUCCEEDED))
+        )
+        | (
             (Product.workflow_node == WORKFLOW_NODE_IMAGE_ANALYSIS)
+            & Product.workflow_status.in_((WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_SUCCEEDED))
+        )
+        | (
+            (Product.workflow_node == WORKFLOW_NODE_CUSTOMER_MINDSET)
             & Product.workflow_status.in_((WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_SUCCEEDED))
         )
         | (
@@ -831,7 +951,9 @@ def _running_condition():
         & Product.workflow_node.in_(
             (
                 WORKFLOW_NODE_AUTO_SELECT_IMAGES,
+                WORKFLOW_NODE_KEYWORD_RESEARCH,
                 WORKFLOW_NODE_IMAGE_ANALYSIS,
+                WORKFLOW_NODE_CUSTOMER_MINDSET,
                 WORKFLOW_NODE_LISTING_GENERATION,
             )
         )
@@ -1141,6 +1263,41 @@ async def _queue_product_listing_generation(
     await _require_generation_prerequisites(db, product, 6)
     runs = await create_product_listing_runs(db, [product.id], created_by=created_by)
     return [run.id for run in runs]
+
+
+async def _queue_product_customer_mindset(
+    db: AsyncSession,
+    product: Product,
+    *,
+    created_by: str,
+) -> list[int]:
+    await _require_generation_prerequisites(
+        db,
+        product,
+        6,
+        require_customer_mindset=False,
+    )
+    runs = await create_product_customer_mindset_runs(db, [product.id], created_by=created_by)
+    return [run.id for run in runs]
+
+
+async def _queue_product_post_image_generation(
+    db: AsyncSession,
+    product: Product,
+    *,
+    created_by: str,
+) -> tuple[str, list[int]]:
+    if not _customer_mindset_ready(product):
+        return WORKFLOW_NODE_CUSTOMER_MINDSET, await _queue_product_customer_mindset(
+            db,
+            product,
+            created_by=created_by,
+        )
+    return WORKFLOW_NODE_LISTING_GENERATION, await _queue_product_listing_generation(
+        db,
+        product,
+        created_by=created_by,
+    )
 
 
 def _raise_step1_browser_collect_removed() -> None:
@@ -1638,6 +1795,100 @@ def _category_upload_summary(category: str) -> dict[str, Any]:
     }
 
 
+def _builtin_template_registry() -> dict[str, dict[str, Any]]:
+    """Load the checked-in mapping files as the baseline template registry."""
+    registry: dict[str, dict[str, Any]] = {}
+    for mapping_path in sorted(MAPPING_DIR.glob("*.json")):
+        try:
+            mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            registry[mapping_path.stem] = {
+                "category": mapping_path.stem,
+                "path": None,
+                "source": "builtin",
+                "template_name": None,
+                "object_key": None,
+                "oss_url": None,
+                "error": f"映射文件无法读取: {type(exc).__name__}: {exc}",
+                "mapping_path": str(mapping_path),
+            }
+            continue
+
+        category = str(mapping.get("category") or mapping_path.stem).strip() or mapping_path.stem
+        template_value = str(mapping.get("template_path") or "").strip()
+        template_path = (MAPPING_DIR.parent / template_value).resolve() if template_value else None
+        registry[category] = {
+            "category": category,
+            "path": template_path,
+            "source": "builtin",
+            "template_name": template_path.name if template_path else None,
+            "object_key": None,
+            "oss_url": None,
+            "error": None if template_path else "映射未配置模板文件",
+            "mapping_path": str(mapping_path),
+        }
+    return registry
+
+
+def _template_registry_entries() -> dict[str, dict[str, Any]]:
+    """Overlay uploaded category templates on top of checked-in mappings."""
+    registry = _builtin_template_registry()
+    for raw_category, upload in _load_category_template_manifest().items():
+        if not isinstance(upload, dict):
+            continue
+        category = str(raw_category or upload.get("category") or "").strip()
+        cache_path = str(upload.get("cache_path") or "").strip()
+        if not category or not cache_path:
+            continue
+        path = Path(cache_path).expanduser()
+        registry[category] = {
+            "category": category,
+            "path": path,
+            "source": "uploaded",
+            "template_name": str(upload.get("filename") or path.name),
+            "object_key": str(upload.get("object_key") or "").strip() or None,
+            "oss_url": str(upload.get("oss_url") or "").strip() or None,
+            "error": None,
+            "mapping_path": registry.get(category, {}).get("mapping_path"),
+        }
+    return registry
+
+
+def _template_registry_status(entry: dict[str, Any]) -> tuple[bool, str | None]:
+    path = entry.get("path")
+    if not isinstance(path, Path):
+        return False, str(entry.get("error") or "模板路径不存在")
+    if not _template_file_enabled(path):
+        return False, "模板文件已停用"
+    if path.is_file() or entry.get("object_key"):
+        return True, None
+    return False, "模板本地缓存不存在" if entry.get("source") == "uploaded" else f"模板文件不存在: {path}"
+
+
+def _template_registry_entry_for_category(
+    category: str,
+    brands: list[str] | None,
+    registry: dict[str, dict[str, Any]],
+) -> dict[str, Any] | None:
+    direct = registry.get(category)
+    if direct:
+        return direct
+
+    for brand in brands or ["Vindhvisk"]:
+        product = SimpleNamespace(brand=brand or "Vindhvisk")
+        pd = SimpleNamespace(leaf_category=category, categories=category, product_type="", title="")
+        try:
+            mapping = _load_template_mapping(product, pd)
+        except Exception:
+            continue
+        mapped_path = Path(mapping["template_path"]).expanduser().resolve()
+        for entry in registry.values():
+            entry_path = entry.get("path")
+            if entry_path and Path(entry_path).expanduser().resolve() == mapped_path:
+                return entry
+    return None
+
+
 def _catalog_template_status_for_category(
     category: str,
     brands: list[str] | None = None,
@@ -1705,9 +1956,8 @@ async def _catalog_template_file_summaries(db: AsyncSession) -> list[CatalogTemp
         error: str | None = None,
         preferred_object_key: str | None = None,
         preferred_oss_url: str | None = None,
+        can_delete: bool | None = None,
     ) -> None:
-        if not path.is_file() and not preferred_object_key:
-            return
         resolved = path.expanduser().resolve()
         file_id = _template_file_id(resolved)
         state = template_file_state.get(file_id)
@@ -1729,42 +1979,37 @@ async def _catalog_template_file_summaries(db: AsyncSession) -> list[CatalogTemp
                 "support_categories": [],
                 "template_errors": [],
                 "can_download": bool(path.is_file() or object_key),
-                "can_delete": True,
+                "can_delete": _template_file_source(resolved) == "uploaded" if can_delete is None else can_delete,
             },
         )
         if object_key:
             row["oss_object_key"] = object_key
         if oss_url:
             row["oss_url"] = oss_url
-        if category not in row["support_categories"]:
+        if category and category not in row["support_categories"]:
             row["support_categories"].append(category)
         if error and error not in row["template_errors"]:
             row["template_errors"].append(error)
 
-    for category_row in await _catalog_template_category_samples(db):
-        category = category_row["category"]
-        upload = _category_template_upload_for(category)
-        if upload:
-            cache_path = str(upload.get("cache_path") or "").strip()
-            if cache_path:
-                add_file(
-                    Path(cache_path).expanduser(),
-                    category,
-                    preferred_object_key=upload.get("object_key"),
-                    preferred_oss_url=upload.get("oss_url"),
-                )
-                continue
-
-        available, _template_name, template_path, template_error = _catalog_template_status_for_category(
-            category,
-            category_row.get("brands") or [],
+    registry = _template_registry_entries()
+    for entry in registry.values():
+        path = entry.get("path")
+        if not isinstance(path, Path):
+            continue
+        available, error = _template_registry_status(entry)
+        add_file(
+            path,
+            str(entry["category"]),
+            error=None if available else error,
+            preferred_object_key=entry.get("object_key"),
+            preferred_oss_url=entry.get("oss_url"),
+            can_delete=entry.get("source") == "uploaded",
         )
-        if template_path:
-            add_file(
-                Path(template_path).expanduser(),
-                category,
-                error=None if available else template_error,
-            )
+
+    template_root = (Path(__file__).resolve().parents[1] / "pipeline" / "templates").resolve()
+    for path in sorted(template_root.glob("*.xls*")):
+        if _template_file_id(path) not in files:
+            add_file(path, "", error="未被类目映射引用", can_delete=False)
 
     summaries: list[CatalogTemplateFileSummary] = []
     for row in files.values():
@@ -3327,7 +3572,12 @@ async def bulk_start_pipeline(body: BulkStartRequest, db: AsyncSession = Depends
             errors.append(f"任务 {product_id} 尚未完成图片/竞品确认，不能启动生成")
             continue
         try:
-            await _require_generation_prerequisites(db, product, _generation_start_step(product))
+            await _require_generation_prerequisites(
+                db,
+                product,
+                _generation_start_step(product),
+                require_customer_mindset=False,
+            )
         except HTTPException as exc:
             errors.append(f"任务 {product_id} {exc.detail}")
             continue
@@ -3349,9 +3599,9 @@ async def bulk_start_pipeline(body: BulkStartRequest, db: AsyncSession = Depends
         if start_step == 6:
             try:
                 if product:
-                    await _queue_product_listing_generation(db, product, created_by="bulk_start")
+                    await _queue_product_post_image_generation(db, product, created_by="bulk_start")
                 else:
-                    await create_product_listing_runs(db, [product_id], created_by="bulk_start")
+                    raise ValueError("商品不存在，无法提交图片分析后的生成任务")
                 actually_started.append(product_id)
             except ValueError as exc:
                 errors.append(f"任务 {product_id} {exc}")
@@ -3415,7 +3665,12 @@ async def auto_start_ready_generation(
             continue
         start_step = _generation_start_step(product)
         try:
-            await _require_generation_prerequisites(db, product, start_step)
+            await _require_generation_prerequisites(
+                db,
+                product,
+                start_step,
+                require_customer_mindset=False,
+            )
         except HTTPException as exc:
             errors.append(f"任务 {product.id} {exc.detail}")
             continue
@@ -3437,9 +3692,13 @@ async def auto_start_ready_generation(
         if start_step == 6:
             try:
                 if product:
-                    await _queue_product_listing_generation(db, product, created_by="auto_start_ready_generation")
+                    await _queue_product_post_image_generation(
+                        db,
+                        product,
+                        created_by="auto_start_ready_generation",
+                    )
                 else:
-                    await create_product_listing_runs(db, [product_id], created_by="auto_start_ready_generation")
+                    raise ValueError("商品不存在，无法提交图片分析后的生成任务")
                 started_ids.append(product_id)
             except ValueError as exc:
                 errors.append(f"任务 {product_id} {exc}")
@@ -3857,27 +4116,63 @@ async def list_catalog_export_categories(db: AsyncSession = Depends(get_db)):
 
 @router.get("/catalog/template-categories", response_model=list[CatalogExportCategorySummary])
 async def list_catalog_template_categories(db: AsyncSession = Depends(get_db)):
-    """列出库里所有商品类目，用于类目模板管理。"""
+    """List registered templates, then augment them with current catalog usage."""
     groups: dict[str, dict] = {}
-    for row in await _catalog_template_category_samples(db):
-        category = row["category"]
-        count = int(row["count"] or 0)
-        available, template_name, template_path, template_error = _catalog_template_status_for_category(
-            category,
-            row.get("brands") or [],
-        )
+    registry = _template_registry_entries()
+
+    for entry in registry.values():
+        category = str(entry["category"])
+        available, template_error = _template_registry_status(entry)
+        path = entry.get("path")
         groups[category] = {
             "category": category,
-            "count": count,
-            "exportable_count": count if available else 0,
-            "blocked_count": 0 if available else count,
+            "count": 0,
+            "exportable_count": 0,
+            "blocked_count": 0,
             "template_available": available,
-            "template_name": template_name,
-            "template_path": template_path,
+            "template_name": entry.get("template_name"),
+            "template_path": str(path) if path else None,
             "template_error": template_error,
             **_category_upload_summary(category),
-            "sample_item_codes": row.get("sample_item_codes") or [],
+            "sample_item_codes": [],
         }
+
+    for row in await _catalog_template_category_samples(db):
+        source_category = row["category"]
+        count = int(row["count"] or 0)
+        entry = _template_registry_entry_for_category(
+            source_category,
+            row.get("brands") or [],
+            registry,
+        )
+        if entry:
+            category = str(entry["category"])
+            available, template_error = _template_registry_status(entry)
+            group = groups[category]
+        else:
+            category = source_category
+            available, template_name, template_path, template_error = _catalog_template_status_for_category(
+                category,
+                row.get("brands") or [],
+            )
+            group = groups.setdefault(category, {
+                "category": category,
+                "count": 0,
+                "exportable_count": 0,
+                "blocked_count": 0,
+                "template_available": available,
+                "template_name": template_name,
+                "template_path": template_path,
+                "template_error": template_error,
+                **_category_upload_summary(category),
+                "sample_item_codes": [],
+            })
+        group["count"] += count
+        group["exportable_count"] += count if available else 0
+        group["blocked_count"] += 0 if available else count
+        for item_code in row.get("sample_item_codes") or []:
+            if item_code not in group["sample_item_codes"] and len(group["sample_item_codes"]) < 5:
+                group["sample_item_codes"].append(item_code)
     return _export_category_summaries(groups)
 
 
@@ -3937,6 +4232,8 @@ async def update_catalog_template_file_status(
 @router.delete("/catalog/template-files/{file_id}", response_model=list[CatalogTemplateFileSummary])
 async def delete_catalog_template_file(file_id: str, db: AsyncSession = Depends(get_db)):
     item = await _find_catalog_template_file(db, file_id)
+    if not item.can_delete:
+        raise HTTPException(400, "内置模板不能删除；如需替换，请上传同类目模板覆盖")
     if not item.template_path:
         raise HTTPException(400, "模板文件路径不存在")
 
@@ -4882,8 +5179,10 @@ async def confirm_product(product_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(400, "任务还在运行中，完成后再确认")
     if product.current_step < 6:
         raise HTTPException(400, "Listing 内容还没有生成完成")
-    if not product.data or not product.data.listing_title or not product.data.listing_bullets:
-        raise HTTPException(400, "Listing 标题和五点还没有生成完成")
+    if not _customer_mindset_ready(product):
+        raise HTTPException(400, "用户心智梳理还没有完成，不能确认进入待导出")
+    if not _listing_content_ready(product):
+        raise HTTPException(400, "Listing 标题、商品亮点和五点还没有完整生成")
 
     product.status = COMPLETED
     product.current_step = 6
@@ -5077,10 +5376,12 @@ async def update_product(
         if key in {
             "listing_title",
             "listing_bullets",
+            "listing_product_highlights",
             "listing_description",
             "listing_search_terms",
             "listing_title_zh",
             "listing_bullets_zh",
+            "listing_product_highlights_zh",
             "listing_description_zh",
             "listing_search_terms_zh",
             "listing_primary_keyword",
@@ -5110,7 +5411,13 @@ async def update_product(
         if leaf_category_value is not None:
             product.data.leaf_category = leaf_category_value.strip() or None
         for key, value in product_data_updates.items():
-            if key in {"listing_bullets", "listing_bullets_zh"}:
+            if key == "listing_title":
+                product.data.listing_title = _normalize_listing_title(value)
+            elif key in {"listing_product_highlights", "listing_product_highlights_zh"}:
+                label = "商品亮点" if key == "listing_product_highlights" else "中文商品亮点"
+                normalized = _normalize_product_highlights(value, label=label)
+                setattr(product.data, key, json.dumps(normalized, ensure_ascii=False) if normalized else None)
+            elif key in {"listing_bullets", "listing_bullets_zh"}:
                 if isinstance(value, list):
                     normalized = [" ".join(str(item).split()).strip() for item in value if str(item).strip()]
                 else:
@@ -5560,7 +5867,12 @@ async def retry_step(product_id: int, db: AsyncSession = Depends(get_db)):
     if (step or 0) <= 1:
         _raise_step1_browser_collect_removed()
     if (step or 0) >= 5:
-        await _require_generation_prerequisites(db, product, step)
+        await _require_generation_prerequisites(
+            db,
+            product,
+            step,
+            require_customer_mindset=step != 6,
+        )
         if step == 5:
             await _queue_product_image_analysis(db, product, created_by="retry_step")
             refreshed = await db.execute(
@@ -5574,7 +5886,10 @@ async def retry_step(product_id: int, db: AsyncSession = Depends(get_db)):
             queued_product.current_task_status = _current_task_status(queued_product)
             return queued_product
         if step == 6:
-            await _queue_product_listing_generation(db, product, created_by="retry_step")
+            if product.workflow_node == WORKFLOW_NODE_CUSTOMER_MINDSET:
+                await _queue_product_customer_mindset(db, product, created_by="retry_step")
+            else:
+                await _queue_product_post_image_generation(db, product, created_by="retry_step")
         else:
             await create_product_bulk_advance_run(
                 db,
@@ -5629,7 +5944,12 @@ async def run_product_from_step(
         raise HTTPException(400, f"当前状态不能从该节点启动生成: {product.status}")
     if product.status == "paused":
         raise HTTPException(400, "商品已挂起，请先点击继续")
-    await _require_generation_prerequisites(db, product, start_step)
+    await _require_generation_prerequisites(
+        db,
+        product,
+        start_step,
+        require_customer_mindset=start_step != 6,
+    )
 
     if start_step == 5:
         await _queue_product_image_analysis(db, product, created_by="run_from_step")
@@ -5645,7 +5965,7 @@ async def run_product_from_step(
         return queued_product
 
     if start_step == 6:
-        await _queue_product_listing_generation(db, product, created_by="run_from_step")
+        await _queue_product_post_image_generation(db, product, created_by="run_from_step")
     else:
         await db.commit()
         await create_product_bulk_advance_run(
@@ -5691,6 +6011,31 @@ async def resume_pipeline(product_id: int, db: AsyncSession = Depends(get_db)):
     if step > 6:
         raise HTTPException(400, f"当前步骤无效，无法继续: {step}")
     if product.status == PENDING_REVIEW and step >= 6:
+        if not _customer_mindset_ready(product):
+            await _queue_product_customer_mindset(db, product, created_by="resume_pipeline")
+            refreshed = await db.execute(
+                select(Product)
+                .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
+                .where(Product.id == product_id)
+            )
+            queued_product = refreshed.scalar_one_or_none()
+            if not queued_product:
+                raise HTTPException(404, "Product not found")
+            queued_product.current_task_status = _current_task_status(queued_product)
+            return queued_product
+        if not _listing_content_ready(product):
+            await _queue_product_post_image_generation(db, product, created_by="resume_pipeline")
+            refreshed = await db.execute(
+                select(Product)
+                .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
+                .where(Product.id == product_id)
+            )
+            queued_product = refreshed.scalar_one_or_none()
+            if not queued_product:
+                raise HTTPException(404, "Product not found")
+            queued_product.current_task_status = _current_task_status(queued_product)
+            return queued_product
+        await _require_generation_prerequisites(db, product, 6)
         product.status = COMPLETED
         product.current_step = 6
         product.error_message = None
@@ -5700,7 +6045,12 @@ async def resume_pipeline(product_id: int, db: AsyncSession = Depends(get_db)):
         await db.refresh(product)
         return product
     if step >= 5:
-        await _require_generation_prerequisites(db, product, step)
+        await _require_generation_prerequisites(
+            db,
+            product,
+            step,
+            require_customer_mindset=step != 6,
+        )
     if step == 5:
         await _queue_product_image_analysis(db, product, created_by="resume_pipeline")
         refreshed = await db.execute(
@@ -5714,7 +6064,10 @@ async def resume_pipeline(product_id: int, db: AsyncSession = Depends(get_db)):
         queued_product.current_task_status = _current_task_status(queued_product)
         return queued_product
     if step == 6:
-        await _queue_product_listing_generation(db, product, created_by="resume_pipeline")
+        if product.workflow_node == WORKFLOW_NODE_CUSTOMER_MINDSET:
+            await _queue_product_customer_mindset(db, product, created_by="resume_pipeline")
+        else:
+            await _queue_product_post_image_generation(db, product, created_by="resume_pipeline")
         refreshed = await db.execute(
             select(Product)
             .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
@@ -5755,13 +6108,27 @@ async def run_single_step(product_id: int, step: int, db: AsyncSession = Depends
     if is_running(product.id):
         raise HTTPException(400, "商品流程正在运行中，不能单独执行节点")
     if step >= 5:
-        await _require_generation_prerequisites(db, product, step)
+        await _require_generation_prerequisites(
+            db,
+            product,
+            step,
+            require_customer_mindset=step != 6,
+        )
     if step == 5:
         task_run_ids = await _queue_product_image_analysis(db, product, created_by="single_step")
         return {"status": "queued", "step": step, "task_run_ids": task_run_ids}
     if step == 6:
-        task_run_ids = await _queue_product_listing_generation(db, product, created_by="single_step")
-        return {"status": "queued", "step": step, "task_run_ids": task_run_ids}
+        queued_node, task_run_ids = await _queue_product_post_image_generation(
+            db,
+            product,
+            created_by="single_step",
+        )
+        return {
+            "status": "queued",
+            "step": step,
+            "workflow_node": queued_node,
+            "task_run_ids": task_run_ids,
+        }
 
     product.status = STEP_STATUS_MAP.get(step, "created")
     product.current_step = step

@@ -16,6 +16,8 @@ Backend runtime configuration is defined by `backend/app/config.py` and loaded f
 
 `backend/.env.example` is the committed template. `backend/.env` is local-only and ignored by Git.
 
+在“系统配置”菜单中，“本地环境变量”标签页会按 `backend/.env` 中已有的分类注释分组，可查看变量名和非敏感值、逐项更新配置，或导入整份 `KEY=value` 配置文件。API Key、Token、Secret、Password 和数据库连接串始终只显示为已配置状态，不能通过页面读取原始值；如需变更，重新输入并保存。导入会原子替换本地 `backend/.env`，保存或导入后均需重启服务。
+
 Relative paths in `backend/.env` are resolved relative to the `backend/` directory. For example:
 
 ```env
@@ -62,7 +64,7 @@ The GPT image helper under `codex-skills/gpt-image-async/scripts/` loads configu
 | Safe default ports | `backend/app/config.py`, `frontend/.env.example` | Yes |
 | Local backend API keys | `backend/.env` or process env | No |
 | Local OSS credentials | `backend/.env` or process env | No |
-| Local SellerSprite token | `backend/.env` or process env | No |
+| Local SellerSprite OpenAPI key or legacy browser token | `backend/.env` or process env | No |
 | Local GIGA Open API credentials | `backend/.env` or process env | No |
 | Local product material root | `backend/.env` | No |
 | Frontend dev backend URL | `frontend/.env` | No |
@@ -70,6 +72,33 @@ The GPT image helper under `codex-skills/gpt-image-async/scripts/` loads configu
 | Amazon template mapping JSON | `backend/app/pipeline/template_mappings/*.json` | Yes |
 | Amazon template XLSM files | `backend/app/pipeline/templates/*.xlsm` | Yes |
 | Generated product data, images, DB files, logs | `data/`, `logs/`, `backend/data/` | No |
+
+关键词反查优先使用 `SELLERSPRITE_OPENAPI_SECRET_KEY` 调用开放平台，不需要浏览器登录；仅在未配置开放平台密钥时，才兼容使用 `SELLERSPRITE_TOKEN` 或 Chrome 的旧登录态。开放平台已经配置但请求失败时会明确报错，不会自动打开浏览器或把接口故障伪装成无关键词。
+
+### Listing 文案长度
+
+Listing 生成使用以下本地配置：
+
+```env
+STEP5_TITLE_MAX_CHARS=75
+STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS=125
+STEP5_BULLET_MAX_CHARS=500
+# 自动生成五点以 320 字符为目标；500 仍是 Amazon 字段兼容上限。
+STEP5_SEARCH_TERMS_MAX_BYTES=250
+```
+
+标题上限包含空格和标点。Product Highlights 是独立于旧五点的 3-5 条短亮点，单条不得超过 125 字符；标题或亮点超限时生成器会把具体违规原因反馈给 LLM 重写，不会直接截断文本。旧五点继续保留并写入当前 Amazon 模板的 `bullet_point #1-#5`。现有模板尚未提供 Item Highlights 列，因此商品亮点会保存在系统中并在导出警告中提示，不会猜测或伪造模板字段。
+
+### Amazon 人像图片元数据
+
+含人物的 A+ 或 Listing 投放图片会写入 `XMP-dc:Subject=contains-synthetic-performer`。工作节点必须安装 ExifTool，并可按需指定其路径：
+
+```env
+IMAGE_COMPLIANCE_EXIFTOOL_PATH=exiftool
+IMAGE_COMPLIANCE_VERIFY_OSS_ROUND_TRIP=true
+```
+
+开启 OSS 回读验证后，上传后的对象会被下载并检查 XMP 标签及 SHA-256；任一环节失败会阻止该图片进入 Amazon 导出 URL。部署后用 `cd backend && .venv/bin/python ../scripts/test_amazon_image_compliance_oss.py` 进行一次真实对象的上传、回读和清理验证。
 
 ## Fresh Clone Setup
 

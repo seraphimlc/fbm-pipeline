@@ -66,7 +66,9 @@ const groupLabel = (key: string) => {
     finalize: '校验',
     aggregate: '聚合',
     materialize: '生成草稿',
+    keyword_research: '关键词采集',
     image_analysis: '图片分析',
+    customer_mindset: '用户心智梳理',
     listing: 'Listing 生成',
     export_file: '导出文件',
     aplus_generate: 'A+生成',
@@ -86,7 +88,9 @@ const stepLabel = (type: string) => {
     giga_pull_finalize_snapshot: '快照校验',
     giga_pull_aggregate_items: '聚合 Item/Group',
     giga_pull_materialize_products: '生成商品草稿',
+    product_keyword_research: '关键词采集',
     product_image_analysis: '图片分析',
+    product_customer_mindset: '用户心智梳理',
     product_listing_generation: 'Listing 生成',
     catalog_export_template: '导出文件',
     aplus_generate_product: 'A+生成',
@@ -100,7 +104,9 @@ const stepLabel = (type: string) => {
 const taskTypeLabel = (type: string) => {
   const map: Record<string, string> = {
     giga_pull: 'GIGA 拉品',
+    product_keyword_research: '关键词采集',
     product_image_analysis: '图片分析',
+    product_customer_mindset: '用户心智梳理',
     product_listing_generation: 'Listing 生成',
     catalog_export: '导出文件',
     aplus_generate: 'A+生成',
@@ -147,6 +153,7 @@ const latestResultLabel = (value?: string | null) => {
   const map: Record<string, { color: string; label: string }> = {
     export_ready: { color: 'success', label: '已到待导出' },
     image_analysis_queued: { color: 'processing', label: '图片分析已提交' },
+    customer_mindset_queued: { color: 'processing', label: '用户心智已提交' },
     listing_queued: { color: 'processing', label: 'Listing 已提交' },
     in_progress: { color: 'processing', label: '后续生成中' },
     blocked: { color: 'warning', label: '仍阻塞' },
@@ -562,7 +569,7 @@ const TaskRunCenter: React.FC = () => {
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <div>
           <Title level={4} style={{ margin: 0 }}>任务中心</Title>
-          <Text type="secondary">展示任务框架 V1；当前承载 GIGA 拉品、库存/价格同步、图片分析、Listing、批量推进、导出文件和 A+生成。</Text>
+          <Text type="secondary">展示任务框架 V1；当前承载 GIGA 拉品、库存/价格同步、图片分析、用户心智、Listing、批量推进、导出文件和 A+生成。</Text>
         </div>
         <Space>
           <Select
@@ -599,7 +606,9 @@ const TaskRunCenter: React.FC = () => {
             onChange={(value) => { resetPage(); setTaskType(value); }}
             options={[
               { value: 'giga_pull', label: 'GIGA 拉品' },
+              { value: 'product_keyword_research', label: '关键词采集' },
               { value: 'product_image_analysis', label: '图片分析' },
+              { value: 'product_customer_mindset', label: '用户心智梳理' },
               { value: 'product_listing_generation', label: 'Listing 生成' },
               { value: 'catalog_export', label: '导出文件' },
               { value: 'aplus_generate', label: 'A+生成' },

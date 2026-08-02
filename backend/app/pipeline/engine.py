@@ -2,11 +2,10 @@
 Pipeline 引擎 — 编排商品优化 Pipeline 的执行
 
 状态流转：
-  Step1(采集) → Step2(定价) → Step3(关键词) → Step4(类目) → Step5(图片分析) → Step6(Listing) → 待导出
+  图片分析 → 用户心智梳理 → Listing → 待导出；生成尾段由新任务中心执行。
 """
 
 import asyncio
-import json
 import logging
 import time
 import traceback
@@ -24,21 +23,17 @@ from app.pipeline.step3_keywords import Step3NeedsLogin, run_keywords
 from app.pipeline.step4_category import Step4NeedsReview, run_category
 from app.pipeline.step5_listing import run_listing
 from app.pipeline.step6_image import run_image_analysis
+from app.pipeline.customer_mindset import (
+    customer_mindset_matches_product,
+    image_analysis_ready,
+    keyword_research_ready,
+)
 
 logger = logging.getLogger(__name__)
 
 # 正在运行的Pipeline任务
 _running_tasks: dict[int, asyncio.Task] = {}
 _pipeline_semaphore = asyncio.Semaphore(max(1, settings.PIPELINE_MAX_CONCURRENCY))
-
-
-def _json_loads(value: str | None, fallback):
-    if not value:
-        return fallback
-    try:
-        return json.loads(value)
-    except Exception:
-        return fallback
 
 
 def _is_competitor_listing_capture_state(product: Product) -> bool:
@@ -50,7 +45,21 @@ def _is_competitor_listing_capture_state(product: Product) -> bool:
     )
 
 
-async def _assert_step_prerequisites(product_id: int, step: int) -> None:
+def _customer_mindset_ready(product: Product) -> bool:
+    if not product.data or not product.data.customer_mindset:
+        return False
+    try:
+        return customer_mindset_matches_product(product.data.customer_mindset, product)
+    except RuntimeError:
+        return False
+
+
+async def _assert_step_prerequisites(
+    product_id: int,
+    step: int,
+    *,
+    require_customer_mindset: bool = True,
+) -> None:
     async with async_session() as db:
         result = await db.execute(
             select(Product)
@@ -65,8 +74,16 @@ async def _assert_step_prerequisites(product_id: int, step: int) -> None:
                 raise RuntimeError("前置节点未完成：请先确认商品主图和 Listing 图片")
             if not product.competitor_asin:
                 raise RuntimeError("前置节点未完成：请先从候选中选择参考竞品")
-        if step >= 6 and (not product.images or not product.images.image_analysis):
+            if not product.data or not keyword_research_ready(product.data.keywords_top):
+                raise RuntimeError("前置节点未完成：请先完成关键词采集")
+            if product.data.suggested_price is None:
+                raise RuntimeError("前置节点未完成：请先完成建议售价计算")
+            if not product.data.leaf_category:
+                raise RuntimeError("前置节点未完成：请先完成 Amazon 类目匹配")
+        if step >= 6 and (not product.images or not image_analysis_ready(product.images.image_analysis)):
             raise RuntimeError("前置节点未完成：图片分析节点未完成，不能进入 Listing 文案")
+        if step >= 6 and require_customer_mindset and not _customer_mindset_ready(product):
+            raise RuntimeError("前置节点未完成：用户心智梳理未完成，不能进入 Listing 文案")
         if step >= 7:
             raise RuntimeError("A+ 已从主流程拆出，请在 A+管理中单独生成")
 
@@ -94,7 +111,11 @@ async def _run_pipeline(product_id: int, start_step: int = 1):
     """
     try:
         if start_step <= 6:
-            raise RuntimeError("Step5 图片分析和 Step6 Listing 已迁移到新任务中心，请创建 product_image_analysis/product_listing_generation task_run")
+            raise RuntimeError(
+                "图片分析、用户心智梳理和 Listing 已迁移到新任务中心，"
+                "请创建对应的 product task_run"
+            )
+        raise RuntimeError("A+ 已从商品主流程拆出，请在 A+管理中单独生成")
 
         if start_step <= 1:
             raise RuntimeError(
@@ -230,6 +251,10 @@ async def _mark_completed_for_export(product_id: int) -> None:
         product = result.scalar_one_or_none()
         if not product:
             return
+        if not _customer_mindset_ready(product):
+            raise RuntimeError("用户心智梳理未完成，不能进入待导出")
+        if not product.data or not product.data.listing_title or not product.data.listing_bullets:
+            raise RuntimeError("Listing 标题和五点未完成，不能进入待导出")
 
         product.status = COMPLETED
         product.current_step = 6
@@ -274,29 +299,24 @@ def start_pipeline(product_id: int, start_step: int = 1) -> bool:
         bool: 是否成功启动
     """
     if start_step <= 6:
-        logger.warning("[Pipeline] Step5 图片分析和 Step6 Listing 已迁移到新任务中心，拒绝旧内存启动: product=%s start_step=%s", product_id, start_step)
+        logger.warning(
+            "[Pipeline] 图片分析、用户心智梳理和 Listing 已迁移到新任务中心，拒绝旧内存启动: product=%s start_step=%s",
+            product_id,
+            start_step,
+        )
         return False
-    if product_id in _running_tasks:
-        return False
-
-    task = asyncio.create_task(_run_pipeline_with_limit(product_id, start_step=start_step))
-    _running_tasks[product_id] = task
-    return True
+    logger.warning("[Pipeline] A+ 已从商品主流程拆出，拒绝旧内存启动: product=%s start_step=%s", product_id, start_step)
+    return False
 
 
 async def run_pipeline_tracked(product_id: int, start_step: int = 1) -> None:
     """Run a product pipeline in the current task while exposing it via is_running()."""
     if start_step <= 6:
-        raise RuntimeError("Step5 图片分析和 Step6 Listing 已迁移到新任务中心，请创建 product_image_analysis/product_listing_generation task_run")
-    current_task = asyncio.current_task()
-    if current_task is None:
-        await _run_pipeline_with_limit(product_id, start_step=start_step)
-        return
-    existing = _running_tasks.get(product_id)
-    if existing and not existing.done() and existing is not current_task:
-        raise RuntimeError("商品流程正在运行中")
-    _running_tasks[product_id] = current_task
-    await _run_pipeline_with_limit(product_id, start_step=start_step)
+        raise RuntimeError(
+            "图片分析、用户心智梳理和 Listing 已迁移到新任务中心，"
+            "请创建对应的 product task_run"
+        )
+    raise RuntimeError("A+ 已从商品主流程拆出，请在 A+管理中单独生成")
 
 
 def cancel_pipeline(product_id: int) -> bool:

@@ -24,6 +24,13 @@ from app.models import Product, ProductData, ProductFile
 from app.pipeline.ride_on_category import RIDE_ON_CATEGORY_MARKERS, select_ride_on_category
 from app.pipeline.search_terms import normalize_search_terms
 from app.services.oss_uploader import oss_configured, upload_private_image
+from app.services.amazon_image_compliance import (
+    ensure_synthetic_performer_subject,
+    prepare_delivery_copy,
+    sha256_file,
+    verify_oss_round_trip,
+)
+from app.services.product_image_vlm import detect_person_in_image
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -480,7 +487,7 @@ def _missing_required_fields(mapping: dict, fill: dict[str, Any], columns: dict[
     ]
 
 
-def _listing_template_warnings(pd: ProductData) -> list[str]:
+def _listing_template_warnings(pd: ProductData, mapping: dict | None = None) -> list[str]:
     warnings: list[str] = []
     listing_check = _json_loads(pd.listing_check, {})
     issues = listing_check.get("issues") if isinstance(listing_check, dict) else []
@@ -494,14 +501,32 @@ def _listing_template_warnings(pd: ProductData) -> list[str]:
                 warnings.append(f"Listing提醒: {message}")
 
     primary = (pd.listing_primary_keyword or "").strip().lower()
-    title_start = (pd.listing_title or "")[:100].lower()
-    if primary and primary not in title_start:
-        warnings.append("主关键词未出现在标题前100字符内，可能影响搜索相关性。")
+    title = (pd.listing_title or "").strip()
+    if len(title) > settings.STEP5_TITLE_MAX_CHARS:
+        warnings.append(
+            f"标题共 {len(title)} 字符，超过当前 {settings.STEP5_TITLE_MAX_CHARS} 字符上限。"
+        )
+    if primary and primary not in title.lower():
+        warnings.append("主关键词未出现在标题中，可能影响搜索相关性。")
+    highlights = _json_loads(getattr(pd, "listing_product_highlights", None), [])
+    highlights = highlights if isinstance(highlights, list) else []
+    if highlights and not (mapping or {}).get("product_highlight_fields"):
+        warnings.append(
+            "商品亮点已保存在系统中，但当前 Amazon 导入模板没有 Item Highlights 字段；"
+            "本次仅导出旧五点，商品亮点需在支持该属性的模板或后台中补充。"
+        )
+    if not 3 <= len(highlights) <= 5:
+        warnings.append(f"商品亮点应为 3-5 条，当前为 {len(highlights)} 条。")
+    for index, highlight in enumerate(highlights, start=1):
+        if len(str(highlight)) > settings.STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS:
+            warnings.append(
+                f"商品亮点 {index} 超过 {settings.STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS} 字符。"
+            )
     bullets = _json_loads(pd.listing_bullets, [])
     bullets = bullets if isinstance(bullets, list) else []
     search_terms = normalize_search_terms(
         pd.listing_search_terms,
-        visible_copy=" ".join([pd.listing_title or "", *bullets]),
+        visible_copy=" ".join([pd.listing_title or "", *highlights, *bullets]),
         max_bytes=settings.STEP5_SEARCH_TERMS_MAX_BYTES,
     )[0]
     if not search_terms:
@@ -695,16 +720,51 @@ def _upload_listing_images(
     other_fields = mapping.get("image_fields", {}).get("others", [])
     image_sources.extend(_gallery_sources(product)[:len(other_fields)])
 
+    analysis = _json_loads(product.images.image_analysis, {}) if product.images else {}
+    reviews = analysis.get("images") if isinstance(analysis, dict) else []
+
+    def contains_person(source: str) -> bool:
+        for review in reviews if isinstance(reviews, list) else []:
+            if isinstance(review, dict) and str(review.get("path") or "").strip() == source:
+                if not isinstance(review.get("contains_person"), bool):
+                    raise AmazonTemplateBusinessError(f"图片缺少人物识别结果，需重新执行 Step6: {source}")
+                return review["contains_person"]
+        raise AmazonTemplateBusinessError(f"图片未找到 Step6 人物识别结果，需重新执行 Step6: {source}")
+
+    def upload_compliant_copy(source: str, slot: str) -> dict:
+        suffix = Path(source.split("?", 1)[0]).suffix.lower() or ".jpg"
+        material_dir = Path(pd.material_dir) if pd.material_dir else settings.DATA_DIR / "products" / str(product.id)
+        delivery_path = material_dir / "amazon import" / ".image-compliance" / f"{slot}{suffix}"
+        prepare_delivery_copy(source, delivery_path)
+        local = ensure_synthetic_performer_subject(delivery_path)
+        result = upload_private_image(delivery_path, product_key, slot)
+        verification: dict[str, Any] = {}
+        if settings.IMAGE_COMPLIANCE_VERIFY_OSS_ROUND_TRIP:
+            downloaded = delivery_path.with_name(f"{delivery_path.stem}_oss_verify{delivery_path.suffix}")
+            try:
+                verification = verify_oss_round_trip(str(result["object_key"]), delivery_path, downloaded)
+            finally:
+                downloaded.unlink(missing_ok=True)
+        return {
+            **result,
+            "source_path": source,
+            "delivery_path": str(delivery_path),
+            "contains_person": True,
+            "compliance_status": "oss_round_trip_verified" if verification else "local_verified",
+            "image_compliance": {**local, **verification},
+        }
+
     for idx, source in enumerate(image_sources[:1 + len(other_fields)]):
         slot = "main" if idx == 0 else f"other_{idx}"
         field = mapping.get("image_fields", {}).get("main") if idx == 0 else other_fields[idx - 1]
         if not field or not source:
             continue
-        if _is_remote_url(source):
+        has_person = contains_person(source)
+        if _is_remote_url(source) and not has_person:
             fill[field] = source
-            uploaded.append({"slot": slot, "path": source, "url": source, "status": "remote_url"})
+            uploaded.append({"slot": slot, "path": source, "url": source, "status": "remote_url", "contains_person": False, "compliance_status": "not_required"})
             continue
-        if field in fill:
+        if field in fill and not has_person:
             uploaded.append({"slot": slot, "path": source, "url": fill[field], "status": "reused"})
             continue
         if not oss_configured():
@@ -712,10 +772,14 @@ def _upload_listing_images(
             continue
         path = Path(source).expanduser()
         try:
-            result = upload_private_image(path, product_key, slot)
+            result = upload_compliant_copy(source, slot) if has_person else {
+                **upload_private_image(path, product_key, slot),
+                "contains_person": False,
+                "compliance_status": "not_required",
+                "image_compliance": {"tagged": False, "sha256": sha256_file(path)},
+            }
         except Exception as exc:
-            warnings.append(f"图片上传失败 {slot}: {type(exc).__name__}: {exc}")
-            continue
+            raise AmazonTemplateBusinessError(f"图片合规/上传失败 {slot}: {type(exc).__name__}: {exc}") from exc
         uploaded.append(result)
         fill[field] = result["url"]
 
@@ -2159,6 +2223,37 @@ class AmazonTemplateBusinessError(ValueError):
     """Expected product/template validation failure, safe to expose as row evidence."""
 
 
+async def _ensure_listing_person_detections(product: Product, mapping: dict) -> None:
+    """Backfill only the new person signal for old Step6 analyses before export."""
+    if not product.images or not product.images.main_image_path:
+        return
+    payload = _json_loads(product.images.image_analysis, {})
+    if not isinstance(payload, dict):
+        payload = {}
+    reviews = payload.get("images") if isinstance(payload.get("images"), list) else []
+    sources = [str(product.images.main_image_path).strip()]
+    sources.extend(_gallery_sources(product)[:len(mapping.get("image_fields", {}).get("others", []))])
+    by_path = {str(item.get("path") or "").strip(): item for item in reviews if isinstance(item, dict)}
+    changed = False
+    for source in filter(None, sources):
+        item = by_path.get(source)
+        if item and isinstance(item.get("contains_person"), bool):
+            continue
+        try:
+            detection = await detect_person_in_image(source)
+        except Exception as exc:
+            raise AmazonTemplateBusinessError(f"图片人物识别失败，不能安全导出: {source}; {type(exc).__name__}: {exc}") from exc
+        if item is None:
+            item = {"path": source, "filename": Path(source.split("?", 1)[0]).name}
+            reviews.append(item)
+            by_path[source] = item
+        item.update(detection)
+        changed = True
+    if changed:
+        payload["images"] = reviews
+        product.images.image_analysis = json.dumps(payload, ensure_ascii=False)
+
+
 async def run_amazon_template_in_session(db: AsyncSession, product: Product) -> dict:
     """Generate and persist template metadata without committing or rolling back ``db``."""
 
@@ -2178,6 +2273,7 @@ async def run_amazon_template_in_session(db: AsyncSession, product: Product) -> 
         raise AmazonTemplateBusinessError("缺少Listing文案，请先执行Step5")
 
     await ensure_amazon_template_semantic_fields(product, pd, mapping, template_path)
+    await _ensure_listing_person_detections(product, mapping)
     if not product.upc:
         from app.services.upc_pool import UpcPoolEmptyError, ensure_product_upc
 
@@ -2208,6 +2304,11 @@ async def run_amazon_template_in_session(db: AsyncSession, product: Product) -> 
     pd.amazon_template_warnings = json.dumps(template_result["warnings"], ensure_ascii=False)
     pd.amazon_template_fill_summary = json.dumps(template_result["fill_summary"], ensure_ascii=False)
     pd.amazon_template_generated_at = datetime.now()
+    if product.images:
+        product.images.image_compliance_manifest = json.dumps({
+            "updated_at": datetime.now().isoformat(),
+            "assets": template_result.get("uploaded_images", []),
+        }, ensure_ascii=False)
     file_result = await db.execute(
         select(ProductFile).where(
             ProductFile.product_id == product.id,

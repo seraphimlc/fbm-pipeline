@@ -17,6 +17,7 @@ import openpyxl
 from app.config import settings
 from app.database import async_session
 from app.models import Product, ProductData
+from app.services.seller_sprite_openapi import is_openapi_configured, keyword_order_lookup
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -190,6 +191,11 @@ async def fetch_keywords(asin: str) -> tuple[list[dict], bytes]:
     Returns:
         (关键词列表, 原始Excel bytes)
     """
+    # OpenAPI is the primary integration. It does not require a Chrome login.
+    # Keep the legacy Cookie export path for installations without an OpenAPI key.
+    if is_openapi_configured():
+        return await keyword_order_lookup(asin), b""
+
     # 优先用配置的token，否则从Chrome登录态获取完整Cookie。
     cookie = _configured_cookie() or await _get_sellersprite_cookie()
 
@@ -442,7 +448,7 @@ async def run_keywords(product_id: int) -> dict:
         generated_by_llm = False
         if asin:
             keywords, excel_bytes = await fetch_keywords(asin)
-            if not keywords:
+            if not keywords and not is_openapi_configured():
                 await _ensure_sellersprite_logged_in_for_empty_keywords(asin)
         else:
             logger.warning(f"[Step3] 未设置竞品ASIN，改用LLM关键词兜底: product_id={product_id}")

@@ -24,9 +24,11 @@ class ProductUpdate(BaseModel):
     leaf_category: str | None = None
     listing_title: str | None = None
     listing_bullets: Any | None = None
+    listing_product_highlights: Any | None = None
     listing_search_terms: str | None = None
     listing_title_zh: str | None = None
     listing_bullets_zh: Any | None = None
+    listing_product_highlights_zh: Any | None = None
     listing_description: str | None = None
     listing_search_terms_zh: str | None = None
     listing_description_zh: str | None = None
@@ -225,6 +227,7 @@ class OfflineTaskGigaPullRequest(BaseModel):
     current_category: str | None = Field(default=None, max_length=200)
     page_size: int | None = Field(default=None, ge=1, le=200)
     max_pages: int | None = Field(default=None, ge=1)
+    new_sku_limit: int | None = Field(default=None, ge=1, le=10000)
 
 
 class OfflineTaskGigaDynamicSyncRequest(BaseModel):
@@ -937,11 +940,15 @@ class ProductDataResponse(BaseModel):
     keyword_excel_path: str | None = None
     categories: str | None = None
     leaf_category: str | None = None
+    customer_mindset: str | None = None
+    customer_mindset_generated_at: datetime | None = None
     listing_title: str | None = None
     listing_bullets: str | None = None
+    listing_product_highlights: str | None = None
     listing_search_terms: str | None = None
     listing_title_zh: str | None = None
     listing_bullets_zh: str | None = None
+    listing_product_highlights_zh: str | None = None
     listing_description: str | None = None
     listing_search_terms_zh: str | None = None
     listing_description_zh: str | None = None
@@ -972,6 +979,7 @@ class ProductImageResponse(BaseModel):
     gallery_order: str | None = None
     main_image_summary: str | None = None
     image_selection_analysis: str | None = None
+    image_compliance_manifest: str | None = None
     image_selected_at: datetime | None = None
     analyzed_at: datetime | None = None
     vlm_model: str | None = None

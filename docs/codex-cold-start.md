@@ -120,7 +120,7 @@ OSS_ACCESS_KEY_ID
 OSS_ACCESS_KEY_SECRET
 OSS_BUCKET
 OSS_ENDPOINT
-SELLERSPRITE_TOKEN
+SELLERSPRITE_OPENAPI_SECRET_KEY
 ```
 
 配置要求按使用场景区分：
@@ -129,7 +129,7 @@ SELLERSPRITE_TOKEN
 - 跑 Listing、图片分析、A+ 规划或 A+ 脚本：需要 `LLM_API_KEY`。
 - 跑 A+ 出图：需要 `GPT_IMAGE_API_KEY`，或设置 `GPT_IMAGE_USE_LLM_API=true` 复用 LLM 通道。
 - 生成带图片 URL 的 Amazon 导入表：需要 OSS 配置。
-- 跑卖家精灵关键词：需要 `SELLERSPRITE_TOKEN` 或可用浏览器登录态。
+- 跑卖家精灵关键词：优先配置 `SELLERSPRITE_OPENAPI_SECRET_KEY`，无需浏览器登录；未配置开放平台密钥时，才兼容使用 `SELLERSPRITE_TOKEN` 或 Chrome 登录态。
 - 采集真实商品素材：`PRODUCT_BASE_DIR` 必须改成当前机器存在的商品素材根目录。
 
 配置好后启动：

@@ -27,6 +27,7 @@ export type MutationCallsiteId =
   | "deleteProductDataSource|frontend/src/pages/ProductDataSourceList.tsx|remove"
   | "extractProductZip|frontend/src/pages/ProductDetail.tsx|extractZip"
   | "generateProductAplus|frontend/src/pages/ProductDetail.tsx|generateAplus"
+  | "importLocalEnvConfig|frontend/src/components/LocalEnvConfigTable.tsx|importConfig"
   | "importUpcPool|frontend/src/pages/UpcPoolPage.tsx|handleAdd"
   | "markTaskRunInterrupted|frontend/src/pages/TaskRunCenter.tsx|markInterrupted"
   | "openProductFile|frontend/src/pages/ProductDetail.tsx|openPath"
@@ -62,6 +63,7 @@ export type MutationCallsiteId =
   | "runProductFromStep|frontend/src/pages/ProductDetail.tsx|retryInterruptedPipeline"
   | "updateCatalogTemplateFileStatus|frontend/src/pages/CatalogList.tsx|toggleTemplateFile"
   | "updateConfig|frontend/src/pages/ConfigPage.tsx|saveConfig"
+  | "updateLocalEnvValue|frontend/src/components/LocalEnvConfigTable.tsx|saveValue"
   | "updateProduct|frontend/src/pages/ProductDetail.tsx|saveCategory"
   | "updateProduct|frontend/src/pages/ProductDetail.tsx|saveListing"
   | "updateProductDataSource|frontend/src/pages/ProductDataSourceList.tsx|save"
@@ -204,6 +206,15 @@ export const mutationInventory = [
     "method": "post",
     "source": "frontend/src/pages/ProductDetail.tsx",
     "handler": "generateAplus",
+    "via": "direct"
+  },
+  {
+    "id": "importLocalEnvConfig|frontend/src/components/LocalEnvConfigTable.tsx|importConfig",
+    "client": "importLocalEnvConfig",
+    "endpoint": "'/config/local-env/import'",
+    "method": "post",
+    "source": "frontend/src/components/LocalEnvConfigTable.tsx",
+    "handler": "importConfig",
     "via": "direct"
   },
   {
@@ -519,6 +530,15 @@ export const mutationInventory = [
     "method": "patch",
     "source": "frontend/src/pages/ConfigPage.tsx",
     "handler": "saveConfig",
+    "via": "direct"
+  },
+  {
+    "id": "updateLocalEnvValue|frontend/src/components/LocalEnvConfigTable.tsx|saveValue",
+    "client": "updateLocalEnvValue",
+    "endpoint": "`/config/local-env/${encodeURIComponent(key)}`",
+    "method": "patch",
+    "source": "frontend/src/components/LocalEnvConfigTable.tsx",
+    "handler": "saveValue",
     "via": "direct"
   },
   {

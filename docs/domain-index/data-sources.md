@@ -23,7 +23,7 @@
 - GIGA API：`backend/app/api/giga.py`
 - TikTok API：`backend/app/api/tiktok.py`
 - GIGA OpenAPI client：`backend/app/services/giga_openapi.py`
-- GIGA 拉品：`backend/app/task_planners/giga_pull.py`, `backend/app/task_runtime/giga_pull_workers.py`
+- GIGA 拉品：`backend/app/task_planners/giga_pull.py`, `backend/app/task_runtime/giga_pull_workers.py`；商品工作台可提交指定数量或全部新增 SKU，同步上限在 worker 过滤历史 SKU 后生效。
 - GIGA 库存/价格：`backend/app/task_planners/giga_dynamic_sync.py`, `backend/app/task_runtime/giga_dynamic_sync_workers.py`
 - 库存/价格服务：`backend/app/services/giga_inventory_sync.py`, `backend/app/services/giga_price_sync.py`
 - 表：`product_data_sources`, `giga_sync_batches`, `giga_raw_sku_details`, `giga_items`, `giga_skus`, `giga_groups`, `giga_product_images`, `giga_prices`, `giga_price_alerts`, `giga_inventory`, `giga_inventory_alerts`

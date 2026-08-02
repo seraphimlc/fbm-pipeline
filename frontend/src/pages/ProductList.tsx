@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Table, Button, Tag, Space, Typography, message, Popconfirm, Input, Modal, DatePicker, Image, Select, Tooltip } from 'antd';
+import { Table, Button, Tag, Space, Typography, message, Popconfirm, Input, InputNumber, Modal, DatePicker, Image, Radio, Select, Tooltip } from 'antd';
 import { EditOutlined, ReloadOutlined, PlayCircleOutlined, RedoOutlined, DeleteOutlined, CloudDownloadOutlined, PauseOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 import {
@@ -264,6 +264,8 @@ const ProductList: React.FC = () => {
   const [pullingGigaProducts, setPullingGigaProducts] = useState(false);
   const [pullModalOpen, setPullModalOpen] = useState(false);
   const [selectedPullDataSourceIds, setSelectedPullDataSourceIds] = useState<number[]>([]);
+  const [pullScope, setPullScope] = useState<'limited' | 'all'>('limited');
+  const [pullNewSkuLimit, setPullNewSkuLimit] = useState(100);
   const activeDataSource = useMemo(
     () => dataSources.find((source) => source.id === selectedDataSourceId),
     [dataSources, selectedDataSourceId],
@@ -545,6 +547,8 @@ const ProductList: React.FC = () => {
 
   const openPullModal = () => {
     setSelectedPullDataSourceIds(selectedDataSourceId ? [selectedDataSourceId] : []);
+    setPullScope('limited');
+    setPullNewSkuLimit(100);
     setPullModalOpen(true);
   };
 
@@ -553,11 +557,18 @@ const ProductList: React.FC = () => {
       message.warning('请选择要同步的大健店铺');
       return;
     }
+    if (pullScope === 'limited' && (!pullNewSkuLimit || pullNewSkuLimit < 1)) {
+      message.warning('请输入本次新增同步数量');
+      return;
+    }
     setPullingGigaProducts(true);
     await runMutationWithUX(
       'createGigaPullTaskRuns|frontend/src/pages/ProductList.tsx|pullMissingGigaProducts',
       async (metadata) => {
-        const { data } = await createGigaPullTaskRuns({ data_source_ids: selectedPullDataSourceIds }, metadata);
+        const { data } = await createGigaPullTaskRuns({
+          data_source_ids: selectedPullDataSourceIds,
+          new_sku_limit: pullScope === 'all' ? null : pullNewSkuLimit,
+        }, metadata);
         const firstRun = data.runs[0];
         message.success(`已提交新任务中心：${data.runs.map((run) => `#${run.id}`).join('、')}`);
         const detail = await getTaskRun(firstRun.id);
@@ -1412,6 +1423,31 @@ const ProductList: React.FC = () => {
             }))}
             onChange={(value) => setSelectedPullDataSourceIds(value)}
           />
+          <div>
+            <Text strong>本次新增同步</Text>
+            <Radio.Group
+              value={pullScope}
+              onChange={(event) => setPullScope(event.target.value)}
+              style={{ display: 'block', marginTop: 8 }}
+            >
+              <Space direction="vertical">
+                <Radio value="limited">指定数量</Radio>
+                <Radio value="all">全部新增 SKU</Radio>
+              </Space>
+            </Radio.Group>
+            <InputNumber
+              min={1}
+              max={10000}
+              value={pullNewSkuLimit}
+              disabled={pullScope === 'all'}
+              onChange={(value) => setPullNewSkuLimit(value || 0)}
+              addonAfter="个新增 SKU"
+              style={{ width: '100%', marginTop: 8 }}
+            />
+            <Text type="secondary" style={{ display: 'block', marginTop: 8 }}>
+              仅同步尚未拉取过的 SKU；指定数量时按店铺分别取前 N 个，选择全部则同步所有新增 SKU。
+            </Text>
+          </div>
         </Space>
       </Modal>
     </div>

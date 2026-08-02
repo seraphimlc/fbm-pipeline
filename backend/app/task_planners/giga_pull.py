@@ -38,9 +38,10 @@ async def create_giga_pull_runs(
     runs: list[TaskRun] = []
     for source in sources:
         context = await resolve_giga_data_source_context(db, source.id, source.site)
+        scope_label = "全部新增 SKU" if body.new_sku_limit is None else f"前 {body.new_sku_limit} 个新增 SKU"
         run = TaskRun(
             task_type="giga_pull",
-            title=f"同步店铺商品：{context.name}",
+            title=f"同步店铺商品：{context.name} · {scope_label}",
             status="pending",
             created_by=created_by,
             payload_json=json_dumps({
@@ -50,6 +51,7 @@ async def create_giga_pull_runs(
                 "current_category": body.current_category,
                 "page_size": body.page_size,
                 "max_pages": body.max_pages,
+                "new_sku_limit": body.new_sku_limit,
                 "skip_existing": True,
             }),
             created_at=datetime.now(),
@@ -95,6 +97,7 @@ async def create_giga_pull_runs(
                     "current_category": body.current_category,
                     "page_size": body.page_size,
                     "max_pages": body.max_pages,
+                    "new_sku_limit": body.new_sku_limit,
                     "skip_existing": True,
                 }),
                 progress_current=0,

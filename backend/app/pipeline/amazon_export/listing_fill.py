@@ -23,6 +23,8 @@ def apply_listing_fill(ctx: AmazonExportContext) -> None:
         ctx.warnings.append("缺少 UPC，Product Id Type/Product Id 暂未填写；生成前应先从 UPC 池绑定。")
 
     seller_sku = amazon_seller_sku_for_export(product, pd)
+    highlights = legacy._json_loads(getattr(pd, "listing_product_highlights", None), [])
+    highlights = highlights if isinstance(highlights, list) else []
     ctx.fill.update({
         fields["sku"]: seller_sku,
         fields["title"]: pd.listing_title,
@@ -35,10 +37,12 @@ def apply_listing_fill(ctx: AmazonExportContext) -> None:
         fields["description"]: legacy._description(pd),
         fields["search_terms"]: normalize_search_terms(
             pd.listing_search_terms,
-            visible_copy=" ".join([pd.listing_title or "", *ctx.bullets]),
+            visible_copy=" ".join([pd.listing_title or "", *highlights, *ctx.bullets]),
             max_bytes=settings.STEP5_SEARCH_TERMS_MAX_BYTES,
         )[0],
     })
+    for field, highlight in zip(ctx.mapping.get("product_highlight_fields", []), highlights[:5]):
+        ctx.fill[field] = highlight
 
 
 def apply_bullet_fill(ctx: AmazonExportContext) -> None:

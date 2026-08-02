@@ -27,7 +27,7 @@ from app.models import (  # noqa: E402
 )
 from app.models.status import (  # noqa: E402
     WORKFLOW_NODE_AUTO_SELECT_COMPETITOR,
-    WORKFLOW_NODE_IMAGE_ANALYSIS,
+    WORKFLOW_NODE_KEYWORD_RESEARCH,
     WORKFLOW_STATUS_FAILED,
     WORKFLOW_STATUS_PENDING,
     WORKFLOW_STATUS_PROCESSING,
@@ -74,8 +74,8 @@ async def _make_run(
         run.correlation_key = f"product:{product_id}:competitor_visual_match"
     elif task_type == "product_auto_competitor_selection":
         run.correlation_key = f"product:{product_id}:auto_competitor_selection"
-    elif task_type == "product_image_analysis":
-        run.correlation_key = f"product:{product_id}:image_analysis"
+    elif task_type == "product_keyword_research":
+        run.correlation_key = f"product:{product_id}:keyword_research"
     session.add(run)
     await session.flush()
     group = TaskGroup(
@@ -297,11 +297,11 @@ async def _test_high_success_final_facts_and_image_task() -> tuple[int, list[int
 
         refreshed = await _get_product(session, product.id)
         row = (await session.execute(select(AmazonCompetitorSearchCandidate).where(AmazonCompetitorSearchCandidate.id == selected.id))).scalar_one()
-        image_runs = (
+        keyword_runs = (
             await session.execute(
                 select(TaskRun)
-                .where(TaskRun.task_type == "product_image_analysis")
-                .where(TaskRun.correlation_key == f"product:{product.id}:image_analysis")
+                .where(TaskRun.task_type == "product_keyword_research")
+                .where(TaskRun.correlation_key == f"product:{product.id}:keyword_research")
             )
         ).scalars().all()
         snapshot = json_loads(refreshed.data.gigab2b_raw_snapshot, {})
@@ -312,10 +312,10 @@ async def _test_high_success_final_facts_and_image_task() -> tuple[int, list[int
         assert refreshed.competitor_asin == "B0E4HIGH001", refreshed.competitor_asin
         assert refreshed.catalog_item.competitor_asin == "B0E4HIGH001", refreshed.catalog_item.competitor_asin
         assert snapshot["selected_competitor"]["asin"] == "B0E4HIGH001", snapshot
-        assert refreshed.workflow_node == WORKFLOW_NODE_IMAGE_ANALYSIS, refreshed.workflow_node
+        assert refreshed.workflow_node == WORKFLOW_NODE_KEYWORD_RESEARCH, refreshed.workflow_node
         assert refreshed.workflow_status == WORKFLOW_STATUS_PROCESSING, refreshed.workflow_status
-        assert len(image_runs) == 1, [run.id for run in image_runs]
-        return product.id, [visual_run.id, auto_run.id, image_runs[0].id]
+        assert len(keyword_runs) == 1, [run.id for run in keyword_runs]
+        return product.id, [visual_run.id, auto_run.id, keyword_runs[0].id]
 
 
 async def _test_medium_success_writes_risks() -> tuple[int, list[int]]:
@@ -348,7 +348,7 @@ async def _test_medium_success_writes_risks() -> tuple[int, list[int]]:
         image_run_ids = [
             run.id
             for run in (
-                await session.execute(select(TaskRun).where(TaskRun.task_type == "product_image_analysis").where(TaskRun.correlation_key == f"product:{product.id}:image_analysis"))
+                await session.execute(select(TaskRun).where(TaskRun.task_type == "product_keyword_research").where(TaskRun.correlation_key == f"product:{product.id}:keyword_research"))
             ).scalars().all()
         ]
         return product.id, [visual_run.id, auto_run.id, *image_run_ids]
@@ -505,7 +505,7 @@ async def _test_old_visual_run_excluded() -> tuple[int, list[int]]:
         image_run_ids = [
             run.id
             for run in (
-                await session.execute(select(TaskRun).where(TaskRun.task_type == "product_image_analysis").where(TaskRun.correlation_key == f"product:{product.id}:image_analysis"))
+                await session.execute(select(TaskRun).where(TaskRun.task_type == "product_keyword_research").where(TaskRun.correlation_key == f"product:{product.id}:keyword_research"))
             ).scalars().all()
         ]
         return product.id, [old_visual_run.id, current_visual_run.id, auto_run.id, *image_run_ids]
@@ -551,8 +551,8 @@ async def _test_downstream_image_creation_failure_preserves_final_facts() -> tup
         original_create = product_actions.create_product_action_runs
 
         async def _raise_for_image(*args, **kwargs):
-            if args and args[1] == "product_image_analysis":
-                raise RuntimeError("forced image analysis planner failure")
+            if args and args[1] == "product_keyword_research":
+                raise RuntimeError("forced keyword research planner failure")
             return await original_create(*args, **kwargs)
 
         product_actions.create_product_action_runs = _raise_for_image
@@ -565,9 +565,9 @@ async def _test_downstream_image_creation_failure_preserves_final_facts() -> tup
         row = (await session.execute(select(AmazonCompetitorSearchCandidate).where(AmazonCompetitorSearchCandidate.id == selected.id))).scalar_one()
         assert row.final_selected == 1, row.final_selected
         assert refreshed.competitor_asin == "B0E4DOWNFL", refreshed.competitor_asin
-        assert refreshed.workflow_node == WORKFLOW_NODE_IMAGE_ANALYSIS, refreshed.workflow_node
+        assert refreshed.workflow_node == WORKFLOW_NODE_KEYWORD_RESEARCH, refreshed.workflow_node
         assert refreshed.workflow_status == WORKFLOW_STATUS_FAILED, refreshed.workflow_status
-        assert "forced image analysis" in (refreshed.workflow_error or refreshed.error_message or ""), refreshed.workflow_error
+        assert "forced keyword research" in (refreshed.workflow_error or refreshed.error_message or ""), refreshed.workflow_error
         return product.id, [visual_run.id, auto_run.id]
 
 

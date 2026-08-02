@@ -105,7 +105,7 @@ def finalize_warnings(ctx: AmazonExportContext, missing_columns: list[str]) -> N
 
     if missing_columns:
         ctx.warnings.append(f"模板中未找到 {len(missing_columns)} 个预期字段: {', '.join(missing_columns[:5])}")
-    ctx.warnings.extend(legacy._listing_template_warnings(ctx.product_data))
+    ctx.warnings.extend(legacy._listing_template_warnings(ctx.product_data, ctx.mapping))
     ctx.warnings.extend(legacy._pricing_template_warnings(ctx.product_data))
     ctx.warnings.extend(legacy._inventory_template_warnings(ctx.product_data))
     ctx.warnings.extend(legacy._aplus_template_warnings(ctx.product))

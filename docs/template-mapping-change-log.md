@@ -9,6 +9,50 @@
 - 每条记录至少包含：日期、改动文件、涉及类目/模板、变更原因、验证命令和结果、后续注意事项。
 - 不要覆盖历史记录；只追加新条目。
 
+## 2026-08-01
+
+### Product Highlights 的真实模板字段兼容
+
+- 改动文件：
+  - `backend/app/pipeline/amazon_export/listing_fill.py`
+  - `backend/app/pipeline/amazon_export/validators.py`
+  - `backend/app/pipeline/step10_amazon_template.py`
+  - `docs/template-mapping-change-log.md`
+- 涉及类目/模板：
+  - 所有 Step 10 映射；当前 5 套真实 Amazon 模板仍未声明 `product_highlight_fields`，因此不改变其实际导出列。
+- 变更原因：
+  - 商品亮点已独立落库。后续正式模板若提供 Item/Product Highlights 字段，映射应能显式声明后写入，不能凭字段名猜测或挤占旧五点列。
+- 主要行为：
+  - `product_highlight_fields` 存在时，按映射顺序写入最多 5 条已保存的商品亮点。
+  - 映射未声明该字段时维持旧行为，只导出五点；相应 warning 仍提示商品亮点需要由支持的模板或后台补充。
+- 验证：
+  - `cd backend && .venv/bin/python ../scripts/test_listing_title_highlights.py` 通过。
+- 后续注意：
+  - 新增该映射前必须核对实际 Amazon 模板列名，并运行模板映射校验；不得修改现有模板来伪造字段。
+
+### Listing 短标题与独立 Product Highlights 导出边界
+
+- 改动文件：
+  - `backend/app/pipeline/amazon_export/listing_fill.py`
+  - `backend/app/pipeline/step10_amazon_template.py`
+  - `docs/template-mapping-change-log.md`
+- 涉及类目/模板：
+  - 当前 5 套 Amazon Listing 导入模板及其全部类目：`BICYCLE_CYCLING.xlsm`、`CHAIR_SOFA.xlsm`、`DRESSER_STORAGE_DRAWER_STORAGE_BOX_CABINET_STEP_STOOL.xlsm`、`RIDE_ON_TOY.xlsm`、`SHELF_TABLE_CABINET_ANIMAL_CAGE_TEMPORARY_GATE.xlsm`。
+  - 未修改模板文件或 `template_mappings/*.json`。
+- 变更原因：
+  - Listing 标题改为最多 75 字符，并新增独立的 3-5 条 Product Highlights；当前真实模板只有旧 `bullet_point #1..#5`，没有 Item/Product Highlights 列，不能猜测字段或复用旧五点列。
+  - Product Highlights 属买家可见文案，导出的 Search Terms 去重必须同时排除其已使用词汇。
+- 主要行为：
+  - 首次导入表继续只把旧五点写入模板 `bullet_point #1..#5`，不会把 Product Highlights 混写到旧五点。
+  - Product Highlights 参与 Search Terms 可见文案去重；Step 10 会检查标题 75 字符上限、亮点 3-5 条及单条 125 字符上限。
+  - 商品已有 Product Highlights 时，导出 warning 明确提示当前模板无对应字段，需要在支持该属性的模板或后台补充。
+- 验证：
+  - `make validate-template-mappings` 通过：5 个 mapping、96 个 category options、0 warning。
+  - `cd backend && .venv/bin/python ../scripts/test_listing_title_highlights.py` 通过：核对 5 套真实模板与 mapping 均只有旧五点列，并验证亮点独立落库和超长重写。
+  - `cd frontend && npm run build` 通过。
+- 后续注意：
+  - Amazon 后续若提供含 Item/Product Highlights 的正式模板字段，必须先核对真实字段名和模板定义，再新增 mapping；不能把该字段映射到现有 `bullet_point`。
+
 ## 2026-06-14
 
 ### Catalog Export 补齐模板必填 Fabric Type
@@ -386,3 +430,13 @@
   - `make validate-template-mappings` 通过。
 - 后续注意：
   - 当前 StyleSnap 候选阶段保存的是卖家精灵增强后的类目排名/摘要文本，不是完整 Amazon browse node；后续 listing 详情抓取若能拿到更完整 breadcrumbs，可继续补强匹配上下文。
+
+### Amazon 人像图片 XMP 合规封装
+
+- 日期：2026-08-02
+- 改动文件：`backend/app/pipeline/step10_amazon_template.py`、`backend/app/services/amazon_image_compliance.py`。
+- 涉及类目/模板：所有 Step 10 Amazon 导入模板的主图/副图 URL。
+- 变更原因：含人物的投放图片需携带 `XMP-dc:Subject=contains-synthetic-performer`。
+- 主要行为：Step 6 保存逐图人物判断；Step 10 对含人物的本地或远程 URL 生成受管投放副本、写入并校验 XMP、上传 OSS 后下载回读并验证哈希，再将受管 URL 填入模板。任何识别、写标、上传或回读失败会阻止该商品导出。
+- 验证：`cd backend && .venv/bin/python ../scripts/test_amazon_image_compliance_oss.py`；当前环境会在 OSS 或 ExifTool 未配置时明确输出 `SKIPPED`，不得作为通过。
+- 后续注意：生产工作节点必须安装 ExifTool；首次启用前在已配置 OSS 的环境执行上述实测门槛。

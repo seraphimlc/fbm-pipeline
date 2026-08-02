@@ -1,8 +1,18 @@
-"""
-模块7：A+ 规划 — 使用 LLM 设计 A+ Content 布局
+"""待导出后的 A+ 派生节点 1：使用 LLM 生成 A+ 内容规划。
 
-基于商品属性、卖点、关键词和图片分析结果，
-生成 A+ Content 的模块布局规划（普通 A+ 固定 5 个模块）
+前置输入包括已落库 Listing、商品事实、关键词、图片分析和用户心智简报。规划要先形成
+商品叙事诊断：购买动机、关键场景、买家疑虑、证据强弱、证据缺口、禁止 claim，以及
+每个模块在转化路径中的职责；竞品或关键词只能提供市场语境，不能证明自身产品属性。
+
+默认发布 profile 是 `standard_header_image_text_v1`，对应普通 A+ 的 5 个宽横幅
+`STANDARD_HEADER_IMAGE_TEXT` 模块，语义角色依次覆盖 hero、lifestyle、feature_proof、
+spec_objection、closing。规划应补充 Gallery 未充分表达的场景和异议处理，避免把主图/
+Gallery 原样重复成 A+。其它 profile 的模块数量和图片槽位以
+`backend/app/aplus_publish/module_registry.py` 为最终事实源，不能在本模块另建一套约束。
+
+输出写入 `ProductAplus` 的规划及 profile/版本相关字段，供 Step 8 生成脚本。此链路独立
+于商品主 workflow：A+ 规划失败不得把已完成商品从“待导出”退回；证据不足时应显式记录
+缺口或失败，禁止编造卖点继续。
 """
 
 import asyncio
@@ -26,6 +36,11 @@ from app.pipeline.aplus_narrative_diagnosis import (
     NARRATIVE_DIAGNOSIS_OUTPUT_SCHEMA,
     NARRATIVE_DIAGNOSIS_PROMPT_SECTION,
     normalize_product_narrative_diagnosis,
+)
+from app.pipeline.customer_mindset import (
+    customer_mindset_context,
+    customer_mindset_matches_product,
+    image_analysis_ready,
 )
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -62,7 +77,7 @@ Critical visual planning rules:
 - Lifestyle scenes may include people when useful, but any visible person must be shown as a complete, natural full body. Do not plan cropped heads, cropped hands, cropped legs, or partial bodies.
 - Preserve the original product identity and proportions as much as possible. Do not plan transformations that change the product type, silhouette, color, material, visible parts, package, surface finish, scale, or construction.
 - Preserve the product material shown in the reference images. Do not plan a change from the supplied fabric/plastic/wood/metal/glass/paper/rubber/packaging material into another material.
-- Plan different reference-image roles per module. Do not make every A+ image use the same two product references.
+- Select the concrete primary and secondary reference image_id for every module from the supplied candidate list. Do not make every A+ image use the same two product references.
 - Anchor every planned A+ image to selling points that are actually visible or supported by its selected reference images.
 - The generated A+ image may change scene, people, light, camera framing, and styling, but the product itself should stay as close as possible to the selected reference images. Do not add, remove, reshape, recolor, retexture, or redesign product parts.
 
@@ -96,6 +111,9 @@ PLAN_PROMPT = """Design an A+ Content plan for this Amazon product.
 ## Primary Keyword
 {primary_keyword}
 
+## Customer Mindset Brief
+{customer_mindset}
+
 """ + NARRATIVE_DIAGNOSIS_PROMPT_SECTION + """
 
 ## Requirements
@@ -108,22 +126,28 @@ PLAN_PROMPT = """Design an A+ Content plan for this Amazon product.
 7. Image concepts must preserve the original product type, shape, color, proportions, material, texture/finish, package, visible parts, accessories, and construction.
 8. If a scene includes people, specify complete full-body people with natural anatomy and no cropped body parts.
 9. Any planned on-image text must avoid the brand name "{brand}".
-10. For each module, add a reference_strategy that names the two different kinds of product references needed for that module, such as product identity, lifestyle context, dimensions, material close-up, comfort detail, or finished-back view.
-11. Choose reference strategies from the provided image candidates and vary the pair by module; the same two references should not be used for every module.
-12. State that the material from the selected product references must be preserved and not replaced.
-13. The image concept should stay close to the selected references' visible selling points. Do not plan new features, extra accessories, different modules, different cushions, different legs, different armrests, different stitching, or unsupported claims that are not visible in the references/product facts.
-14. Allow changes mainly to scenario, people, light, camera angle, room styling, and clean Amazon A+ composition; keep the product itself reference-faithful.
-15. A+ should be experience-led, not spec-led. Prefer lifestyle, usage, ownership feeling, room fit, comfort, setup ease, and emotional context over repeating dry parameters.
-16. At least 3 of the 5 modules should be lifestyle/experience-led unless the product category makes that unsafe or misleading.
-17. Use the Image Risk and Conversion Gaps to choose module priorities, but translate gaps into user experience where possible. For example, a dimensions gap becomes "small apartment fit"; a material gap becomes "soft touch in daily lounging"; a setup gap becomes "easy move-in setup".
-18. Use specs only when they reduce a major buyer objection, and keep specs as supporting evidence rather than the main A+ story.
-19. Do not repeat information already covered by MAIN/gallery images unless A+ adds deeper context, emotion, or usage understanding.
-20. Do not pretend missing gallery evidence exists. If references are limited, use conservative text/spec explanation or a visual concept anchored to available references, and avoid unsupported visual claims.
-21. Every module must explicitly use the product_narrative_diagnosis. Do not create five generic banners that would fit any product.
-22. For every module, define the conversion strategy fields: conversion_goal, buyer_objection, evidence_source, risk_guardrails, visual_do_not_claim, experience_angle, and gallery_overlap_avoidance.
-23. Keep on-image copy short and useful. Do not write keyword-stuffed or paragraph-like image text.
-24. Treat the 5 modules as five wide banner images, not as independent posters. Each image should have one clear focal product/reference anchor, one buyer question, and a simple left/right or foreground/background composition that will still read at 1940 x 1200.
-25. The five banners must form this standard story arc: (1) product identity and promise, (2) realistic use/fit context, (3) visible feature or material proof, (4) objection reducer for size/setup/material/compatibility, (5) ownership close or confidence moment.
+10. For each module, choose `primary_reference_image_id` and, when useful, `secondary_reference_image_id` from the exact image_id values in Reference Image Candidates. Never invent an image_id, filename, slot, or path.
+11. Explain the business decision in `reference_selection_reason`, and explain what each selected image proves in `primary_reference_use` and `secondary_reference_use`. Also provide `fallback_reference_roles` for Step 8 to use only if a selected image is missing or unsafe.
+12. Add a reference_strategy that explains the two reference roles needed for that module, such as product identity, lifestyle context, dimensions, material close-up, comfort detail, or finished-back view.
+13. Vary the selected pair by module; the same two references should not be used for every module. It is acceptable to reuse one strong product-identity image across modules when the supporting image changes.
+14. State that the material from the selected product references must be preserved and not replaced.
+15. The image concept should stay close to the selected references' visible selling points. Do not plan new features, extra accessories, different modules, different cushions, different legs, different armrests, different stitching, or unsupported claims that are not visible in the references/product facts.
+16. Allow changes mainly to scenario, people, light, camera angle, room styling, and clean Amazon A+ composition; keep the product itself reference-faithful.
+17. A+ should be experience-led, not spec-led. Prefer lifestyle, usage, ownership feeling, room fit, comfort, setup ease, and emotional context over repeating dry parameters.
+18. At least 3 of the 5 modules should be lifestyle/experience-led unless the product category makes that unsafe or misleading.
+19. Use the Image Risk and Conversion Gaps to choose module priorities, but translate gaps into user experience where possible. For example, a dimensions gap becomes "small apartment fit"; a material gap becomes "soft touch in daily lounging"; a setup gap becomes "easy move-in setup".
+20. Use specs only when they reduce a major buyer objection, and keep specs as supporting evidence rather than the main A+ story.
+21. Do not repeat information already covered by MAIN/gallery images unless A+ adds deeper context, emotion, or usage understanding.
+22. Do not pretend missing gallery evidence exists. If references are limited, use conservative text/spec explanation or a visual concept anchored to available references, and avoid unsupported visual claims.
+23. Every module must explicitly use the product_narrative_diagnosis. Do not create five generic banners that would fit any product.
+24. For every module, define the conversion strategy fields: conversion_goal, buyer_objection, evidence_source, risk_guardrails, visual_do_not_claim, experience_angle, and gallery_overlap_avoidance.
+25. Keep on-image copy short and useful. Do not write keyword-stuffed or paragraph-like image text.
+26. Treat the 5 modules as five wide banner images, not as independent posters. Each image should have one clear focal product/reference anchor, one buyer question, and a simple left/right or foreground/background composition that will still read at 1940 x 1200.
+27. The five banners must form this standard story arc: (1) product identity and promise, (2) realistic use/fit context, (3) visible feature or material proof, (4) objection reducer for size/setup/material/compatibility, (5) ownership close or confidence moment.
+28. When a Customer Mindset Brief is available, use strategy fields only when strategy_field_evidence marks planning_usable=true. Inferred fields may organize the story but are not researched shopper facts, and fields with copy_claim_usable=false must not become factual on-image claims.
+29. Use benefit_ladder items only when copy_usable=true. State a comparative differentiator only when comparison_supported=true. Never convert keyword or competitor evidence into a product attribute.
+30. If the mindset quality requires review, design conservatively around critical_unknowns and evidence_boundary_issues instead of inventing a more dramatic story.
+31. An A+ or future-visual job with claim_proof_usable=false may define a buyer question, but it cannot authorize factual copy. visual_anchor_usable=true may guide only visible appearance, structure, framing, and reference selection.
 
 Output JSON:
 {{
@@ -148,6 +172,12 @@ Output JSON:
       "gallery_overlap_avoidance": "what MAIN/gallery already covers and how this module avoids repeating it",
       "risk_guardrails": ["truthfulness and visual fidelity constraints for this module"],
       "visual_do_not_claim": ["unsupported claims or visual elements this module must avoid"],
+      "primary_reference_image_id": "#01",
+      "secondary_reference_image_id": "#03",
+      "reference_selection_reason": "why these exact two images best support this module and differ from the other modules",
+      "primary_reference_use": "what visible product identity or evidence the primary reference must preserve",
+      "secondary_reference_use": "what module-specific detail, scale, scene, or function the secondary reference must preserve",
+      "fallback_reference_roles": ["product identity", "module-specific supporting evidence"],
       "reference_strategy": "two reference-image roles to use for this module and what each preserves",
       "preferred_reference_roles": ["role 1", "role 2"],
       "text_content": "body text for this module"
@@ -193,6 +223,7 @@ def _format_reference_candidates(pi: ProductImage | None) -> str:
         review = by_path.get(path, {})
         mm = review.get("multimodal_result") if isinstance(review.get("multimodal_result"), dict) else {}
         candidates.append({
+            "image_id": selected.get("image_id") or review.get("image_id"),
             "slot": selected.get("slot"),
             "filename": selected.get("filename"),
             "path": path,
@@ -201,6 +232,12 @@ def _format_reference_candidates(pi: ProductImage | None) -> str:
             "selling_point": review.get("visible_selling_point") or mm.get("primary_selling_point"),
             "material": review.get("material_texture") or mm.get("material_texture"),
             "scene": review.get("scene_type") or mm.get("scene_type"),
+            "risk_flags": review.get("risk_flags") or [],
+            "amazon_suitability": (
+                (mm.get("quality_assessment") or {}).get("amazon_suitability")
+                if isinstance(mm.get("quality_assessment"), dict)
+                else None
+            ),
         })
         seen.add(path)
 
@@ -220,6 +257,12 @@ def _format_reference_candidates(pi: ProductImage | None) -> str:
             "selling_point": review.get("visible_selling_point") or mm.get("primary_selling_point"),
             "material": review.get("material_texture") or mm.get("material_texture"),
             "scene": review.get("scene_type") or mm.get("scene_type"),
+            "risk_flags": review.get("risk_flags") or [],
+            "amazon_suitability": (
+                (mm.get("quality_assessment") or {}).get("amazon_suitability")
+                if isinstance(mm.get("quality_assessment"), dict)
+                else None
+            ),
         })
         seen.add(path)
         if len(candidates) >= 16:
@@ -445,6 +488,143 @@ def _json_dict_from_text(value) -> dict:
 
 def _product_title(pd: ProductData) -> str:
     return _trim_text(getattr(pd, "listing_title", None) or getattr(pd, "title", None), 80, "Current product")
+
+
+def _normalize_narrative_with_customer_mindset(
+    raw_value,
+    *,
+    product_data: ProductData,
+    product_image: ProductImage | None,
+    selling_points: list,
+    fallback: bool,
+) -> dict:
+    """Use customer mindset as the upstream truth while retaining A+-specific LLM choices."""
+    raw = dict(raw_value) if isinstance(raw_value, dict) else {}
+    mindset = customer_mindset_context(
+        getattr(product_data, "customer_mindset", None),
+        surface="aplus",
+        required=False,
+    )
+    if not mindset:
+        return normalize_product_narrative_diagnosis(
+            raw,
+            product_data=product_data,
+            product_image=product_image,
+            selling_points=selling_points,
+            fallback=fallback,
+        )
+
+    strategy = mindset.get("strategy") if isinstance(mindset.get("strategy"), dict) else {}
+    quality = mindset.get("quality") if isinstance(mindset.get("quality"), dict) else {}
+    strategy_field_evidence = (
+        strategy.get("strategy_field_evidence")
+        if isinstance(strategy.get("strategy_field_evidence"), dict)
+        else {}
+    )
+
+    def planning_value(field: str) -> str:
+        meta = strategy_field_evidence.get(field)
+        if isinstance(meta, dict) and not meta.get("planning_usable"):
+            return ""
+        return _compact_text(strategy.get(field))
+
+    primary_job = planning_value("primary_job")
+    core_value = planning_value("core_value_proposition")
+    primary_buyer = planning_value("primary_buyer")
+    top_scenarios = strategy.get("top_scenarios") if isinstance(strategy.get("top_scenarios"), list) else []
+    primary_scenario = ""
+    if (
+        top_scenarios
+        and isinstance(top_scenarios[0], dict)
+        and top_scenarios[0].get("planning_usable", True)
+    ):
+        primary_scenario = _compact_text(top_scenarios[0].get("scenario"))
+
+    objections = []
+    for item in strategy.get("objections") or []:
+        if isinstance(item, dict) and _compact_text(item.get("objection")):
+            objections.append(_compact_text(item.get("objection")))
+    verified_differentiators = []
+    for item in strategy.get("differentiators") or []:
+        if isinstance(item, dict) and item.get("comparison_supported") and _compact_text(item.get("claim")):
+            verified_differentiators.append(_compact_text(item.get("claim")))
+
+    content_direction = strategy.get("content_direction") if isinstance(strategy.get("content_direction"), dict) else {}
+    mindset_claims_to_avoid = [
+        _compact_text(item)
+        for item in content_direction.get("claims_to_avoid") or []
+        if _compact_text(item)
+    ]
+    raw_claims_to_avoid = [
+        _compact_text(item)
+        for item in _as_list(raw.get("claims_to_avoid") or raw.get("visual_do_not_claim"))
+        if _compact_text(item)
+    ]
+    critical_unknowns = [
+        _compact_text(item)
+        for item in quality.get("critical_unknowns") or []
+        if _compact_text(item)
+    ]
+    boundary_issues = [
+        _compact_text(item)
+        for item in quality.get("evidence_boundary_issues") or []
+        if _compact_text(item)
+    ]
+    evidence_gaps = list(dict.fromkeys([*critical_unknowns, *boundary_issues]))[:5]
+
+    module_roles = ("hero", "lifestyle", "feature_proof", "spec_objection", "closing")
+    module_strategy = raw.get("narrative_strategy_by_module")
+    module_strategy = dict(module_strategy) if isinstance(module_strategy, dict) else {}
+    for role, item in zip(module_roles, content_direction.get("aplus_jobs") or []):
+        if not isinstance(item, dict):
+            continue
+        story_job = _compact_text(item.get("story_job"))
+        buyer_question = _compact_text(item.get("buyer_question"))
+        if story_job and item.get("claim_proof_usable"):
+            module_strategy[role] = story_job
+        elif buyer_question:
+            module_strategy[role] = (
+                f"Address the buyer question '{buyer_question}' using only independently supported product facts"
+                + (" and the visible reference anchor." if item.get("visual_anchor_usable") else ".")
+            )
+
+    diagnosis_summary = _compact_text(raw.get("diagnosis_summary"))
+    if primary_job or core_value:
+        diagnosis_summary = (
+            f"For {primary_buyer or 'the intended buyer'}, use A+ to support the job '{primary_job}' "
+            f"through the evidence-grounded value '{core_value}', without filling documented evidence gaps."
+        )
+    source_truth = {
+        "diagnosis_summary": diagnosis_summary,
+        "primary_buyer_motivation": primary_job or raw.get("primary_buyer_motivation"),
+        "target_use_context": (
+            f"{primary_buyer}: {primary_scenario}" if primary_buyer and primary_scenario else primary_scenario
+        ) or raw.get("target_use_context"),
+        "dominant_purchase_trigger": core_value or raw.get("dominant_purchase_trigger"),
+        "key_buyer_objections": objections or raw.get("key_buyer_objections"),
+        "evidence_strength": (
+            "limited" if critical_unknowns else "mixed" if quality.get("requires_review") else raw.get("evidence_strength") or "strong"
+        ),
+        "evidence_gaps": evidence_gaps or raw.get("evidence_gaps"),
+        "differentiation_angle": (
+            "; ".join(verified_differentiators[:3])
+            if verified_differentiators
+            else "No comparison-ready differentiator is sufficiently proven; lead with supported product value instead."
+        ),
+        "narrative_strategy_by_module": module_strategy,
+        "claims_to_avoid": list(dict.fromkeys([*mindset_claims_to_avoid, *raw_claims_to_avoid]))[:8],
+    }
+    combined = {**raw, **{key: value for key, value in source_truth.items() if value}}
+    normalized = normalize_product_narrative_diagnosis(
+        combined,
+        product_data=product_data,
+        product_image=product_image,
+        selling_points=selling_points,
+        fallback=fallback,
+    )
+    normalized["diagnosis_source"] = "customer_mindset+fallback" if fallback else "customer_mindset+llm"
+    normalized["customer_mindset_source_fingerprint"] = mindset.get("source_fingerprint")
+    return normalized
 
 
 def _selected_competitor_fact(pd: ProductData, comparison_asin: str | None) -> dict:
@@ -748,7 +928,7 @@ def _build_enhanced_basic_aplus_plan(raw_plan: dict, *, product: Product, produc
         "publish_profile": contract.profile_key,
         "profile_version": contract.profile_version,
         "module_contract_source": APLUS_MODULE_CONTRACT_SOURCE,
-        "product_narrative_diagnosis": normalize_product_narrative_diagnosis(
+        "product_narrative_diagnosis": _normalize_narrative_with_customer_mindset(
             raw_plan.get("product_narrative_diagnosis") or raw_plan.get("narrative_diagnosis"),
             product_data=product_data,
             product_image=product_image,
@@ -783,7 +963,7 @@ def _build_standard_header_image_text_plan(
         _normalize_module_strategy(module, index)
         modules.append(module)
     plan = dict(raw_plan)
-    plan["product_narrative_diagnosis"] = normalize_product_narrative_diagnosis(
+    plan["product_narrative_diagnosis"] = _normalize_narrative_with_customer_mindset(
         raw_plan.get("product_narrative_diagnosis") or raw_plan.get("narrative_diagnosis"),
         product_data=product_data,
         product_image=product_image,
@@ -910,6 +1090,24 @@ def _normalize_module_strategy(module: dict, index: int) -> dict:
     preferred_roles = module.get("preferred_reference_roles")
     if not isinstance(preferred_roles, list) or not preferred_roles:
         module["preferred_reference_roles"] = list(role_guidance.get("preferred_reference_roles") or ["product identity", "supporting detail"])
+    for key in ("primary_reference_image_id", "secondary_reference_image_id"):
+        value = str(module.get(key) or "").strip()
+        module[key] = value if value else None
+    module.setdefault(
+        "reference_selection_reason",
+        "Use the strongest available product-identity anchor plus evidence matched to this module's buyer question.",
+    )
+    module.setdefault(
+        "primary_reference_use",
+        "Preserve product identity, silhouette, color, proportions, visible parts, material, and construction.",
+    )
+    module.setdefault(
+        "secondary_reference_use",
+        "Preserve the module-specific visible detail, usage context, scale, or function when available.",
+    )
+    fallback_roles = module.get("fallback_reference_roles")
+    if not isinstance(fallback_roles, list) or not fallback_roles:
+        module["fallback_reference_roles"] = list(module.get("preferred_reference_roles") or ["product identity", "supporting detail"])
     if not str(module.get("key_message") or "").strip():
         module["key_message"] = module.get("conversion_goal") or module.get("headline") or f"Explain A+ module {index}"
     if not str(module.get("text_content") or "").strip():
@@ -1004,7 +1202,7 @@ def fallback_aplus_plan(
             _normalize_module_strategy(module, idx)
         return {
             "modules": modules,
-            "product_narrative_diagnosis": normalize_product_narrative_diagnosis(
+            "product_narrative_diagnosis": _normalize_narrative_with_customer_mindset(
                 None,
                 product_data=pd,
                 product_image=pi,
@@ -1022,7 +1220,7 @@ def fallback_aplus_plan(
 
     raw_plan = {
         "plan_summary": "A+ planning was generated by fallback logic after the LLM did not return usable content.",
-        "product_narrative_diagnosis": normalize_product_narrative_diagnosis(
+        "product_narrative_diagnosis": _normalize_narrative_with_customer_mindset(
             None,
             product_data=pd,
             product_image=pi,
@@ -1135,6 +1333,12 @@ async def run_aplus_plan(product_id: int) -> dict:
 
         pd = product.data
         pi = product.images
+        if not pi or not image_analysis_ready(pi.image_analysis):
+            raise RuntimeError("图片分析尚未完成，不能规划 A+")
+        if not pd.customer_mindset:
+            raise RuntimeError("用户心智梳理尚未完成，不能规划 A+")
+        if not customer_mindset_matches_product(pd.customer_mindset, product):
+            raise RuntimeError("用户心智梳理已过期：商品、关键词、竞品或图片分析输入发生变化，请重新梳理后再规划 A+")
 
         # 收集卖点
         selling_points = []
@@ -1153,6 +1357,12 @@ async def run_aplus_plan(product_id: int) -> dict:
             except:
                 features = str(pd.features)
 
+        mindset_context = customer_mindset_context(
+            getattr(pd, "customer_mindset", None),
+            surface="aplus",
+            required=True,
+        )
+
         prompt = PLAN_PROMPT.format(
             title=pd.listing_title or pd.title or "Unknown",
             brand=product.brand or settings.DEFAULT_BRAND,
@@ -1163,6 +1373,7 @@ async def run_aplus_plan(product_id: int) -> dict:
             reference_candidates=_format_reference_candidates(pi),
             image_diagnostics=_format_image_diagnostics(pi),
             primary_keyword=pd.listing_primary_keyword or "N/A",
+            customer_mindset=json.dumps(mindset_context, ensure_ascii=False, indent=2),
         )
 
         # 调用 LLM

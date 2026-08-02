@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     EXTERNAL_HTTP_VERIFY_TLS: bool = True
     EXTERNAL_HTTP_CA_BUNDLE: Path | None = None
     IMAGE_PROXY_EXTRA_ROOTS: str = ""
+    IMAGE_COMPLIANCE_EXIFTOOL_PATH: str = "exiftool"
+    IMAGE_COMPLIANCE_VERIFY_OSS_ROUND_TRIP: bool = True
 
     # 商品文件存储根目录
     PRODUCT_BASE_DIR: Path = REPO_ROOT / "data" / "products"
@@ -140,9 +142,19 @@ class Settings(BaseSettings):
     STEP4_MISSING_ASIN_POLICY: str = "manual_review"  # fail/manual_review/continue
     STEP4_CATEGORY_MISSING_POLICY: str = "manual_review"  # fail/manual_review/continue
     STEP4_ALLOW_EXISTING_CATEGORY: bool = True
-    STEP5_LLM_TEMPERATURE: float = 0.7
-    STEP5_LLM_MAX_TOKENS: int = 2000
-    STEP5_TITLE_MAX_CHARS: int = 200
+    # Listing 需要完整的买家心智和商品事实；输出采用较低随机性，避免改写时漂移。
+    STEP5_LLM_TEMPERATURE: float = 0.3
+    STEP5_LLM_MAX_TOKENS: int = 4500
+    STEP5_LLM_TIMEOUT_SECONDS: int = 120
+    STEP5_LLM_RETRY_ATTEMPTS: int = 2
+    STEP5_DESCRIPTION_INPUT_MAX_CHARS: int = 8000
+    STEP5_FEATURES_INPUT_MAX_CHARS: int = 4000
+    STEP5_STRUCTURED_INPUT_MAX_CHARS: int = 6000
+    STEP5_IMAGE_CONTEXT_MAX_ITEMS: int = 6
+    STEP5_IMAGE_EVIDENCE_MAX_CHARS: int = 500
+    STEP5_IMAGE_DIAGNOSTICS_MAX_CHARS: int = 1000
+    STEP5_TITLE_MAX_CHARS: int = 75
+    STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS: int = 125
     STEP5_BULLET_MAX_CHARS: int = 500
     STEP5_SEARCH_TERMS_MAX_BYTES: int = 250
     APLUS_CONCURRENCY: int = 1     # A+图并发数

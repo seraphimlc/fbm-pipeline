@@ -263,8 +263,43 @@ def normalize_sheet_reviews(analysis: dict, batch_records: list[dict], sheet_rec
         normalized.setdefault("slot01_score", 0)
         normalized.setdefault("gallery_score", 0)
         normalized.setdefault("risk_flags", [])
+        if isinstance(normalized.get("contains_person"), bool):
+            normalized["person_detection_status"] = "complete"
+            normalized.setdefault("person_detection_confidence", "low")
+            normalized.setdefault("person_detection_source", "step6_vlm")
+        else:
+            # Old cached analyses do not have the field.  Keep the gap explicit;
+            # Step10 will refuse a person-sensitive delivery asset until reanalysed.
+            normalized["contains_person"] = None
+            normalized["person_detection_status"] = "missing"
         reviews.append(normalized)
     return reviews
+
+
+def require_complete_batch_reviews(reviews: list[dict], batch_records: list[dict], *, batch_label: str) -> None:
+    """Reject a partial VLM response instead of silently analysing only some images.
+
+    Image analysis feeds the customer-mindset and Listing evidence chain.  A
+    response that omits an attached image is not a conservative result: it
+    leaves an unknown gap while reporting the batch as successful.  The caller
+    can retry the whole VLM request, which keeps the evidence set auditable.
+    """
+    expected_ids = [str(record.get("image_id") or "").strip() for record in batch_records]
+    expected_ids = [image_id for image_id in expected_ids if image_id]
+    received_ids = [str(review.get("image_id") or "").strip() for review in reviews if isinstance(review, dict)]
+    missing_ids = [image_id for image_id in expected_ids if image_id not in received_ids]
+    duplicate_ids = sorted({image_id for image_id in received_ids if image_id and received_ids.count(image_id) > 1})
+    if missing_ids or duplicate_ids or len(reviews) != len(expected_ids):
+        problems: list[str] = []
+        if missing_ids:
+            problems.append(f"missing={','.join(missing_ids)}")
+        if duplicate_ids:
+            problems.append(f"duplicate={','.join(duplicate_ids)}")
+        if len(reviews) != len(expected_ids):
+            problems.append(f"count={len(reviews)}/{len(expected_ids)}")
+        raise RuntimeError(
+            f"VLM 图片分析返回不完整 ({batch_label}; {'; '.join(problems)}); 将整批重试，不能使用部分图片结果。"
+        )
 
 
 async def analyze_contact_sheet(
@@ -439,4 +474,36 @@ async def analyze_image_url_batch(
         batch_analysis = {"raw": response_content, "images": []}
 
     reviews = normalize_sheet_reviews(batch_analysis, batch_records, batch)
+    require_complete_batch_reviews(reviews, batch_records, batch_label=f"image_url_batch={batch['sheet_page']}")
     return batch_analysis, reviews
+
+
+async def detect_person_in_image(source: str) -> dict:
+    """Focused fallback for legacy Step6 records missing person evidence."""
+    image_url = source if is_remote_url(source) else image_data_url(Path(source).expanduser())
+    client = settings.get_image_analysis_client()
+    response = await client.chat.completions.create(
+        model=settings.VLM_MODEL,
+        messages=[
+            {"role": "system", "content": "Return valid JSON only."},
+            {"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": "Does this image visibly contain any person, human model, face, body, hand, or human silhouette? Return exactly {\"contains_person\": true|false, \"confidence\": \"high|medium|low\"}."},
+            ]},
+        ],
+        max_tokens=80,
+        temperature=0,
+    )
+    content = response.choices[0].message.content if response and response.choices else ""
+    try:
+        result = json.loads(clean_json_content(content or ""))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("人物识别未返回有效 JSON") from exc
+    if not isinstance(result.get("contains_person"), bool):
+        raise RuntimeError("人物识别未返回 contains_person 布尔值")
+    return {
+        "contains_person": result["contains_person"],
+        "person_detection_confidence": str(result.get("confidence") or "low"),
+        "person_detection_source": "step10_legacy_vlm",
+        "person_detection_status": "complete",
+    }

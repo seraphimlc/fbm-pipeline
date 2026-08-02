@@ -205,12 +205,16 @@ export interface ProductData {
   keywords_top: string | null;
   categories: string | null;
   leaf_category: string | null;
+  customer_mindset: string | null;
+  customer_mindset_generated_at: string | null;
   listing_title: string | null;
   listing_bullets: string | null;
+  listing_product_highlights: string | null;
   listing_description: string | null;
   listing_search_terms: string | null;
   listing_title_zh: string | null;
   listing_bullets_zh: string | null;
+  listing_product_highlights_zh: string | null;
   listing_description_zh: string | null;
   listing_search_terms_zh: string | null;
   listing_check: string | null;
@@ -231,6 +235,7 @@ export interface ProductImage {
   gallery_images: string | null;
   gallery_order: string | null;
   image_analysis: string | null;
+  image_compliance_manifest?: string | null;
   [key: string]: unknown;
 }
 
@@ -1207,13 +1212,24 @@ export interface SystemConfig {
   step4_allow_existing_category: boolean;
   step5_llm_temperature: number;
   step5_llm_max_tokens: number;
+  step5_llm_timeout_seconds: number;
+  step5_llm_retry_attempts: number;
+  step5_description_input_max_chars: number;
+  step5_features_input_max_chars: number;
+  step5_structured_input_max_chars: number;
+  step5_image_context_max_items: number;
+  step5_image_evidence_max_chars: number;
+  step5_image_diagnostics_max_chars: number;
   step5_title_max_chars: number;
+  step5_product_highlight_max_chars: number;
   step5_bullet_max_chars: number;
   step5_search_terms_max_bytes: number;
   llm_api_configured: boolean;
   vlm_api_configured: boolean;
   gpt_image_api_configured: boolean;
   sellersprite_configured: boolean;
+  sellersprite_openapi_configured: boolean;
+  sellersprite_browser_token_configured: boolean;
   env_file: string;
 }
 
@@ -1245,7 +1261,16 @@ export type SystemConfigUpdate = Partial<Pick<
   | 'step4_allow_existing_category'
   | 'step5_llm_temperature'
   | 'step5_llm_max_tokens'
+  | 'step5_llm_timeout_seconds'
+  | 'step5_llm_retry_attempts'
+  | 'step5_description_input_max_chars'
+  | 'step5_features_input_max_chars'
+  | 'step5_structured_input_max_chars'
+  | 'step5_image_context_max_items'
+  | 'step5_image_evidence_max_chars'
+  | 'step5_image_diagnostics_max_chars'
   | 'step5_title_max_chars'
+  | 'step5_product_highlight_max_chars'
   | 'step5_bullet_max_chars'
   | 'step5_search_terms_max_bytes'
   | 'llm_model'
@@ -1260,6 +1285,20 @@ export type SystemConfigUpdate = Partial<Pick<
 	  aplus_image_api_retries: number;
 	  aplus_image_overwrite_policy: 'skip_success' | 'overwrite_all';
 	}>;
+
+export interface LocalEnvItem {
+  key: string;
+  value: string;
+  is_secret: boolean;
+  has_value: boolean;
+  section: string;
+}
+
+export interface LocalEnvConfig {
+  env_file: string;
+  items: LocalEnvItem[];
+  restart_required: boolean;
+}
 
 // ─── Step labels ───
 
@@ -1456,7 +1495,7 @@ export const syncMissingGigaProducts = (body: { site?: string; data_source_id: n
 export const syncMissingGigaProductsBackground = (body: { site?: string; data_source_id: number; task_id?: string | null; current_category?: string | null; page_size?: number | null; max_pages?: number | null }, metadata?: MutationMetadataConfig) =>
   api.post<GigaSyncQueuedResult>('/giga/sync-missing/background', body, mutationRequestConfig(metadata, { timeout: 30000 }));
 
-export const createGigaPullTaskRuns = (body: { data_source_ids: number[]; current_category?: string | null; page_size?: number | null; max_pages?: number | null }, metadata?: MutationMetadataConfig) =>
+export const createGigaPullTaskRuns = (body: { data_source_ids: number[]; current_category?: string | null; page_size?: number | null; max_pages?: number | null; new_sku_limit?: number | null }, metadata?: MutationMetadataConfig) =>
   api.post<TaskRunBatchQueuedResult>('/task-runs/giga-pull', body, mutationRequestConfig(metadata, { timeout: 30000 }));
 
 export const createGigaInventorySyncTaskRuns = (body: { data_source_ids: number[]; sku_codes?: string[] | null }, metadata?: MutationMetadataConfig) =>
@@ -1575,10 +1614,12 @@ export const updateProduct = (id: number, data: Partial<Product> & {
   leaf_category?: string;
   listing_title?: string;
   listing_bullets?: string | string[];
+  listing_product_highlights?: string | string[] | null;
   listing_description?: string;
   listing_search_terms?: string;
   listing_title_zh?: string;
   listing_bullets_zh?: string | string[];
+  listing_product_highlights_zh?: string | string[] | null;
   listing_description_zh?: string;
   listing_search_terms_zh?: string;
   listing_primary_keyword?: string;
@@ -1649,6 +1690,23 @@ export const getConfig = () =>
 
 export const updateConfig = (data: SystemConfigUpdate, metadata?: MutationMetadataConfig) =>
   api.patch<{ status: string; restart_required: boolean; env_file: string; updated_fields: string[] }>('/config', data, mutationRequestConfig(metadata));
+
+export const getLocalEnvConfig = () =>
+  api.get<LocalEnvConfig>('/config/local-env');
+
+export const updateLocalEnvValue = (key: string, value: string, metadata?: MutationMetadataConfig) =>
+  api.patch<{ status: string; key: string; restart_required: boolean }>(
+    `/config/local-env/${encodeURIComponent(key)}`,
+    { value },
+    mutationRequestConfig(metadata),
+  );
+
+export const importLocalEnvConfig = (content: string, metadata?: MutationMetadataConfig) =>
+  api.post<{ status: string; imported_count: number; restart_required: boolean }>(
+    '/config/local-env/import',
+    { content },
+    mutationRequestConfig(metadata),
+  );
 
 export const getHealth = () =>
   api.get<{ status: string; version: string }>('/health');

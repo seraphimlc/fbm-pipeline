@@ -5,8 +5,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.models import Product
-from app.models.status import STEP5_LISTING, STEP6_CURATING
+from app.models.status import STEP5_LISTING, STEP6_CURATING, STEP_CUSTOMER_MINDSET
+from app.pipeline.customer_mindset import customer_mindset_matches_product
 from app.pipeline.engine import is_running
+from app.task_planners.product_customer_mindset import create_product_customer_mindset_runs
 from app.task_planners.product_image_analysis import create_product_image_analysis_runs
 from app.task_planners.product_listing import create_product_listing_runs
 from app.task_runtime.events import update_step_progress
@@ -23,7 +25,11 @@ async def _load_product(ctx: TaskContext, product_id: int) -> Product | None:
     result = await ctx.db.execute(
         select(Product)
         .where(Product.id == product_id)
-        .options(selectinload(Product.data), selectinload(Product.catalog_item))
+        .options(
+            selectinload(Product.data),
+            selectinload(Product.images),
+            selectinload(Product.catalog_item),
+        )
     )
     return result.scalar_one_or_none()
 
@@ -62,6 +68,15 @@ async def _update_run_row(ctx: TaskContext, row_update: dict[str, Any]) -> None:
     await ctx.db.commit()
 
 
+def _customer_mindset_ready(product: Product) -> bool:
+    if not product.data or not product.data.customer_mindset:
+        return False
+    try:
+        return customer_mindset_matches_product(product.data.customer_mindset, product)
+    except RuntimeError:
+        return False
+
+
 async def product_bulk_advance_product(ctx: TaskContext) -> dict[str, Any]:
     payload = _payload(ctx)
     product_id = int(payload.get("product_id") or 0)
@@ -91,7 +106,7 @@ async def product_bulk_advance_product(ctx: TaskContext) -> dict[str, Any]:
             "product_id": product_id,
             "item_code": item_code,
             "status": "submitted",
-            "reason": "已提交图片分析子任务；完成后由任务链路继续 Listing",
+            "reason": "已提交图片分析子任务；完成后自动继续用户心智梳理和 Listing",
             "latest_status": STEP6_CURATING,
             "latest_step": 5,
             "latest_result": "image_analysis_queued",
@@ -102,12 +117,42 @@ async def product_bulk_advance_product(ctx: TaskContext) -> dict[str, Any]:
         await update_step_progress(ctx.db, ctx.step, current=1, total=1, message="已提交图片分析子任务", data=result)
         return result
 
+    if not _customer_mindset_ready(product):
+        runs = await create_product_customer_mindset_runs(
+            ctx.db,
+            [product_id],
+            created_by="product_bulk_advance",
+        )
+        result = {
+            "product_id": product_id,
+            "item_code": item_code,
+            "status": "submitted",
+            "reason": "已提交用户心智梳理子任务；完成后自动继续 Listing",
+            "generation_target": "customer_mindset",
+            "latest_status": STEP_CUSTOMER_MINDSET,
+            "latest_step": 6,
+            "latest_result": "customer_mindset_queued",
+            "latest_reason": "用户心智梳理子任务已进入任务中心",
+            "task_run_ids": [run.id for run in runs],
+        }
+        await _update_run_row(ctx, result)
+        await update_step_progress(
+            ctx.db,
+            ctx.step,
+            current=1,
+            total=1,
+            message="已提交用户心智梳理子任务",
+            data=result,
+        )
+        return result
+
     runs = await create_product_listing_runs(ctx.db, [product_id], created_by="product_bulk_advance")
     result = {
         "product_id": product_id,
         "item_code": item_code,
         "status": "submitted",
         "reason": "已提交 Listing 生成子任务",
+        "generation_target": "listing_generation",
         "latest_status": STEP5_LISTING,
         "latest_step": 6,
         "latest_result": "listing_queued",

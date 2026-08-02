@@ -242,9 +242,11 @@ assert AMAZON_WORKFLOW_NODES == (
     "visual_match_competitors",
     "capture_competitor_candidates",
     "auto_select_competitor",
+    "keyword_research",
     "select_competitor",
     "capture_competitor_detail",
     "image_analysis",
+    "customer_mindset",
     "listing_generation",
     "flow_done",
 ), AMAZON_WORKFLOW_NODES
@@ -268,6 +270,8 @@ for forbidden in ("export", "catalog_export", "amazon_upload"):
         "AMAZON_WORKFLOW_NODES" in status_text
         and "AMAZON_WORKFLOW_STATUSES" in status_text
         and "WORKFLOW_NODE_SELECT_IMAGES" in status_text
+        and "WORKFLOW_NODE_KEYWORD_RESEARCH" in status_text
+        and "WORKFLOW_NODE_CUSTOMER_MINDSET" in status_text
         and "WORKFLOW_STATUS_PROCESSING" in status_text,
         "Amazon workflow node/status 必须集中定义在 backend/app/models/status.py",
     )
@@ -326,10 +330,13 @@ def test_amazon_workflow_t2_service_projection_and_write_rules() -> None:
         and "product_status == COMPLETED and catalog_item and getattr(catalog_item, \"confirmed_at\", None)" in workflow_text
         and "def _legacy_failed_workflow_node(" in workflow_text
         and "has_image_analysis = bool(images and getattr(images, \"image_analysis\", None))" in workflow_text
+        and "has_customer_mindset = False" in workflow_text
+        and "load_customer_mindset(" in workflow_text
         and "has_listing_content = bool(data and getattr(data, \"listing_title\", None))" in workflow_text
+        and "WORKFLOW_NODE_CUSTOMER_MINDSET" in workflow_text
         and "retry_image_analysis" in workflow_text
         and "retry_listing_generation" in workflow_text,
-        "Product Workflow Service 必须用 Catalog/Image/Listing 结构化事实只读兼容 E5 前历史空 workflow 投影",
+        "Product Workflow Service 必须用 Catalog/Image/用户心智/Listing 结构化事实只读兼容 E5 前历史空 workflow 投影",
     )
     assert_true(
         "error or \"\"" not in workflow_text
@@ -357,10 +364,12 @@ def test_amazon_workflow_t2_service_projection_and_write_rules() -> None:
     )
 
     code = r'''
+import json
 from datetime import datetime
 from types import SimpleNamespace
 from app.api.products import _product_list_work_status
 from app.product_tasks.workflow import build_product_workflow, set_product_workflow
+from app.pipeline.customer_mindset import DYNAMIC_QUESTION_FOCUSES, FIXED_QUESTIONS, SCHEMA_VERSION
 from app.models.status import (
     COMPLETED,
     FAILED,
@@ -369,6 +378,7 @@ from app.models.status import (
     WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES,
     WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
     WORKFLOW_NODE_FLOW_DONE,
+    WORKFLOW_NODE_CUSTOMER_MINDSET,
     WORKFLOW_NODE_IMAGE_ANALYSIS,
     WORKFLOW_NODE_LISTING_GENERATION,
     WORKFLOW_NODE_SEARCH_COMPETITOR,
@@ -378,6 +388,47 @@ from app.models.status import (
     WORKFLOW_STATUS_PROCESSING,
     WORKFLOW_STATUS_SUCCEEDED,
 )
+
+def customer_mindset_fixture():
+    evidence_id = "product.title"
+    fixed = [
+        {
+            "id": item["id"],
+            "question_type": "fixed",
+            "answer": {"conclusion": f"fixture {item['id']}", "evidence_refs": [evidence_id]},
+        }
+        for item in FIXED_QUESTIONS
+    ]
+    dynamic = [
+        {
+            "id": f"dynamic_{index:02d}",
+            "question_type": "dynamic",
+            "focus": focus,
+            "trigger_evidence_refs": [evidence_id],
+            "answer": {"conclusion": f"fixture dynamic {index}", "evidence_refs": [evidence_id]},
+        }
+        for index, focus in enumerate(DYNAMIC_QUESTION_FOCUSES, start=1)
+    ]
+    return json.dumps({
+        "schema_version": SCHEMA_VERSION,
+        "evidence_catalog": [{"id": evidence_id}],
+        "questions": fixed + dynamic,
+        "strategy": {
+            "primary_buyer": "fixture buyer",
+            "current_pain": "fixture pain",
+            "purchase_trigger": "fixture trigger",
+            "primary_job": "fixture job",
+            "core_value_proposition": "fixture value",
+            "content_direction": {
+                "bullet_jobs": [{"position": index} for index in range(1, 6)],
+                "claims_to_avoid": ["unsupported fixture claim"],
+            },
+        },
+        "quality": {
+            "fixed_question_count": len(FIXED_QUESTIONS),
+            "dynamic_question_count": len(DYNAMIC_QUESTION_FOCUSES),
+        },
+    })
 
 product = SimpleNamespace(id=123, workflow_node=None, workflow_status=None, workflow_error=None, workflow_updated_at=None)
 empty = build_product_workflow(product)
@@ -444,12 +495,29 @@ legacy_listing_failed = SimpleNamespace(
     workflow_updated_at=None,
     error_message="historical failure reason for display only",
     images=SimpleNamespace(image_analysis="{\"selling_points\": []}"),
-    data=SimpleNamespace(listing_title=None),
+    data=SimpleNamespace(customer_mindset=customer_mindset_fixture(), listing_title=None),
 )
 legacy_listing_failed_view = build_product_workflow(legacy_listing_failed)
 assert legacy_listing_failed_view["stage"] == WORKFLOW_NODE_LISTING_GENERATION, legacy_listing_failed_view
 assert legacy_listing_failed_view["work_status"] == "failed", legacy_listing_failed_view
 assert legacy_listing_failed_view["primary_action"] == "retry_listing_generation", legacy_listing_failed_view
+
+legacy_customer_mindset_failed = SimpleNamespace(
+    id=128,
+    status=FAILED,
+    current_step=0,
+    workflow_node=None,
+    workflow_status=None,
+    workflow_error=None,
+    workflow_updated_at=None,
+    error_message="historical failure reason for display only",
+    images=SimpleNamespace(image_analysis="{\"selling_points\": []}"),
+    data=SimpleNamespace(customer_mindset=None, listing_title=None),
+)
+legacy_customer_mindset_failed_view = build_product_workflow(legacy_customer_mindset_failed)
+assert legacy_customer_mindset_failed_view["stage"] == WORKFLOW_NODE_CUSTOMER_MINDSET, legacy_customer_mindset_failed_view
+assert legacy_customer_mindset_failed_view["work_status"] == "failed", legacy_customer_mindset_failed_view
+assert legacy_customer_mindset_failed_view["primary_action"] == "open_task_center", legacy_customer_mindset_failed_view
 
 now = datetime(2026, 6, 18, 9, 30, 0)
 set_product_workflow(product, node=WORKFLOW_NODE_SEARCH_COMPETITOR, status=WORKFLOW_STATUS_PROCESSING, now=now)
@@ -481,6 +549,7 @@ assert "等待视觉初筛任务" in visual_pending["action_reason"], visual_pen
 for node, action in [
     (WORKFLOW_NODE_AUTO_SELECT_IMAGES, "retry_auto_image_selection"),
     (WORKFLOW_NODE_IMAGE_ANALYSIS, "retry_image_analysis"),
+    (WORKFLOW_NODE_CUSTOMER_MINDSET, "open_task_center"),
     (WORKFLOW_NODE_LISTING_GENERATION, "retry_listing_generation"),
 ]:
     item = SimpleNamespace(id=456, workflow_node=node, workflow_status=WORKFLOW_STATUS_FAILED, workflow_error="boom")
@@ -728,6 +797,7 @@ def test_product_detail_uses_workflow_as_primary_display_source() -> None:
         (ROOT / "contracts" / "product_workflow_actions.json").read_text(encoding="utf-8")
     )
     product_flow_index = (ROOT / "docs" / "domain-index" / "product-flow.md").read_text(encoding="utf-8")
+    workflow_stage_index_section = product_detail_text.split("const workflowStageIndex", 1)[1].split("const workflowStepStatus", 1)[0]
     default_tab_section = product_detail_text.split("const defaultProductDetailTab", 1)[1].split("const ProductDetail", 1)[0]
     poll_section = product_detail_text.split("// 自动轮询：任务运行中时每3秒刷新", 1)[1].split(
         "  useEffect(() => {\n    if (!product) return;\n    if (listingImageDraftProductId",
@@ -774,10 +844,17 @@ def test_product_detail_uses_workflow_as_primary_display_source() -> None:
         "商品详情 stepper 必须在 workflow 存在时使用 workflow stage/work_status，不得被 legacy stepper/current_step 覆盖",
     )
     assert_true(
-        "if (workStatus === 'ready_to_generate') return 6" in product_detail_text
-        and "if (workStatus === 'export_ready' || workStatus === 'exported') return 7" in product_detail_text
-        and "if (workStatus === 'capture_detail' && (workflow?.stage_status === 'succeeded' || directIndex < 3)) return 3" in product_detail_text,
-        "ProductDetail stepper 必须让已推进的 work_status 工作桶覆盖上一节点 succeeded 展示位置",
+        "if (workStatus === 'export_ready' || workStatus === 'exported') return workflowGroupIndex('export')" in product_detail_text
+        and "if (workStatus === 'capture_detail' && (workflow?.stage_status === 'succeeded' || directIndex < 3)) return 3" in product_detail_text
+        and "if (directIndex >= 0) {" in workflow_stage_index_section
+        and "if (workStatus === 'ready_to_generate' && workflow?.stage_status === 'succeeded')" in workflow_stage_index_section
+        and "return Math.min(directIndex + 1, workflowGroupIndex('export'));" in workflow_stage_index_section
+        and "if (workStatus === 'ready_to_generate' || workStatus === 'running') return workflowGroupIndex('image_analysis')" in workflow_stage_index_section
+        and workflow_stage_index_section.index("if (workStatus === 'export_ready' || workStatus === 'exported')")
+            < workflow_stage_index_section.index("if (directIndex >= 0)")
+        and workflow_stage_index_section.index("if (directIndex >= 0)")
+            < workflow_stage_index_section.index("if (workStatus === 'ready_to_generate' || workStatus === 'running')"),
+        "ProductDetail stepper 必须按当前节点推进 ready 状态；用户心智 pending 不能回退成图片分析，也不能依赖旧魔法数字",
     )
     assert_true(
         "if (workflow) {" in default_tab_section
@@ -1485,6 +1562,28 @@ def test_upc_pool_is_source_of_new_task_upcs() -> None:
     assert_true("bound_item_code" in upc_pool_text and "bound_source_product_id" in upc_pool_text, "UPC 池必须记录商品Code和来源商品ID")
     assert_true("UPC 会自动从 UPC池子领取" in product_list_text, "前端导入提示必须说明 UPC 来自池子")
     assert_true('name="upc"' not in create_page_text, "创建任务页面不应再显示 UPC 输入框")
+
+
+def test_offline_tasks_json_loads_fallback_regression() -> None:
+    code = r'''
+from app.services.offline_tasks import _json_loads
+
+sentinel = []
+assert _json_loads(None) == {}
+assert _json_loads("") == {}
+assert _json_loads("{broken-json") == {}
+assert _json_loads(None, sentinel) is sentinel
+assert _json_loads("{broken-json", sentinel) is sentinel
+assert _json_loads("[]", sentinel) == []
+assert _json_loads('{"ok": true}', sentinel) == {"ok": True}
+'''
+    result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
+        cwd=ROOT / "backend",
+        text=True,
+        capture_output=True,
+    )
+    assert_true(result.returncode == 0, f"offline_tasks._json_loads fallback 回归验证失败: {result.stderr or result.stdout}")
 
 
 def test_offline_tasks_are_claimed_and_idempotent() -> None:
@@ -3492,8 +3591,10 @@ from types import SimpleNamespace
 from app.api.products import _current_task_status, _workflow_state
 from app.product_tasks import actions as product_actions
 from app.models.status import (
+    STEP_CUSTOMER_MINDSET,
     STEP5_LISTING,
     STEP6_CURATING,
+    WORKFLOW_NODE_CUSTOMER_MINDSET,
     WORKFLOW_NODE_IMAGE_ANALYSIS,
     WORKFLOW_NODE_LISTING_GENERATION,
     WORKFLOW_STATUS_PROCESSING,
@@ -3501,6 +3602,7 @@ from app.models.status import (
 
 samples = [
     (STEP6_CURATING, 5, "图片分析已加入任务中心队列", WORKFLOW_NODE_IMAGE_ANALYSIS),
+    (STEP_CUSTOMER_MINDSET, 6, "用户心智梳理已加入任务中心队列", WORKFLOW_NODE_CUSTOMER_MINDSET),
     (STEP5_LISTING, 6, "Listing 生成已加入任务中心队列", WORKFLOW_NODE_LISTING_GENERATION),
 ]
 
@@ -3518,13 +3620,15 @@ class FakeDb:
 
 async def main():
     original_load_product = product_actions._load_product
+    original_raise_if_customer_mindset_missing = product_actions._raise_if_customer_mindset_missing
     async def fake_load_product(_db, _product_id):
         return fake_load_product.product
     fake_load_product.product = None
     try:
         for action, status, step, message, workflow_node in [
             (product_actions.ProductImageAnalysisAction(), *samples[0]),
-            (product_actions.ProductListingGenerationAction(), *samples[1]),
+            (product_actions.ProductCustomerMindsetAction(), *samples[1]),
+            (product_actions.ProductListingGenerationAction(), *samples[2]),
         ]:
             product = SimpleNamespace(
                 id=999999,
@@ -3543,6 +3647,7 @@ async def main():
                 aplus_uploaded_at=None,
                 aplus_upload_error=None,
                 data=None,
+                images=SimpleNamespace(image_analysis="{\"images\":[{\"filename\":\"fixture.jpg\"}],\"fixture\":true}"),
                 files=[],
                 catalog_item=None,
                 workflow_node=None,
@@ -3553,6 +3658,7 @@ async def main():
             )
             fake_load_product.product = product
             product_actions._load_product = fake_load_product
+            product_actions._raise_if_customer_mindset_missing = lambda _product: None
             await action.reserve(FakeDb(product), {"product_id": product.id}, SimpleNamespace())
             assert product.status == status, product
             assert product.current_step == step, product
@@ -3569,6 +3675,7 @@ async def main():
             assert "中断" not in _current_task_status(product)
     finally:
         product_actions._load_product = original_load_product
+        product_actions._raise_if_customer_mindset_missing = original_raise_if_customer_mindset_missing
 
 asyncio.run(main())
 '''
@@ -3590,6 +3697,7 @@ from app.models.status import (
     COMPLETED,
     FAILED,
     PAUSED,
+    WORKFLOW_NODE_CUSTOMER_MINDSET,
     WORKFLOW_NODE_FLOW_DONE,
     WORKFLOW_NODE_IMAGE_ANALYSIS,
     WORKFLOW_NODE_LISTING_GENERATION,
@@ -3636,6 +3744,8 @@ def product():
 
 async def main():
     original_load_product = product_actions._load_product
+    original_raise_if_customer_mindset_missing = product_actions._raise_if_customer_mindset_missing
+    original_listing_content_ready = product_actions._listing_content_ready
     async def fake_load_product(_db, _product_id):
         return fake_load_product.product
     fake_load_product.product = None
@@ -3651,6 +3761,18 @@ async def main():
         assert failed.workflow_error == "boom"
         assert db.commit_count == 1
 
+        mindset_failed = product()
+        fake_load_product.product = mindset_failed
+        await product_actions._project_customer_mindset_failed(
+            db,
+            product_id=mindset_failed.id,
+            message="用户心智梳理失败",
+        )
+        assert mindset_failed.status == FAILED
+        assert mindset_failed.workflow_node == WORKFLOW_NODE_CUSTOMER_MINDSET
+        assert mindset_failed.workflow_status == WORKFLOW_STATUS_FAILED
+        assert mindset_failed.workflow_error == "用户心智梳理失败"
+
         paused = product()
         fake_load_product.product = paused
         await product_actions._project_product_paused(db, product_id=paused.id, step=6, message="Listing 生成任务已取消")
@@ -3660,6 +3782,8 @@ async def main():
         assert paused.workflow_error == "Listing 生成任务已取消"
 
         done = product()
+        product_actions._raise_if_customer_mindset_missing = lambda _product: None
+        product_actions._listing_content_ready = lambda _product: True
         product_actions._project_listing_completed(done)
         assert done.status == COMPLETED
         assert done.workflow_node == WORKFLOW_NODE_FLOW_DONE
@@ -3667,6 +3791,8 @@ async def main():
         assert done.workflow_error is None
     finally:
         product_actions._load_product = original_load_product
+        product_actions._raise_if_customer_mindset_missing = original_raise_if_customer_mindset_missing
+        product_actions._listing_content_ready = original_listing_content_ready
 
 asyncio.run(main())
 '''
@@ -3680,18 +3806,37 @@ asyncio.run(main())
 
 
 def test_image_analysis_listing_e5_contract() -> None:
+    models_text = (ROOT / "backend" / "app" / "models" / "models.py").read_text(encoding="utf-8")
+    database_text = (ROOT / "backend" / "app" / "database.py").read_text(encoding="utf-8")
+    schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
     actions_text = (ROOT / "backend" / "app" / "product_tasks" / "actions.py").read_text(encoding="utf-8")
     products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    engine_text = (ROOT / "backend" / "app" / "pipeline" / "engine.py").read_text(encoding="utf-8")
+    mindset_text = (ROOT / "backend" / "app" / "pipeline" / "customer_mindset.py").read_text(encoding="utf-8")
+    listing_text = (ROOT / "backend" / "app" / "pipeline" / "step5_listing.py").read_text(encoding="utf-8")
+    aplus_text = (ROOT / "backend" / "app" / "pipeline" / "step7_aplus_plan.py").read_text(encoding="utf-8")
     workflow_text = (ROOT / "backend" / "app" / "product_tasks" / "workflow.py").read_text(encoding="utf-8")
+    product_flow_index = (ROOT / "docs" / "domain-index" / "product-flow.md").read_text(encoding="utf-8")
+    task_runtime_index = (ROOT / "docs" / "domain-index" / "task-runtime.md").read_text(encoding="utf-8")
+    mindset_behavior_script = ROOT / "scripts" / "test_customer_mindset.py"
     product_list_text = (ROOT / "frontend" / "src" / "pages" / "ProductList.tsx").read_text(encoding="utf-8")
     workflow_registry_text = (ROOT / "frontend" / "src" / "workflow" / "productWorkflowActionRegistry.ts").read_text(encoding="utf-8")
     workflow_manifest = json.loads((ROOT / "contracts" / "product_workflow_actions.json").read_text(encoding="utf-8"))
 
-    image_section = actions_text.split("class ProductImageAnalysisAction", 1)[1].split("class ProductListingGenerationAction", 1)[0]
+    image_section = actions_text.split("class ProductImageAnalysisAction", 1)[1].split("class ProductCustomerMindsetAction", 1)[0]
+    mindset_section = actions_text.split("class ProductCustomerMindsetAction", 1)[1].split("class ProductListingGenerationAction", 1)[0]
     listing_section = actions_text.split("class ProductListingGenerationAction", 1)[1].split("async def _existing_active_run", 1)[0]
     retry_section = products_text.split("async def retry_step", 1)[1].split("async def run_product_from_step", 1)[0]
-    e5_sections = image_section + "\n" + listing_section
+    e5_sections = image_section + "\n" + mindset_section + "\n" + listing_section
     manifest_by_action = {item["action"]: item for item in workflow_manifest}
+
+    for field in ("customer_mindset", "customer_mindset_generated_at"):
+        assert_true(
+            f"{field}: Mapped" in models_text
+            and f'(\"{field}\",' in database_text
+            and field in schemas_text,
+            f"用户心智 durable 字段必须同时存在于 ORM、MySQL schema ensure 和 API schema: {field}",
+        )
 
     assert_true(
         actions_text.count("_project_listing_completed(") == 2
@@ -3701,16 +3846,60 @@ def test_image_analysis_listing_e5_contract() -> None:
     assert_true(
         "def _e5_export_ready_protection_reasons" in actions_text
         and "_raise_if_e5_export_ready_protected(product, action_label=\"启动图片分析\")" in image_section
+        and "_raise_if_e5_export_ready_protected(product, action_label=\"启动用户心智梳理\")" in mindset_section
         and "_raise_if_e5_export_ready_protected(product, action_label=\"启动 Listing 生成\")" in listing_section
         and "_raise_if_e5_export_ready_protected(product, action_label=\"完成 Listing 并进入待导出\")" in listing_section,
-        "E5 图片分析/Listing reserve/success 必须走专用保护 helper，阻断外部不可逆事实",
+        "E5 图片分析/用户心智/Listing reserve/success 必须走专用保护 helper，阻断外部不可逆事实",
     )
     assert_true(
         "already_completed" in image_section
         and "downstream_failed" in image_section
         and "create_product_action_runs(" in image_section
-        and "self._listing_action_type()" in image_section,
-        "图片分析 success 必须 completed no-op，并且只通过 ProductTaskAction planner 创建/复用 Listing run，创建失败要可见",
+        and "self._customer_mindset_action_type()" in image_section
+        and '"product_listing_generation"' not in image_section,
+        "图片分析 success 必须 completed no-op，并且只创建/复用用户心智 run，不能直接创建 Listing",
+    )
+    assert_true(
+        "already_completed" in mindset_section
+        and "downstream_failed" in mindset_section
+        and "run_customer_mindset(product_id)" in mindset_section
+        and "create_product_action_runs(" in mindset_section
+        and '"product_listing_generation"' in mindset_section,
+        "用户心智 success 必须落库有效简报后才创建/复用 Listing run，失败要可见",
+    )
+    assert_true(
+        "customer_mindset_matches_product" in actions_text
+        and "customer_mindset_matches_product" in products_text
+        and "customer_mindset_matches_product" in engine_text
+        and "_raise_if_customer_mindset_missing(product)" in listing_section
+        and "_queue_product_post_image_generation" in products_text
+        and "_queue_product_customer_mindset" in products_text,
+        "API、engine 和 ProductTaskAction 必须共用正式心智校验，所有 Step 6 入口缺产物时先排用户心智",
+    )
+    assert_true(
+        "DYNAMIC_QUESTION_MIN = 2" in mindset_text
+        and "DYNAMIC_QUESTION_MAX = 5" in mindset_text
+        and "DYNAMIC_QUESTION_FOCUSES" in mindset_text
+        and "固定问题必须完整且保持 13 题稳定顺序" in mindset_text
+        and "动态问题数量必须在" in mindset_text,
+        "用户心智必须固定 13 个核心问题，并按商品证据生成 2 至 5 个商品专属问题",
+    )
+    assert_true(
+        "customer_mindset_context(" in listing_text
+        and 'surface="listing"' in listing_text
+        and "customer_mindset_context(" in aplus_text
+        and 'surface="aplus"' in aplus_text,
+        "Listing 与 A+ 必须通过同一 customer_mindset_context 消费同一份心智简报",
+    )
+    assert_true(
+        "13 个固定核心问题" in product_flow_index
+        and "2 至 5 个" in product_flow_index
+        and "15 至 18 题" in product_flow_index
+        and "13 个固定核心问题" in task_runtime_index
+        and "2 至 5 个" in task_runtime_index
+        and "15 至 18 题" in task_runtime_index
+        and mindset_behavior_script.is_file(),
+        "13 个固定题 + 2 至 5 个动态题契约及验证入口必须同步写入 product-flow/task-runtime 索引",
     )
     assert_true(
         "confirmed_at = None" not in listing_section
@@ -3740,7 +3929,15 @@ def test_image_analysis_listing_e5_contract() -> None:
         "threading.Thread",
         "enqueue_pipeline(",
     ):
-        assert_true(forbidden not in e5_sections, f"E5 image/listing action 不得触发导出/A+/上传/TikTok/旧 pipeline 副作用: {forbidden}")
+        assert_true(forbidden not in e5_sections, f"E5 image/mindset/listing action 不得触发导出/A+/上传/TikTok/旧 pipeline 副作用: {forbidden}")
+
+    mindset_result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), str(mindset_behavior_script)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    assert_true(mindset_result.returncode == 0, f"用户心智 13+2~5/证据/共享消费行为验证失败: {mindset_result.stderr or mindset_result.stdout}")
 
 
 def test_aplus_auto_after_export_ready_a1_a2_contract() -> None:
@@ -6943,9 +7140,17 @@ def test_auto_competitor_candidate_capture_and_selection_phase1_contract() -> No
         and "product.competitor_asin = asin" in selection_action_section
         and "product.catalog_item.competitor_asin = asin" in selection_action_section
         and 'snapshot["selected_competitor"]' in selection_action_section
-        and "_create_or_reuse_image_analysis_after_auto_competitor" in selection_action_section
-        and "auto_start=False" in actions_text,
-        "E4A 自动选竞品必须使用 current-set deterministic scoring，success hook 才写 final facts 并创建/复用 image_analysis 且不自动启动真实图片分析",
+        and "_create_or_reuse_keyword_research_after_auto_competitor" in selection_action_section
+        and '"product_keyword_research"' in actions_text
+        and "class ProductKeywordResearchAction" in actions_text
+        and "ProductKeywordResearchAction()" in actions_text
+        and "run_keywords(product_id)" in actions_text
+        and "run_pricing(product_id)" in actions_text
+        and "run_category(product_id)" in actions_text
+        and "product.data.suggested_price is None" in actions_text
+        and "not product.data.leaf_category" in actions_text
+        and "_assert_step_prerequisites(product_id, 5)" in actions_text,
+        "自动选竞品必须使用 current-set deterministic scoring，success hook 写 final facts 后先创建商品准备任务；图片分析和 Listing 不得绕过关键词、定价和类目前置",
     )
     assert_true(
         "retry_competitor_capture" not in workflow_text
@@ -7379,6 +7584,7 @@ def main() -> int:
         test_search_terms_are_twenty_comma_separated_keywords,
         test_gigab2b_alphanumeric_product_id_url_is_supported,
         test_upc_pool_is_source_of_new_task_upcs,
+        test_offline_tasks_json_loads_fallback_regression,
         test_offline_tasks_are_claimed_and_idempotent,
         test_product_pipeline_recovers_interrupted_competitor_capture,
         test_competitor_review_queue_uses_workbench_status_scope,

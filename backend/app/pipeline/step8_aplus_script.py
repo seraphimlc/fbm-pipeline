@@ -1,7 +1,19 @@
-"""
-模块8：A+ 脚本 — 使用 LLM 为每个 A+ 模块生成出图 Prompt
+"""待导出后的 A+ 派生节点 2：把 A+ 规划转换为可执行的 GPT Image 脚本。
 
-将模块7的规划转化为具体的 GPT Image 出图指令（prompt + 尺寸 + 风格）
+输入是 Step 7 规划、商品图片候选及其逐图证据。默认
+`standard_header_image_text_v1` profile 必须生成恰好 5 个宽横幅脚本；其它 profile
+使用 `module_registry.py` 的模块和 slot 契约。每个脚本包含英文 prompt、negative prompt、
+模块职责、尺寸、发布 profile、领星模块类型以及可追溯的 `reference_images`。
+
+参考图规则：每个模块选择 1-2 张与该模块目的匹配的图。Lifestyle 模块需要产品身份图
+和使用环境依据；材质/功能细节模块需要细节图和产品身份图；尺寸/异议模块需要比例或
+规格依据。不能让所有模块机械复用同一对图，也不能因为缺素材而选无关图凑数。Step 9
+还会硬校验每个脚本至少有 1 张参考图，因此没有可信参考图的脚本不得进入出图。
+
+Prompt 当前要求 100-300 个英文单词，每张图最多规划 1-3 个短文本片段；默认标准尺寸
+为 1940x1200，实际值由脚本目标和 `APLUS_IMAGE_WIDTH/HEIGHT` 配置决定。脚本必须保护
+产品类型、轮廓、颜色、尺寸比例、部件、材质、纹理、表面处理和包装，不得把规划中的
+证据缺口写成新功能。输出写入 `ProductAplus` 脚本字段；失败不影响商品“待导出”状态。
 """
 
 import asyncio
@@ -80,6 +92,7 @@ Key rules:
 - Specify only short, benefit-led text elements when useful; avoid dense text, paragraph overlays, keyword stuffing, and copied supplier labels.
 - On-image text must NOT contain the brand name. The brand can guide style internally, but do not render it as a logo, wordmark, headline, caption, or text overlay.
 - Lifestyle scenes may include people when useful, but any visible person must be shown as a complete, natural full body. Do not crop people at the head, hands, torso, legs, or feet.
+- Each script must include contains_person=true when the requested generated composition includes any person, otherwise false.
 - Preserve the original product identity and proportions as much as possible: same product type, shape, color, scale, key parts, visible accessories, material, surface finish, and distinctive construction details shown in the references.
 - Preserve the exact material shown in the selected product reference images. Do not change fabric, plastic, wood, metal, finish, texture, packaging, or visible surface treatment into another material.
 - Each A+ module must use its own two reference images chosen for that module's purpose. Do not reuse the same pair for every image.
@@ -122,7 +135,8 @@ For each module in the plan, generate a detailed image generation prompt:
 - Text overlays must not include the brand name "{brand}" or any logo/wordmark.
 - If a lifestyle image includes people, require complete full-body people with natural anatomy and no cropped body parts.
 - Protect product fidelity: explicitly preserve the original product type, shape, color, dimensions, proportions, key parts, visible accessories, material, texture/finish, and distinctive construction details. Preserve the material shown in the selected references; do not change fabric/plastic/wood/metal/finish/texture/packaging. Avoid any prompt language that changes the product design.
-- Choose 1-2 reference_images for each module from the Reference Image Candidates. Use two when the module needs separate identity/detail anchors; use one when the available material is limited or one strong reference is enough. Select them based on the module purpose: lifestyle modules need usage/context plus product-identity references, detail modules need material/feature close-ups plus product-identity references, spec modules need dimensions/scale plus product-identity references.
+- Step 7 is the business authority for reference selection. Preserve each module's primary_reference_image_id and secondary_reference_image_id when those candidates exist and are safe. Use fallback_reference_roles and the Reference Image Candidates only when a planned image is missing, unavailable, excluded, wrong-variant, blurry, watermarked, or otherwise unsafe.
+- Each final module must still contain 1-2 reference_images. Use two when the module needs separate identity/detail anchors; use one only when the available material is limited or one strong reference is enough.
 - Do not use the same two reference images for every module.
 - In the prompt, include a short "Selected reference images" section that explains how each selected reference should be used.
 - Generate exactly 5 scripts total for standard Amazon A+ content. Do not create 6 or 7 scripts.
@@ -155,6 +169,7 @@ Output JSON:
       "publish_profile": "standard_header_image_text_v1",
       "lingxing_content_module_type": "STANDARD_HEADER_IMAGE_TEXT",
       "semantic_role": "hero",
+      "contains_person": false,
       "prompt": "detailed image generation prompt...",
       "negative_prompt": "what to avoid...",
       "width": {output_width},
@@ -241,6 +256,7 @@ REGENERATE_SCRIPT_PROMPT = """Regenerate one A+ Content image generation script 
 Output JSON:
 {{
   "module_position": {module_position},
+  "contains_person": false,
   "prompt": "detailed image generation prompt...",
   "negative_prompt": "what to avoid...",
   "width": {output_width},
@@ -394,6 +410,12 @@ def _load_reference_candidates(product: Product) -> list[dict]:
             "product_angle": review.get("product_angle") or mm.get("product_angle"),
             "scene_type": review.get("scene_type") or mm.get("scene_type"),
             "aplus_reference_value": review.get("aplus_reference_value") or mm.get("aplus_reference_value"),
+            "risk_flags": review.get("risk_flags") or mm.get("risk_flags") or [],
+            "amazon_suitability": (
+                (mm.get("quality_assessment") or {}).get("amazon_suitability")
+                if isinstance(mm.get("quality_assessment"), dict)
+                else None
+            ),
         }
         candidates.append(candidate)
         seen.add(path)
@@ -743,6 +765,9 @@ def _attach_module_strategy_section(script: dict, module: dict) -> None:
         f"- Experience angle: {strategy.get('experience_angle') or 'Show a realistic ownership or usage experience.'}",
         f"- Avoid gallery overlap: {strategy.get('gallery_overlap_avoidance') or 'Do not repeat MAIN/gallery specs unless adding deeper usage context.'}",
         f"- Wide banner layout: {strategy.get('banner_layout') or 'Use one clear focal product/reference anchor with a clean foreground/background or left/right composition.'}",
+        f"- Step 7 primary reference: {module.get('primary_reference_image_id') or 'not specified; validate a fallback'} — {module.get('primary_reference_use') or 'preserve product identity'}",
+        f"- Step 7 secondary reference: {module.get('secondary_reference_image_id') or 'not specified; validate a fallback'} — {module.get('secondary_reference_use') or 'preserve module-specific evidence'}",
+        f"- Reference selection reason: {module.get('reference_selection_reason') or module.get('reference_strategy') or 'match references to the buyer question'}",
     ]
     if strategy.get("risk_guardrails"):
         lines.append("- Risk guardrails: " + "; ".join(strategy["risk_guardrails"]))
@@ -776,6 +801,36 @@ def _select_references_for_script(
     if not candidates:
         return []
 
+    planned_ids = [
+        str(module.get("primary_reference_image_id") or "").strip(),
+        str(module.get("secondary_reference_image_id") or "").strip(),
+    ]
+    planned_ids = [image_id for image_id in planned_ids if image_id]
+    by_image_id = {
+        str(candidate.get("image_id") or "").strip().lower(): candidate
+        for candidate in candidates
+        if str(candidate.get("image_id") or "").strip()
+    }
+
+    def planned_reference_problem(candidate: dict | None) -> str | None:
+        if not candidate:
+            return "planned image_id is not present in the current candidate set"
+        path = str(candidate.get("path") or "").strip()
+        if not path:
+            return "candidate has no usable image path"
+        if not _is_remote_url(path) and not Path(path).is_file():
+            return "local reference file no longer exists"
+        role = str(candidate.get("conversion_role") or "").strip().lower()
+        suitability = str(candidate.get("amazon_suitability") or "").strip().lower()
+        risk_text = " ".join(str(item or "") for item in (candidate.get("risk_flags") or [])).lower()
+        unsafe_markers = (
+            "wrong variant", "wrong color", "mismatched", "blur", "blurry",
+            "watermark", "low resolution", "unclear product", "exclude",
+        )
+        if role == "exclude" or suitability == "exclude" or any(marker in risk_text for marker in unsafe_markers):
+            return "planned reference is excluded or has a high-risk visual flag"
+        return None
+
     scored = sorted(
         enumerate(candidates),
         key=lambda pair: _score_reference_candidate(pair[1], module, script, position, pair[0], main_path),
@@ -784,9 +839,23 @@ def _select_references_for_script(
 
     selected: list[dict] = []
     seen: set[str] = set()
+    validation_issues: list[dict] = []
+    for planned_id in planned_ids:
+        candidate = by_image_id.get(planned_id.lower())
+        problem = planned_reference_problem(candidate)
+        if problem:
+            validation_issues.append({"image_id": planned_id, "reason": problem})
+            continue
+        path = candidate.get("path")
+        if path and path not in seen:
+            selected.append(candidate)
+            seen.add(path)
+        if len(selected) == 2:
+            break
+
     for _, candidate in scored:
         path = candidate.get("path")
-        if not path or path in seen:
+        if not path or path in seen or planned_reference_problem(candidate):
             continue
         selected.append(candidate)
         seen.add(path)
@@ -798,7 +867,7 @@ def _select_references_for_script(
         for offset in range(len(candidates)):
             candidate = candidates[(start + offset) % len(candidates)]
             path = candidate.get("path")
-            if path and path not in seen:
+            if path and path not in seen and not planned_reference_problem(candidate):
                 selected.append(candidate)
                 seen.add(path)
             if len(selected) == 2:
@@ -810,7 +879,7 @@ def _select_references_for_script(
             selected_paths = {item.get("path") for item in selected}
             for _, alternate in scored:
                 alternate_path = alternate.get("path")
-                if not alternate_path or alternate_path in selected_paths:
+                if not alternate_path or alternate_path in selected_paths or planned_reference_problem(alternate):
                     continue
                 candidate_pair = [selected[0], alternate]
                 alternate_key = tuple(sorted(str(item.get("path")) for item in candidate_pair if item.get("path")))
@@ -818,7 +887,20 @@ def _select_references_for_script(
                     selected = candidate_pair
                     break
 
-    return [_format_reference(candidate, chr(65 + index), module, script) for index, candidate in enumerate(selected[:2])]
+    final_refs = [_format_reference(candidate, chr(65 + index), module, script) for index, candidate in enumerate(selected[:2])]
+    script["reference_selection_audit"] = {
+        "selection_owner": "step7_business_plan",
+        "planned_image_ids": planned_ids,
+        "accepted_planned_image_ids": [
+            ref.get("image_id") for ref in final_refs
+            if ref.get("image_id") in planned_ids
+        ],
+        "fallback_used": bool(validation_issues or any(ref.get("image_id") not in planned_ids for ref in final_refs)),
+        "validation_issues": validation_issues,
+        "final_image_ids": [ref.get("image_id") for ref in final_refs],
+        "reference_selection_reason": module.get("reference_selection_reason"),
+    }
+    return final_refs
 
 
 def _select_references_for_regeneration(
@@ -1086,6 +1168,7 @@ def _normalize_script_count_and_size(scripts_data: dict) -> dict:
         script["module_position"] = idx
         script["width"] = settings.APLUS_IMAGE_WIDTH
         script["height"] = settings.APLUS_IMAGE_HEIGHT
+        script["contains_person"] = bool(script.get("contains_person", False))
         prompt = script.get("prompt") or ""
         size_rule = f"Output size requirement: exactly {settings.APLUS_IMAGE_WIDTH} x {settings.APLUS_IMAGE_HEIGHT} pixels."
         if prompt and size_rule not in prompt:
@@ -1312,6 +1395,7 @@ def _normalize_enhanced_scripts_for_plan(scripts_data: dict, plan: dict) -> dict
                     ),
                     "negative_prompt": raw.get("negative_prompt") or script.get("negative_prompt"),
                     "style": raw.get("style") or script.get("style") or "photography",
+                    "contains_person": bool(raw.get("contains_person", script.get("contains_person", False))),
                     "alt_text": module.get("alt_text_seed") or script.get("alt_text"),
                 }
             )
@@ -1342,6 +1426,7 @@ def normalize_aplus_scripts_for_plan(scripts_data: dict, plan: dict) -> dict:
             continue
         script["publish_profile"] = APLUS_PUBLISH_PROFILE_STANDARD_HEADER_IMAGE_TEXT_V1
         script["lingxing_content_module_type"] = LINGXING_STANDARD_HEADER_IMAGE_TEXT
+        script["contains_person"] = bool(script.get("contains_person", False))
     return normalized
 
 

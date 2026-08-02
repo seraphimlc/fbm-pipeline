@@ -15,7 +15,8 @@ from app.api.schemas import OfflineTaskCatalogExportRequest, OfflineTaskGigaDyna
 from app.config import settings
 from app.database import async_session
 from app.models import CatalogProduct, OfflineTask, OfflineTaskStep, Product, ProductAplus, ProductDataSource
-from app.models.status import COMPLETED, FAILED, PAUSED, STEP6_CURATING
+from app.models.status import COMPLETED, FAILED, PAUSED, STEP6_CURATING, STEP_CUSTOMER_MINDSET
+from app.pipeline.customer_mindset import customer_mindset_matches_product
 from app.pipeline.engine import get_step_status, is_running, run_pipeline_tracked
 from app.pipeline.step7_aplus_plan import run_aplus_plan
 from app.pipeline.step8_aplus_script import run_aplus_script
@@ -27,6 +28,7 @@ from app.services.giga_price_sync import GigaPriceSyncOptions, sync_giga_price_s
 from app.services.oss_uploader import upload_private_file
 from app.services.giga_product_drafts import upsert_product_drafts_from_giga_batch
 from app.task_planners.product_image_analysis import create_product_image_analysis_runs
+from app.task_planners.product_customer_mindset import create_product_customer_mindset_runs
 from app.task_planners.product_listing import create_product_listing_runs
 from app.task_runtime.catalog_export_status import (
     CATALOG_STEP_OWNER_OFFLINE_TASK,
@@ -68,6 +70,15 @@ def _json_loads(value: str | None, default: object | None = None) -> object:
         return json.loads(value)
     except Exception:
         return {} if default is None else default
+
+
+def _customer_mindset_ready(product: Product) -> bool:
+    if not product.data or not product.data.customer_mindset:
+        return False
+    try:
+        return customer_mindset_matches_product(product.data.customer_mindset, product)
+    except RuntimeError:
+        return False
 
 
 def _safe_filename_part(value: str | None, fallback: str = "export") -> str:
@@ -849,7 +860,7 @@ async def _run_product_bulk_advance_step(db: AsyncSession, step: OfflineTaskStep
                     "product_id": product_id,
                     "item_code": item_code,
                     "status": "queued",
-                    "reason": "已提交新任务中心图片分析；完成后从 Step 6 继续 Listing",
+                    "reason": "已提交新任务中心图片分析；完成后自动继续用户心智梳理和 Listing",
                     "latest_status": STEP6_CURATING,
                     "latest_step": 5,
                     "latest_result": "image_analysis_queued",
@@ -879,25 +890,36 @@ async def _run_product_bulk_advance_step(db: AsyncSession, step: OfflineTaskStep
                 result = await session.execute(
                     select(Product)
                     .where(Product.id == product_id)
-                    .options(selectinload(Product.catalog_item))
+                    .options(
+                        selectinload(Product.data),
+                        selectinload(Product.images),
+                        selectinload(Product.catalog_item),
+                    )
                 )
                 product = result.scalar_one_or_none()
                 if not product:
                     await _set_step_status(db, step, "failed", error=f"商品 {product_id} 不存在")
                     return
-                product.status = get_step_status(6)
-                product.current_step = 6
-                product.error_message = "Listing 生成已加入新任务中心队列，请到新任务中心查看进度"
-                product.updated_at = datetime.now()
-                if product.catalog_item:
-                    product.catalog_item.status = product.status
-                    product.catalog_item.confirmed_at = None
-                    product.catalog_item.updated_at = product.updated_at
-                runs = await create_product_listing_runs(
-                    session,
-                    [product_id],
-                    created_by="product_bulk_advance",
-                )
+                if _customer_mindset_ready(product):
+                    generation_target = "listing_generation"
+                    latest_status = get_step_status(6)
+                    latest_result = "listing_queued"
+                    latest_reason = "Listing 已进入新任务中心"
+                    runs = await create_product_listing_runs(
+                        session,
+                        [product_id],
+                        created_by="product_bulk_advance",
+                    )
+                else:
+                    generation_target = "customer_mindset"
+                    latest_status = STEP_CUSTOMER_MINDSET
+                    latest_result = "customer_mindset_queued"
+                    latest_reason = "用户心智梳理已进入新任务中心"
+                    runs = await create_product_customer_mindset_runs(
+                        session,
+                        [product_id],
+                        created_by="product_bulk_advance",
+                    )
             await _ensure_task_not_paused(db, step.task_id)
             await _set_step_status(
                 db,
@@ -907,11 +929,14 @@ async def _run_product_bulk_advance_step(db: AsyncSession, step: OfflineTaskStep
                     "product_id": product_id,
                     "item_code": item_code,
                     "status": "queued",
-                    "reason": "已提交新任务中心 Listing 生成",
-                    "latest_status": get_step_status(6),
+                    "reason": "已提交新任务中心用户心智梳理；完成后自动继续 Listing"
+                    if generation_target == "customer_mindset"
+                    else "已提交新任务中心 Listing 生成",
+                    "generation_target": generation_target,
+                    "latest_status": latest_status,
                     "latest_step": 6,
-                    "latest_result": "listing_queued",
-                    "latest_reason": "Listing 已进入新任务中心",
+                    "latest_result": latest_result,
+                    "latest_reason": latest_reason,
                     "task_run_ids": [run.id for run in runs],
                 },
                 progress_current=1,

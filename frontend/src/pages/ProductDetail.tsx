@@ -7,7 +7,7 @@ import {
   PauseOutlined, ReloadOutlined, DeleteOutlined,
   FolderOpenOutlined, FileZipOutlined, InboxOutlined, FileExcelOutlined,
   CheckOutlined, DragOutlined, CopyOutlined, ExportOutlined,
-  PictureOutlined,
+  PictureOutlined, PlusOutlined,
 } from '@ant-design/icons';
 import { getProduct, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, generateProductAplus, runProductFromStep, updateProduct, updateProductListingImages, listCategoryOptions } from '../api';
 import type { CategoryOption, ProductDetail } from '../api';
@@ -53,7 +53,9 @@ const WORKFLOW_STEP_GROUPS = [
   { key: 'visual', title: '视觉初筛', nodes: ['visual_match_competitors'] },
   { key: 'capture', title: '抓取详情', nodes: ['capture_competitor_candidates', 'capture_competitor_detail'] },
   { key: 'competitor', title: '选择竞品', nodes: ['auto_select_competitor', 'select_competitor'] },
+  { key: 'keywords', title: '关键词采集', nodes: ['keyword_research'] },
   { key: 'image_analysis', title: '图片分析', nodes: ['image_analysis'] },
+  { key: 'customer_mindset', title: '用户心智', nodes: ['customer_mindset'] },
   { key: 'listing', title: 'Listing文案', nodes: ['listing_generation'] },
   { key: 'export', title: '待导出', nodes: ['flow_done'] },
 ];
@@ -109,6 +111,47 @@ const parseJson = (value: string | null | undefined, fallback: any = null) => {
   } catch {
     return fallback;
   }
+};
+
+const productHighlightValues = (value: string | null | undefined) => {
+  const parsed = parseJson(value, []);
+  if (!Array.isArray(parsed)) return [];
+  return parsed.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 5);
+};
+
+const productHighlightDrafts = (
+  englishValue: string | null | undefined,
+  chineseValue: string | null | undefined,
+) => {
+  const english = productHighlightValues(englishValue);
+  const chinese = productHighlightValues(chineseValue);
+  const count = Math.max(3, Math.min(5, Math.max(english.length, chinese.length)));
+  return {
+    english: Array.from({ length: count }, (_, index) => english[index] || ''),
+    chinese: Array.from({ length: count }, (_, index) => chinese[index] || ''),
+  };
+};
+
+const MINDSET_STATUS_META: Record<string, { label: string; color: string }> = {
+  supported: { label: '有直接支持', color: 'success' },
+  inferred: { label: '合理推断', color: 'processing' },
+  unknown: { label: '证据不足', color: 'warning' },
+  conflicting: { label: '证据冲突', color: 'error' },
+};
+const MINDSET_CONFIDENCE_META: Record<string, { label: string; color: string }> = {
+  high: { label: '高置信度', color: 'success' },
+  medium: { label: '中置信度', color: 'processing' },
+  low: { label: '低置信度', color: 'warning' },
+};
+const MINDSET_CONTENT_USE_LABELS: Record<string, string> = {
+  title: '标题',
+  bullet_1: '五点 1',
+  bullet_2: '五点 2',
+  bullet_3: '五点 3',
+  bullet_4: '五点 4',
+  bullet_5: '五点 5',
+  listing_image: 'Listing 图片',
+  aplus: 'A+',
 };
 
 const normalizeComparableImage = (value: string | null | undefined) => String(value || '').trim();
@@ -191,21 +234,26 @@ const fileSize = (bytes: number | null | undefined) => {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 };
 const valueText = (value: string | null | undefined) => value || '-';
+const workflowGroupIndex = (key: string) => WORKFLOW_STEP_GROUPS.findIndex((group) => group.key === key);
 const workflowStageIndex = (workflow: any) => {
   const stage = workflow?.stage || workflow?.node_key;
   const directIndex = WORKFLOW_STEP_GROUPS.findIndex((group) => group.nodes.includes(stage));
   const workStatus = workflow?.work_status;
-  if (workStatus === 'ready_to_generate') return 6;
-  if (workStatus === 'export_ready' || workStatus === 'exported') return 7;
+  if (workStatus === 'export_ready' || workStatus === 'exported') return workflowGroupIndex('export');
   if (workStatus === 'select_competitor' && (workflow?.stage_status === 'succeeded' || directIndex < 2)) return 4;
   if (workStatus === 'capture_detail' && (workflow?.stage_status === 'succeeded' || directIndex < 3)) return 3;
-  if (directIndex >= 0) return directIndex;
+  if (directIndex >= 0) {
+    if (workStatus === 'ready_to_generate' && workflow?.stage_status === 'succeeded') {
+      return Math.min(directIndex + 1, workflowGroupIndex('export'));
+    }
+    return directIndex;
+  }
   if (workStatus === 'needs_initialization' || workStatus === 'auto_select_images' || workStatus === 'select_images') return 0;
   if (workStatus === 'competitor_searching') return 1;
   if (workStatus === 'select_competitor') return 4;
   if (workStatus === 'capture_detail') return 3;
-  if (workStatus === 'ready_to_generate' || workStatus === 'running') return 6;
-  if (workStatus === 'export_ready' || workStatus === 'exported') return 7;
+  if (workStatus === 'ready_to_generate' || workStatus === 'running') return workflowGroupIndex('image_analysis');
+  if (workStatus === 'export_ready' || workStatus === 'exported') return workflowGroupIndex('export');
   if (workStatus === 'failed') return Math.max(directIndex, 0);
   return 0;
 };
@@ -245,6 +293,7 @@ const defaultProductDetailTab = (detail: ProductDetail | null | undefined) => {
     const workflowStage = workflow.stage || workflow.node_key;
     const workflowWorkStatus = workflow.work_status;
     if (['auto_select_images', 'select_images', 'image_analysis'].includes(workflowStage)) return 'images';
+    if (workflowStage === 'customer_mindset') return 'mindset';
     if (['needs_initialization', 'auto_select_images', 'select_images'].includes(workflowWorkStatus)) return 'images';
     if ([
       'search_competitor',
@@ -290,6 +339,7 @@ const defaultProductDetailTab = (detail: ProductDetail | null | undefined) => {
   ) {
     return 'competitor';
   }
+  if (detail.data?.customer_mindset && !hasListingContent) return 'mindset';
   if (
     step === 5
     || detail.status === 'step6_curating'
@@ -326,10 +376,12 @@ const ProductDetail: React.FC = () => {
   const [listingEditOpen, setListingEditOpen] = useState(false);
   const [listingTitleInput, setListingTitleInput] = useState('');
   const [listingBulletsInput, setListingBulletsInput] = useState('');
+  const [listingProductHighlightsInput, setListingProductHighlightsInput] = useState<string[]>(['', '', '']);
   const [listingDescriptionInput, setListingDescriptionInput] = useState('');
   const [listingSearchTermsInput, setListingSearchTermsInput] = useState('');
   const [listingTitleZhInput, setListingTitleZhInput] = useState('');
   const [listingBulletsZhInput, setListingBulletsZhInput] = useState('');
+  const [listingProductHighlightsZhInput, setListingProductHighlightsZhInput] = useState<string[]>(['', '', '']);
   const [listingDescriptionZhInput, setListingDescriptionZhInput] = useState('');
   const [listingSearchTermsZhInput, setListingSearchTermsZhInput] = useState('');
   const [listingPrimaryKeywordInput, setListingPrimaryKeywordInput] = useState('');
@@ -482,24 +534,67 @@ const ProductDetail: React.FC = () => {
   const pricingDetail = parseJson(data?.pricing_detail, null);
   const categories = parseJson(data?.categories, []);
   const categoryPath = Array.isArray(categories) ? categories.join(' > ') : (data?.categories || '');
+  const listingProductHighlights = productHighlightValues(data?.listing_product_highlights);
+  const listingProductHighlightsZh = productHighlightValues(data?.listing_product_highlights_zh);
+  const customerMindset = parseJson(data?.customer_mindset, null);
+  const customerMindsetQuestions = Array.isArray(customerMindset?.questions) ? customerMindset.questions : [];
+  const customerMindsetFixedQuestionCount = customerMindsetQuestions.filter(
+    (item: any) => item?.question_type === 'fixed',
+  ).length;
+  const customerMindsetDynamicQuestionCount = customerMindsetQuestions.filter(
+    (item: any) => item?.question_type === 'dynamic',
+  ).length;
+  const customerMindsetStrategy = customerMindset?.strategy && typeof customerMindset.strategy === 'object'
+    ? customerMindset.strategy
+    : {};
+  const customerMindsetStrategyFieldEvidence = customerMindsetStrategy?.strategy_field_evidence
+    && typeof customerMindsetStrategy.strategy_field_evidence === 'object'
+    ? customerMindsetStrategy.strategy_field_evidence
+    : {};
+  const customerMindsetQuality = customerMindset?.quality && typeof customerMindset.quality === 'object'
+    ? customerMindset.quality
+    : {};
+  const customerMindsetEvidence = Array.isArray(customerMindset?.evidence_catalog)
+    ? customerMindset.evidence_catalog
+    : [];
+  const customerMindsetEvidenceById = new Map(
+    customerMindsetEvidence.map((item: any) => [String(item?.id || ''), item]),
+  );
+  const renderMindsetStrategyValue = (field: string, value: string | null | undefined) => {
+    const meta = customerMindsetStrategyFieldEvidence[field] || {};
+    const statusMeta = MINDSET_STATUS_META[meta.status] || MINDSET_STATUS_META.unknown;
+    return (
+      <Space wrap size={[4, 4]}>
+        <Text>{value || '-'}</Text>
+        {meta.status && <Tag color={statusMeta.color}>{statusMeta.label}</Tag>}
+        {meta.planning_usable === false && <Tag color="warning">不进入下游策略</Tag>}
+        {meta.planning_usable !== false && meta.copy_claim_usable === false && <Tag>仅作策略参考</Tag>}
+      </Space>
+    );
+  };
   const generatedFiles = product.generated_files || [];
   const visibleGeneratedFiles = generatedFiles.filter((file: any) => file?.file_type !== 'amazon_import_template');
   const dimensionLine = (length?: number | string | null, width?: number | string | null, height?: number | string | null, unit = 'in') => (
     length != null && width != null && height != null ? `${length} × ${width} × ${height} ${unit}` : '-'
   );
   const imageAnalysisPayload = parseJson(images?.image_analysis, null);
+  const imageComplianceManifest = parseJson(images?.image_compliance_manifest, {});
+  const imageComplianceAssets = Array.isArray(imageComplianceManifest?.assets) ? imageComplianceManifest.assets : [];
   const imageReviews = Array.isArray(imageAnalysisPayload)
     ? imageAnalysisPayload
     : (imageAnalysisPayload?.images || []);
   const imageSelectionDiagnostics = imageAnalysisPayload?.selection_diagnostics || {};
   const imageHealth = imageSelectionDiagnostics?.image_health || {};
   const imageGalleryRoles = imageSelectionDiagnostics?.gallery_roles || [];
+  const imageEvidenceCoverage = imageSelectionDiagnostics?.gallery_evidence_coverage || [];
+  const imageEvidenceCards = imageSelectionDiagnostics?.image_evidence_cards || [];
   const missingGalleryRoles = imageSelectionDiagnostics?.missing_gallery_roles || [];
   const duplicateSuppressed = imageSelectionDiagnostics?.duplicate_suppressed || [];
   const duplicateBackfill = imageSelectionDiagnostics?.duplicate_backfill || [];
   const listingImageAlignment = imageSelectionDiagnostics?.listing_image_alignment || {};
   const missingImageEvidence = listingImageAlignment?.missing_evidence || [];
   const supportedImageClaims = listingImageAlignment?.supported_claims || [];
+  const listingImageAlignmentPending = listingImageAlignment?.status === 'pending_listing';
   const legacyContactSheets = imageAnalysisPayload?.contact_sheets || (
     images?.contact_sheet_path ? [{ sheet_page: 1, sheet_path: images.contact_sheet_path, image_ids: imageReviews.map((item) => item.image_id || `#${item.index}`) }] : []
   );
@@ -1060,21 +1155,67 @@ const ProductDetail: React.FC = () => {
   };
 
   const openListingEditor = () => {
+    const highlightDrafts = productHighlightDrafts(
+      data?.listing_product_highlights,
+      data?.listing_product_highlights_zh,
+    );
     setListingTitleInput(data?.listing_title || '');
     setListingBulletsInput(parseJson(data?.listing_bullets, []).join('\n'));
+    setListingProductHighlightsInput(highlightDrafts.english);
     setListingDescriptionInput(data?.listing_description || '');
     setListingSearchTermsInput(data?.listing_search_terms || '');
     setListingTitleZhInput(data?.listing_title_zh || '');
     setListingBulletsZhInput(parseJson(data?.listing_bullets_zh, []).join('\n'));
+    setListingProductHighlightsZhInput(highlightDrafts.chinese);
     setListingDescriptionZhInput(data?.listing_description_zh || '');
     setListingSearchTermsZhInput(data?.listing_search_terms_zh || '');
     setListingPrimaryKeywordInput((data?.listing_primary_keyword as string) || '');
     setListingEditOpen(true);
   };
 
+  const updateProductHighlight = (index: number, value: string, chinese = false) => {
+    const setter = chinese ? setListingProductHighlightsZhInput : setListingProductHighlightsInput;
+    setter((current) => current.map((item, itemIndex) => (itemIndex === index ? value : item)));
+  };
+
+  const addProductHighlight = () => {
+    if (listingProductHighlightsInput.length >= 5) return;
+    setListingProductHighlightsInput((current) => [...current, '']);
+    setListingProductHighlightsZhInput((current) => [...current, '']);
+  };
+
+  const removeProductHighlight = (index: number) => {
+    if (listingProductHighlightsInput.length <= 3) return;
+    setListingProductHighlightsInput((current) => current.filter((_, itemIndex) => itemIndex !== index));
+    setListingProductHighlightsZhInput((current) => current.filter((_, itemIndex) => itemIndex !== index));
+  };
+
   const saveListing = async () => {
     if (!listingTitleInput.trim()) {
       message.warning('请填写标题');
+      return;
+    }
+    if (listingTitleInput.trim().length > 75) {
+      message.warning('标题不能超过 75 个字符');
+      return;
+    }
+    const productHighlights = listingProductHighlightsInput.map((item) => item.trim());
+    if (productHighlights.length < 3 || productHighlights.length > 5 || productHighlights.some((item) => !item)) {
+      message.warning('请完整填写 3-5 条商品亮点');
+      return;
+    }
+    if (productHighlights.some((item) => item.length > 125)) {
+      message.warning('每条商品亮点不能超过 125 个字符');
+      return;
+    }
+    const productHighlightsZh = listingProductHighlightsZhInput.map((item) => item.trim());
+    const hasChineseProductHighlights = productHighlightsZh.some(Boolean);
+    if (hasChineseProductHighlights && productHighlightsZh.some((item) => !item)) {
+      message.warning('中文商品亮点填写后，需要与英文亮点逐条对应');
+      return;
+    }
+    if (productHighlightsZh.some((item) => item.length > 125)) {
+      message.warning('每条中文商品亮点不能超过 125 个字符');
       return;
     }
     setListingSaving(true);
@@ -1084,10 +1225,12 @@ const ProductDetail: React.FC = () => {
         await updateProduct(product.id, {
           listing_title: listingTitleInput.trim(),
           listing_bullets: listingBulletsInput,
+          listing_product_highlights: productHighlights,
           listing_description: listingDescriptionInput.trim(),
           listing_search_terms: listingSearchTermsInput.trim(),
           listing_title_zh: listingTitleZhInput.trim(),
           listing_bullets_zh: listingBulletsZhInput,
+          listing_product_highlights_zh: hasChineseProductHighlights ? productHighlightsZh : null,
           listing_description_zh: listingDescriptionZhInput.trim(),
           listing_search_terms_zh: listingSearchTermsZhInput.trim(),
           listing_primary_keyword: listingPrimaryKeywordInput.trim(),
@@ -1344,9 +1487,17 @@ const ProductDetail: React.FC = () => {
     || (
       product.status === 'failed'
       && failedStep === 5
+      && (workflow?.stage || workflow?.node_key) !== 'customer_mindset'
     )
   );
-  const isHardStopped = isStopped && !isCompetitorSearchFailed && !isImageAnalysisFailed;
+  const isCustomerMindsetFailed = Boolean(
+    product.status === 'failed'
+    && (
+      (workflow?.stage || workflow?.node_key) === 'customer_mindset'
+      || /用户心智|customer mindset|customer_mindset/i.test(product.error_message || '')
+    )
+  );
+  const isHardStopped = isStopped && !isCompetitorSearchFailed && !isImageAnalysisFailed && !isCustomerMindsetFailed;
   const showTopProductError = Boolean(
     productErrorMessage
   );
@@ -1363,6 +1514,13 @@ const ProductDetail: React.FC = () => {
     || imageAnalysisBatches.length
     || product.current_step > 5
     || isReadyToExport
+  );
+  const hasCustomerMindset = Boolean(
+    customerMindset?.schema_version === 'customer_mindset_v1'
+    && customerMindsetFixedQuestionCount === 13
+    && customerMindsetDynamicQuestionCount >= 2
+    && customerMindsetDynamicQuestionCount <= 5
+    && customerMindsetStrategy?.core_value_proposition
   );
   const hasAplusOutput = Boolean(
     aplus?.aplus_status === 'done'
@@ -1386,11 +1544,13 @@ const ProductDetail: React.FC = () => {
   const nodeErrorAt = (node: string) => {
     if (isCompetitorSearchFailed) return node === 'find-competitors';
     if (isImageAnalysisFailed) return node === 'image-analysis';
+    if (isCustomerMindsetFailed) return node === 'customer-mindset';
     if (!isStopped) return false;
     const step = failedStep;
     if (node === 'find-competitors') return step <= 2;
     if (node === 'choose-competitor') return step <= 4;
     if (node === 'image-analysis') return step === 5;
+    if (node === 'customer-mindset') return false;
     if (node === 'listing') return step === 6;
     return false;
   };
@@ -1400,7 +1560,8 @@ const ProductDetail: React.FC = () => {
     if (node === 'find-competitors') return isCompetitorSearching || (hasConfirmedSearchImage && !hasReferenceCompetitor && !isCompetitorSearchFailed);
     if (node === 'choose-competitor') return hasConfirmedSearchImage && !hasReferenceCompetitor && !isCompetitorSearching;
     if (node === 'image-analysis') return hasReferenceCompetitor && hasListingImages && !hasImageAnalysis;
-    if (node === 'listing') return hasReferenceCompetitor && hasImageAnalysis && !hasListingContent;
+    if (node === 'customer-mindset') return hasImageAnalysis && !hasCustomerMindset;
+    if (node === 'listing') return hasReferenceCompetitor && hasImageAnalysis && hasCustomerMindset && !hasListingContent;
     if (node === 'export') return isReadyToExport;
     return false;
   };
@@ -1452,12 +1613,23 @@ const ProductDetail: React.FC = () => {
       error: nodeErrorAt('image-analysis'),
     },
     {
+      title: '用户心智',
+      description: isCustomerMindsetFailed
+        ? (product.error_message || '用户心智梳理未完成，请在任务中心查看原因')
+        : hasCustomerMindset
+          ? `已完成 ${customerMindsetQuality.total_question_count || customerMindsetQuestions.length} 个问题的梳理`
+          : `等待结合商品事实、关键词、竞品和图片分析梳理用户需求${statusSuffix}`,
+      done: hasCustomerMindset,
+      active: nodeActiveAt('customer-mindset'),
+      error: nodeErrorAt('customer-mindset'),
+    },
+    {
       title: 'Listing文案',
       description: hasListingContent
         ? '标题、五点、描述已生成'
-        : hasReferenceCompetitor
-          ? `等待结合图片分析生成文案${statusSuffix}`
-          : `等待参考竞品选择完成${statusSuffix}`,
+        : hasCustomerMindset
+          ? `等待按用户心智策略生成文案${statusSuffix}`
+          : `等待用户心智梳理完成${statusSuffix}`,
       done: hasListingContent || product.current_step >= 6 || isReadyToExport,
       active: nodeActiveAt('listing'),
       error: nodeErrorAt('listing'),
@@ -1486,7 +1658,7 @@ const ProductDetail: React.FC = () => {
   const isInterruptedProduct = /运行状态已中断|未在当前服务中运行/.test(product.current_task_status || '');
   const isPipelineRunning = !isInterruptedProduct
     && !PRODUCT_NON_RUNNING_STATUSES.includes(product.status);
-  const canRegenerateListing = Boolean(hasReferenceCompetitor && hasImageAnalysis && !isPipelineRunning && !isPaused && !isHardStopped);
+  const canRegenerateListing = Boolean(hasReferenceCompetitor && hasImageAnalysis && hasCustomerMindset && !isPipelineRunning && !isPaused && !isHardStopped);
   const canGenerateMissingListing = Boolean(
     canRegenerateListing
     && !hasListingContent
@@ -1500,6 +1672,7 @@ const ProductDetail: React.FC = () => {
     product.current_step > 0
     || hasReferenceCompetitor
     || hasImageAnalysis
+    || hasCustomerMindset
     || hasListingContent
     || hasAplusOutput
     || visibleGeneratedFiles.length
@@ -1819,6 +1992,264 @@ const ProductDetail: React.FC = () => {
       ),
     },
     {
+      key: 'mindset',
+      label: '用户心智',
+      children: hasCustomerMindset ? (
+        <div>
+          <Alert
+            type={customerMindsetQuality.requires_review ? 'warning' : 'success'}
+            showIcon
+            style={{ marginBottom: 12 }}
+            message={customerMindsetQuality.requires_review ? '已生成，存在需要人工关注的未知项' : '用户心智梳理已完成'}
+            description={(
+              <Space wrap>
+                <Tag>{customerMindsetQuality.fixed_question_count || 13} 个固定问题</Tag>
+                <Tag color="blue">{customerMindsetQuality.dynamic_question_count || Math.max(customerMindsetQuestions.length - 13, 0)} 个动态问题</Tag>
+                <Tag color={customerMindsetQuality.requires_review ? 'warning' : 'success'}>
+                  共 {customerMindsetQuality.total_question_count || customerMindsetQuestions.length} 个问题
+                </Tag>
+                <Text type="secondary">
+                  {data?.customer_mindset_generated_at
+                    ? `生成于 ${new Date(data.customer_mindset_generated_at).toLocaleString('zh-CN')}`
+                    : customerMindset.generated_at
+                      ? `生成于 ${new Date(customerMindset.generated_at).toLocaleString('zh-CN')}`
+                      : null}
+                </Text>
+              </Space>
+            )}
+          />
+
+          <Card title="核心策略" size="small" style={{ marginBottom: 12 }}>
+            <Descriptions bordered size="small" column={{ xs: 1, md: 2 }}>
+              <Descriptions.Item label="主要购买者">{renderMindsetStrategyValue('primary_buyer', customerMindsetStrategy.primary_buyer)}</Descriptions.Item>
+              <Descriptions.Item label="实际使用者">{renderMindsetStrategyValue('actual_user', customerMindsetStrategy.actual_user)}</Descriptions.Item>
+              <Descriptions.Item label="购买触发点">{renderMindsetStrategyValue('purchase_trigger', customerMindsetStrategy.purchase_trigger)}</Descriptions.Item>
+              <Descriptions.Item label="首要任务">{renderMindsetStrategyValue('primary_job', customerMindsetStrategy.primary_job)}</Descriptions.Item>
+              <Descriptions.Item label="核心价值" span="filled">
+                {renderMindsetStrategyValue('core_value_proposition', customerMindsetStrategy.core_value_proposition)}
+              </Descriptions.Item>
+              <Descriptions.Item label="重点场景" span="filled">
+                <Space wrap>
+                  {(customerMindsetStrategy.top_scenarios || []).map((item: any, index: number) => (
+                    <Space key={`${item?.rank || index}-${item?.scenario || item}`} size={4}>
+                      <Tag color="blue">{item?.rank ? `${item.rank}. ` : ''}{item?.scenario || String(item)}</Tag>
+                      {item?.status && <Tag>{MINDSET_STATUS_META[item.status]?.label || item.status}</Tag>}
+                    </Space>
+                  ))}
+                  {!(customerMindsetStrategy.top_scenarios || []).length && '-'}
+                </Space>
+              </Descriptions.Item>
+              <Descriptions.Item label="决策标准" span="filled">
+                <Space wrap>
+                  {(customerMindsetStrategy.decision_criteria || []).map((item: any, index: number) => (
+                    <Space key={`${item?.rank || index}-${item?.criterion || item}`} size={4}>
+                      <Tag color="purple">{item?.rank ? `${item.rank}. ` : ''}{item?.criterion || String(item)}</Tag>
+                      {item?.status && <Tag>{MINDSET_STATUS_META[item.status]?.label || item.status}</Tag>}
+                    </Space>
+                  ))}
+                  {!(customerMindsetStrategy.decision_criteria || []).length && '-'}
+                </Space>
+              </Descriptions.Item>
+              <Descriptions.Item label="适用边界" span="filled">
+                <Space wrap>
+                  {(customerMindsetStrategy.fit_boundaries || []).map((item: string) => <Tag key={item}>{item}</Tag>)}
+                  {!(customerMindsetStrategy.fit_boundaries || []).length && '-'}
+                </Space>
+              </Descriptions.Item>
+              <Descriptions.Item label="禁止宣称" span="filled">
+                <Space wrap>
+                  {(customerMindsetStrategy.content_direction?.claims_to_avoid || []).map((item: string) => (
+                    <Tag key={item} color="red">{item}</Tag>
+                  ))}
+                  {!(customerMindsetStrategy.content_direction?.claims_to_avoid || []).length && '-'}
+                </Space>
+              </Descriptions.Item>
+            </Descriptions>
+          </Card>
+
+          <Card title="Listing 内容分工" size="small" style={{ marginBottom: 12 }}>
+            <Typography.Paragraph>
+              <Text strong>标题任务：</Text>{customerMindsetStrategy.content_direction?.title_job || '-'}
+            </Typography.Paragraph>
+            <Space wrap size={[4, 4]} style={{ marginBottom: 12 }}>
+              <Text type="secondary">标题证据：</Text>
+              {(customerMindsetStrategy.content_direction?.title_required_proof_refs || []).map((ref: string) => (
+                <Tag key={ref}>{ref}</Tag>
+              ))}
+              {!(customerMindsetStrategy.content_direction?.title_required_proof_refs || []).length && <Tag color="warning">待补充</Tag>}
+              <Tag color={customerMindsetStrategy.content_direction?.title_claim_proof_usable ? 'success' : 'warning'}>
+                {customerMindsetStrategy.content_direction?.title_claim_proof_usable ? '证据可用于标题' : '仅限商品身份信息'}
+              </Tag>
+            </Space>
+            <Table
+              size="small"
+              rowKey={(record: any) => record.position}
+              pagination={false}
+              dataSource={customerMindsetStrategy.content_direction?.bullet_jobs || []}
+              columns={[
+                { title: '五点', dataIndex: 'position', width: 72, render: (value: number) => `第 ${value} 点` },
+                { title: '用户问题', dataIndex: 'buyer_question', width: 280, render: (value: string) => value || '-' },
+                { title: '表达任务', dataIndex: 'message_job', render: (value: string) => value || '-' },
+                {
+                  title: '所需证据',
+                  dataIndex: 'required_proof_refs',
+                  width: 260,
+                  render: (refs: string[], record: any) => (
+                    <Space wrap size={[4, 4]}>
+                      {(refs || []).map((ref) => <Tag key={ref}>{ref}</Tag>)}
+                      {!(refs || []).length && <Text type="secondary">待补充</Text>}
+                      <Tag color={record?.claim_proof_usable ? 'success' : 'warning'}>
+                        {record?.claim_proof_usable ? '可用于文案' : '仅作问题参考'}
+                      </Tag>
+                    </Space>
+                  ),
+                },
+              ]}
+              scroll={{ x: 920 }}
+            />
+            <Title level={5} style={{ marginTop: 18, marginBottom: 10 }}>后续图片与 A+ 任务</Title>
+            <Table
+              size="small"
+              rowKey={(record: any, index: number) => `${record.surface}-${index}`}
+              pagination={false}
+              dataSource={[
+                ...(customerMindsetStrategy.content_direction?.future_visual_jobs || []).map((item: any) => ({
+                  ...item,
+                  surface: 'Listing 图片',
+                  content_job: item.visual_job,
+                })),
+                ...(customerMindsetStrategy.content_direction?.aplus_jobs || []).map((item: any) => ({
+                  ...item,
+                  surface: 'A+',
+                  content_job: item.story_job,
+                })),
+              ]}
+              columns={[
+                { title: '内容位置', dataIndex: 'surface', width: 120, render: (value: string) => <Tag color="blue">{value}</Tag> },
+                { title: '用户问题', dataIndex: 'buyer_question', width: 300, render: (value: string) => value || '-' },
+                { title: '沟通任务', dataIndex: 'content_job', render: (value: string) => value || '-' },
+                {
+                  title: '所需证据',
+                  dataIndex: 'required_proof_refs',
+                  width: 260,
+                  render: (refs: string[], record: any) => (
+                    <Space wrap size={[4, 4]}>
+                      {(refs || []).map((ref) => <Tag key={ref}>{ref}</Tag>)}
+                      {!(refs || []).length && <Text type="secondary">待补充</Text>}
+                      <Tag color={record?.claim_proof_usable ? 'success' : record?.visual_anchor_usable ? 'blue' : 'warning'}>
+                        {record?.claim_proof_usable
+                          ? '可用于文案'
+                          : record?.visual_anchor_usable
+                            ? '仅作视觉锚点'
+                            : '仅作问题参考'}
+                      </Tag>
+                    </Space>
+                  ),
+                },
+              ]}
+              scroll={{ x: 920 }}
+              locale={{ emptyText: '暂无后续视觉任务' }}
+            />
+          </Card>
+
+          <Card title={`问题与回答（${customerMindsetQuestions.length}）`} size="small">
+            <Table
+              size="small"
+              rowKey="id"
+              dataSource={customerMindsetQuestions}
+              pagination={{ pageSize: 10, showSizeChanger: false }}
+              scroll={{ x: 1180 }}
+              columns={[
+                {
+                  title: '类型',
+                  dataIndex: 'question_type',
+                  width: 100,
+                  render: (value: string) => value === 'dynamic'
+                    ? <Tag color="blue">动态补充</Tag>
+                    : <Tag>固定核心</Tag>,
+                },
+                {
+                  title: '问题',
+                  dataIndex: 'question',
+                  width: 300,
+                  render: (value: string, record: any) => (
+                    <Space direction="vertical" size={4}>
+                      <Text strong>{value}</Text>
+                      {record.why_asked && <Text type="secondary">补充原因：{record.why_asked}</Text>}
+                      {record.incremental_decision_gap && (
+                        <Text type="secondary">
+                          相比 {record.closest_fixed_question_id || '固定问题'} 新增：{record.incremental_decision_gap}
+                        </Text>
+                      )}
+                    </Space>
+                  ),
+                },
+                {
+                  title: '结论',
+                  dataIndex: 'answer',
+                  render: (answer: any) => (
+                    <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                      <Text>{answer?.conclusion || '-'}</Text>
+                      {answer?.supporting_rationale && <Text type="secondary">依据：{answer.supporting_rationale}</Text>}
+                      {(answer?.assumptions || []).length > 0 && (
+                        <div><Text type="secondary">假设：</Text>{answer.assumptions.join('；')}</div>
+                      )}
+                      {(answer?.unknowns || []).length > 0 && (
+                        <div><Text type="warning">未知：</Text>{answer.unknowns.join('；')}</div>
+                      )}
+                      <Space wrap size={[4, 4]}>
+                        {(answer?.content_uses || []).map((use: string) => (
+                          <Tag key={use} color="purple">{MINDSET_CONTENT_USE_LABELS[use] || use}</Tag>
+                        ))}
+                      </Space>
+                    </Space>
+                  ),
+                },
+                {
+                  title: '证据',
+                  dataIndex: ['answer', 'evidence_refs'],
+                  width: 250,
+                  render: (refs: string[]) => (
+                    <Space wrap size={[4, 4]}>
+                      {(refs || []).map((ref) => {
+                        const evidence = customerMindsetEvidenceById.get(ref) as any;
+                        return (
+                          <Tooltip key={ref} title={evidence?.excerpt || evidence?.source || ref}>
+                            <Tag>{ref}</Tag>
+                          </Tooltip>
+                        );
+                      })}
+                      {!(refs || []).length && <Tag color="warning">无直接证据</Tag>}
+                    </Space>
+                  ),
+                },
+                {
+                  title: '判断',
+                  dataIndex: 'answer',
+                  width: 130,
+                  render: (answer: any) => {
+                    const statusMeta = MINDSET_STATUS_META[answer?.status] || MINDSET_STATUS_META.unknown;
+                    const confidenceMeta = MINDSET_CONFIDENCE_META[answer?.confidence] || MINDSET_CONFIDENCE_META.low;
+                    return (
+                      <Space direction="vertical" size={4}>
+                        <Tag color={statusMeta.color}>{statusMeta.label}</Tag>
+                        <Tag color={confidenceMeta.color}>{confidenceMeta.label}</Tag>
+                        <Tag color={answer?.copy_claim_usable ? 'success' : 'default'}>
+                          {answer?.copy_claim_usable ? '可直接用于文案' : '仅作策略参考'}
+                        </Tag>
+                      </Space>
+                    );
+                  },
+                },
+              ]}
+            />
+          </Card>
+        </div>
+      ) : (
+        <Empty description={isCustomerMindsetFailed ? '用户心智梳理失败，请在任务中心查看并重试' : '等待图片分析完成后自动梳理'} />
+      ),
+    },
+    {
       key: 'listing',
       label: '📝 Listing文案',
       children: (
@@ -1831,7 +2262,7 @@ const ProductDetail: React.FC = () => {
               <Space size="small">
                 <Popconfirm
                   title="确定重新生成 Listing 文案？"
-                  description="会基于当前商品图片、图片分析和已选竞品重新生成标题、五点、描述和 Search Terms；完成后会自动回到待导出。"
+                  description="会基于当前商品事实、关键词、竞品、图片分析和用户心智策略重新生成标题、五点、描述和 Search Terms；完成后会自动回到待导出。"
                   okText="重新生成"
                   cancelText="取消"
                   onConfirm={regenerateListing}
@@ -1852,8 +2283,39 @@ const ProductDetail: React.FC = () => {
           >
             <Space direction="vertical" style={{ width: '100%' }}>
               <Text>{data?.listing_title || '（未生成）'}</Text>
+              {data?.listing_title && <Text type="secondary">{data.listing_title.length}/75 字符</Text>}
               {data?.listing_title_zh && <Text type="secondary">中文：{data.listing_title_zh}</Text>}
             </Space>
+          </Card>
+          <Card
+            title={(
+              <Space size="small">
+                <span>商品亮点（Product Highlights）</span>
+                <Tag color={listingProductHighlights.length >= 3 ? 'blue' : 'default'}>
+                  {listingProductHighlights.length}/5 条
+                </Tag>
+              </Space>
+            )}
+            size="small"
+            style={{ marginBottom: 12 }}
+          >
+            {listingProductHighlights.length ? (
+              <ol style={{ paddingLeft: 20, marginBottom: 0 }}>
+                {listingProductHighlights.map((highlight, index) => (
+                  <li key={`${index}-${highlight}`} style={{ marginBottom: 10 }}>
+                    <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                      <Text>{highlight}</Text>
+                      <Text type="secondary">{highlight.length}/125 字符</Text>
+                      {listingProductHighlightsZh[index] && (
+                        <Text type="secondary">
+                          中文：{listingProductHighlightsZh[index]}（{listingProductHighlightsZh[index].length}/125 字符）
+                        </Text>
+                      )}
+                    </Space>
+                  </li>
+                ))}
+              </ol>
+            ) : <Text type="secondary">（未填写）</Text>}
           </Card>
           <Card title="五点描述" size="small" style={{ marginBottom: 12 }}>
             {data?.listing_bullets ? (() => {
@@ -2046,6 +2508,29 @@ const ProductDetail: React.FC = () => {
                 />
               )}
 
+              {imageEvidenceCoverage.length > 0 && (
+                <div>
+                  <Text strong>图片证据覆盖</Text>
+                  <Table
+                    size="small"
+                    style={{ marginTop: 6 }}
+                    rowKey="key"
+                    dataSource={imageEvidenceCoverage}
+                    pagination={false}
+                    columns={[
+                      { title: '买家判断', dataIndex: 'label', width: 220 },
+                      {
+                        title: '覆盖情况', dataIndex: 'status', width: 110,
+                        render: (value) => value === 'covered'
+                          ? <Tag color="success">已覆盖</Tag>
+                          : <Tag color="warning">待补图</Tag>,
+                      },
+                      { title: '图片', dataIndex: 'image_ids', render: (value) => (value || []).join('、') || '-' },
+                    ]}
+                  />
+                </div>
+              )}
+
               {missingImageEvidence.length > 0 && (
                 <Alert
                   type="warning"
@@ -2058,6 +2543,15 @@ const ProductDetail: React.FC = () => {
                       ))}
                     </Space>
                   }
+                />
+              )}
+
+              {listingImageAlignmentPending && (
+                <Alert
+                  type="info"
+                  showIcon
+                  message="最终 Listing 图片证据将在文案生成后核对"
+                  description="当前展示的是图库本身的覆盖情况；标题、Product Highlights、五点和描述尚未生成，不能据此判断文案卖点是否已有对应图片。"
                 />
               )}
 
@@ -2280,6 +2774,22 @@ const ProductDetail: React.FC = () => {
               </Space>
             </Spin>
           </Card>
+          {imageComplianceAssets.length ? (
+            <Card title="Amazon 人像图片元数据合规" size="small" style={{ marginTop: 12 }}>
+              <Table
+                size="small"
+                rowKey={(record: any) => record.slot || record.path || record.url}
+                dataSource={imageComplianceAssets}
+                pagination={false}
+                columns={[
+                  { title: '位置', dataIndex: 'slot', width: 100 },
+                  { title: '人物', dataIndex: 'contains_person', width: 100, render: (value: boolean) => value ? <Tag color="gold">含人物</Tag> : <Tag>无人像</Tag> },
+                  { title: '状态', dataIndex: 'compliance_status', render: (value: string) => value === 'oss_round_trip_verified' ? <Tag color="green">已写标并回读验证</Tag> : <Tag>{value || '未处理'}</Tag> },
+                  { title: '投放 URL', dataIndex: 'url', ellipsis: true, render: (value: string) => value ? <a href={value} target="_blank" rel="noreferrer">查看</a> : '-' },
+                ]}
+              />
+            </Card>
+          ) : null}
           <Card title="图片分析批次" size="small" style={{ marginTop: 12 }}>
             {reviewsByImageBatch.length ? (
               <Space direction="vertical" style={{ width: '100%' }} size={16}>
@@ -2307,6 +2817,34 @@ const ProductDetail: React.FC = () => {
                         { title: '副图分', dataIndex: 'gallery_score', width: 90, render: (v) => v ?? '-' },
                         { title: '判断', dataIndex: 'decision_reason', render: (v, r) => v || r.reason || '-' },
                       ]}
+                      expandable={{
+                        expandedRowRender: (record: any) => {
+                          const card = imageEvidenceCards.find((item: any) => item?.image_id === record?.image_id) || {};
+                          const observations = card.visual_observations || record.multimodal_result || {};
+                          const quality = card.quality_assessment || observations.quality_assessment || {};
+                          const tagList = (value: any, color = 'default') => Array.isArray(value) && value.length
+                            ? <Space wrap>{value.map((item: any) => <Tag key={String(item)} color={color}>{String(item)}</Tag>)}</Space>
+                            : <Text type="secondary">-</Text>;
+                          return (
+                            <Descriptions bordered size="small" column={{ xs: 1, md: 2 }}>
+                              <Descriptions.Item label="视觉摘要" span={2}>{observations.summary || observations.visual_summary || '-'}</Descriptions.Item>
+                              <Descriptions.Item label="角度 / 状态">{[observations.product_angle, observations.product_state].filter(Boolean).join('；') || '-'}</Descriptions.Item>
+                              <Descriptions.Item label="颜色 / 场景">{[observations.color_reading, observations.scene_type].filter(Boolean).join('；') || '-'}</Descriptions.Item>
+                              <Descriptions.Item label="尺寸 / 比例线索">{observations.size_scale_cues || '-'}</Descriptions.Item>
+                              <Descriptions.Item label="可见部件">{observations.visible_parts || '-'}</Descriptions.Item>
+                              <Descriptions.Item label="材质 / 纹理">{observations.material_texture || '-'}</Descriptions.Item>
+                              <Descriptions.Item label="背景 / 可见文字">{[observations.background_props, observations.visible_text_or_graphics || observations.text_graphics].filter(Boolean).join('；') || '-'}</Descriptions.Item>
+                              <Descriptions.Item label="图片可支持的表达" span={2}>{tagList(card.claimable_visual_facts)}</Descriptions.Item>
+                              <Descriptions.Item label="不确定或不可宣称" span={2}>{tagList(card.not_proven_or_uncertain || observations.non_claimable_or_uncertain || observations.uncertainty, 'warning')}</Descriptions.Item>
+                              <Descriptions.Item label="建议文案用途" span={2}>{tagList(card.recommended_copy_uses, 'blue')}</Descriptions.Item>
+                              <Descriptions.Item label="清晰度 / 裁切">{[quality.sharpness, quality.crop_and_completeness].filter(Boolean).join('；') || '-'}</Descriptions.Item>
+                              <Descriptions.Item label="光线 / Amazon 适配">{[quality.lighting_and_color, quality.amazon_suitability].filter(Boolean).join('；') || '-'}</Descriptions.Item>
+                              <Descriptions.Item label="A+ 参考价值" span={2}>{card.aplus_reference_value || observations.aplus_reference_value || '-'}</Descriptions.Item>
+                            </Descriptions>
+                          );
+                        },
+                        rowExpandable: (record: any) => Boolean(record?.multimodal_result || imageEvidenceCards.some((item: any) => item?.image_id === record?.image_id)),
+                      }}
                     />
                   </Card>
                 ))}
@@ -2697,7 +3235,7 @@ const ProductDetail: React.FC = () => {
       ),
     },
   ];
-  const tabOrder = ['basic', 'competitor', 'images', 'listing', 'aplus', 'files'];
+  const tabOrder = ['basic', 'competitor', 'images', 'mindset', 'listing', 'aplus', 'files'];
   const orderedTabItems = tabOrder
     .map((key) => tabItems.find((item) => item.key === key))
     .filter(Boolean);
@@ -2857,7 +3395,7 @@ const ProductDetail: React.FC = () => {
           {!hasWorkflow && canRestartProduct && (
             <Popconfirm
               title="确定重新开始流程？"
-              description="会保留已使用图片，清空旧候选竞品、已选竞品、Listing、图片分析、A+ 和生成文件；有主图时会重新搜索候选竞品。"
+              description="会保留已使用图片，清空旧候选竞品、已选竞品、图片分析、用户心智、Listing、A+ 和生成文件；有主图时会重新搜索候选竞品。"
               okText="重新开始"
               cancelText="取消"
               onConfirm={() => doRestart()}
@@ -3024,7 +3562,7 @@ const ProductDetail: React.FC = () => {
             value={listingTitleInput}
             onChange={(event) => setListingTitleInput(event.target.value)}
             rows={2}
-            maxLength={200}
+            maxLength={75}
             showCount
           />
         </div>
@@ -3035,6 +3573,56 @@ const ProductDetail: React.FC = () => {
             onChange={(event) => setListingBulletsInput(event.target.value)}
             rows={8}
           />
+        </div>
+        <div>
+          <Space style={{ width: '100%', justifyContent: 'space-between' }} align="center">
+            <Text type="secondary">商品亮点（3-5 条，每条最多 125 字符）</Text>
+            <Button
+              size="small"
+              icon={<PlusOutlined />}
+              disabled={listingProductHighlightsInput.length >= 5}
+              onClick={addProductHighlight}
+            >
+              添加亮点
+            </Button>
+          </Space>
+          {listingProductHighlightsInput.map((highlight, index) => (
+            <div
+              key={`product-highlight-${index}`}
+              style={{ borderTop: index ? '1px solid #f0f0f0' : undefined, marginTop: 10, paddingTop: 10 }}
+            >
+              <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 6 }} align="center">
+                <Text strong>亮点 {index + 1}</Text>
+                <Button
+                  type="text"
+                  danger
+                  size="small"
+                  icon={<DeleteOutlined />}
+                  title={`删除第 ${index + 1} 条亮点`}
+                  aria-label={`删除第 ${index + 1} 条亮点`}
+                  disabled={listingProductHighlightsInput.length <= 3}
+                  onClick={() => removeProductHighlight(index)}
+                />
+              </Space>
+              <Input.TextArea
+                value={highlight}
+                onChange={(event) => updateProductHighlight(index, event.target.value)}
+                placeholder="英文商品亮点"
+                rows={2}
+                maxLength={125}
+                showCount
+              />
+              <Input.TextArea
+                value={listingProductHighlightsZhInput[index] || ''}
+                onChange={(event) => updateProductHighlight(index, event.target.value, true)}
+                placeholder="中文翻译（可选，填写后需逐条对应）"
+                rows={2}
+                maxLength={125}
+                showCount
+                style={{ marginTop: 8 }}
+              />
+            </div>
+          ))}
         </div>
         <div>
           <Text type="secondary">商品描述</Text>

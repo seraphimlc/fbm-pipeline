@@ -34,6 +34,8 @@ async def init_db():
         await _ensure_mysql_product_source_columns_and_indexes(conn)
         await _ensure_mysql_product_workflow_columns(conn)
         await _ensure_mysql_product_image_selection_columns(conn)
+        await _ensure_mysql_customer_mindset_columns(conn)
+        await _ensure_mysql_listing_product_highlight_columns(conn)
         await _ensure_mysql_competitor_visual_match_columns(conn)
         await _ensure_mysql_competitor_capture_selection_columns(conn)
         await _ensure_mysql_catalog_export_columns(conn)
@@ -216,10 +218,29 @@ async def _ensure_mysql_product_workflow_columns(conn) -> None:
 async def _ensure_mysql_product_image_selection_columns(conn) -> None:
     for column_name, column_type in (
         ("image_selection_analysis", "LONGTEXT NULL"),
+        ("image_compliance_manifest", "LONGTEXT NULL"),
         ("image_selected_at", "DATETIME NULL"),
     ):
         if not await _mysql_column_exists(conn, "product_images", column_name):
             await conn.execute(text(f"ALTER TABLE `product_images` ADD COLUMN `{column_name}` {column_type}"))
+
+
+async def _ensure_mysql_customer_mindset_columns(conn) -> None:
+    for column_name, column_type in (
+        ("customer_mindset", "LONGTEXT NULL"),
+        ("customer_mindset_generated_at", "DATETIME NULL"),
+    ):
+        if not await _mysql_column_exists(conn, "product_data", column_name):
+            await conn.execute(text(f"ALTER TABLE `product_data` ADD COLUMN `{column_name}` {column_type}"))
+
+
+async def _ensure_mysql_listing_product_highlight_columns(conn) -> None:
+    for column_name in (
+        "listing_product_highlights",
+        "listing_product_highlights_zh",
+    ):
+        if not await _mysql_column_exists(conn, "product_data", column_name):
+            await conn.execute(text(f"ALTER TABLE `product_data` ADD COLUMN `{column_name}` LONGTEXT NULL"))
 
 
 async def _ensure_mysql_competitor_visual_match_columns(conn) -> None:

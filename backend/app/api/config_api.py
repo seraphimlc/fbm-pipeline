@@ -1,3 +1,6 @@
+import os
+import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +15,9 @@ router = APIRouter(prefix="/api/config", tags=["config"])
 
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 ENV_FILE = BACKEND_DIR / ".env"
+ENV_KEY_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]*$")
+SECRET_KEY_MARKERS = ("KEY", "SECRET", "TOKEN", "PASSWORD", "DATABASE_URL")
+PLACEHOLDER_SECRET_VALUES = {"", "xxx", "token", "your_token", "your_key", "your_secret"}
 
 
 class ConfigUpdateRequest(BaseModel):
@@ -41,7 +47,16 @@ class ConfigUpdateRequest(BaseModel):
     step4_allow_existing_category: bool | None = None
     step5_llm_temperature: float | None = Field(default=None, ge=0, le=2)
     step5_llm_max_tokens: int | None = Field(default=None, ge=500, le=8000)
-    step5_title_max_chars: int | None = Field(default=None, ge=80, le=250)
+    step5_llm_timeout_seconds: int | None = Field(default=None, ge=30, le=300)
+    step5_llm_retry_attempts: int | None = Field(default=None, ge=0, le=5)
+    step5_description_input_max_chars: int | None = Field(default=None, ge=1000, le=20000)
+    step5_features_input_max_chars: int | None = Field(default=None, ge=500, le=10000)
+    step5_structured_input_max_chars: int | None = Field(default=None, ge=1000, le=16000)
+    step5_image_context_max_items: int | None = Field(default=None, ge=1, le=16)
+    step5_image_evidence_max_chars: int | None = Field(default=None, ge=100, le=1500)
+    step5_image_diagnostics_max_chars: int | None = Field(default=None, ge=200, le=3000)
+    step5_title_max_chars: int | None = Field(default=None, ge=40, le=75)
+    step5_product_highlight_max_chars: int | None = Field(default=None, ge=80, le=125)
     step5_bullet_max_chars: int | None = Field(default=None, ge=100, le=1000)
     step5_search_terms_max_bytes: int | None = Field(default=None, ge=50, le=500)
     llm_model: str | None = Field(default=None, min_length=1, max_length=100)
@@ -67,6 +82,14 @@ class ConfigUpdateRequest(BaseModel):
         if net_rate <= margin_rate:
             raise ValueError("净收入比例必须大于目标净利率")
         return self
+
+
+class LocalEnvValueUpdateRequest(BaseModel):
+    value: str = Field(default="", max_length=20000)
+
+
+class LocalEnvImportRequest(BaseModel):
+    content: str = Field(min_length=1, max_length=500000)
 
 
 UPDATE_FIELD_MAP = {
@@ -96,7 +119,16 @@ UPDATE_FIELD_MAP = {
     "step4_allow_existing_category": "STEP4_ALLOW_EXISTING_CATEGORY",
     "step5_llm_temperature": "STEP5_LLM_TEMPERATURE",
     "step5_llm_max_tokens": "STEP5_LLM_MAX_TOKENS",
+    "step5_llm_timeout_seconds": "STEP5_LLM_TIMEOUT_SECONDS",
+    "step5_llm_retry_attempts": "STEP5_LLM_RETRY_ATTEMPTS",
+    "step5_description_input_max_chars": "STEP5_DESCRIPTION_INPUT_MAX_CHARS",
+    "step5_features_input_max_chars": "STEP5_FEATURES_INPUT_MAX_CHARS",
+    "step5_structured_input_max_chars": "STEP5_STRUCTURED_INPUT_MAX_CHARS",
+    "step5_image_context_max_items": "STEP5_IMAGE_CONTEXT_MAX_ITEMS",
+    "step5_image_evidence_max_chars": "STEP5_IMAGE_EVIDENCE_MAX_CHARS",
+    "step5_image_diagnostics_max_chars": "STEP5_IMAGE_DIAGNOSTICS_MAX_CHARS",
     "step5_title_max_chars": "STEP5_TITLE_MAX_CHARS",
+    "step5_product_highlight_max_chars": "STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS",
     "step5_bullet_max_chars": "STEP5_BULLET_MAX_CHARS",
     "step5_search_terms_max_bytes": "STEP5_SEARCH_TERMS_MAX_BYTES",
     "llm_model": "LLM_MODEL",
@@ -125,6 +157,113 @@ def _format_env_value(value: Any) -> str:
         escaped = text.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
     return text
+
+
+def _is_secret_key(key: str) -> bool:
+    return any(marker in key for marker in SECRET_KEY_MARKERS)
+
+
+def _has_effective_value(key: str, value: str) -> bool:
+    if _is_secret_key(key):
+        return value.strip().lower() not in PLACEHOLDER_SECRET_VALUES
+    return bool(value.strip())
+
+
+def _env_section_from_comment(comment: str) -> str | None:
+    if "───" in comment:
+        return comment.strip("─ ")
+    if comment == "Runtime configuration":
+        return "运行配置"
+    if comment == "Filled missing defaults for local completeness":
+        return "本地默认配置"
+    if comment.startswith("GIGA Open API runtime options"):
+        return "GIGA Open API"
+    return None
+
+
+def _parse_env_entries(content: str) -> list[tuple[str, str, str]]:
+    entries: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    section = "未分类"
+    for number, line in enumerate(content.splitlines(), start=1):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("#"):
+            section = _env_section_from_comment(stripped[1:].strip()) or section
+            continue
+        if "=" not in line:
+            raise HTTPException(400, f"第 {number} 行不是 KEY=VALUE 格式")
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if not ENV_KEY_PATTERN.fullmatch(key):
+            raise HTTPException(400, f"第 {number} 行的变量名无效: {key or '(空)'}")
+        if key in seen:
+            raise HTTPException(400, f"变量 {key} 重复出现")
+        seen.add(key)
+        entries.append((key, value.strip(), section))
+    if not entries:
+        raise HTTPException(400, "配置文件中没有有效的环境变量")
+    return entries
+
+
+def _atomic_write_env(content: str) -> None:
+    ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+    normalized = content.rstrip("\n") + "\n"
+    fd, temp_name = tempfile.mkstemp(prefix=".env.", dir=ENV_FILE.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as temp_file:
+            temp_file.write(normalized)
+        os.chmod(temp_name, 0o600)
+        os.replace(temp_name, ENV_FILE)
+        os.chmod(ENV_FILE, 0o600)
+    except Exception:
+        try:
+            os.unlink(temp_name)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _local_env_items() -> list[dict[str, Any]]:
+    content = ENV_FILE.read_text(encoding="utf-8") if ENV_FILE.exists() else ""
+    return [
+        {
+            "key": key,
+            "value": "已隐藏" if _is_secret_key(key) else value,
+            "is_secret": _is_secret_key(key),
+            "has_value": _has_effective_value(key, value),
+            "section": section,
+        }
+        for key, value, section in _parse_env_entries(content)
+    ]
+
+
+def _write_local_env_value(key: str, value: str) -> None:
+    if not ENV_KEY_PATTERN.fullmatch(key):
+        raise HTTPException(400, "变量名无效")
+    if "\n" in value or "\r" in value:
+        raise HTTPException(400, "配置值不能包含换行")
+
+    lines = ENV_FILE.read_text(encoding="utf-8").splitlines() if ENV_FILE.exists() else []
+    found = False
+    next_lines: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            next_lines.append(line)
+            continue
+        existing_key = line.split("=", 1)[0].strip()
+        if existing_key == key:
+            next_lines.append(f"{key}={value}")
+            found = True
+        else:
+            next_lines.append(line)
+    if not found:
+        if next_lines and next_lines[-1].strip():
+            next_lines.append("")
+        next_lines.append(f"{key}={value}")
+    _atomic_write_env("\n".join(next_lines))
 
 
 def _write_env_updates(updates: dict[str, Any]) -> None:
@@ -159,7 +298,7 @@ def _write_env_updates(updates: dict[str, Any]) -> None:
         for key in missing:
             next_lines.append(f"{key}={env_updates[key]}")
 
-    ENV_FILE.write_text("\n".join(next_lines) + "\n", encoding="utf-8")
+    _atomic_write_env("\n".join(next_lines))
 
 
 class ConfigResponse(settings.__class__):
@@ -206,9 +345,18 @@ class ConfigResponse(settings.__class__):
                 "STEP4_MISSING_ASIN_POLICY": "manual_review",
                 "STEP4_CATEGORY_MISSING_POLICY": "manual_review",
                 "STEP4_ALLOW_EXISTING_CATEGORY": True,
-                "STEP5_LLM_TEMPERATURE": 0.7,
-                "STEP5_LLM_MAX_TOKENS": 2000,
-                "STEP5_TITLE_MAX_CHARS": 200,
+                "STEP5_LLM_TEMPERATURE": 0.3,
+                "STEP5_LLM_MAX_TOKENS": 4500,
+                "STEP5_LLM_TIMEOUT_SECONDS": 120,
+                "STEP5_LLM_RETRY_ATTEMPTS": 2,
+                "STEP5_DESCRIPTION_INPUT_MAX_CHARS": 8000,
+                "STEP5_FEATURES_INPUT_MAX_CHARS": 4000,
+                "STEP5_STRUCTURED_INPUT_MAX_CHARS": 6000,
+                "STEP5_IMAGE_CONTEXT_MAX_ITEMS": 6,
+                "STEP5_IMAGE_EVIDENCE_MAX_CHARS": 500,
+                "STEP5_IMAGE_DIAGNOSTICS_MAX_CHARS": 1000,
+                "STEP5_TITLE_MAX_CHARS": 75,
+                "STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS": 125,
                 "STEP5_BULLET_MAX_CHARS": 500,
                 "STEP5_SEARCH_TERMS_MAX_BYTES": 250,
             }
@@ -265,13 +413,28 @@ async def get_config():
         "step4_allow_existing_category": settings.STEP4_ALLOW_EXISTING_CATEGORY,
         "step5_llm_temperature": settings.STEP5_LLM_TEMPERATURE,
         "step5_llm_max_tokens": settings.STEP5_LLM_MAX_TOKENS,
+        "step5_llm_timeout_seconds": settings.STEP5_LLM_TIMEOUT_SECONDS,
+        "step5_llm_retry_attempts": settings.STEP5_LLM_RETRY_ATTEMPTS,
+        "step5_description_input_max_chars": settings.STEP5_DESCRIPTION_INPUT_MAX_CHARS,
+        "step5_features_input_max_chars": settings.STEP5_FEATURES_INPUT_MAX_CHARS,
+        "step5_structured_input_max_chars": settings.STEP5_STRUCTURED_INPUT_MAX_CHARS,
+        "step5_image_context_max_items": settings.STEP5_IMAGE_CONTEXT_MAX_ITEMS,
+        "step5_image_evidence_max_chars": settings.STEP5_IMAGE_EVIDENCE_MAX_CHARS,
+        "step5_image_diagnostics_max_chars": settings.STEP5_IMAGE_DIAGNOSTICS_MAX_CHARS,
         "step5_title_max_chars": settings.STEP5_TITLE_MAX_CHARS,
+        "step5_product_highlight_max_chars": settings.STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS,
         "step5_bullet_max_chars": settings.STEP5_BULLET_MAX_CHARS,
         "step5_search_terms_max_bytes": settings.STEP5_SEARCH_TERMS_MAX_BYTES,
         "llm_api_configured": bool(settings.LLM_API_KEY),
         "vlm_api_configured": bool(settings.LLM_API_KEY if settings.VLM_USE_LLM_API else settings.VLM_API_KEY),
         "gpt_image_api_configured": bool(settings.resolved_gpt_image_api_key),
-        "sellersprite_configured": bool(settings.SELLERSPRITE_TOKEN),
+        "sellersprite_configured": bool(
+            settings.SELLERSPRITE_OPENAPI_SECRET_KEY.strip()
+            or settings.SELLERSPRITE_TOKEN.strip().lower() not in PLACEHOLDER_SECRET_VALUES
+        ),
+        "sellersprite_openapi_configured": bool(settings.SELLERSPRITE_OPENAPI_SECRET_KEY.strip()),
+        "sellersprite_browser_token_configured": settings.SELLERSPRITE_TOKEN.strip().lower()
+        not in PLACEHOLDER_SECRET_VALUES,
         "giga_sync_page_size": settings.GIGA_SYNC_PAGE_SIZE,
         "env_file": str(ENV_FILE),
     }
@@ -288,6 +451,31 @@ async def update_config(body: ConfigUpdateRequest):
         "env_file": str(ENV_FILE),
         "updated_fields": sorted(updates.keys()),
     }
+
+
+@router.get("/local-env")
+async def get_local_env():
+    """列出本地 backend/.env；敏感值始终脱敏。"""
+    return {
+        "env_file": str(ENV_FILE),
+        "items": _local_env_items(),
+        "restart_required": True,
+    }
+
+
+@router.patch("/local-env/{key}")
+async def update_local_env_value(key: str, body: LocalEnvValueUpdateRequest):
+    """更新本地 backend/.env 的单个变量，服务重启后生效。"""
+    _write_local_env_value(key, body.value)
+    return {"status": "saved", "key": key, "restart_required": True}
+
+
+@router.post("/local-env/import")
+async def import_local_env(body: LocalEnvImportRequest):
+    """校验后导入完整的本地 backend/.env 文件。"""
+    entries = _parse_env_entries(body.content)
+    _atomic_write_env(body.content)
+    return {"status": "imported", "imported_count": len(entries), "restart_required": True}
 
 
 @router.get("/status")

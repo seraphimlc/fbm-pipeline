@@ -27,7 +27,7 @@
 - 前端标准 403 与 mutation D2a foundation：`frontend/src/api/index.ts`, `frontend/src/api/mutationRunner.ts`, `frontend/src/api/mutationInventory.generated.ts`, `frontend/src/api/mutationOwnerContract.ts`
 - 配置：`backend/app/config.py`, `backend/.env.example`
 - 数据库初始化：`backend/app/database.py`
-- 配置 API：`backend/app/api/config_api.py`
+- 配置 API：`backend/app/api/config_api.py`；本地环境变量页面通过 `/api/config/local-env` 读取脱敏列表、逐项更新或导入 `backend/.env`，敏感值不得由读取接口返回。
 - 任务 API：`backend/app/api/task_runs.py`
 - 商品/文件/导出 API：`backend/app/api/products.py`
 - 数据源 API：`backend/app/api/data_sources.py`
@@ -69,6 +69,7 @@
 - 远程访问风险：先看 `scripts/read_startup_env.py` 的 host+token 单快照分类/校验、`scripts/start.sh` 的 FD proof continuation 与最终 Vite host来源、`frontend/dev-api-write-guard.ts` proxy 前 guard、`frontend/vite.config.ts` middleware 顺序、`backend/app/main.py` remote marker 二次校验，再跑包含 `.env` before/after snapshot race 的真实多进程 remote guard harness。
 - 启动改库/唤醒任务：先区分本地一键启动脚本和普通 API lifespan；`scripts/start.sh` 会先跑 `python -m app.database` 补齐 schema，`backend/app/main.py` lifespan 仍由 `STARTUP_RUN_*` 开关控制维护、backfill、恢复和 runtime kick，再看 `backend/app/database.py`。
 - TLS verify：先看 `backend/app/config.py`、`aplus_upload.py`、`step9_aplus_image.py`。
+- Amazon 图片 XMP 合规：`backend/app/services/amazon_image_compliance.py` 使用配置的 `IMAGE_COMPLIANCE_EXIFTOOL_PATH` 写入/读取元数据；含人物投放图在 OSS 上传后由 `download_private_file()` 回读并核验标签及 SHA-256。真实 OSS 门槛脚本为 `scripts/test_amazon_image_compliance_oss.py`，未配置 OSS 或 ExifTool 时只能 SKIPPED。
 - 领星 A+ 发布风险：先看 `docs/superpowers/specs/2026-06-23-lingxing-aplus-publish-after-aplus-done-prd.md`、`docs/superpowers/specs/2026-06-23-lingxing-aplus-publish-technical-plan.md`、`docs/superpowers/specs/2026-06-24-lingxing-aplus-enhanced-basic-prd.md`、`docs/lingxing-aplus-upload.md`、`backend/app/services/lingxing_listing_client.py`、`backend/app/services/lingxing_aplus_publish_client.py`、`backend/app/services/lingxing_aplus_publish_policy.py`、`backend/app/services/lingxing_aplus_module_mapper.py` 和 `backend/app/services/aplus_upload.py`；确认 Chrome 登录态、真实外部请求配置、自动提交审批、multi-slot upload map 和 task/runtime 审计边界。T2 真实 Listing 读取必须显式设置 `LINGXING_LISTING_SYNC_ALLOW_REAL_EXTERNAL_CALLS=true`、`LINGXING_APLUS_STORE_NAME` 和 `LINGXING_APLUS_STORE_ID`。T3/M3 真实草稿保存必须显式设置 `LINGXING_APLUS_ALLOW_REAL_EXTERNAL_CALLS=true` 和 `LINGXING_APLUS_STORE_ID`，并保持 `LINGXING_APLUS_SUBMIT_FOR_APPROVAL=false`。
 - 图片代理：先看 `backend/app/main.py` 中 image proxy 路由和允许根目录。
 

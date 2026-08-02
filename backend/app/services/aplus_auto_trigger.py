@@ -24,7 +24,9 @@ PRODUCT_MAIN_ACTION_TYPES = (
     "product_competitor_visual_match",
     "product_competitor_candidate_capture",
     "product_auto_competitor_selection",
+    "product_keyword_research",
     "product_image_analysis",
+    "product_customer_mindset",
     "product_listing_generation",
 )
 ACTIVE_RUN_STATUSES = (RUN_STATUS_PENDING, RUN_STATUS_RUNNING)

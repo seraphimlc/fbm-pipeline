@@ -53,7 +53,7 @@ export const mutationOwnerContract = {
   },
   'createGigaPullTaskRuns|frontend/src/pages/ProductList.tsx|pullMissingGigaProducts': {
     owner_component: 'ProductList',
-    owner_state: 'filters, pagination, current rows, selectedDataSourceId, and selectedPullDataSourceIds',
+    owner_state: 'filters, pagination, current rows, selectedPullDataSourceIds, pullScope, and pullNewSkuLimit',
     loading_state: 'pullingGigaProducts',
     catch_policy: 'runMutationWithUX apiErrorMessage -> message.error; preserve product-list and pull-modal state',
     finally_policy: 'runMutationWithUX clearLoading: pullingGigaProducts',
@@ -122,6 +122,14 @@ export const mutationOwnerContract = {
     catch_policy: 'runMutationWithUX apiErrorMessage -> message.error; preserve loaded detail and drafts',
     finally_policy: 'runMutationWithUX clearLoading: zipExtractingPath',
     playwright_case: 'runtime case: zip extract detail-retention case',
+  },
+  'importLocalEnvConfig|frontend/src/components/LocalEnvConfigTable.tsx|importConfig': {
+    owner_component: 'LocalEnvConfigTable',
+    owner_state: 'items, importOpen, and importContent',
+    loading_state: 'saving',
+    catch_policy: 'runMutationWithUX apiErrorMessage -> message.error; preserve import text and loaded rows',
+    finally_policy: 'runMutationWithUX clearLoading: saving',
+    playwright_case: 'runtime case: local environment import state-retention case',
   },
   'generateProductAplus|frontend/src/pages/ProductDetail.tsx|generateAplus': {
     owner_component: 'ProductDetail',
@@ -410,6 +418,14 @@ export const mutationOwnerContract = {
     catch_policy: 'runMutationWithUX apiErrorMessage -> message.error; preserve configuration form values',
     finally_policy: 'runMutationWithUX clearLoading: saving',
     playwright_case: 'runtime case: configuration form-retention case',
+  },
+  'updateLocalEnvValue|frontend/src/components/LocalEnvConfigTable.tsx|saveValue': {
+    owner_component: 'LocalEnvConfigTable',
+    owner_state: 'items, editing, and form',
+    loading_state: 'saving',
+    catch_policy: 'runMutationWithUX apiErrorMessage -> message.error; preserve the edit draft and loaded rows',
+    finally_policy: 'runMutationWithUX clearLoading: saving',
+    playwright_case: 'runtime case: local environment value state-retention case',
   },
   'updateProduct|frontend/src/pages/ProductDetail.tsx|saveCategory': {
     owner_component: 'ProductDetail',

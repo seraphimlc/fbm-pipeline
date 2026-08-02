@@ -19,13 +19,21 @@ from app.models.status import (  # noqa: E402
     COMPLETED,
     FAILED,
     PAUSED,
+    STEP_CUSTOMER_MINDSET,
     STEP5_LISTING,
     WORKFLOW_NODE_FLOW_DONE,
+    WORKFLOW_NODE_CUSTOMER_MINDSET,
     WORKFLOW_NODE_IMAGE_ANALYSIS,
     WORKFLOW_NODE_LISTING_GENERATION,
     WORKFLOW_STATUS_FAILED,
     WORKFLOW_STATUS_PROCESSING,
     WORKFLOW_STATUS_SUCCEEDED,
+)
+from app.pipeline.customer_mindset import (  # noqa: E402
+    DYNAMIC_QUESTION_FOCUSES,
+    FIXED_QUESTIONS,
+    SCHEMA_VERSION,
+    build_mindset_input_fingerprint,
 )
 from app.product_tasks.workflow import build_product_workflow  # noqa: E402
 from app.product_tasks import actions as product_actions  # noqa: E402
@@ -43,7 +51,11 @@ def _ensure_actions_registered() -> None:
 
 async def _make_run(session, *, product_id: int, task_type: str, suffix: str, status: str = RUN_STATUS_RUNNING) -> tuple[TaskRun, TaskStep]:
     now = datetime.now()
-    correlation_suffix = "image_analysis" if task_type == "product_image_analysis" else "listing_generation"
+    correlation_suffix = {
+        "product_image_analysis": "image_analysis",
+        "product_customer_mindset": "customer_mindset",
+        "product_listing_generation": "listing_generation",
+    }[task_type]
     run = TaskRun(
         task_type=task_type,
         title=f"E5 {task_type} {suffix}",
@@ -104,6 +116,7 @@ async def _make_product(
     template_output: bool = False,
     template_file: bool = False,
     aplus_uploaded: bool = False,
+    customer_mindset: bool = False,
 ) -> Product:
     now = datetime.now()
     product = Product(
@@ -124,16 +137,34 @@ async def _make_product(
         item_code=marker,
         title="E5 modular sofa",
         leaf_category="Home & Kitchen > Furniture > Sofas",
+        keywords_top=json_dumps([{"keyword": "modular sofa", "search_volume": 12000}]),
+        suggested_price=699.99,
         listing_title="Existing listing title",
+        listing_product_highlights=json_dumps(
+            [
+                "Living Room Comfort: Supported seating helps during everyday family time.",
+                "Flexible Layout: Modular pieces adapt as the room arrangement changes.",
+                "Clear Product Fit: Documented details help buyers compare the intended use.",
+            ]
+        ),
+        listing_bullets=json_dumps([f"Existing fixture bullet {index}" for index in range(1, 6)]),
+        customer_mindset=None,
+        customer_mindset_generated_at=now if customer_mindset else None,
         amazon_template_path="/tmp/e5-template.xlsm" if template_output else None,
         amazon_template_generated_at=now if template_output else None,
     )
     product.images = ProductImage(
         main_image_path="https://images.example/e5-source.jpg",
         gallery_images=json_dumps(["https://images.example/e5-gallery.jpg"]),
-        image_analysis=json_dumps({"selling_points": ["modular"], "fixture": True}) if image_analysis else None,
+        image_analysis=json_dumps({
+            "images": [{"filename": "e5-source.jpg", "visible_selling_point": "modular"}],
+            "selling_points": ["modular"],
+            "fixture": True,
+        }) if image_analysis else None,
         analyzed_at=now if image_analysis else None,
     )
+    if customer_mindset:
+        product.data.customer_mindset = json_dumps(_customer_mindset_payload_for_product(product))
     product.catalog_item = CatalogProduct(
         gigab2b_url=product.gigab2b_url,
         gigab2b_product_id=marker,
@@ -166,6 +197,108 @@ async def _make_product(
     session.add(product)
     await session.flush()
     return product
+
+
+def _customer_mindset_payload() -> dict:
+    evidence_id = "product.title"
+    fixed_questions = [
+        {
+            **question,
+            "question_type": "fixed",
+            "answer": {
+                "status": "supported",
+                "conclusion": f"Fixture answer for {question['id']}",
+                "evidence_refs": [evidence_id],
+                "confidence": "high",
+                "content_uses": list(question["content_uses"]),
+            },
+        }
+        for question in FIXED_QUESTIONS
+    ]
+    dynamic_questions = [
+        {
+            "id": f"dynamic_{index:02d}",
+            "focus": focus,
+            "topic": f"fixture_product_specific_{index:02d}",
+            "question_type": "dynamic",
+            "question": f"Fixture product-specific buyer question {index}",
+            "closest_fixed_question_id": FIXED_QUESTIONS[(index - 1) % len(FIXED_QUESTIONS)]["id"],
+            "incremental_decision_gap": f"Fixture incremental decision gap {index}",
+            "trigger_evidence_refs": [evidence_id],
+            "answer": {
+                "status": "supported",
+                "conclusion": f"Fixture answer for dynamic question {index}",
+                "evidence_refs": [evidence_id],
+                "confidence": "high",
+                "content_uses": ["title", "aplus"],
+            },
+        }
+        for index, focus in enumerate(DYNAMIC_QUESTION_FOCUSES, start=1)
+    ]
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "source_fingerprint": "e5-customer-mindset-fixture",
+        "input_fingerprint": "fixture-input-fingerprint",
+        "evidence_catalog": [
+            {
+                "id": evidence_id,
+                "source": "product_data.title",
+                "kind": "own_product_fact",
+                "reliability": "direct",
+                "excerpt": "E5 modular sofa",
+            }
+        ],
+        "questions": fixed_questions + dynamic_questions,
+        "strategy": {
+            "primary_buyer": "Fixture buyer",
+            "current_pain": "Fixture room-fit problem",
+            "purchase_trigger": "Fixture seating replacement",
+            "primary_job": "Fixture seating job",
+            "core_value_proposition": "Fixture evidence-grounded value",
+            "strategy_field_evidence": {
+                field: {
+                    "question_id": question_id,
+                    "status": "inferred",
+                    "confidence": "medium",
+                    "evidence_refs": [evidence_id],
+                    "planning_usable": True,
+                    "copy_claim_usable": False,
+                }
+                for field, question_id in {
+                    "primary_buyer": "core_02_buyer_and_user",
+                    "actual_user": "core_02_buyer_and_user",
+                    "current_pain": "core_03_purchase_trigger_and_pain",
+                    "purchase_trigger": "core_03_purchase_trigger_and_pain",
+                    "primary_job": "core_04_job_to_be_done",
+                    "core_value_proposition": "core_08_core_value",
+                }.items()
+            },
+            "content_direction": {
+                "title_job": "Identify the exact offer",
+                "bullet_jobs": [
+                    {
+                        "position": index,
+                        "buyer_question": f"Fixture buyer question {index}",
+                        "message_job": f"Fixture message job {index}",
+                        "required_proof_refs": [evidence_id],
+                    }
+                    for index in range(1, 6)
+                ],
+                "claims_to_avoid": ["Unsupported fixture claim"],
+            },
+        },
+        "quality": {
+            "fixed_question_count": len(FIXED_QUESTIONS),
+            "dynamic_question_count": len(DYNAMIC_QUESTION_FOCUSES),
+            "total_question_count": len(FIXED_QUESTIONS) + len(DYNAMIC_QUESTION_FOCUSES),
+        },
+    }
+
+
+def _customer_mindset_payload_for_product(product: Product) -> dict:
+    payload = _customer_mindset_payload()
+    payload["input_fingerprint"] = build_mindset_input_fingerprint(product)
+    return payload
 
 
 async def _delete_runs(session, run_ids: list[int]) -> None:
@@ -231,7 +364,19 @@ async def _listing_runs(session, product_id: int) -> list[TaskRun]:
     ).scalars().all()
 
 
-async def _test_image_success_creates_listing_processing() -> tuple[int, list[int]]:
+async def _customer_mindset_runs(session, product_id: int) -> list[TaskRun]:
+    return (
+        await session.execute(
+            select(TaskRun)
+            .where(TaskRun.task_type == "product_customer_mindset")
+            .where(TaskRun.correlation_key == f"product:{product_id}:customer_mindset")
+            .options(selectinload(TaskRun.steps))
+            .order_by(TaskRun.id.asc())
+        )
+    ).scalars().all()
+
+
+async def _test_image_success_creates_customer_mindset_processing() -> tuple[int, list[int]]:
     async with async_session() as session:
         product = await _make_product(session, "E5_TEST_IMAGE_SUCCESS")
         image_run, image_step = await _make_run(session, product_id=product.id, task_type="product_image_analysis", suffix="image_success")
@@ -241,19 +386,21 @@ async def _test_image_success_creates_listing_processing() -> tuple[int, list[in
         await product_actions.ProductImageAnalysisAction().on_step_success(session, image_step, result)
 
         refreshed = await _get_product(session, product.id)
+        customer_mindset_runs = await _customer_mindset_runs(session, product.id)
         listing_runs = await _listing_runs(session, product.id)
-        assert refreshed.status == STEP5_LISTING, refreshed.status
-        assert refreshed.workflow_node == WORKFLOW_NODE_LISTING_GENERATION, refreshed.workflow_node
+        assert refreshed.status == STEP_CUSTOMER_MINDSET, refreshed.status
+        assert refreshed.workflow_node == WORKFLOW_NODE_CUSTOMER_MINDSET, refreshed.workflow_node
         assert refreshed.workflow_status == WORKFLOW_STATUS_PROCESSING, refreshed.workflow_status
-        assert len(listing_runs) == 1, [run.id for run in listing_runs]
-        assert listing_runs[0].status in {RUN_STATUS_PENDING, RUN_STATUS_RUNNING}, listing_runs[0].status
-        assert listing_runs[0].steps and listing_runs[0].steps[0].status in {STEP_STATUS_READY, STEP_STATUS_RUNNING}, [step.status for step in listing_runs[0].steps]
+        assert len(customer_mindset_runs) == 1, [run.id for run in customer_mindset_runs]
+        assert customer_mindset_runs[0].status in {RUN_STATUS_PENDING, RUN_STATUS_RUNNING}, customer_mindset_runs[0].status
+        assert customer_mindset_runs[0].steps and customer_mindset_runs[0].steps[0].status in {STEP_STATUS_READY, STEP_STATUS_RUNNING}, [step.status for step in customer_mindset_runs[0].steps]
+        assert listing_runs == [], [run.id for run in listing_runs]
         assert result["status"] == "done", result
-        assert result["listing_task_run_ids"] == [listing_runs[0].id], result
-        return product.id, [image_run.id, listing_runs[0].id]
+        assert result["customer_mindset_task_run_ids"] == [customer_mindset_runs[0].id], result
+        return product.id, [image_run.id, customer_mindset_runs[0].id]
 
 
-async def _test_repeated_image_success_reuses_active_listing() -> tuple[int, list[int]]:
+async def _test_repeated_image_success_reuses_active_customer_mindset() -> tuple[int, list[int]]:
     async with async_session() as session:
         product = await _make_product(session, "E5_TEST_IMAGE_REUSE")
         first_run, first_step = await _make_run(session, product_id=product.id, task_type="product_image_analysis", suffix="image_reuse_first")
@@ -263,14 +410,16 @@ async def _test_repeated_image_success_reuses_active_listing() -> tuple[int, lis
         action = product_actions.ProductImageAnalysisAction()
         first_result = {"product_id": product.id, "item_code": "E5_TEST_IMAGE_REUSE"}
         await action.on_step_success(session, first_step, first_result)
-        first_listing_id = first_result["listing_task_run_ids"][0]
+        first_customer_mindset_id = first_result["customer_mindset_task_run_ids"][0]
         second_result = {"product_id": product.id, "item_code": "E5_TEST_IMAGE_REUSE"}
         await action.on_step_success(session, second_step, second_result)
 
+        customer_mindset_runs = await _customer_mindset_runs(session, product.id)
         listing_runs = await _listing_runs(session, product.id)
-        assert len(listing_runs) == 1, [run.id for run in listing_runs]
-        assert second_result["listing_task_run_ids"] == [first_listing_id], second_result
-        return product.id, [first_run.id, second_run.id, first_listing_id]
+        assert len(customer_mindset_runs) == 1, [run.id for run in customer_mindset_runs]
+        assert listing_runs == [], [run.id for run in listing_runs]
+        assert second_result["customer_mindset_task_run_ids"] == [first_customer_mindset_id], second_result
+        return product.id, [first_run.id, second_run.id, first_customer_mindset_id]
 
 
 async def _test_image_success_completed_product_noops() -> tuple[int, list[int]]:
@@ -292,6 +441,143 @@ async def _test_image_success_completed_product_noops() -> tuple[int, list[int]]
         await product_actions.ProductImageAnalysisAction().on_step_success(session, image_step, result)
 
         refreshed = await _get_product(session, product.id)
+        customer_mindset_runs = await _customer_mindset_runs(session, product.id)
+        listing_runs = await _listing_runs(session, product.id)
+        assert refreshed.status == COMPLETED, refreshed.status
+        assert refreshed.workflow_node == WORKFLOW_NODE_FLOW_DONE, refreshed.workflow_node
+        assert refreshed.workflow_status == WORKFLOW_STATUS_SUCCEEDED, refreshed.workflow_status
+        assert refreshed.catalog_item.confirmed_at == confirmed_at, refreshed.catalog_item.confirmed_at
+        assert customer_mindset_runs == [], [run.id for run in customer_mindset_runs]
+        assert listing_runs == [], [run.id for run in listing_runs]
+        assert result["status"] == "already_completed", result
+        return product.id, [image_run.id]
+
+
+async def _test_downstream_customer_mindset_creation_failure_is_visible() -> tuple[int, list[int]]:
+    async with async_session() as session:
+        product = await _make_product(session, "E5_TEST_MINDSET_CREATE_FAIL")
+        image_run, image_step = await _make_run(session, product_id=product.id, task_type="product_image_analysis", suffix="mindset_create_fail")
+        product_id = product.id
+        image_run_id = image_run.id
+        await session.commit()
+
+        original_create = product_actions.create_product_action_runs
+
+        async def _raise_for_customer_mindset(*args, **kwargs):
+            if args and args[1] == "product_customer_mindset":
+                raise RuntimeError("forced customer mindset planner failure")
+            return await original_create(*args, **kwargs)
+
+        product_actions.create_product_action_runs = _raise_for_customer_mindset
+        try:
+            result = {"product_id": product.id, "item_code": "E5_TEST_MINDSET_CREATE_FAIL"}
+            await product_actions.ProductImageAnalysisAction().on_step_success(session, image_step, result)
+        finally:
+            product_actions.create_product_action_runs = original_create
+
+        refreshed = await _get_product(session, product_id)
+        customer_mindset_runs = await _customer_mindset_runs(session, product_id)
+        listing_runs = await _listing_runs(session, product_id)
+        assert customer_mindset_runs == [], [run.id for run in customer_mindset_runs]
+        assert listing_runs == [], [run.id for run in listing_runs]
+        assert refreshed.status == FAILED, refreshed.status
+        assert refreshed.current_step == 6, refreshed.current_step
+        assert refreshed.workflow_node == WORKFLOW_NODE_CUSTOMER_MINDSET, refreshed.workflow_node
+        assert refreshed.workflow_status == WORKFLOW_STATUS_FAILED, refreshed.workflow_status
+        assert "forced customer mindset planner failure" in (refreshed.workflow_error or refreshed.error_message or ""), refreshed.workflow_error
+        assert result["status"] == "downstream_failed", result
+        return product_id, [image_run_id]
+
+
+async def _test_customer_mindset_success_creates_listing_processing() -> tuple[int, list[int]]:
+    async with async_session() as session:
+        product = await _make_product(
+            session,
+            "E5_TEST_MINDSET_SUCCESS",
+            workflow_node=WORKFLOW_NODE_CUSTOMER_MINDSET,
+            status=STEP_CUSTOMER_MINDSET,
+            current_step=6,
+            customer_mindset=True,
+        )
+        mindset_run, mindset_step = await _make_run(
+            session,
+            product_id=product.id,
+            task_type="product_customer_mindset",
+            suffix="mindset_success",
+        )
+        await session.commit()
+
+        mindset_payload = _customer_mindset_payload_for_product(product)
+        result = {"product_id": product.id, "item_code": "E5_TEST_MINDSET_SUCCESS", "customer_mindset": mindset_payload}
+        await product_actions.ProductCustomerMindsetAction().on_step_success(session, mindset_step, result)
+
+        refreshed = await _get_product(session, product.id)
+        listing_runs = await _listing_runs(session, product.id)
+        assert refreshed.status == STEP5_LISTING, {
+            "status": refreshed.status,
+            "workflow_node": refreshed.workflow_node,
+            "workflow_status": refreshed.workflow_status,
+            "workflow_error": refreshed.workflow_error,
+            "error_message": refreshed.error_message,
+            "result": result,
+        }
+        assert refreshed.workflow_node == WORKFLOW_NODE_LISTING_GENERATION, refreshed.workflow_node
+        assert refreshed.workflow_status == WORKFLOW_STATUS_PROCESSING, refreshed.workflow_status
+        assert len(listing_runs) == 1, [run.id for run in listing_runs]
+        assert listing_runs[0].status in {RUN_STATUS_PENDING, RUN_STATUS_RUNNING}, listing_runs[0].status
+        assert listing_runs[0].steps and listing_runs[0].steps[0].status in {STEP_STATUS_READY, STEP_STATUS_RUNNING}, [step.status for step in listing_runs[0].steps]
+        assert result["status"] == "done", result
+        assert result["listing_task_run_ids"] == [listing_runs[0].id], result
+        return product.id, [mindset_run.id, listing_runs[0].id]
+
+
+async def _test_repeated_customer_mindset_success_reuses_active_listing() -> tuple[int, list[int]]:
+    async with async_session() as session:
+        product = await _make_product(
+            session,
+            "E5_TEST_MINDSET_REUSE",
+            workflow_node=WORKFLOW_NODE_CUSTOMER_MINDSET,
+            status=STEP_CUSTOMER_MINDSET,
+            current_step=6,
+            customer_mindset=True,
+        )
+        first_run, first_step = await _make_run(session, product_id=product.id, task_type="product_customer_mindset", suffix="mindset_reuse_first")
+        second_run, second_step = await _make_run(session, product_id=product.id, task_type="product_customer_mindset", suffix="mindset_reuse_second")
+        await session.commit()
+
+        action = product_actions.ProductCustomerMindsetAction()
+        first_result = {"product_id": product.id, "item_code": "E5_TEST_MINDSET_REUSE", "customer_mindset": _customer_mindset_payload_for_product(product)}
+        await action.on_step_success(session, first_step, first_result)
+        first_listing_id = first_result["listing_task_run_ids"][0]
+        second_result = {"product_id": product.id, "item_code": "E5_TEST_MINDSET_REUSE", "customer_mindset": _customer_mindset_payload_for_product(product)}
+        await action.on_step_success(session, second_step, second_result)
+
+        listing_runs = await _listing_runs(session, product.id)
+        assert len(listing_runs) == 1, [run.id for run in listing_runs]
+        assert second_result["listing_task_run_ids"] == [first_listing_id], second_result
+        return product.id, [first_run.id, second_run.id, first_listing_id]
+
+
+async def _test_customer_mindset_success_completed_product_noops() -> tuple[int, list[int]]:
+    async with async_session() as session:
+        confirmed_at = datetime.now()
+        product = await _make_product(
+            session,
+            "E5_TEST_MINDSET_COMPLETED_NOOP",
+            workflow_node=WORKFLOW_NODE_FLOW_DONE,
+            workflow_status=WORKFLOW_STATUS_SUCCEEDED,
+            status=COMPLETED,
+            current_step=6,
+            confirmed_at=confirmed_at,
+            customer_mindset=True,
+        )
+        mindset_run, mindset_step = await _make_run(session, product_id=product.id, task_type="product_customer_mindset", suffix="mindset_completed_noop")
+        await session.commit()
+
+        result = {"product_id": product.id, "item_code": "E5_TEST_MINDSET_COMPLETED_NOOP", "customer_mindset": _customer_mindset_payload_for_product(product)}
+        await product_actions.ProductCustomerMindsetAction().on_step_success(session, mindset_step, result)
+
+        refreshed = await _get_product(session, product.id)
         listing_runs = await _listing_runs(session, product.id)
         assert refreshed.status == COMPLETED, refreshed.status
         assert refreshed.workflow_node == WORKFLOW_NODE_FLOW_DONE, refreshed.workflow_node
@@ -299,15 +585,22 @@ async def _test_image_success_completed_product_noops() -> tuple[int, list[int]]
         assert refreshed.catalog_item.confirmed_at == confirmed_at, refreshed.catalog_item.confirmed_at
         assert listing_runs == [], [run.id for run in listing_runs]
         assert result["status"] == "already_completed", result
-        return product.id, [image_run.id]
+        return product.id, [mindset_run.id]
 
 
 async def _test_downstream_listing_creation_failure_is_visible() -> tuple[int, list[int]]:
     async with async_session() as session:
-        product = await _make_product(session, "E5_TEST_LISTING_CREATE_FAIL")
-        image_run, image_step = await _make_run(session, product_id=product.id, task_type="product_image_analysis", suffix="listing_create_fail")
+        product = await _make_product(
+            session,
+            "E5_TEST_LISTING_CREATE_FAIL",
+            workflow_node=WORKFLOW_NODE_CUSTOMER_MINDSET,
+            status=STEP_CUSTOMER_MINDSET,
+            current_step=6,
+            customer_mindset=True,
+        )
+        mindset_run, mindset_step = await _make_run(session, product_id=product.id, task_type="product_customer_mindset", suffix="listing_create_fail")
         product_id = product.id
-        image_run_id = image_run.id
+        mindset_run_id = mindset_run.id
         await session.commit()
 
         original_create = product_actions.create_product_action_runs
@@ -319,8 +612,8 @@ async def _test_downstream_listing_creation_failure_is_visible() -> tuple[int, l
 
         product_actions.create_product_action_runs = _raise_for_listing
         try:
-            result = {"product_id": product.id, "item_code": "E5_TEST_LISTING_CREATE_FAIL"}
-            await product_actions.ProductImageAnalysisAction().on_step_success(session, image_step, result)
+            result = {"product_id": product.id, "item_code": "E5_TEST_LISTING_CREATE_FAIL", "customer_mindset": _customer_mindset_payload_for_product(product)}
+            await product_actions.ProductCustomerMindsetAction().on_step_success(session, mindset_step, result)
         finally:
             product_actions.create_product_action_runs = original_create
 
@@ -333,7 +626,46 @@ async def _test_downstream_listing_creation_failure_is_visible() -> tuple[int, l
         assert refreshed.workflow_status == WORKFLOW_STATUS_FAILED, refreshed.workflow_status
         assert "forced listing planner failure" in (refreshed.workflow_error or refreshed.error_message or ""), refreshed.workflow_error
         assert result["status"] == "downstream_failed", result
-        return product_id, [image_run_id]
+        return product_id, [mindset_run_id]
+
+
+async def _test_customer_mindset_failure_cancel_interrupted_do_not_create_listing() -> tuple[list[int], list[int]]:
+    product_ids: list[int] = []
+    run_ids: list[int] = []
+    async with async_session() as session:
+        action = product_actions.ProductCustomerMindsetAction()
+        for marker, mode in (
+            ("E5_TEST_MINDSET_FAILURE", "failure"),
+            ("E5_TEST_MINDSET_INTERRUPTED", "interrupted"),
+            ("E5_TEST_MINDSET_CANCEL", "cancel"),
+        ):
+            product = await _make_product(
+                session,
+                marker,
+                workflow_node=WORKFLOW_NODE_CUSTOMER_MINDSET,
+                workflow_status=WORKFLOW_STATUS_PROCESSING,
+                status=STEP_CUSTOMER_MINDSET,
+                current_step=6,
+            )
+            mindset_run, mindset_step = await _make_run(session, product_id=product.id, task_type="product_customer_mindset", suffix=mode)
+            await session.commit()
+            if mode == "failure":
+                await action.on_step_failure(session, mindset_step, RuntimeError("mindset boom"))
+            elif mode == "interrupted":
+                await action.on_step_interrupted(session, mindset_step, "heartbeat expired")
+            else:
+                await action.on_cancel_requested(session, mindset_run, "user cancel")
+            refreshed = await _get_product(session, product.id)
+            listing_runs = await _listing_runs(session, product.id)
+            assert listing_runs == [], (mode, [run.id for run in listing_runs])
+            assert refreshed.status in {FAILED, PAUSED}, (mode, refreshed.status)
+            assert refreshed.status != COMPLETED, (mode, refreshed.status)
+            assert refreshed.workflow_node == WORKFLOW_NODE_CUSTOMER_MINDSET, (mode, refreshed.workflow_node)
+            assert refreshed.workflow_status == WORKFLOW_STATUS_FAILED, (mode, refreshed.workflow_status)
+            assert refreshed.catalog_item.confirmed_at is None, (mode, refreshed.catalog_item.confirmed_at)
+            product_ids.append(product.id)
+            run_ids.append(mindset_run.id)
+        return product_ids, run_ids
 
 
 async def _test_listing_success_reaches_export_ready() -> tuple[int, list[int]]:
@@ -345,6 +677,7 @@ async def _test_listing_success_reaches_export_ready() -> tuple[int, list[int]]:
             workflow_status=WORKFLOW_STATUS_PROCESSING,
             status=STEP5_LISTING,
             current_step=6,
+            customer_mindset=True,
         )
         listing_run, listing_step = await _make_run(session, product_id=product.id, task_type="product_listing_generation", suffix="listing_success")
         await session.commit()
@@ -380,6 +713,7 @@ async def _test_listing_failure_cancel_interrupted_do_not_complete() -> tuple[li
                 workflow_status=WORKFLOW_STATUS_PROCESSING,
                 status=STEP5_LISTING,
                 current_step=6,
+                customer_mindset=True,
             )
             listing_run, listing_step = await _make_run(session, product_id=product.id, task_type="product_listing_generation", suffix=mode)
             await session.commit()
@@ -438,6 +772,7 @@ async def _test_listing_protection_blocks_irreversible_results() -> tuple[list[i
                 workflow_status=WORKFLOW_STATUS_FAILED,
                 status=FAILED,
                 current_step=6,
+                customer_mindset=True,
                 **kwargs,
             )
             product_id = product.id
@@ -492,9 +827,23 @@ async def _test_legacy_empty_workflow_projection_for_e5_list_paths() -> tuple[li
             status=FAILED,
             current_step=0,
             image_analysis=True,
+            customer_mindset=True,
         )
         failed_listing.data.listing_title = None
         product_ids.append(failed_listing.id)
+
+        failed_customer_mindset = await _make_product(
+            session,
+            "E5_TEST_LEGACY_MINDSET_FAILED",
+            workflow_node=None,
+            workflow_status=None,
+            status=FAILED,
+            current_step=0,
+            image_analysis=True,
+            customer_mindset=False,
+        )
+        failed_customer_mindset.data.listing_title = None
+        product_ids.append(failed_customer_mindset.id)
 
         await session.commit()
 
@@ -512,6 +861,11 @@ async def _test_legacy_empty_workflow_projection_for_e5_list_paths() -> tuple[li
         assert failed_image_state["stage"] == WORKFLOW_NODE_IMAGE_ANALYSIS, failed_image_state
         assert failed_image_state["primary_action"] == "retry_image_analysis", failed_image_state
 
+        failed_customer_mindset_state = build_product_workflow(failed_customer_mindset)
+        assert failed_customer_mindset_state["work_status"] == "failed", failed_customer_mindset_state
+        assert failed_customer_mindset_state["stage"] == WORKFLOW_NODE_CUSTOMER_MINDSET, failed_customer_mindset_state
+        assert failed_customer_mindset_state["primary_action"] == "open_task_center", failed_customer_mindset_state
+
         failed_listing_state = build_product_workflow(failed_listing)
         assert failed_listing_state["work_status"] == "failed", failed_listing_state
         assert failed_listing_state["stage"] == WORKFLOW_NODE_LISTING_GENERATION, failed_listing_state
@@ -527,18 +881,33 @@ async def main() -> None:
     product_ids: list[int] = []
     run_ids: list[int] = []
     try:
-        product_id, ids = await _test_image_success_creates_listing_processing()
+        product_id, ids = await _test_image_success_creates_customer_mindset_processing()
         product_ids.append(product_id)
         run_ids.extend(ids)
-        product_id, ids = await _test_repeated_image_success_reuses_active_listing()
+        product_id, ids = await _test_repeated_image_success_reuses_active_customer_mindset()
         product_ids.append(product_id)
         run_ids.extend(ids)
         product_id, ids = await _test_image_success_completed_product_noops()
         product_ids.append(product_id)
         run_ids.extend(ids)
+        product_id, ids = await _test_downstream_customer_mindset_creation_failure_is_visible()
+        product_ids.append(product_id)
+        run_ids.extend(ids)
+        product_id, ids = await _test_customer_mindset_success_creates_listing_processing()
+        product_ids.append(product_id)
+        run_ids.extend(ids)
+        product_id, ids = await _test_repeated_customer_mindset_success_reuses_active_listing()
+        product_ids.append(product_id)
+        run_ids.extend(ids)
+        product_id, ids = await _test_customer_mindset_success_completed_product_noops()
+        product_ids.append(product_id)
+        run_ids.extend(ids)
         product_id, ids = await _test_downstream_listing_creation_failure_is_visible()
         product_ids.append(product_id)
         run_ids.extend(ids)
+        ids, runs = await _test_customer_mindset_failure_cancel_interrupted_do_not_create_listing()
+        product_ids.extend(ids)
+        run_ids.extend(runs)
         product_id, ids = await _test_listing_success_reaches_export_ready()
         product_ids.append(product_id)
         run_ids.extend(ids)
@@ -551,7 +920,7 @@ async def main() -> None:
         ids, runs = await _test_legacy_empty_workflow_projection_for_e5_list_paths()
         product_ids.extend(ids)
         run_ids.extend(runs)
-        print("E5 image analysis -> listing -> export_ready behavior checks passed")
+        print("E5 image analysis -> customer mindset -> listing -> export_ready behavior checks passed")
     finally:
         await _cleanup(product_ids, run_ids)
 

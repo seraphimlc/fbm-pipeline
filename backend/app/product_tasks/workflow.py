@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from app.pipeline.customer_mindset import load_customer_mindset
 from app.models.status import (
     AMAZON_WORKFLOW_NODES,
     AMAZON_WORKFLOW_STATUSES,
@@ -17,8 +18,10 @@ from app.models.status import (
     WORKFLOW_NODE_AUTO_SELECT_COMPETITOR,
     WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES,
     WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
+    WORKFLOW_NODE_CUSTOMER_MINDSET,
     WORKFLOW_NODE_FLOW_DONE,
     WORKFLOW_NODE_IMAGE_ANALYSIS,
+    WORKFLOW_NODE_KEYWORD_RESEARCH,
     WORKFLOW_NODE_LISTING_GENERATION,
     WORKFLOW_NODE_SEARCH_COMPETITOR,
     WORKFLOW_NODE_SELECT_COMPETITOR,
@@ -117,6 +120,16 @@ WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
         default_action_reason="自动选竞品入口尚未启用，可查看商品或重新搜索竞品",
         default_color="warning",
     ),
+    WORKFLOW_NODE_KEYWORD_RESEARCH: WorkflowNodeView(
+        label="关键词采集",
+        node_type="async",
+        default_work_status=PRODUCT_WORK_STATUS_READY_TO_GENERATE,
+        default_primary_action="open_task_center",
+        default_primary_action_label="任务中心",
+        default_allowed_actions=("open_task_center",),
+        default_action_reason="正在获取已选竞品的关键词，完成后才会进入图片分析和 Listing 生成",
+        default_color="processing",
+    ),
     WORKFLOW_NODE_SELECT_COMPETITOR: WorkflowNodeView(
         label="选择竞品",
         node_type="sync",
@@ -145,6 +158,16 @@ WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
         default_primary_action_label="任务中心",
         default_allowed_actions=("open_task_center",),
         default_action_reason="图片分析正在执行或等待执行",
+        default_color="processing",
+    ),
+    WORKFLOW_NODE_CUSTOMER_MINDSET: WorkflowNodeView(
+        label="用户心智梳理",
+        node_type="async",
+        default_work_status=PRODUCT_WORK_STATUS_RUNNING,
+        default_primary_action="open_task_center",
+        default_primary_action_label="任务中心",
+        default_allowed_actions=("open_task_center",),
+        default_action_reason="正在结合商品事实、关键词、竞品和图片分析梳理用户心智",
         default_color="processing",
     ),
     WORKFLOW_NODE_LISTING_GENERATION: WorkflowNodeView(
@@ -374,9 +397,20 @@ def _legacy_failed_workflow_node(product: Any, error: str | None) -> str | None:
     images = getattr(product, "images", None)
     data = getattr(product, "data", None)
     has_image_analysis = bool(images and getattr(images, "image_analysis", None))
+    has_customer_mindset = False
+    if data and getattr(data, "customer_mindset", None):
+        try:
+            has_customer_mindset = load_customer_mindset(
+                data.customer_mindset,
+                required=True,
+            ) is not None
+        except RuntimeError:
+            has_customer_mindset = False
     has_listing_content = bool(data and getattr(data, "listing_title", None))
     if not has_image_analysis:
         return WORKFLOW_NODE_IMAGE_ANALYSIS
+    if not has_customer_mindset:
+        return WORKFLOW_NODE_CUSTOMER_MINDSET
     if not has_listing_content:
         return WORKFLOW_NODE_LISTING_GENERATION
     return None
@@ -408,8 +442,12 @@ def _related_correlation_key(product: Any, node: str) -> str | None:
         return f"product:{product_id}:competitor_candidate_capture"
     if node == WORKFLOW_NODE_AUTO_SELECT_COMPETITOR:
         return f"product:{product_id}:auto_competitor_selection"
+    if node == WORKFLOW_NODE_KEYWORD_RESEARCH:
+        return f"product:{product_id}:keyword_research"
     if node == WORKFLOW_NODE_IMAGE_ANALYSIS:
         return f"product:{product_id}:image_analysis"
+    if node == WORKFLOW_NODE_CUSTOMER_MINDSET:
+        return f"product:{product_id}:customer_mindset"
     if node == WORKFLOW_NODE_LISTING_GENERATION:
         return f"product:{product_id}:listing_generation"
     return None
@@ -633,6 +671,28 @@ def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
         }
     if node == WORKFLOW_NODE_AUTO_SELECT_COMPETITOR and status == WORKFLOW_STATUS_SUCCEEDED:
         return {"label": "自动选竞品完成", "work_status": PRODUCT_WORK_STATUS_READY_TO_GENERATE, "color": "success"}
+    if node == WORKFLOW_NODE_KEYWORD_RESEARCH and status == WORKFLOW_STATUS_PENDING:
+        return {
+            "label": "待采集关键词",
+            "work_status": PRODUCT_WORK_STATUS_READY_TO_GENERATE,
+            "primary_action": "open_task_center",
+            "primary_action_label": "任务中心",
+            "allowed_actions": ("open_task_center",),
+            "action_reason": "已选定参考竞品，等待采集关键词",
+            "color": "warning",
+        }
+    if node == WORKFLOW_NODE_KEYWORD_RESEARCH and status == WORKFLOW_STATUS_PROCESSING:
+        return {
+            "label": "关键词采集中",
+            "work_status": PRODUCT_WORK_STATUS_RUNNING,
+            "primary_action": "open_task_center",
+            "primary_action_label": "任务中心",
+            "allowed_actions": ("open_task_center",),
+            "action_reason": "正在通过卖家精灵反查关键词，必要时使用 LLM 兜底",
+            "color": "processing",
+        }
+    if node == WORKFLOW_NODE_KEYWORD_RESEARCH and status == WORKFLOW_STATUS_SUCCEEDED:
+        return {"label": "关键词采集完成", "work_status": PRODUCT_WORK_STATUS_READY_TO_GENERATE, "color": "success"}
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL and status == WORKFLOW_STATUS_PENDING:
         return {"label": "待抓取竞品详情", "color": "warning", "action_reason": "已选择竞品，等待抓取详情"}
     if node == WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL and status == WORKFLOW_STATUS_SUCCEEDED:
@@ -641,6 +701,28 @@ def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
         return {"label": "待图片分析", "work_status": PRODUCT_WORK_STATUS_READY_TO_GENERATE, "color": "warning"}
     if node == WORKFLOW_NODE_IMAGE_ANALYSIS and status == WORKFLOW_STATUS_SUCCEEDED:
         return {"label": "图片分析完成", "work_status": PRODUCT_WORK_STATUS_READY_TO_GENERATE, "color": "success"}
+    if node == WORKFLOW_NODE_CUSTOMER_MINDSET and status == WORKFLOW_STATUS_PENDING:
+        return {
+            "label": "待梳理用户心智",
+            "work_status": PRODUCT_WORK_STATUS_READY_TO_GENERATE,
+            "primary_action": "open_task_center",
+            "primary_action_label": "任务中心",
+            "allowed_actions": ("open_task_center",),
+            "action_reason": "图片分析已完成，等待梳理用户心智",
+            "color": "warning",
+        }
+    if node == WORKFLOW_NODE_CUSTOMER_MINDSET and status == WORKFLOW_STATUS_PROCESSING:
+        return {
+            "label": "用户心智梳理中",
+            "work_status": PRODUCT_WORK_STATUS_RUNNING,
+            "primary_action": "open_task_center",
+            "primary_action_label": "任务中心",
+            "allowed_actions": ("open_task_center",),
+            "action_reason": "正在生成固定核心问题、商品专属问题及证据化回答",
+            "color": "processing",
+        }
+    if node == WORKFLOW_NODE_CUSTOMER_MINDSET and status == WORKFLOW_STATUS_SUCCEEDED:
+        return {"label": "用户心智梳理完成", "work_status": PRODUCT_WORK_STATUS_READY_TO_GENERATE, "color": "success"}
     if node == WORKFLOW_NODE_LISTING_GENERATION and status == WORKFLOW_STATUS_PENDING:
         return {"label": "待生成 Listing", "work_status": PRODUCT_WORK_STATUS_READY_TO_GENERATE, "color": "warning"}
     if node == WORKFLOW_NODE_LISTING_GENERATION and status == WORKFLOW_STATUS_SUCCEEDED:
@@ -720,6 +802,16 @@ def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
             label="自动选竞品失败",
             work_status=PRODUCT_WORK_STATUS_SELECT_COMPETITOR,
         )
+    if node == WORKFLOW_NODE_KEYWORD_RESEARCH:
+        return {
+            "label": "关键词采集失败",
+            "work_status": PRODUCT_WORK_STATUS_FAILED,
+            "primary_action": "open_task_center",
+            "primary_action_label": "任务中心",
+            "allowed_actions": ("open_task_center",),
+            "action_reason": "关键词采集失败，请在任务中心查看原因并重试任务",
+            "color": "error",
+        }
     if node == WORKFLOW_NODE_IMAGE_ANALYSIS:
         return {
             "label": "图片分析失败",
@@ -728,6 +820,16 @@ def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
             "primary_action_label": "重试图片分析",
             "allowed_actions": ("retry_image_analysis",),
             "action_reason": "图片分析失败，可重试图片分析",
+            "color": "error",
+        }
+    if node == WORKFLOW_NODE_CUSTOMER_MINDSET:
+        return {
+            "label": "用户心智梳理失败",
+            "work_status": PRODUCT_WORK_STATUS_FAILED,
+            "primary_action": "open_task_center",
+            "primary_action_label": "任务中心",
+            "allowed_actions": ("open_task_center",),
+            "action_reason": "用户心智梳理失败，请在任务中心查看原因并重试任务",
             "color": "error",
         }
     if node == WORKFLOW_NODE_LISTING_GENERATION:

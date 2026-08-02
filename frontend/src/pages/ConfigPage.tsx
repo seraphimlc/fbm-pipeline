@@ -5,7 +5,7 @@ import { getConfig, updateConfig } from '../api';
 import type { SystemConfig, SystemConfigUpdate } from '../api';
 import { runMutationWithUX } from '../api/mutationRunner.ts';
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 
 const yesNo = (value: boolean) => (
   value ? <Tag color="success">已配置</Tag> : <Tag color="warning">未配置</Tag>
@@ -50,7 +50,16 @@ const ConfigPage: React.FC = () => {
         step4_allow_existing_category: data.step4_allow_existing_category,
         step5_llm_temperature: data.step5_llm_temperature,
         step5_llm_max_tokens: data.step5_llm_max_tokens,
+        step5_llm_timeout_seconds: data.step5_llm_timeout_seconds,
+        step5_llm_retry_attempts: data.step5_llm_retry_attempts,
+        step5_description_input_max_chars: data.step5_description_input_max_chars,
+        step5_features_input_max_chars: data.step5_features_input_max_chars,
+        step5_structured_input_max_chars: data.step5_structured_input_max_chars,
+        step5_image_context_max_items: data.step5_image_context_max_items,
+        step5_image_evidence_max_chars: data.step5_image_evidence_max_chars,
+        step5_image_diagnostics_max_chars: data.step5_image_diagnostics_max_chars,
         step5_title_max_chars: data.step5_title_max_chars,
+        step5_product_highlight_max_chars: data.step5_product_highlight_max_chars,
         step5_bullet_max_chars: data.step5_bullet_max_chars,
         step5_search_terms_max_bytes: data.step5_search_terms_max_bytes,
         llm_model: data.llm_model,
@@ -95,7 +104,6 @@ const ConfigPage: React.FC = () => {
 
   return (
     <div>
-      <Title level={4}>系统配置</Title>
       <Alert
         type={saved ? 'warning' : 'info'}
         showIcon
@@ -235,14 +243,41 @@ const ConfigPage: React.FC = () => {
             <Form.Item label="最大输出 Tokens" name="step5_llm_max_tokens" rules={[{ required: true }]}>
               <InputNumber min={500} max={8000} step={100} style={{ width: '100%' }} />
             </Form.Item>
+            <Form.Item label="请求超时（秒）" name="step5_llm_timeout_seconds" rules={[{ required: true }]}>
+              <InputNumber min={30} max={300} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item label="临时失败重试次数" name="step5_llm_retry_attempts" rules={[{ required: true }]}>
+              <InputNumber min={0} max={5} style={{ width: '100%' }} />
+            </Form.Item>
             <Form.Item label="标题字符上限" name="step5_title_max_chars" rules={[{ required: true }]}>
-              <InputNumber min={80} max={250} style={{ width: '100%' }} />
+              <InputNumber min={40} max={75} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item label="商品亮点单条字符上限" name="step5_product_highlight_max_chars" rules={[{ required: true }]}>
+              <InputNumber min={80} max={125} style={{ width: '100%' }} />
             </Form.Item>
             <Form.Item label="五点字符上限" name="step5_bullet_max_chars" rules={[{ required: true }]}>
               <InputNumber min={100} max={1000} style={{ width: '100%' }} />
             </Form.Item>
             <Form.Item label="Search Terms 字节上限" name="step5_search_terms_max_bytes" rules={[{ required: true }]}>
               <InputNumber min={50} max={500} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item label="供应商描述输入上限" name="step5_description_input_max_chars" rules={[{ required: true }]}>
+              <InputNumber min={1000} max={20000} step={500} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item label="特性输入上限" name="step5_features_input_max_chars" rules={[{ required: true }]}>
+              <InputNumber min={500} max={10000} step={500} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item label="结构化规格输入上限" name="step5_structured_input_max_chars" rules={[{ required: true }]}>
+              <InputNumber min={1000} max={16000} step={500} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item label="图片摘要数量" name="step5_image_context_max_items" rules={[{ required: true }]}>
+              <InputNumber min={1} max={16} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item label="单张图片摘要上限" name="step5_image_evidence_max_chars" rules={[{ required: true }]}>
+              <InputNumber min={100} max={1500} step={100} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item label="图片诊断输入上限" name="step5_image_diagnostics_max_chars" rules={[{ required: true }]}>
+              <InputNumber min={200} max={3000} step={100} style={{ width: '100%' }} />
             </Form.Item>
           </div>
         </Card>
@@ -309,6 +344,8 @@ const ConfigPage: React.FC = () => {
           <Descriptions.Item label="图片分析 API">{yesNo(config.vlm_api_configured)}</Descriptions.Item>
           <Descriptions.Item label="图片 API">{yesNo(config.gpt_image_api_configured)}</Descriptions.Item>
           <Descriptions.Item label="SellerSprite">{yesNo(config.sellersprite_configured)}</Descriptions.Item>
+          <Descriptions.Item label="SellerSprite 开放接口">{yesNo(config.sellersprite_openapi_configured)}</Descriptions.Item>
+          <Descriptions.Item label="SellerSprite 浏览器令牌">{yesNo(config.sellersprite_browser_token_configured)}</Descriptions.Item>
           <Descriptions.Item label="图片通道">{config.gpt_image_api_provider}</Descriptions.Item>
           <Descriptions.Item label="版本">{config.version}</Descriptions.Item>
         </Descriptions>

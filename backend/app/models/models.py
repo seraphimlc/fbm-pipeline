@@ -1,5 +1,6 @@
 from datetime import datetime
 from sqlalchemy import Integer, String, Float, Text, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
@@ -506,12 +507,18 @@ class ProductData(Base):
     categories: Mapped[str | None] = mapped_column(Text)         # JSON
     leaf_category: Mapped[str | None] = mapped_column(String(200))
 
+    # 用户心智梳理（图片分析后、Listing 生成前）
+    customer_mindset: Mapped[str | None] = mapped_column(Text().with_variant(LONGTEXT(), "mysql"))   # JSON
+    customer_mindset_generated_at: Mapped[datetime | None] = mapped_column(DateTime)
+
     # 模块5：Listing文案
     listing_title: Mapped[str | None] = mapped_column(Text)
     listing_bullets: Mapped[str | None] = mapped_column(Text)    # JSON
+    listing_product_highlights: Mapped[str | None] = mapped_column(Text)    # JSON
     listing_search_terms: Mapped[str | None] = mapped_column(Text)
     listing_title_zh: Mapped[str | None] = mapped_column(Text)
     listing_bullets_zh: Mapped[str | None] = mapped_column(Text)    # JSON
+    listing_product_highlights_zh: Mapped[str | None] = mapped_column(Text)    # JSON
     listing_search_terms_zh: Mapped[str | None] = mapped_column(Text)
     listing_description: Mapped[str | None] = mapped_column(Text)
     listing_description_zh: Mapped[str | None] = mapped_column(Text)
@@ -549,6 +556,7 @@ class ProductImage(Base):
     gallery_order: Mapped[str | None] = mapped_column(Text)          # JSON
     main_image_summary: Mapped[str | None] = mapped_column(Text)
     image_selection_analysis: Mapped[str | None] = mapped_column(Text)  # JSON
+    image_compliance_manifest: Mapped[str | None] = mapped_column(Text)  # JSON
     image_selected_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     analyzed_at: Mapped[datetime | None] = mapped_column(DateTime)

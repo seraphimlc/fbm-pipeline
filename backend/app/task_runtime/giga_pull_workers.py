@@ -94,6 +94,8 @@ async def giga_pull_plan(ctx: TaskContext) -> dict[str, Any]:
     page_size = int(payload.get("page_size") or settings.GIGA_SYNC_PAGE_SIZE)
     max_pages = payload.get("max_pages")
     max_pages = int(max_pages) if max_pages else None
+    new_sku_limit = payload.get("new_sku_limit")
+    new_sku_limit = int(new_sku_limit) if new_sku_limit else None
     skip_existing = bool(payload.get("skip_existing", True))
 
     batch_result = await ctx.db.execute(
@@ -146,6 +148,10 @@ async def giga_pull_plan(ctx: TaskContext) -> dict[str, Any]:
         existing_skus = {sku for sku in existing_result.scalars().all() if sku}
         sku_codes = [sku for sku in listed_skus if sku not in existing_skus]
         skipped_existing_count = len(listed_skus) - len(sku_codes)
+    available_new_sku_count = len(sku_codes)
+    if new_sku_limit is not None:
+        sku_codes = sku_codes[:new_sku_limit]
+    deferred_new_sku_count = available_new_sku_count - len(sku_codes)
 
     details_group = await _group_by_key(ctx, "details")
     inventory_group = await _group_by_key(ctx, "inventory")
@@ -184,6 +190,9 @@ async def giga_pull_plan(ctx: TaskContext) -> dict[str, Any]:
             "listed_sku_count": len(listed_skus),
             "sku_count": 0,
             "skipped_existing_count": skipped_existing_count,
+            "requested_new_sku_limit": new_sku_limit,
+            "available_new_sku_count": available_new_sku_count,
+            "deferred_new_sku_count": deferred_new_sku_count,
             "chunk_count": 0,
             "message": "所有远端 SKU 已存在，本次无需拉取新 SKU",
         })
@@ -250,6 +259,9 @@ async def giga_pull_plan(ctx: TaskContext) -> dict[str, Any]:
                 "listed_sku_count": len(listed_skus),
                 "sku_codes": sku_codes,
                 "skipped_existing_count": skipped_existing_count,
+                "requested_new_sku_limit": new_sku_limit,
+                "available_new_sku_count": available_new_sku_count,
+                "deferred_new_sku_count": deferred_new_sku_count,
             }),
             max_attempts=3,
             created_at=datetime.now(),
@@ -269,6 +281,9 @@ async def giga_pull_plan(ctx: TaskContext) -> dict[str, Any]:
         "listed_sku_count": len(listed_skus),
         "sku_count": len(sku_codes),
         "skipped_existing_count": skipped_existing_count,
+        "requested_new_sku_limit": new_sku_limit,
+        "available_new_sku_count": available_new_sku_count,
+        "deferred_new_sku_count": deferred_new_sku_count,
     })
     await ctx.db.commit()
     return {
@@ -278,6 +293,9 @@ async def giga_pull_plan(ctx: TaskContext) -> dict[str, Any]:
         "listed_sku_count": len(listed_skus),
         "sku_count": len(sku_codes),
         "skipped_existing_count": skipped_existing_count,
+        "requested_new_sku_limit": new_sku_limit,
+        "available_new_sku_count": available_new_sku_count,
+        "deferred_new_sku_count": deferred_new_sku_count,
         "chunk_count": len(detail_chunks),
     }
 

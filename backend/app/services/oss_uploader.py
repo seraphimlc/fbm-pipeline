@@ -101,6 +101,16 @@ def download_private_file(object_key: str, target_path: Path) -> dict:
     }
 
 
+def delete_private_file(object_key: str) -> None:
+    """Delete a caller-owned, explicit temporary object (used only by QA)."""
+    if not oss_configured():
+        raise RuntimeError("OSS 未配置，无法删除文件。")
+    cleaned_key = object_key.strip().lstrip("/")
+    if not cleaned_key:
+        raise ValueError("OSS object_key 不能为空")
+    _bucket().delete_object(cleaned_key)
+
+
 def sign_private_url(object_key: str) -> str:
     if not oss_configured():
         raise RuntimeError("OSS 未配置，无法生成文件访问链接。")

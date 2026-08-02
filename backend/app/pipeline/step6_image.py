@@ -65,6 +65,8 @@ Category gallery strategy:
 {gallery_strategy}
 
 The contact sheet tiles are labeled with image_id and filename. Analyze every tile on this page.
+You MUST return exactly one object for every supplied image_id, with no omitted or duplicate image_id.
+Use numeric slot01_score and gallery_score from 0 to 10 (10 is best).
 
 Output JSON:
 {{
@@ -72,6 +74,9 @@ Output JSON:
     {{
       "image_id": "#01",
       "filename": "source.jpg",
+      "contains_person": false,
+      "person_detection_confidence": "high|medium|low",
+      "person_detection_source": "step6_vlm",
       "multimodal_result": {{
         "visual_summary": "",
         "product_angle": "",
@@ -84,6 +89,15 @@ Output JSON:
         "scene_type": "",
         "background_props": "",
         "text_graphics": "",
+        "claimable_visual_facts": [""],
+        "non_claimable_or_uncertain": [""],
+        "recommended_copy_uses": [""],
+        "quality_assessment": {{
+          "sharpness": "clear|acceptable|soft|blurred",
+          "crop_and_completeness": "",
+          "lighting_and_color": "",
+          "amazon_suitability": "main|gallery|aplus_reference|exclude"
+        }},
         "aplus_reference_value": "",
         "confidence": "high|medium|low",
         "uncertainty": []
@@ -320,6 +334,16 @@ ROLE_BUYER_QUESTIONS = {
     "package_contents": "到货包含什么、包装是什么样？",
     "proof": "还有哪些补充证据能降低顾虑？",
 }
+
+EVIDENCE_COVERAGE_DIMENSIONS = (
+    ("product_identity", "商品身份与全貌", {"identity", "alternate_angle"}),
+    ("size_scale", "尺寸与空间比例", {"size_scale"}),
+    ("material_detail", "材质、纹理与做工", {"material_detail"}),
+    ("function_use", "功能、结构与使用方式", {"function_use", "proof"}),
+    ("lifestyle", "真实使用场景", {"lifestyle"}),
+    ("setup_storage", "安装、收纳或维护", {"setup_storage"}),
+    ("package_contents", "包装、配件与到货内容", {"package_contents"}),
+)
 
 IMAGE_HEALTH_LABELS = {
     "pass": "素材够用",
@@ -917,6 +941,93 @@ def _gallery_role_entry(item: dict) -> dict:
     }
 
 
+def _as_analysis_list(value, *, limit: int = 8) -> list[str]:
+    values = value if isinstance(value, list) else [value]
+    result: list[str] = []
+    for item in values:
+        text = str(item or "").strip()
+        if text and text not in result:
+            result.append(text)
+    return result[:limit]
+
+
+def _image_evidence_cards(reviews: list[dict], gallery: list[dict]) -> list[dict]:
+    """Make VLM observations inspectable without treating them as product facts."""
+    selected_by_id = {
+        item.get("image_id"): item
+        for item in gallery
+        if isinstance(item, dict) and item.get("image_id")
+    }
+    cards: list[dict] = []
+    for review in reviews:
+        if not isinstance(review, dict):
+            continue
+        selected = selected_by_id.get(review.get("image_id"), {})
+        item = {**review, **selected}
+        mm = item.get("multimodal_result") if isinstance(item.get("multimodal_result"), dict) else {}
+        quality = mm.get("quality_assessment") if isinstance(mm.get("quality_assessment"), dict) else {}
+        role = item.get("selection_role") or _selection_role(item)
+        cards.append({
+            "image_id": item.get("image_id"),
+            "filename": item.get("filename"),
+            "selected_slot": item.get("slot"),
+            "selection_role": role,
+            "selection_role_label": ROLE_LABELS.get(role, role),
+            "selected_for_gallery": bool(selected),
+            "visual_observations": {
+                "summary": mm.get("visual_summary"),
+                "product_angle": mm.get("product_angle"),
+                "product_state": mm.get("product_state"),
+                "color_reading": mm.get("color_reading"),
+                "size_scale_cues": mm.get("size_scale_cues"),
+                "visible_parts": mm.get("visible_parts"),
+                "completeness": mm.get("completeness"),
+                "material_texture": mm.get("material_texture"),
+                "scene_type": mm.get("scene_type"),
+                "background_props": mm.get("background_props"),
+                "visible_text_or_graphics": mm.get("text_graphics"),
+            },
+            # Visual observations can anchor copy, but cannot establish unshown
+            # specifications or performance. The names make that boundary explicit.
+            "claimable_visual_facts": _as_analysis_list(mm.get("claimable_visual_facts")),
+            "not_proven_or_uncertain": list(dict.fromkeys([
+                *_as_analysis_list(mm.get("non_claimable_or_uncertain")),
+                *_as_analysis_list(mm.get("uncertainty")),
+                *_as_analysis_list(item.get("risk_flags")),
+            ]))[:12],
+            "recommended_copy_uses": _as_analysis_list(mm.get("recommended_copy_uses")),
+            "quality_assessment": {
+                "sharpness": quality.get("sharpness"),
+                "crop_and_completeness": quality.get("crop_and_completeness"),
+                "lighting_and_color": quality.get("lighting_and_color"),
+                "amazon_suitability": quality.get("amazon_suitability"),
+            },
+            "matched_title_bullet_evidence": item.get("matched_title_bullet_evidence"),
+            "visible_selling_point": item.get("visible_selling_point"),
+            "aplus_reference_value": mm.get("aplus_reference_value"),
+            "confidence": mm.get("confidence"),
+            "decision_reason": item.get("decision_reason"),
+        })
+    return cards
+
+
+def _gallery_evidence_coverage(gallery: list[dict]) -> list[dict]:
+    coverage: list[dict] = []
+    for key, label, roles in EVIDENCE_COVERAGE_DIMENSIONS:
+        matches = [
+            item for item in gallery
+            if (item.get("selection_role") or _selection_role(item)) in roles
+        ]
+        coverage.append({
+            "key": key,
+            "label": label,
+            "status": "covered" if matches else "missing",
+            "image_ids": [item.get("image_id") for item in matches if item.get("image_id")],
+            "slots": [item.get("slot") for item in matches if item.get("slot")],
+        })
+    return coverage
+
+
 def _dedupe_diagnostic_items(items: list[dict]) -> list[dict]:
     seen = set()
     result = []
@@ -955,22 +1066,13 @@ def _json_loads(value, fallback):
 
 def _listing_alignment_text(pd: ProductData) -> str:
     bullets = _json_loads(pd.listing_bullets, [])
-    check = _json_loads(pd.listing_check, {})
-    keyword_plan = check.get("keyword_plan") if isinstance(check, dict) else {}
-    positioning = check.get("positioning") if isinstance(check, dict) else {}
+    highlights = _json_loads(pd.listing_product_highlights, [])
     parts = [
         pd.listing_title,
+        " ".join(highlights) if isinstance(highlights, list) else highlights,
         " ".join(bullets) if isinstance(bullets, list) else bullets,
-        pd.listing_primary_keyword,
+        pd.listing_description,
     ]
-    if isinstance(keyword_plan, dict):
-        parts.extend(keyword_plan.get("title_keywords") or [])
-        parts.extend(keyword_plan.get("bullet_keywords") or [])
-    if isinstance(positioning, dict):
-        parts.append(positioning.get("main_click_reason"))
-        risks = positioning.get("conversion_risks") or []
-        if isinstance(risks, list):
-            parts.extend(risks)
     return " ".join(str(part or "") for part in parts).lower()
 
 
@@ -1106,11 +1208,56 @@ def _listing_image_alignment(pd: ProductData, gallery: list[dict]) -> dict:
             })
 
     return {
+        "status": "checked",
         "checked_claims": claims,
         "supported_claims": supported,
         "missing_evidence": missing,
         "warnings": [item["message"] for item in missing],
     }
+
+
+def _pending_listing_image_alignment() -> dict:
+    """Make the pre-Listing state explicit instead of reporting a false clean check."""
+    return {
+        "status": "pending_listing",
+        "checked_claims": [],
+        "supported_claims": [],
+        "missing_evidence": [],
+        "warnings": [],
+    }
+
+
+def _has_listing_copy(pd: ProductData) -> bool:
+    return bool(
+        str(pd.listing_title or "").strip()
+        or _json_loads(pd.listing_product_highlights, [])
+        or _json_loads(pd.listing_bullets, [])
+        or str(pd.listing_description or "").strip()
+    )
+
+
+def refresh_listing_image_alignment(pd: ProductData, pi: ProductImage) -> dict:
+    """Recheck selected gallery evidence against the final, shopper-facing Listing copy.
+
+    Step 6 runs before copy exists, so it can only report gallery coverage.  The
+    Listing writer calls this after persisting its final title, Highlights,
+    bullets and description.  It changes diagnostics only and never replaces
+    the user-confirmed main/gallery images.
+    """
+    payload = _json_loads(pi.image_analysis, {})
+    if not isinstance(payload, dict):
+        return _pending_listing_image_alignment()
+    gallery = payload.get("gallery_selection")
+    gallery = gallery if isinstance(gallery, list) else []
+    diagnostics = payload.get("selection_diagnostics")
+    diagnostics = dict(diagnostics) if isinstance(diagnostics, dict) else {}
+    alignment = _listing_image_alignment(pd, gallery) if _has_listing_copy(pd) else _pending_listing_image_alignment()
+    diagnostics["listing_image_alignment"] = alignment
+    strategy = _image_strategy(pd.leaf_category or "General", pd)
+    diagnostics["image_health"] = _image_health(diagnostics, strategy)
+    payload["selection_diagnostics"] = diagnostics
+    pi.image_analysis = json.dumps(payload, ensure_ascii=False)
+    return alignment
 
 
 def _image_health(diagnostics: dict, strategy: dict | None = None) -> dict:
@@ -1342,6 +1489,8 @@ def _select_gallery(reviews: list[dict], strategy: dict) -> tuple[dict | None, l
             })
 
     diagnostics["gallery_roles"] = [_gallery_role_entry(item) for item in gallery]
+    diagnostics["gallery_evidence_coverage"] = _gallery_evidence_coverage(gallery)
+    diagnostics["image_evidence_cards"] = _image_evidence_cards(reviews, gallery)
     diagnostics["gallery_count"] = len(gallery)
     diagnostics["missing_gallery_roles"] = _missing_gallery_roles(gallery, strategy)
     diagnostics["duplicate_suppressed"] = _dedupe_diagnostic_items(duplicate_suppressed)
@@ -1446,7 +1595,13 @@ def _restore_cached_image_analysis(
     main_item, gallery_selection, diagnostics = _select_gallery(reviews, strategy)
     if previous_diagnostics.get("analysis_warnings"):
         diagnostics["analysis_warnings"] = previous_diagnostics.get("analysis_warnings")
-    diagnostics["listing_image_alignment"] = _listing_image_alignment(pd, gallery_selection)
+    # Listing does not exist at Step 6.  Only gallery coverage is valid here;
+    # the final title/Highlights/bullets are checked after Listing generation.
+    diagnostics["listing_image_alignment"] = (
+        _listing_image_alignment(pd, gallery_selection)
+        if _has_listing_copy(pd)
+        else _pending_listing_image_alignment()
+    )
     diagnostics["image_strategy"] = {
         "name": strategy.get("name"),
         "buyer_focus": strategy.get("buyer_focus") or [],
@@ -1691,7 +1846,11 @@ async def run_image_analysis(product_id: int) -> dict:
         main_review, gallery_selection, selection_diagnostics = _select_gallery(all_reviews, strategy)
         if analysis_warnings:
             selection_diagnostics["analysis_warnings"] = analysis_warnings
-        selection_diagnostics["listing_image_alignment"] = _listing_image_alignment(pd, gallery_selection)
+        selection_diagnostics["listing_image_alignment"] = (
+            _listing_image_alignment(pd, gallery_selection)
+            if _has_listing_copy(pd)
+            else _pending_listing_image_alignment()
+        )
         selection_diagnostics["image_strategy"] = {
             "name": strategy.get("name"),
             "buyer_focus": strategy.get("buyer_focus") or [],

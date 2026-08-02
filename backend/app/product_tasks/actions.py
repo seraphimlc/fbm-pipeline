@@ -24,14 +24,18 @@ from app.models.status import (
     COMPLETED,
     FAILED,
     PAUSED,
+    STEP3_KEYWORDS,
     STEP5_LISTING,
     STEP6_CURATING,
     STEP6_DONE,
+    STEP_CUSTOMER_MINDSET,
     WORKFLOW_NODE_AUTO_SELECT_IMAGES,
     WORKFLOW_NODE_AUTO_SELECT_COMPETITOR,
     WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES,
     WORKFLOW_NODE_FLOW_DONE,
     WORKFLOW_NODE_IMAGE_ANALYSIS,
+    WORKFLOW_NODE_KEYWORD_RESEARCH,
+    WORKFLOW_NODE_CUSTOMER_MINDSET,
     WORKFLOW_NODE_LISTING_GENERATION,
     WORKFLOW_NODE_SEARCH_COMPETITOR,
     WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS,
@@ -42,8 +46,16 @@ from app.models.status import (
 )
 from app.product_tasks.auto_image_selection import run_auto_image_selection
 from app.pipeline.engine import _assert_step_prerequisites
+from app.pipeline.step2_pricing import run_pricing
+from app.pipeline.step4_category import run_category
 from app.pipeline.step5_listing import run_listing
 from app.pipeline.step6_image import run_image_analysis
+from app.pipeline.step3_keywords import run_keywords
+from app.pipeline.customer_mindset import (
+    customer_mindset_matches_product,
+    image_analysis_ready,
+    run_customer_mindset,
+)
 from app.product_tasks.workflow import set_product_workflow
 from app.services.amazon_competitor_query import CompetitorQueryError, build_amazon_competitor_queries
 from app.services.amazon_competitor_visual_match import (
@@ -121,7 +133,9 @@ PRODUCT_ACTION_TYPES = {
     "product_competitor_visual_match",
     "product_competitor_candidate_capture",
     "product_auto_competitor_selection",
+    "product_keyword_research",
     "product_image_analysis",
+    "product_customer_mindset",
     "product_listing_generation",
 }
 
@@ -153,8 +167,12 @@ def _legacy_dedupe_key(task_type: str, product_id: int) -> str | None:
         return f"product_competitor_candidate_capture:product:{product_id}"
     if task_type == "product_auto_competitor_selection":
         return f"product_auto_competitor_selection:product:{product_id}"
+    if task_type == "product_keyword_research":
+        return f"product_keyword_research:product:{product_id}"
     if task_type == "product_image_analysis":
         return f"product_image_analysis:product:{product_id}"
+    if task_type == "product_customer_mindset":
+        return f"product_customer_mindset:product:{product_id}"
     if task_type == "product_listing_generation":
         return f"product_listing_generation:product:{product_id}"
     return None
@@ -171,8 +189,12 @@ def _legacy_correlation_key(task_type: str, product_id: int) -> str | None:
         return f"product:{product_id}:competitor_candidate_capture"
     if task_type == "product_auto_competitor_selection":
         return f"product:{product_id}:auto_competitor_selection"
+    if task_type == "product_keyword_research":
+        return f"product:{product_id}:keyword_research"
     if task_type == "product_image_analysis":
         return f"product:{product_id}:image_analysis"
+    if task_type == "product_customer_mindset":
+        return f"product:{product_id}:customer_mindset"
     if task_type == "product_listing_generation":
         return f"product:{product_id}:listing_generation"
     return None
@@ -237,11 +259,52 @@ def _raise_if_e5_export_ready_protected(product: Product, *, action_label: str) 
 
 
 def _workflow_node_for_step(step: int) -> str:
+    if step == 3:
+        return WORKFLOW_NODE_KEYWORD_RESEARCH
     return WORKFLOW_NODE_IMAGE_ANALYSIS if step == 5 else WORKFLOW_NODE_LISTING_GENERATION
 
 
 def _json_from_text(value: str | None) -> Any:
     return json_loads(value, {})
+
+
+def _customer_mindset_ready(product: Product) -> bool:
+    data = product.data
+    if not data or not data.customer_mindset:
+        return False
+    try:
+        return customer_mindset_matches_product(data.customer_mindset, product)
+    except RuntimeError:
+        return False
+
+
+def _raise_if_customer_mindset_missing(product: Product) -> None:
+    if not _customer_mindset_ready(product):
+        raise RuntimeError("前置节点未完成：用户心智梳理未完成，不能进入 Listing 文案")
+
+
+def _listing_content_ready(product: Product) -> bool:
+    data = product.data
+    title = str(data.listing_title or "").strip() if data else ""
+    if not title or len(title) > settings.STEP5_TITLE_MAX_CHARS:
+        return False
+    highlights = _json_from_text(str(getattr(data, "listing_product_highlights", "") or ""))
+    if not isinstance(highlights, list) or not 3 <= len(highlights) <= 5:
+        return False
+    if any(
+        not str(item or "").strip()
+        or len(str(item).strip()) > settings.STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS
+        for item in highlights
+    ):
+        return False
+    bullets = _json_from_text(str(data.listing_bullets or "").strip())
+    if not isinstance(bullets, list) or len(bullets) != 5:
+        return False
+    return all(
+        str(item or "").strip()
+        and len(str(item).strip()) <= settings.STEP5_BULLET_MAX_CHARS
+        for item in bullets
+    )
 
 
 def _clamp(value: float, lower: float = 0.0, upper: float = 1.0) -> float:
@@ -505,10 +568,14 @@ def _clear_auto_image_downstream_outputs(product: Product) -> None:
         for field in (
             "categories",
             "leaf_category",
+            "customer_mindset",
+            "customer_mindset_generated_at",
             "listing_title",
+            "listing_product_highlights",
             "listing_bullets",
             "listing_search_terms",
             "listing_title_zh",
+            "listing_product_highlights_zh",
             "listing_bullets_zh",
             "listing_search_terms_zh",
             "listing_description",
@@ -761,14 +828,67 @@ async def _project_image_analysis_creation_failed(
     await db.commit()
 
 
-async def _create_or_reuse_image_analysis_after_auto_competitor(product_id: int) -> list[int]:
+async def _project_customer_mindset_failed(
+    db: AsyncSession,
+    *,
+    product_id: int,
+    message: str,
+    paused: bool = False,
+) -> None:
+    try:
+        product = await _load_product(db, product_id)
+    except RuntimeError:
+        return
+    now = datetime.now()
+    product.status = PAUSED if paused else FAILED
+    product.current_step = 6
+    product.error_message = message
+    set_product_workflow(
+        product,
+        node=WORKFLOW_NODE_CUSTOMER_MINDSET,
+        status=WORKFLOW_STATUS_FAILED,
+        error=message,
+        now=now,
+    )
+    product.updated_at = now
+    _sync_catalog_item(product)
+    await db.commit()
+
+
+async def _project_keyword_research_failed(
+    db: AsyncSession,
+    *,
+    product_id: int,
+    message: str,
+) -> None:
+    try:
+        product = await _load_product(db, product_id)
+    except RuntimeError:
+        return
+    now = datetime.now()
+    product.status = FAILED
+    product.current_step = 3
+    product.error_message = message
+    set_product_workflow(
+        product,
+        node=WORKFLOW_NODE_KEYWORD_RESEARCH,
+        status=WORKFLOW_STATUS_FAILED,
+        error=message,
+        now=now,
+    )
+    product.updated_at = now
+    _sync_catalog_item(product)
+    await db.commit()
+
+
+async def _create_or_reuse_keyword_research_after_auto_competitor(product_id: int) -> list[int]:
     async with async_session() as planner_db:
         runs = await create_product_action_runs(
             planner_db,
-            "product_image_analysis",
+            "product_keyword_research",
             [{"product_id": product_id, "created_by": "product_auto_competitor_selection"}],
             created_by="product_auto_competitor_selection",
-            auto_start=False,
+            auto_start=True,
         )
         return [run.id for run in runs]
 
@@ -809,6 +929,9 @@ async def _best_effort_update_step_progress(
 
 
 def _project_listing_completed(product: Product) -> None:
+    _raise_if_customer_mindset_missing(product)
+    if not _listing_content_ready(product):
+        raise RuntimeError("Listing 生成未落库标题、商品亮点和五点，不能进入待导出")
     _raise_if_e5_export_ready_protected(product, action_label="完成 Listing 并进入待导出")
     now = datetime.now()
     product.status = COMPLETED
@@ -853,6 +976,23 @@ def _project_listing_completed(product: Product) -> None:
 
 
 class ProductAutoImageSelectionAction:
+    """节点 1：自动选图，为后续所有视觉节点建立可信的商品图片集合。
+
+    前置与输入：商品必须仍可安全重跑，输入来自 GIGA/供应商图片及已有商品素材；
+    `raise_if_auto_image_selection_protected` 会阻止覆盖真实 ASIN、导出记录、A+ 上传等
+    不可逆外部结果。执行入口是 `run_auto_image_selection`，任务最多尝试 2 次。
+
+    处理规则：模型必须选出 1 张主图；Gallery 去重后最多保存 8 张，且不得重复主图。
+    图片引用优先保留可供 VLM 直接访问的 URL，本地路径仅作为已有素材的兼容形式。
+    选择依据、顺序、置信度和所用模型一并保留，不能只留下最终路径。
+
+    落库与下游：结果写入 `ProductImage.main_image_path`、`gallery_images`、
+    `gallery_order`、`image_selection_analysis`、`image_selected_at` 和 `vlm_model`。
+    重跑会清理尚可重建的竞品、图片分析、用户心智、Listing 和 A+ 下游产物；成功后
+    唯一进入 `search_competitor/pending`。缺少主图、结果格式错误、取消或中断均按
+    fail-closed 投影失败状态，不允许用空结果继续流程。
+    """
+
     action_type = "product_auto_image_selection"
 
     async def validate(self, db: AsyncSession, payload: dict[str, Any]) -> None:
@@ -1040,6 +1180,23 @@ class ProductAutoImageSelectionAction:
 
 
 class ProductCompetitorSearchAction:
+    """节点 2：自动搜索 Amazon 竞品，生成可审计的候选池。
+
+    前置与输入：商品须有已确认主图且处于搜索/允许重搜状态；查询词由
+    `build_amazon_competitor_queries` 根据商品名称、类目、属性等事实生成。已有真实
+    ASIN、导出或其它受保护外部结果时禁止重跑。任务本身最多尝试 1 次。
+
+    数量与过滤：每个查询当前默认最多取 12 条，事实源为
+    `settings.AMAZON_SEARCH_PER_QUERY_LIMIT`；跨查询按 ASIN 去重后的候选总数当前默认
+    最多 20 条，事实源为 `settings.AMAZON_SEARCH_MAX_CANDIDATES`。Sponsored、配件、
+    replacement part、cover only 等风险项必须标记或排除，不能伪装为完整同类商品。
+
+    落库与下游：保存搜索 run/step、查询来源、排名、ASIN、标题、价格、评分、评论数、
+    主图 URL 和风险证据；成功后进入 `visual_match_competitors/pending` 并创建视觉初筛
+    任务。真实 Amazon 搜索 adapter 默认关闭，未显式配置时必须失败，不得用假数据或
+    静默打开浏览器冒充 API 成功。
+    """
+
     action_type = "product_competitor_search"
 
     async def validate(self, db: AsyncSession, payload: dict[str, Any]) -> None:
@@ -1377,6 +1534,21 @@ def _is_auto_competitor_search_product(product: Product) -> bool:
 
 
 class ProductCompetitorVisualMatchAction:
+    """节点 3：用图片证据对竞品候选做视觉初筛，缩小后续详情抓取范围。
+
+    前置与输入：只读取最近一次成功搜索 run/step 的当前候选；源商品使用已确认主图
+    URL，候选使用各自 `image_url`，两者直接交给 VLM。此节点不会下载候选图，也不会
+    拼 Contact Sheet，因此模型判断必须可追溯到原始 URL 和当前搜索批次。
+
+    处理与限制：目标是选出 Top 4-6 个外观和产品类型相符的候选，记录视觉排名、
+    相似度、选择理由、风险及 `visual_selected_for_capture`。任务最多尝试 1 次；选择
+    数量必须大于 0，后续详情抓取还会执行最多 6 个候选的硬校验。
+
+    落库与下游：视觉结果绑定当前 search run/step 和本任务 run/step；写入成功后进入
+    `capture_competitor_candidates` 并自动创建候选详情抓取任务。无合格候选、VLM/API/
+    TLS 错误或证据批次不一致均 fail closed，失败态不得保留一组“当前已选”候选。
+    """
+
     action_type = "product_competitor_visual_match"
 
     async def validate(self, db: AsyncSession, payload: dict[str, Any]) -> None:
@@ -1859,6 +2031,22 @@ async def _captured_candidate_success_count(db: AsyncSession, product_id: int) -
 
 
 class ProductCompetitorCandidateCaptureAction:
+    """节点 4：抓取视觉初筛候选的 Amazon 详情事实，供确定性选品使用。
+
+    前置与输入：只处理当前视觉任务 run/step 中 `visual_selected_for_capture=true` 的
+    候选，候选数必须为 1-6；不允许回读旧批次或扩大到整个搜索候选池。执行前会清理
+    可重建的旧 capture/selection 结果，已有不可逆外部结果时禁止重跑。
+
+    抓取内容：逐候选获取标题、五点、描述、价格、评分、评论数、图片和详情属性等
+    结构化事实。`execute_step` 只返回抓取结果，`on_step_success` 再在单一数据库事务中
+    写入当前 capture 证据，避免部分落库被误当成完整成功。任务失败时不可拼接旧详情。
+
+    落库与下游：保存每个候选的抓取状态、事实、错误和来源 run/step；当前集合具备
+    可用详情后进入 `auto_select_competitor` 并创建自动选竞品任务。真实详情 adapter
+    默认 fail closed，除非显式配置；抓取失败、Top 高位候选全部失败或事务失败都必须
+    留下可见错误，不能以空字段继续。
+    """
+
     action_type = "product_competitor_candidate_capture"
 
     async def validate(self, db: AsyncSession, payload: dict[str, Any]) -> None:
@@ -2222,6 +2410,23 @@ class ProductCompetitorCandidateCaptureAction:
 
 
 class ProductAutoCompetitorSelectionAction:
+    """节点 5：从成功抓取详情的当前候选中确定最终参考竞品。
+
+    前置与输入：只消费当前视觉集合内、详情抓取成功且证据完整的候选；缺少候选或
+    当前流程状态不符时拒绝执行。选定逻辑是可复现的规则评分，不由 LLM 自由决定，
+    当前模型标识为 `rule_based_auto_competitor_v1`，规则版本为
+    `auto_competitor_selection_v1`。
+
+    处理规则：综合产品类型/标题匹配、视觉排名、详情完整度、价格、评分、评论量和
+    风险信号排序；硬拒绝、证据不足或低置信度时 fail closed。最终结果必须保留每个
+    候选的分数构成和拒绝原因，便于以后解释为什么选中该 ASIN。
+
+    落库与下游：写入最终 selected row、`Product.competitor_asin`、CatalogProduct 和
+    GIGA snapshot 的竞品事实；成功后创建 `product_keyword_research`，进入“商品准备”，
+    不能跳过关键词/定价/类目直接做图片分析。取消、中断或落库失败会清除不完整的
+    当前选择投影，不得保留半成功竞品。
+    """
+
     action_type = "product_auto_competitor_selection"
 
     async def validate(self, db: AsyncSession, payload: dict[str, Any]) -> None:
@@ -2405,9 +2610,16 @@ class ProductAutoCompetitorSelectionAction:
         asin = str(selected_row.asin or selected["asin"] or "").strip().upper()
         product.competitor_asin = asin
         product.status = "created"
-        product.current_step = 2
+        product.current_step = 3
         product.error_message = None
         product.updated_at = now
+        set_product_workflow(
+            product,
+            node=WORKFLOW_NODE_KEYWORD_RESEARCH,
+            status=WORKFLOW_STATUS_PENDING,
+            error=None,
+            now=now,
+        )
         if product.catalog_item:
             product.catalog_item.competitor_asin = asin
             product.catalog_item.updated_at = now
@@ -2454,10 +2666,10 @@ class ProductAutoCompetitorSelectionAction:
         await db.commit()
 
         try:
-            image_run_ids = await _create_or_reuse_image_analysis_after_auto_competitor(product_id)
+            keyword_run_ids = await _create_or_reuse_keyword_research_after_auto_competitor(product_id)
         except Exception as exc:
-            message = f"自动竞品已选定，但创建图片分析任务失败: {type(exc).__name__}: {exc}"
-            await _project_image_analysis_creation_failed(db, product_id=product_id, message=message)
+            message = f"自动竞品已选定，但创建关键词采集任务失败: {type(exc).__name__}: {exc}"
+            await _project_keyword_research_failed(db, product_id=product_id, message=message)
             result["status"] = "downstream_failed"
             result["downstream_error"] = message
             return
@@ -2466,8 +2678,8 @@ class ProductAutoCompetitorSelectionAction:
         step.task_run.summary_json = json_dumps({
             "product_id": product_id,
             "status": "auto_competitor_selected",
-            "next_node": WORKFLOW_NODE_IMAGE_ANALYSIS,
-            "image_analysis_task_run_ids": image_run_ids,
+            "next_node": WORKFLOW_NODE_KEYWORD_RESEARCH,
+            "keyword_research_task_run_ids": keyword_run_ids,
             "selected_candidate_id": selected_row.id,
             "selected_asin": asin,
             "score": selected["score"],
@@ -2480,12 +2692,12 @@ class ProductAutoCompetitorSelectionAction:
             step,
             current=1,
             total=1,
-            message="自动选竞品完成，已提交图片分析任务",
-            data={"product_id": product_id, "selected_asin": asin, "image_analysis_task_run_ids": image_run_ids},
+            message="自动选竞品完成，已提交关键词采集任务",
+            data={"product_id": product_id, "selected_asin": asin, "keyword_research_task_run_ids": keyword_run_ids},
         )
         result["status"] = "done"
-        result["next_node"] = WORKFLOW_NODE_IMAGE_ANALYSIS
-        result["image_analysis_task_run_ids"] = image_run_ids
+        result["next_node"] = WORKFLOW_NODE_KEYWORD_RESEARCH
+        result["keyword_research_task_run_ids"] = keyword_run_ids
 
     async def on_step_failure(self, db: AsyncSession, step: TaskStep, error: Exception) -> None:
         product_id = int(_payload_for_step(step).get("product_id") or 0)
@@ -2518,7 +2730,228 @@ class ProductAutoCompetitorSelectionAction:
         )
 
 
+class ProductKeywordResearchAction:
+    """节点 6：商品准备，在一个任务内依次完成关键词、定价和 Amazon 类目。
+
+    前置与输入：必须有最终参考竞品 ASIN 和商品基础资料，且没有真实 ASIN、导出、
+    A+ 上传等受保护结果。任务最多尝试 2 次，内部顺序固定为 `run_keywords` ->
+    `run_pricing` -> `run_category`，任一环节失败都不能进入图片分析。
+
+    关键词：优先通过卖家精灵 OpenAPI 采集并写入 `ProductData.keywords_top`；API 返回
+    空结果时才允许 LLM 兜底。只有 OpenAPI 未配置且旧兼容链路需要人工登录时，才可能
+    调用浏览器，不能在 API 可用时无故打开浏览器。
+
+    定价：设含运费预估总成本为 T、货值为 G，成本基数
+    C = T + 固定成本 - 退货保险抵扣率 * G；候选售价 P1 = C / (净收入率 - 目标净利率)，
+    P2 = (C + 最低利润) / 净收入率，建议售价 = max(P1, P2)。当前默认净收入率 0.685、
+    目标净利率 0.05、最低利润 $10、固定成本 $9、退货保险抵扣率 0.06；最终事实源是
+    `PRICING_*` 配置。
+
+    类目与下游：根据已选竞品 ASIN 获取 Amazon 叶子类目。只有 `keywords_top`、
+    `suggested_price`、`leaf_category` 三者均已落库，才创建 `product_image_analysis`；
+    缺任何一项均 fail closed，并保留具体失败阶段。
+    """
+
+    action_type = "product_keyword_research"
+
+    async def validate(self, db: AsyncSession, payload: dict[str, Any]) -> None:
+        product = await _load_product(db, _product_id(payload))
+        reasons = product_external_result_protection_reasons(product)
+        if reasons:
+            raise RuntimeError("当前商品已有不可逆外部结果，不能重新采集关键词：" + "；".join(reasons))
+        if product.workflow_node != WORKFLOW_NODE_KEYWORD_RESEARCH:
+            raise RuntimeError("当前商品不在关键词采集节点，不能启动关键词任务")
+        if product.workflow_status not in {WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_FAILED, WORKFLOW_STATUS_PROCESSING}:
+            raise RuntimeError("当前关键词采集状态不可启动或重试")
+        if not product.competitor_asin:
+            raise RuntimeError("前置节点未完成：缺少已选定的参考竞品 ASIN")
+        if not product.data:
+            raise RuntimeError("前置节点未完成：缺少商品基础资料，无法生成关键词")
+
+    def dedupe_key(self, payload: dict[str, Any]) -> str | None:
+        return f"product_keyword_research:product:{_product_id(payload)}"
+
+    def correlation_key(self, payload: dict[str, Any]) -> str | None:
+        return f"product:{_product_id(payload)}:keyword_research"
+
+    async def reserve(self, db: AsyncSession, payload: dict[str, Any], run: TaskRun) -> None:
+        product = await _load_product(db, _product_id(payload))
+        now = datetime.now()
+        product.status = STEP3_KEYWORDS
+        product.current_step = 3
+        product.error_message = "关键词采集已加入任务中心队列"
+        set_product_workflow(
+            product,
+            node=WORKFLOW_NODE_KEYWORD_RESEARCH,
+            status=WORKFLOW_STATUS_PROCESSING,
+            error=None,
+            now=now,
+        )
+        product.updated_at = now
+        _sync_catalog_item(product)
+
+    def build_plan(self, payload: dict[str, Any]) -> TaskRunPlan:
+        product_id = _product_id(payload)
+        return TaskRunPlan(
+            task_type=self.action_type,
+            title=f"商品准备：关键词、定价与类目 #{product_id}",
+            payload={"product_id": product_id},
+            groups=[
+                TaskGroupPlan(
+                    group_key="keyword_research",
+                    title="关键词、定价与类目",
+                    steps=[
+                        TaskStepPlan(
+                            step_key=f"product:{product_id}:keyword_research",
+                            step_type=self.action_type,
+                            payload={"product_id": product_id},
+                            max_attempts=2,
+                        )
+                    ],
+                )
+            ],
+        )
+
+    async def execute_step(self, db: AsyncSession, step: TaskStep, payload: dict[str, Any]) -> dict[str, Any]:
+        product_id = _product_id(payload)
+        product = await _load_product(db, product_id)
+        await update_step_progress(
+            db,
+            step,
+            current=0,
+            total=3,
+            message="开始采集竞品关键词",
+            data={"product_id": product_id, "competitor_asin": product.competitor_asin},
+        )
+        keyword_result = await run_keywords(product_id)
+        if not keyword_result.get("top_keywords"):
+            raise RuntimeError("关键词采集未返回可用关键词")
+        await update_step_progress(
+            db,
+            step,
+            current=1,
+            total=3,
+            message="关键词采集完成，开始计算建议售价",
+            data={"product_id": product_id},
+        )
+        pricing_result = await run_pricing(product_id)
+        await update_step_progress(
+            db,
+            step,
+            current=2,
+            total=3,
+            message="定价完成，开始匹配 Amazon 类目",
+            data={"product_id": product_id},
+        )
+        category_result = await run_category(product_id)
+        return {
+            "product_id": product_id,
+            "keyword_result": keyword_result,
+            "pricing_result": pricing_result,
+            "category_result": category_result,
+        }
+
+    async def on_step_success(self, db: AsyncSession, step: TaskStep, result: dict[str, Any]) -> None:
+        product_id = int(result.get("product_id") or _payload_for_step(step).get("product_id") or 0)
+        product = await _load_product(db, product_id)
+        await db.refresh(product, attribute_names=["data"])
+        if not product.data or not product.data.keywords_top:
+            message = "商品准备完成但未落库关键词结果，不能进入图片分析"
+            await _project_keyword_research_failed(db, product_id=product_id, message=message)
+            raise RuntimeError(message)
+        if product.data.suggested_price is None:
+            message = "商品准备完成但缺少建议售价，不能进入图片分析"
+            await _project_keyword_research_failed(db, product_id=product_id, message=message)
+            raise RuntimeError(message)
+        if not product.data.leaf_category:
+            message = "商品准备完成但缺少 Amazon 类目，不能进入图片分析"
+            await _project_keyword_research_failed(db, product_id=product_id, message=message)
+            raise RuntimeError(message)
+        now = datetime.now()
+        product.status = "created"
+        product.current_step = 3
+        product.error_message = None
+        set_product_workflow(
+            product,
+            node=WORKFLOW_NODE_KEYWORD_RESEARCH,
+            status=WORKFLOW_STATUS_SUCCEEDED,
+            error=None,
+            now=now,
+        )
+        product.updated_at = now
+        _sync_catalog_item(product)
+        await db.commit()
+        try:
+            image_runs = await create_product_action_runs(
+                db,
+                "product_image_analysis",
+                [{"product_id": product_id, "created_by": "product_keyword_research"}],
+                created_by="product_keyword_research",
+            )
+        except Exception as exc:
+            await db.rollback()
+            message = f"关键词采集已完成，但图片分析任务创建失败: {type(exc).__name__}: {exc}"
+            await _project_image_analysis_creation_failed(db, product_id=product_id, message=message)
+            result["status"] = "downstream_failed"
+            result["downstream_error"] = message
+            return
+        image_run_ids = [run.id for run in image_runs]
+        step.task_run.summary_json = json_dumps({
+            "product_id": product_id,
+            "status": "product_preparation_done",
+            "next_node": WORKFLOW_NODE_IMAGE_ANALYSIS,
+            "keyword_source": "llm_fallback" if result["keyword_result"].get("llm_fallback") else "sellersprite",
+            "top_keyword_count": len(result["keyword_result"].get("top_keywords") or []),
+            "suggested_price": product.data.suggested_price,
+            "leaf_category": product.data.leaf_category,
+            "image_analysis_task_run_ids": image_run_ids,
+        })
+        await db.commit()
+        await _best_effort_update_step_progress(
+            db,
+            step,
+            current=3,
+            total=3,
+            message="商品准备完成，已提交图片分析任务",
+            data={"product_id": product_id, "image_analysis_task_run_ids": image_run_ids},
+        )
+        result["status"] = "done"
+        result["next_node"] = WORKFLOW_NODE_IMAGE_ANALYSIS
+        result["image_analysis_task_run_ids"] = image_run_ids
+
+    async def on_step_failure(self, db: AsyncSession, step: TaskStep, error: Exception) -> None:
+        product_id = int(_payload_for_step(step).get("product_id") or 0)
+        if product_id > 0:
+            await _project_keyword_research_failed(db, product_id=product_id, message=f"关键词采集失败: {type(error).__name__}: {error}")
+
+    async def on_step_interrupted(self, db: AsyncSession, step: TaskStep, reason: str | None = None) -> None:
+        product_id = int(_payload_for_step(step).get("product_id") or 0)
+        if product_id > 0:
+            await _project_keyword_research_failed(db, product_id=product_id, message=f"关键词采集任务已中断: {reason or '服务重启或执行锁超时'}")
+
+    async def on_cancel_requested(self, db: AsyncSession, run: TaskRun, reason: str | None = None) -> None:
+        product_id = int(_payload_for_run(run).get("product_id") or 0)
+        if product_id > 0:
+            await _project_keyword_research_failed(db, product_id=product_id, message=f"关键词采集任务已取消: {reason or '用户取消'}")
+
+
 class ProductImageAnalysisAction:
+    """节点 7：分析商品自己的已确认图片，建立后续文案可引用的视觉证据。
+
+    前置与输入：商品准备必须完成，并具备主图和 Gallery；输入只来自本商品图片，不能
+    把竞品图片当作自身属性证据。远程 URL 直接交给 VLM，本地路径仅兼容历史或人工
+    素材。执行入口是 `run_image_analysis`，任务最多尝试 2 次。
+
+    输出内容：逐图识别角色、可见卖点、材质/纹理、结构细节、使用场景、尺寸或包装
+    线索、合规风险和证据缺口，并形成跨图汇总。分析支持基于图片集合 fingerprint 的
+    缓存，但只有 fingerprint 与输入一致时才能复用。
+
+    真实性与下游：URL VLM 调用失败时不得悄悄下载图片、改走 Contact Sheet 或生成
+    占位分析来伪成功；没有真实分析结果必须 fail closed。结果写入 ProductImage 的图片
+    分析字段；成功后只创建 `product_customer_mindset`，不能绕过用户心智直接生成
+    Listing。取消/中断会投影为暂停或失败，保留可重试性。
+    """
+
     action_type = "product_image_analysis"
 
     async def validate(self, db: AsyncSession, payload: dict[str, Any]) -> None:
@@ -2606,17 +3039,17 @@ class ProductImageAnalysisAction:
                 "item_code": result.get("item_code"),
                 "status": "already_completed",
                 "next_step": None,
-                "listing_task_run_ids": [],
+                "customer_mindset_task_run_ids": [],
             })
             await db.commit()
             result["status"] = "already_completed"
             result["next_step"] = None
-            result["listing_task_run_ids"] = []
+            result["customer_mindset_task_run_ids"] = []
             return
         reasons = _e5_export_ready_protection_reasons(product)
         if reasons:
-            message = "图片分析完成，但当前商品已有不可逆外部结果，不能创建 Listing 任务：" + "；".join(reasons)
-            await _project_product_failure(db, product_id=product_id, step=6, label="Listing 任务创建", error=message)
+            message = "图片分析完成，但当前商品已有不可逆外部结果，不能创建用户心智任务：" + "；".join(reasons)
+            await _project_customer_mindset_failed(db, product_id=product_id, message=message)
             result["status"] = "downstream_failed"
             result["downstream_error"] = message
             return
@@ -2634,26 +3067,27 @@ class ProductImageAnalysisAction:
         product.updated_at = now
         _sync_catalog_item(product)
         try:
-            listing_runs = await create_product_action_runs(
+            customer_mindset_runs = await create_product_action_runs(
                 db,
-                self._listing_action_type(),
+                self._customer_mindset_action_type(),
                 [{"product_id": product_id, "created_by": "product_image_analysis"}],
                 created_by="product_image_analysis",
             )
         except Exception as exc:
             await db.rollback()
-            message = f"图片分析已完成，但 Listing 任务创建失败: {type(exc).__name__}: {exc}"
-            await _project_product_failure(db, product_id=product_id, step=6, label="Listing 任务创建", error=message)
+            message = f"图片分析已完成，但用户心智任务创建失败: {type(exc).__name__}: {exc}"
+            await _project_customer_mindset_failed(db, product_id=product_id, message=message)
             result["status"] = "downstream_failed"
             result["downstream_error"] = message
             return
-        listing_run_ids = [run.id for run in listing_runs]
+        customer_mindset_run_ids = [run.id for run in customer_mindset_runs]
         step.task_run.summary_json = json_dumps({
             "product_id": product_id,
             "item_code": result.get("item_code"),
             "status": "image_analysis_done",
             "next_step": 6,
-            "listing_task_run_ids": listing_run_ids,
+            "next_node": WORKFLOW_NODE_CUSTOMER_MINDSET,
+            "customer_mindset_task_run_ids": customer_mindset_run_ids,
         })
         await db.commit()
         await _best_effort_update_step_progress(
@@ -2661,12 +3095,13 @@ class ProductImageAnalysisAction:
             step,
             current=1,
             total=1,
-            message="图片分析完成，已提交 Listing 生成",
-            data={"product_id": product_id, "item_code": result.get("item_code"), "listing_task_run_ids": listing_run_ids},
+            message="图片分析完成，已提交用户心智梳理",
+            data={"product_id": product_id, "item_code": result.get("item_code"), "customer_mindset_task_run_ids": customer_mindset_run_ids},
         )
         result["status"] = "done"
         result["next_step"] = 6
-        result["listing_task_run_ids"] = listing_run_ids
+        result["next_node"] = WORKFLOW_NODE_CUSTOMER_MINDSET
+        result["customer_mindset_task_run_ids"] = customer_mindset_run_ids
 
     async def on_step_failure(self, db: AsyncSession, step: TaskStep, error: Exception) -> None:
         product_id = int(_payload_for_step(step).get("product_id") or 0)
@@ -2697,11 +3132,250 @@ class ProductImageAnalysisAction:
         )
 
     @staticmethod
-    def _listing_action_type() -> str:
-        return "product_listing_generation"
+    def _customer_mindset_action_type() -> str:
+        return "product_customer_mindset"
+
+
+class ProductCustomerMindsetAction:
+    """节点 8：在图片分析后形成统一的买家心智与内容决策简报。
+
+    前置与输入：必须有商品事实、关键词、竞品参考和真实图片分析；关键词只是市场搜索
+    信号，竞品只是市场参考，两者都不能证明本商品拥有某项材质、尺寸或功能。任务最多
+    尝试 2 次，缺图片分析或商品已进入受保护的待导出状态时拒绝执行。
+
+    问题结构：固定 13 个核心问题，保持稳定顺序；再由第一次 LLM 调用生成 2 至 5 个
+    商品专属、高决策影响且不重复的动态问题，共 15 至 18 题。动态问题从实际使用行为、
+    材质或性能参数、摆放或环境适配、长期使用或维护、买错风险或证据缺口等视角中，
+    按商品证据择优选择。第二次 LLM 调用回答全部问题并生成统一内容策略。
+
+    证据要求：每题保存结论、证据引用、回答状态、置信度、假设、未知项和下游用途；
+    无法由自身证据确认的内容必须标为未知或风险，禁止补写成确定 claim。结果写入
+    `ProductData.customer_mindset` 和 `customer_mindset_generated_at`。
+
+    下游与失败：只有结构完整且已落库的简报才能创建 `product_listing_generation`。
+    问题数/覆盖面不符、证据引用无效、LLM 失败、取消或中断均 fail closed，不允许用
+    半份简报生成 Listing。
+    """
+
+    action_type = "product_customer_mindset"
+
+    async def validate(self, db: AsyncSession, payload: dict[str, Any]) -> None:
+        product_id = _product_id(payload)
+        product = await _load_product(db, product_id)
+        _raise_if_e5_export_ready_protected(product, action_label="启动用户心智梳理")
+        await _assert_step_prerequisites(product_id, 6, require_customer_mindset=False)
+
+    def dedupe_key(self, payload: dict[str, Any]) -> str | None:
+        return f"product_customer_mindset:product:{_product_id(payload)}"
+
+    def correlation_key(self, payload: dict[str, Any]) -> str | None:
+        return f"product:{_product_id(payload)}:customer_mindset"
+
+    async def reserve(self, db: AsyncSession, payload: dict[str, Any], run: TaskRun) -> None:
+        product = await _load_product(db, _product_id(payload))
+        _raise_if_e5_export_ready_protected(product, action_label="启动用户心智梳理")
+        if not product.images or not image_analysis_ready(product.images.image_analysis):
+            raise RuntimeError("前置节点未完成：图片分析节点未完成，不能梳理用户心智")
+        now = datetime.now()
+        product.status = STEP_CUSTOMER_MINDSET
+        product.current_step = 6
+        product.error_message = "用户心智梳理已加入任务中心队列"
+        set_product_workflow(
+            product,
+            node=WORKFLOW_NODE_CUSTOMER_MINDSET,
+            status=WORKFLOW_STATUS_PROCESSING,
+            error=product.error_message,
+            now=now,
+        )
+        product.updated_at = now
+        _sync_catalog_item(product)
+
+    def build_plan(self, payload: dict[str, Any]) -> TaskRunPlan:
+        product_id = _product_id(payload)
+        return TaskRunPlan(
+            task_type=self.action_type,
+            title=f"用户心智梳理：商品 #{product_id}",
+            payload={"product_id": product_id},
+            groups=[
+                TaskGroupPlan(
+                    group_key="customer_mindset",
+                    title="用户心智梳理",
+                    steps=[
+                        TaskStepPlan(
+                            step_key=f"product:{product_id}:customer_mindset",
+                            step_type=self.action_type,
+                            payload={"product_id": product_id},
+                            max_attempts=2,
+                        )
+                    ],
+                )
+            ],
+        )
+
+    async def execute_step(self, db: AsyncSession, step: TaskStep, payload: dict[str, Any]) -> dict[str, Any]:
+        product_id = _product_id(payload)
+        product = await _load_product(db, product_id)
+        item_code = product.data.item_code if product.data else product.gigab2b_product_id
+        await update_step_progress(
+            db,
+            step,
+            current=0,
+            total=1,
+            message="开始梳理用户心智",
+            data={"product_id": product_id, "item_code": item_code},
+        )
+        return {
+            "product_id": product_id,
+            "item_code": item_code,
+            "customer_mindset": await run_customer_mindset(product_id),
+        }
+
+    async def on_step_success(self, db: AsyncSession, step: TaskStep, result: dict[str, Any]) -> None:
+        product_id = int(result.get("product_id") or _payload_for_step(step).get("product_id") or 0)
+        product = await _load_product(db, product_id)
+        if (
+            product.status == COMPLETED
+            and product.workflow_node == WORKFLOW_NODE_FLOW_DONE
+            and product.workflow_status == WORKFLOW_STATUS_SUCCEEDED
+        ):
+            step.task_run.summary_json = json_dumps({
+                "product_id": product_id,
+                "item_code": result.get("item_code"),
+                "status": "already_completed",
+                "next_step": None,
+                "listing_task_run_ids": [],
+            })
+            await db.commit()
+            result["status"] = "already_completed"
+            result["next_step"] = None
+            result["listing_task_run_ids"] = []
+            return
+
+        reasons = _e5_export_ready_protection_reasons(product)
+        if reasons:
+            message = "用户心智梳理完成，但当前商品已有不可逆外部结果，不能创建 Listing 任务：" + "；".join(reasons)
+            await _project_product_failure(db, product_id=product_id, step=6, label="Listing 任务创建", error=message)
+            result["status"] = "downstream_failed"
+            result["downstream_error"] = message
+            return
+
+        await db.refresh(product, attribute_names=["data"])
+        if not isinstance(result.get("customer_mindset"), dict) or not _customer_mindset_ready(product):
+            message = "用户心智梳理任务完成但未落库有效结果，不能创建 Listing 任务"
+            await _project_customer_mindset_failed(db, product_id=product_id, message=message)
+            result["status"] = "downstream_failed"
+            result["downstream_error"] = message
+            return
+
+        now = datetime.now()
+        product.status = STEP_CUSTOMER_MINDSET
+        product.current_step = 6
+        product.error_message = None
+        set_product_workflow(
+            product,
+            node=WORKFLOW_NODE_CUSTOMER_MINDSET,
+            status=WORKFLOW_STATUS_SUCCEEDED,
+            error=None,
+            now=now,
+        )
+        product.updated_at = now
+        _sync_catalog_item(product)
+        try:
+            listing_runs = await create_product_action_runs(
+                db,
+                "product_listing_generation",
+                [{"product_id": product_id, "created_by": "product_customer_mindset"}],
+                created_by="product_customer_mindset",
+            )
+        except Exception as exc:
+            await db.rollback()
+            message = f"用户心智梳理已完成，但 Listing 任务创建失败: {type(exc).__name__}: {exc}"
+            await _project_product_failure(db, product_id=product_id, step=6, label="Listing 任务创建", error=message)
+            result["status"] = "downstream_failed"
+            result["downstream_error"] = message
+            return
+
+        listing_run_ids = [run.id for run in listing_runs]
+        step.task_run.summary_json = json_dumps({
+            "product_id": product_id,
+            "item_code": result.get("item_code"),
+            "status": "customer_mindset_done",
+            "next_node": WORKFLOW_NODE_LISTING_GENERATION,
+            "listing_task_run_ids": listing_run_ids,
+        })
+        await db.commit()
+        await _best_effort_update_step_progress(
+            db,
+            step,
+            current=1,
+            total=1,
+            message="用户心智梳理完成，已提交 Listing 生成",
+            data={"product_id": product_id, "item_code": result.get("item_code"), "listing_task_run_ids": listing_run_ids},
+        )
+        result["status"] = "done"
+        result["next_node"] = WORKFLOW_NODE_LISTING_GENERATION
+        result["listing_task_run_ids"] = listing_run_ids
+
+    async def on_step_failure(self, db: AsyncSession, step: TaskStep, error: Exception) -> None:
+        product_id = int(_payload_for_step(step).get("product_id") or 0)
+        if product_id > 0:
+            await _project_customer_mindset_failed(
+                db,
+                product_id=product_id,
+                message=f"用户心智梳理失败: {type(error).__name__}: {error}",
+            )
+
+    async def on_step_interrupted(self, db: AsyncSession, step: TaskStep, reason: str | None = None) -> None:
+        product_id = int(_payload_for_step(step).get("product_id") or 0)
+        if product_id > 0:
+            await _project_customer_mindset_failed(
+                db,
+                product_id=product_id,
+                message=f"用户心智梳理任务已中断: {reason or '服务重启或执行锁超时'}",
+                paused=True,
+            )
+
+    async def on_cancel_requested(self, db: AsyncSession, run: TaskRun, reason: str | None = None) -> None:
+        product_id = int(_payload_for_run(run).get("product_id") or 0)
+        if product_id > 0:
+            await _project_customer_mindset_failed(
+                db,
+                product_id=product_id,
+                message=f"用户心智梳理任务已取消: {reason or '用户取消'}",
+                paused=True,
+            )
 
 
 class ProductListingGenerationAction:
+    """节点 9：把完整商品证据转成 Amazon Listing，并将主流程推进到待导出。
+
+    前置与输入：必须消费商品事实、卖家精灵/兜底关键词、已选竞品的市场参考、图片
+    分析以及结构完整的用户心智简报；竞品事实不能改写成本商品事实。已有真实 ASIN、
+    导出历史、模板输出或 A+ 上传证据时禁止覆盖。任务最多尝试 2 次。
+
+    文案硬限制（最终事实源为配置和 `search_terms.py`）：英文标题最大 75 字符
+    (`STEP5_TITLE_MAX_CHARS`，含空格和标点)，标题只承担品牌、核心品类、必要规格和
+    一个最强且有证据的差异点；Product Highlights 是独立于旧五点的 3-5 条搜索结果
+    亮点，每条最大 125 字符 (`STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS`)，承接标题放不下的
+    材质、功能、适用对象和具体使用场景。旧五点仍必须恰好 5 条，每条当前最大 500
+    字符 (`STEP5_BULLET_MAX_CHARS`)；Search Terms 使用逗号分隔，最多 20 个关键词短语
+    (`SEARCH_TERMS_MAX_KEYWORDS`)，整体最大 250 个 UTF-8 bytes
+    (`STEP5_SEARCH_TERMS_MAX_BYTES`)。LLM 默认 temperature=0.7、最大输出 2000 tokens，
+    分别由 `STEP5_LLM_TEMPERATURE`、`STEP5_LLM_MAX_TOKENS` 控制。
+
+    输出与校验：生成英文标题、3-5 条场景化 Product Highlights、恰好五条英文五点、
+    产品描述、Search Terms、对应中文翻译及 `listing_check`。标题或任一 Product
+    Highlight 超限、数量错误或完全没有具体场景时，生成器必须把具体问题反馈给 LLM
+    重新写完整语义；不得在单词中间机械截断。达到重写次数仍不合规则任务失败，不能
+    以不完整文案进入待导出。用户心智中的证据缺口和买错风险应进入合适亮点、五点或
+    描述，而非被隐藏。
+
+    落库与下游：仅当标题、Product Highlights 和五点等必要结果已成功落库，才投影为
+    `flow_done/succeeded`、`Product.status=completed`，并在商品列表显示“待导出”。这是
+    主 workflow 的唯一完成入口。A+ 是待导出后的独立派生链路，默认自动触发关闭
+    (`AUTO_APLUS_AFTER_EXPORT_READY=False`)；A+ 失败不得让商品退出待导出。
+    """
+
     action_type = "product_listing_generation"
 
     async def validate(self, db: AsyncSession, payload: dict[str, Any]) -> None:
@@ -2719,6 +3393,7 @@ class ProductListingGenerationAction:
     async def reserve(self, db: AsyncSession, payload: dict[str, Any], run: TaskRun) -> None:
         product = await _load_product(db, _product_id(payload))
         _raise_if_e5_export_ready_protected(product, action_label="启动 Listing 生成")
+        _raise_if_customer_mindset_missing(product)
         now = datetime.now()
         product.status = STEP5_LISTING
         product.current_step = 6
@@ -2759,6 +3434,7 @@ class ProductListingGenerationAction:
     async def execute_step(self, db: AsyncSession, step: TaskStep, payload: dict[str, Any]) -> dict[str, Any]:
         product_id = _product_id(payload)
         product = await _load_product(db, product_id)
+        _raise_if_customer_mindset_missing(product)
         item_code = product.data.item_code if product.data else product.gigab2b_product_id
         await update_step_progress(
             db,
@@ -3144,7 +3820,9 @@ def register_product_task_actions() -> None:
         ProductCompetitorVisualMatchAction(),
         ProductCompetitorCandidateCaptureAction(),
         ProductAutoCompetitorSelectionAction(),
+        ProductKeywordResearchAction(),
         ProductImageAnalysisAction(),
+        ProductCustomerMindsetAction(),
         ProductListingGenerationAction(),
     ):
         register_action(action)

@@ -1,8 +1,20 @@
-"""
-模块9：A+ 出图 — 使用 GPT Image API 批量生成 A+ Content 图片
+"""待导出后的 A+ 派生节点 3：按脚本和参考图生成、校验并保存 A+ 图片。
 
-基于模块8的出图脚本，并发调用 GPT Image API 生成图片
-5个并发，每张图 15-30秒
+输入来自 Step 8。每个脚本必须至少包含 1 个真实存在或可访问的 `reference_images`；
+缺少参考图直接报错，禁止退化为纯文字生图。默认 API mode 为 `edits`，并发数由
+`APLUS_CONCURRENCY` 控制（当前默认 1），API 尝试次数由 `APLUS_IMAGE_API_RETRIES`
+控制（当前默认 3）。耗时取决于外部 API，不在代码中承诺固定的单图生成时间。
+
+当前默认目标为 1940x1200、97:60，分别由 `APLUS_IMAGE_WIDTH`、
+`APLUS_IMAGE_HEIGHT`、`APLUS_IMAGE_ASPECT_RATIO` 控制。生成结果会被验证并在必要时转为
+JPEG/压缩，文件最大 2,000,000 bytes；初始 JPEG quality 默认 88，最低默认 55，事实源
+为 `APLUS_IMAGE_MAX_BYTES`、`APLUS_IMAGE_JPEG_QUALITY`、
+`APLUS_IMAGE_MIN_JPEG_QUALITY`。无法在最低质量下满足尺寸/字节限制时必须失败。
+
+覆盖策略由 `APLUS_IMAGE_OVERWRITE_POLICY` 控制，当前默认 `skip_success`，已成功 slot
+不会被静默覆盖。每张结果需保存脚本位置、参考图来源、API/模型、尺寸、文件大小、状态
+和错误证据，并按配置上传 OSS 或保留本地产物。A+ 是独立派生链路：失败只影响 A+ 状态，
+不得让已完成商品退出“待导出”，也不得用无参考图或占位图标记成功。
 """
 
 import asyncio
@@ -28,6 +40,11 @@ from app.aplus_publish.module_registry import (
 from app.config import settings
 from app.database import async_session
 from app.models import Product, ProductAplus
+from app.services.amazon_image_compliance import (
+    ImageComplianceError,
+    ensure_synthetic_performer_subject,
+    verify_oss_round_trip,
+)
 from app.services.oss_uploader import oss_configured, upload_private_image
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -440,7 +457,9 @@ def _existing_success_result(position: int, script: dict, output_path: Path, old
     if old and old.get("status") == "done":
         old_path = Path(str(old.get("path") or output_path)).expanduser()
         if old_path.is_file():
-            oss_info = old if old.get("oss_url") else _upload_generated_image_to_oss(old_path, product_key, position)
+            if bool(script.get("contains_person")):
+                ensure_synthetic_performer_subject(old_path)
+            oss_info = _upload_generated_image_to_oss(old_path, product_key, position) if bool(script.get("contains_person")) else (old if old.get("oss_url") else _upload_generated_image_to_oss(old_path, product_key, position))
             result = {**old}
             result.update({
                 "position": position,
@@ -456,6 +475,8 @@ def _existing_success_result(position: int, script: dict, output_path: Path, old
                 "reused_from": "database",
                 "skip_reason": "已有成功A+图片，按配置跳过重新生成",
             })
+            if bool(script.get("contains_person")):
+                result["image_compliance"] = _apply_aplus_compliance(script, old_path, oss_info)
             return result
     if output_path.is_file():
         return _file_result(output_path, position, script, "file", _upload_generated_image_to_oss(output_path, product_key, position))
@@ -792,6 +813,25 @@ def _upload_generated_image_to_oss(output_path: Path, product_key: str, position
     }
 
 
+def _apply_aplus_compliance(script: dict, output_path: Path, oss_info: dict) -> dict:
+    """Write/verify the Amazon marker only after final JPEG encoding."""
+    if not bool(script.get("contains_person")):
+        return {"contains_person": False, "compliance_status": "not_required"}
+    local = ensure_synthetic_performer_subject(output_path)
+    result = {"contains_person": True, "compliance_status": "local_verified", **local}
+    if settings.IMAGE_COMPLIANCE_VERIFY_OSS_ROUND_TRIP:
+        object_key = str(oss_info.get("oss_object_key") or "")
+        if not object_key:
+            raise ImageComplianceError("A+ 图片缺少 OSS object key，无法完成合规回读验证")
+        downloaded = output_path.with_name(f"{output_path.stem}_oss_verify{output_path.suffix}")
+        try:
+            result.update(verify_oss_round_trip(object_key, output_path, downloaded))
+        finally:
+            downloaded.unlink(missing_ok=True)
+        result["compliance_status"] = "oss_round_trip_verified"
+    return result
+
+
 def _create_fallback_aplus_image(output_path: Path, script: dict, ref_sources: list[str], width: int, height: int) -> dict:
     canvas = Image.new("RGB", (width, height), "#f8fafc")
     draw = ImageDraw.Draw(canvas)
@@ -889,7 +929,11 @@ async def _generate_single_image(
             img_bytes = image_payload["bytes"]
             raw_path = output_path.with_name(f"{output_path.stem}_raw{_image_extension(img_bytes)}")
             size_info = _save_exact_size_image(img_bytes, raw_path, output_path, width, height)
+            # This must be after resize/compression and before OSS upload; Pillow strips XMP.
+            if bool(script.get("contains_person")):
+                ensure_synthetic_performer_subject(output_path)
             oss_info = _upload_generated_image_to_oss(output_path, product_key, position, asset_key)
+            compliance = _apply_aplus_compliance(script, output_path, oss_info)
             display_url = oss_info.get("oss_url")
             if not display_url:
                 raise RuntimeError("A+生成图已上传OSS，但未返回可用URL")
@@ -917,6 +961,7 @@ async def _generate_single_image(
                 **oss_info,
                 **size_info,
                 **provider_metadata,
+                "image_compliance": compliance,
             }
 
         except Exception as e:

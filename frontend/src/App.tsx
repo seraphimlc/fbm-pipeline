@@ -12,7 +12,7 @@ import CatalogList from './pages/CatalogList';
 import InventorySyncList from './pages/InventorySyncList';
 import AsinSyncList from './pages/AsinSyncList';
 import AplusManagement from './pages/AplusManagement';
-import ConfigPage from './pages/ConfigPage';
+import SystemConfigurationPage from './pages/SystemConfigurationPage';
 import ProductDataSourceList from './pages/ProductDataSourceList';
 import OfflineTaskCenter from './pages/OfflineTaskCenter';
 import TaskRunCenter from './pages/TaskRunCenter';
@@ -38,7 +38,7 @@ const App: React.FC = () => (
             <Route path="/aplus-upload" element={<Navigate to="/aplus" replace />} />
             <Route path="/upc-pool" element={<UpcPoolPage />} />
             <Route path="/data-sources" element={<ProductDataSourceList />} />
-            <Route path="/config" element={<ConfigPage />} />
+            <Route path="/config" element={<SystemConfigurationPage />} />
             <Route path="/products/new" element={<CreateProduct />} />
             <Route path="/products/:id" element={<ProductDetail />} />
             <Route path="/tiktok/products/:id" element={<TikTokProductDetail />} />
