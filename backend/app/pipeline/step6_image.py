@@ -118,12 +118,15 @@ Output JSON:
 DEFAULT_IMAGE_STRATEGY = {
     "name": "general",
     "prompt": (
-        "Build a gallery that follows a buyer decision path for this specific product and category: clean product identity, "
-        "alternate view, size/scale, material/detail, use/function, lifestyle scene, setup/storage/cleaning, "
-        "package or included parts. Treat size/scale and function/use as critical only when the product facts or category make them important. "
-        "Do not give several images the same role unless the later image proves a clearly different buyer doubt. "
-        "If distinct roles are not available, fill remaining slots with the strongest usable images up to 9."
+        "Build a nine-image conversion story: clean product identity first, then up to three visually distinct, attractive lifestyle scenes, "
+        "material/detail, function/use, a second detail, one alternate full-product angle, and dimensions/fit last. "
+        "Do not use more than one non-main alternate full-product angle. Treat size/scale and function/use as critical only when the product facts or category make them important. "
+        "Each lifestyle image must add a different setting, use case, composition, or buyer insight; do not repeat nearly identical scenes."
     ),
+    "gallery_slot_roles": [
+        "lifestyle", "lifestyle", "lifestyle", "material_detail", "function_use",
+        "material_detail", "alternate_angle", "size_scale",
+    ],
     "role_order": [
         "alternate_angle",
         "size_scale",
@@ -170,21 +173,25 @@ IMAGE_STRATEGIES = [
         {
             "name": "sofas & couches",
             "prompt": (
-                "For sofas, avoid repeating several similar room/lifestyle views. After the MAIN image, prioritize: "
-                "one alternate full-product angle, one dimensions/fit image, one fabric/material detail, one strongest room scene, "
-                "one modular/function or move-in/setup proof, and package/included-parts proof if available. "
+                "For sofas, lead with up to three visually distinct, attractive room/lifestyle scenes after the MAIN image, then show "
+                "fabric/material detail, modular/function or move-in/setup proof, a second quality detail, one alternate full-product angle, "
+                "and dimensions/fit last. Never use more than one non-main alternate full-product angle. "
                 "Buyer doubts are room fit, comfort, fabric texture, seat depth/scale, configuration, setup, and what arrives. "
                 "If there are not enough distinct sofa proofs, fill remaining slots with the best usable alternate/detail/lifestyle images up to 9."
             ),
             "role_order": [
-                "alternate_angle",
-                "size_scale",
-                "material_detail",
                 "lifestyle",
+                "material_detail",
                 "function_use",
                 "setup_storage",
                 "package_contents",
                 "proof",
+                "alternate_angle",
+                "size_scale",
+            ],
+            "gallery_slot_roles": [
+                "lifestyle", "lifestyle", "lifestyle", "material_detail", "function_use",
+                "material_detail", "alternate_angle", "size_scale",
             ],
             "role_limits": {
                 "alternate_angle": 1,
@@ -572,7 +579,7 @@ def _gallery_strategy_prompt(strategy: dict) -> str:
     focus_lines = "\n".join(f"- {item}" for item in (strategy.get("buyer_focus") or []))
     return (
         f"{strategy.get('prompt', '')}\n"
-        f"Preferred role order: {', '.join(strategy.get('role_order') or [])}.\n"
+        f"Preferred gallery slots after MAIN: {', '.join(strategy.get('gallery_slot_roles') or strategy.get('role_order') or [])}.\n"
         f"Category-specific buyer focus:\n{focus_lines or '- Use the product facts to decide which visual doubts matter most.'}\n"
         f"Roles that become high-risk if missing for this category: {', '.join(strategy.get('high_risk_missing_roles') or []) or 'none'}.\n"
         "Use conversion_role consistently so selection can avoid repeated image types."
@@ -1285,8 +1292,8 @@ def _image_health(diagnostics: dict, strategy: dict | None = None) -> dict:
 
     if gallery_count < 4:
         issues.append({"severity": "high", "message": f"图库仅选择 {gallery_count} 张图，转化信息不足。"})
-    elif gallery_count < 6:
-        issues.append({"severity": "warning", "message": f"图库仅选择 {gallery_count} 张图，建议补充更多转化证据。"})
+    elif gallery_count < 9:
+        issues.append({"severity": "warning", "message": f"图库仅选择 {gallery_count} 张图，未达到 9 图展示目标。"})
 
     role_set = {item.get("role") for item in missing_roles}
     high_risk_missing_roles = set(strategy.get("high_risk_missing_roles") or [])
@@ -1420,59 +1427,56 @@ def _select_gallery(reviews: list[dict], strategy: dict) -> tuple[dict | None, l
         gallery.append(selected_item)
         return True
 
-    role_limits = strategy.get("role_limits") or {}
-    for role in strategy.get("role_order") or []:
-        limit = int(role_limits.get(role, 1))
-        if limit <= 0:
-            continue
-        role_candidates = sorted(candidates, key=lambda item: _role_candidate_score(item, role), reverse=True)
-        for item in role_candidates:
-            item_role = _selection_role(item)
-            if item_role == "exclude" or item_role != role:
+    # The slot plan deliberately puts scenes first and dimensions last.  Missing a
+    # planned role never leaves a hole: use the strongest non-angle image for that
+    # slot, but never let additional product-angle shots consume the gallery.
+    slot_roles = list(strategy.get("gallery_slot_roles") or [
+        "lifestyle", "lifestyle", "lifestyle", "material_detail", "function_use",
+        "material_detail", "alternate_angle", "size_scale",
+    ])[: max(0, max_gallery_slots - 1)]
+
+    def ranked_for_target(target_role: str, *, fallback: bool) -> list[dict]:
+        pool = []
+        for item in candidates:
+            actual_role = _selection_role(item)
+            if actual_role == "exclude" or item.get("image_id") in selected_ids:
                 continue
-            if role_counts.get(role, 0) >= limit:
-                break
-            add_item(item, role)
-        if len(gallery) >= max_gallery_slots:
-            break
-
-    fill_limits = strategy.get("role_fill_limits") or role_limits
-    for item in candidates:
-        role = _selection_role(item)
-        if role == "exclude":
-            continue
-        if role_counts.get(role, 0) >= int(fill_limits.get(role, 1)):
-            continue
-        add_item(item, role)
-        if len(gallery) >= max_gallery_slots:
-            break
-
-    # If distinct roles run out, use duplicate backups to keep a workable gallery.
-    duplicate_backfill_target = max_gallery_slots
-    for item in candidates:
-        if len(gallery) >= duplicate_backfill_target:
-            break
-        role = _selection_role(item)
-        if role == "exclude":
-            continue
-        add_item(item, role, allow_duplicate=True)
-
-    # 最后兜底：如果合规图片不够，使用现有分析图片里评分最高、风险最低的素材补齐。
-    fallback_candidates = sorted(
-        [item for item in all_remaining if item.get("image_id") not in selected_ids],
-        key=_gallery_fallback_score,
-        reverse=True,
-    )
-    for item in fallback_candidates:
-        if len(gallery) >= max_gallery_slots:
-            break
-        role = _selection_role(item)
-        fallback_score = _gallery_fallback_score(item)
-        reason = (
-            "合规副图数量不足，已按现有素材中相对最优图片补齐；"
-            f"需人工复核风险，fallback_score={fallback_score:.1f}"
+            # Dimensions stay in the last slot, and only the dedicated alternate
+            # slot may select a second full-product angle.
+            if target_role != "size_scale" and actual_role == "size_scale":
+                continue
+            if target_role != "alternate_angle" and actual_role == "alternate_angle":
+                continue
+            if not fallback and actual_role != target_role:
+                continue
+            pool.append(item)
+        return sorted(
+            pool,
+            key=lambda item: (
+                _role_candidate_score(item, target_role) if not fallback else _gallery_fallback_score(item),
+                _score(item.get("gallery_score")),
+            ),
+            reverse=True,
         )
-        add_item(item, role if role != "exclude" else "proof", allow_duplicate=True, backfill_reason=reason)
+
+    for target_role in slot_roles:
+        if len(gallery) >= max_gallery_slots:
+            break
+        added = False
+        for item in ranked_for_target(target_role, fallback=False):
+            if add_item(item, _selection_role(item)):
+                added = True
+                break
+        if added:
+            continue
+        for item in ranked_for_target(target_role, fallback=True):
+            actual_role = _selection_role(item)
+            reason = (
+                f"未找到合格的{ROLE_LABELS.get(target_role, target_role)}图片，"
+                f"以相对最优的{ROLE_LABELS.get(actual_role, actual_role)}图片补位。"
+            )
+            if add_item(item, actual_role, backfill_reason=reason):
+                break
 
     for item in candidates:
         if item.get("image_id") in selected_ids:

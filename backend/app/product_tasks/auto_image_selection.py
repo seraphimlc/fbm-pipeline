@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -15,12 +16,23 @@ from app.database import async_session
 from app.models import Product
 from app.services.product_image_candidates import collect_product_image_candidates, normalize_image_path
 from app.services.product_image_vlm import (
-    analyze_image_url_batch,
-    build_image_url_batches,
+    analyze_contact_sheet,
+    build_contact_sheets,
+    download_image_records,
     is_remote_url,
+    require_complete_batch_reviews,
 )
+from app.services.product_pipeline_artifacts import product_dimensions
 
 logger = logging.getLogger(__name__)
+
+
+# Slots 02-09.  The first automatic pass must already preserve the shopper
+# story used by Step 6, rather than forwarding a score-sorted pile of angles.
+GALLERY_STORY_ROLES = (
+    "lifestyle", "lifestyle", "lifestyle", "material_detail", "function_use",
+    "material_detail", "alternate_angle", "size_scale",
+)
 
 
 AUTO_IMAGE_SELECTION_PROMPT = """Analyze these candidate images and select Amazon listing images.
@@ -34,17 +46,30 @@ Known product facts:
 Candidate metadata:
 {candidates}
 
-Select exactly one best MAIN image and up to 8 gallery images from this batch.
+Analyze every labeled tile, then select exactly one best MAIN image and up to 8 gallery images from this batch.
 
 MAIN image hard baseline:
 - product identity must be clear;
 - avoid lifestyle, packaging-only, labels, box/shipping packaging, overlays, watermarks, collage, wrong variant, blurry or low-quality images;
 - prefer clean product-only images on white/neutral background.
 
-Gallery images should answer buyer doubts: alternate angle, size/scale, material/detail, function/use, lifestyle/context, package contents, or proof. Reject duplicate, wrong-variant, brand-only, packaging-only, non-product, low-quality, or risky images.
+Gallery order after MAIN must be: up to three visually distinct, attractive lifestyle/context images; material/detail; function/use; a second distinct detail; one alternate full-product angle; and size/scale last. Do not use more than one non-main alternate full-product angle. Reject duplicate, wrong-variant, brand-only, packaging-only, non-product, low-quality, or risky images.
 
 Output valid JSON only:
 {{
+  "images": [
+    {{
+      "image_id": "#01",
+      "filename": "source.jpg",
+      "visual_summary": "",
+      "visible_selling_point": "",
+      "conversion_role": "exact_set|alternate_angle|size_scale|material_detail|function_use|lifestyle|package_contents|proof|exclude",
+      "risk_flags": [],
+      "slot01_score": 0,
+      "gallery_score": 0,
+      "decision_reason": ""
+    }}
+  ],
   "selected_main": {{
     "image_id": "#01",
     "score": 0.95,
@@ -69,7 +94,9 @@ Output valid JSON only:
   ],
   "confidence": "high|medium|low",
   "warnings": []
-}}"""
+}}
+
+The images array MUST contain exactly one entry for every supplied image_id. Every image_id must also appear exactly once across selected_main, selected_gallery, or rejected."""
 
 AUTO_IMAGE_SELECTION_SYSTEM_PROMPT = """You are an expert Amazon listing image selector.
 Choose product images for an Amazon listing from candidate images.
@@ -104,7 +131,7 @@ def _product_facts(product: Product) -> str:
         "color": data.color,
         "material": data.material,
         "product_type": data.product_type,
-        "dimensions": data.dimensions,
+        "dimensions": product_dimensions(data),
         "weight": data.weight,
         "features": _json_loads(data.features, data.features),
     }
@@ -159,6 +186,25 @@ def _score(value: Any) -> float:
         return 0.0
 
 
+def _story_role(value: Any) -> str:
+    role = str(value or "proof").strip().lower().replace("-", "_").replace(" ", "_")
+    if role in {"exact_set", "identity", "variant"}:
+        return "alternate_angle"
+    if role in {"lifestyle", "material_detail", "function_use", "alternate_angle", "size_scale", "setup_storage", "package_contents", "proof"}:
+        return role
+    if any(token in role for token in ("scene", "room", "context", "home")):
+        return "lifestyle"
+    if any(token in role for token in ("material", "fabric", "texture", "detail", "close")):
+        return "material_detail"
+    if any(token in role for token in ("dimension", "measurement", "size", "scale", "fit")):
+        return "size_scale"
+    if any(token in role for token in ("function", "use", "feature", "setup", "storage")):
+        return "function_use"
+    if any(token in role for token in ("angle", "front", "side", "back", "product")):
+        return "alternate_angle"
+    return "proof"
+
+
 def _entry_for_selection(item: dict[str, Any], records_by_id: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
     image_id = str(item.get("image_id") or item.get("sheet_label") or "").strip()
     record = records_by_id.get(image_id)
@@ -169,7 +215,7 @@ def _entry_for_selection(item: dict[str, Any], records_by_id: dict[str, dict[str
         return None
     candidate = record["candidate"]
     return {
-        "path": candidate.get("image_url") or candidate.get("path") or record["path"],
+        "path": record["path"],
         "image_url": candidate.get("image_url"),
         "image_id": record["image_id"],
         "score": _score(item.get("score")),
@@ -177,11 +223,23 @@ def _entry_for_selection(item: dict[str, Any], records_by_id: dict[str, dict[str
         "risk_flags": item.get("risk_flags") if isinstance(item.get("risk_flags"), list) else [],
         "candidate": candidate,
         "main_image_valid": item.get("main_image_valid", True),
+        "material_asset_id": candidate.get("material_asset_id"),
+        "content_hash": candidate.get("content_hash"),
     }
 
 
-def _normalize_batch_result(raw: dict[str, Any], batch_records: list[dict[str, Any]]) -> dict[str, Any]:
+def _normalize_batch_result(raw: dict[str, Any], batch_records: list[dict[str, Any]], reviews: list[dict[str, Any]]) -> dict[str, Any]:
     records_by_id = {record["image_id"]: record for record in batch_records}
+    enriched_reviews = []
+    for review in reviews:
+        record = records_by_id.get(str(review.get("image_id") or ""))
+        candidate = record.get("candidate") if record else {}
+        enriched_reviews.append({
+            **review,
+            "candidate": candidate,
+            "material_asset_id": candidate.get("material_asset_id") if isinstance(candidate, dict) else None,
+            "content_hash": candidate.get("content_hash") if isinstance(candidate, dict) else None,
+        })
     main = raw.get("selected_main") if isinstance(raw.get("selected_main"), dict) else None
     selected_main = _entry_for_selection(main, records_by_id) if main else None
     gallery: list[dict[str, Any]] = []
@@ -205,13 +263,27 @@ def _normalize_batch_result(raw: dict[str, Any], batch_records: list[dict[str, A
             "image_url": entry.get("image_url"),
             "image_id": entry["image_id"],
             "reason": str(item.get("reason") or "").strip() or "not_selected",
+            "material_asset_id": entry.get("material_asset_id"),
+            "content_hash": entry.get("content_hash"),
         })
+    expected_ids = {record["image_id"] for record in batch_records}
+    decision_ids = [entry["image_id"] for entry in ([selected_main] if selected_main else [])]
+    decision_ids.extend(entry["image_id"] for entry in gallery)
+    decision_ids.extend(entry["image_id"] for entry in rejected)
+    missing_ids = sorted(expected_ids - set(decision_ids))
+    duplicate_ids = sorted({image_id for image_id in decision_ids if decision_ids.count(image_id) > 1})
+    if missing_ids or duplicate_ids:
+        raise AutoImageSelectionError(
+            "VLM 自动选图决策未覆盖全部图片: "
+            f"missing={missing_ids or []}, duplicate={duplicate_ids or []}"
+        )
     return {
         "selected_main": selected_main,
         "selected_gallery": gallery,
         "rejected": rejected,
         "confidence": str(raw.get("confidence") or "medium").strip().lower(),
         "warnings": raw.get("warnings") if isinstance(raw.get("warnings"), list) else [],
+        "image_reviews": enriched_reviews,
     }
 
 
@@ -226,24 +298,117 @@ def _merge_batch_results(batch_results: list[dict[str, Any]], image_batches: lis
     if hard_flags.intersection({str(flag).strip().lower() for flag in selected_main.get("risk_flags") or []}):
         raise AutoImageSelectionError("VLM 主图风险标记不允许自动推进")
 
+    image_reviews: list[dict[str, Any]] = []
+    for result in batch_results:
+        image_reviews.extend(result.get("image_reviews") or [])
+    review_by_id = {
+        str(item.get("image_id") or "").strip(): item
+        for item in image_reviews
+        if isinstance(item, dict) and str(item.get("image_id") or "").strip()
+    }
+
     gallery_candidates: list[dict[str, Any]] = []
     for result in batch_results:
         gallery_candidates.extend(result.get("selected_gallery") or [])
-    gallery_candidates = sorted(gallery_candidates, key=lambda item: _score(item.get("score")), reverse=True)
+    for item in main_candidates:
+        if item.get("image_id") == selected_main.get("image_id"):
+            continue
+        gallery_candidates.append({**item, "role": "exact_set"})
+    def enriched_candidate(item: dict[str, Any]) -> dict[str, Any]:
+        review = review_by_id.get(str(item.get("image_id") or "").strip(), {})
+        role = _story_role(review.get("conversion_role") or item.get("role"))
+        return {
+            **item,
+            "role": role,
+            "visual_summary": review.get("visual_summary"),
+            "visible_selling_point": review.get("visible_selling_point") or item.get("reason"),
+            "gallery_score": _score(review.get("gallery_score") or item.get("score")),
+        }
+
+    gallery_candidates = [enriched_candidate(item) for item in gallery_candidates]
+    gallery_candidates = sorted(gallery_candidates, key=lambda item: _score(item.get("gallery_score")), reverse=True)
     gallery: list[dict[str, Any]] = []
     seen = {selected_main["path"]}
-    for item in gallery_candidates:
+    seen_ids = {selected_main["image_id"]}
+    def add_story_candidate(item: dict[str, Any]) -> bool:
         path = item.get("path")
-        if not path or path in seen:
-            continue
+        image_id = item.get("image_id")
+        if not path or not image_id or path in seen or image_id in seen_ids:
+            return False
         seen.add(path)
+        seen_ids.add(image_id)
         gallery.append(item)
+        return True
+
+    for target_role in GALLERY_STORY_ROLES:
         if len(gallery) >= 8:
             break
+        exact = [
+            item for item in gallery_candidates
+            if item.get("image_id") not in seen_ids and item.get("role") == target_role
+        ]
+        for item in exact:
+            if add_story_candidate(item):
+                break
+        else:
+            # Keep dimensions last and reserve the single alternate-angle seat;
+            # a missing role is filled with the best remaining conversion image.
+            fallback = [
+                item for item in gallery_candidates
+                if item.get("image_id") not in seen_ids
+                and (target_role == "size_scale" or item.get("role") != "size_scale")
+                and (target_role == "alternate_angle" or item.get("role") != "alternate_angle")
+            ]
+            if fallback:
+                item = fallback[0]
+                item = {
+                    **item,
+                    "selection_warnings": [
+                        f"未找到{target_role}图片，以 {item.get('role')} 图片补位。",
+                    ],
+                }
+                add_story_candidate(item)
 
-    rejected: list[dict[str, Any]] = []
+    rejected_by_id: dict[str, dict[str, Any]] = {}
     for result in batch_results:
-        rejected.extend(result.get("rejected") or [])
+        for item in result.get("rejected") or []:
+            image_id = str(item.get("image_id") or "").strip()
+            if image_id:
+                rejected_by_id[image_id] = item
+
+    selected_ids = {selected_main["image_id"], *[item["image_id"] for item in gallery]}
+    for item in gallery_candidates:
+        image_id = str(item.get("image_id") or "").strip()
+        if not image_id or image_id in selected_ids or image_id in rejected_by_id:
+            continue
+        rejected_by_id[image_id] = {
+            "path": item.get("path"),
+            "image_url": item.get("image_url"),
+            "image_id": image_id,
+            "reason": "not_selected_after_global_merge",
+            "material_asset_id": item.get("material_asset_id"),
+            "content_hash": item.get("content_hash"),
+        }
+
+    expected_ids = {
+        str(image_id)
+        for batch in image_batches
+        for image_id in (batch.get("image_ids") or [])
+        if str(image_id or "").strip()
+    }
+    decision_ids = [selected_main["image_id"], *[item["image_id"] for item in gallery], *rejected_by_id]
+    missing_ids = sorted(expected_ids - set(decision_ids))
+    duplicate_ids = sorted({image_id for image_id in decision_ids if decision_ids.count(image_id) > 1})
+    review_ids = [str(item.get("image_id") or "").strip() for item in image_reviews]
+    missing_review_ids = sorted(expected_ids - set(review_ids))
+    duplicate_review_ids = sorted({image_id for image_id in review_ids if image_id and review_ids.count(image_id) > 1})
+    if missing_ids or duplicate_ids or missing_review_ids or duplicate_review_ids:
+        raise AutoImageSelectionError(
+            "自动选图全局合并未覆盖全部图片: "
+            f"decision_missing={missing_ids}, decision_duplicate={duplicate_ids}, "
+            f"review_missing={missing_review_ids}, review_duplicate={duplicate_review_ids}"
+        )
+    rejected = [rejected_by_id[image_id] for image_id in sorted(rejected_by_id)]
 
     confidences = [str(result.get("confidence") or "medium").lower() for result in batch_results]
     confidence = "low" if "low" in confidences else ("medium" if "medium" in confidences else "high")
@@ -257,6 +422,15 @@ def _merge_batch_results(batch_results: list[dict[str, Any]], image_batches: lis
         "confidence": confidence,
         "warnings": [*warnings, *[warning for result in batch_results for warning in result.get("warnings") or []]],
         "image_batches": image_batches,
+        "image_reviews": image_reviews,
+        "decision_coverage": {
+            "expected_count": len(expected_ids),
+            "reviewed_count": len(review_ids),
+            "selected_main_count": 1,
+            "selected_gallery_count": len(gallery),
+            "rejected_count": len(rejected),
+            "complete": True,
+        },
         "model": model,
     }
 
@@ -286,38 +460,45 @@ async def _run_with_db(db: AsyncSession, product_id: int) -> dict[str, Any]:
     data = product.data
     model = settings.VLM_MODEL
     client = settings.get_image_analysis_client()
-    prompt = AUTO_IMAGE_SELECTION_PROMPT.format(
-        title=data.title if data else product.gigab2b_product_id,
-        brand=product.brand,
-        category=data.leaf_category or data.product_type if data else "",
-        facts=_product_facts(product),
-        candidates=_candidate_prompt_lines(records),
-    )
-
     image_batches: list[dict[str, Any]] = []
     batch_results: list[dict[str, Any]] = []
     try:
-        batches = build_image_url_batches(records)
+        material_dir = Path(data.material_dir).expanduser().resolve() if data and data.material_dir else (
+            settings.PRODUCT_BASE_DIR / "GIGA" / (product.source_site or "US") / str(data.item_code if data else product.id)
+        )
+        analysis_dir = material_dir / "image analysis" / "contact_sheets" / datetime.now().strftime("auto_selection_%Y%m%d_%H%M%S")
+        local_records = await download_image_records(records, analysis_dir / "source_cache")
+        if len(local_records) != len(records):
+            raise AutoImageSelectionError(f"候选图片本地化不完整: {len(local_records)}/{len(records)}")
+        batches = build_contact_sheets(local_records, analysis_dir, str(data.item_code if data and data.item_code else product.id))
         image_batches = list(batches)
         for batch in batches:
-            batch_records = [record for record in records if record["image_id"] in set(batch["image_ids"])]
-            raw, _reviews = await analyze_image_url_batch(
+            batch_records = [record for record in local_records if record["image_id"] in set(batch["image_ids"])]
+            batch_prompt = AUTO_IMAGE_SELECTION_PROMPT.format(
+                title=data.title if data else product.gigab2b_product_id,
+                brand=product.brand,
+                category=data.leaf_category or data.product_type if data else "",
+                facts=_product_facts(product),
+                candidates=_candidate_prompt_lines(batch_records),
+            )
+            raw, reviews = await analyze_contact_sheet(
                 client,
                 model,
                 batch,
                 batch_records,
-                prompt,
+                batch_prompt,
                 system_prompt=AUTO_IMAGE_SELECTION_SYSTEM_PROMPT,
                 log_prefix="AutoImageSelection",
             )
-            batch_results.append(_normalize_batch_result(raw, batch_records))
+            require_complete_batch_reviews(reviews, batch_records, batch_label=f"contact_sheet={batch['sheet_page']}")
+            batch_results.append(_normalize_batch_result(raw, batch_records, reviews))
     except Exception as exc:
-        logger.warning("自动选图 direct image URL VLM 失败: product_id=%s error=%s", product_id, exc)
-        raise AutoImageSelectionError(f"自动选图 direct image URL VLM 失败: {type(exc).__name__}: {exc}") from exc
+        logger.warning("自动选图 Contact Sheet VLM 失败: product_id=%s error=%s", product_id, exc)
+        raise AutoImageSelectionError(f"自动选图 Contact Sheet VLM 失败: {type(exc).__name__}: {exc}") from exc
 
     result = _merge_batch_results(batch_results, image_batches, warnings, model)
     result["candidate_count"] = len(candidates)
-    result["analyzed_count"] = len(records)
+    result["analyzed_count"] = len(result.get("image_reviews") or [])
     return result
 
 
