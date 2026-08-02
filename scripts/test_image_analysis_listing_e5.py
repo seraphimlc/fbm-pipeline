@@ -141,11 +141,7 @@ async def _make_product(
         suggested_price=699.99,
         listing_title="Existing listing title",
         listing_product_highlights=json_dumps(
-            [
-                "Living Room Comfort: Supported seating helps during everyday family time.",
-                "Flexible Layout: Modular pieces adapt as the room arrangement changes.",
-                "Clear Product Fit: Documented details help buyers compare the intended use.",
-            ]
+            ["Modular pieces support flexible layouts beyond the title's core product identity."]
         ),
         listing_bullets=json_dumps([f"Existing fixture bullet {index}" for index in range(1, 6)]),
         customer_mindset=None,
@@ -163,8 +159,6 @@ async def _make_product(
         }) if image_analysis else None,
         analyzed_at=now if image_analysis else None,
     )
-    if customer_mindset:
-        product.data.customer_mindset = json_dumps(_customer_mindset_payload_for_product(product))
     product.catalog_item = CatalogProduct(
         gigab2b_url=product.gigab2b_url,
         gigab2b_product_id=marker,
@@ -196,6 +190,11 @@ async def _make_product(
         )
     session.add(product)
     await session.flush()
+    if customer_mindset:
+        # SQLAlchemy column defaults such as Product.brand are materialized on flush.
+        # Build the fixture fingerprint after that point, matching the production order.
+        product.data.customer_mindset = json_dumps(_customer_mindset_payload_for_product(product))
+        await session.flush()
     return product
 
 

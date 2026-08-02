@@ -403,6 +403,14 @@ export const mutationOwnerContract = {
     finally_policy: 'runMutationWithUX clearLoading: pipelineRetryLoading',
     playwright_case: 'runtime case: interrupted pipeline retry state-retention case',
   },
+  'runPipelineStep|frontend/src/pages/ProductDetail.tsx|generateCustomerMindset': {
+    owner_component: 'ProductDetail',
+    owner_state: 'product, activeTabKey, listingTitleInput, listingImageDraftPaths, and customer-mindset display state',
+    loading_state: 'pipelineRetryLoading',
+    catch_policy: 'runMutationWithUX apiErrorMessage -> message.error; preserve loaded detail and drafts',
+    finally_policy: 'runMutationWithUX clearLoading: pipelineRetryLoading',
+    playwright_case: 'runtime case: customer-mindset generation detail-retention case',
+  },
   'updateCatalogTemplateFileStatus|frontend/src/pages/CatalogList.tsx|toggleTemplateFile': {
     owner_component: 'CatalogList',
     owner_state: 'template files, category/view filters, selectedIds, selectedItemMap, and pending upload file',

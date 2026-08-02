@@ -67,6 +67,8 @@ STEP_TYPE_LABELS = {
     "giga_pull_finalize_snapshot": "快照校验",
     "giga_pull_aggregate_items": "聚合 Item/Group",
     "giga_pull_materialize_products": "生成商品草稿",
+    "product_material_prepare": "准备供应商素材",
+    "product_auto_image_selection": "自动选图",
     "product_keyword_research": "关键词采集",
     "product_image_analysis": "图片分析",
     "product_customer_mindset": "用户心智梳理",

@@ -1,20 +1,32 @@
 """
-模块2：利润计算 — FBM 售价和利润计算
+模块2：Amazon FBM 建议售价和预期利润计算。
 
-公式：
-    T = 预估总额含运费（大健云仓成本）
-    G = 货值总计
-    C = T + 固定成本 - 退货保险抵扣率×G  (综合成本)
-    P1 = C ÷ (净收入比例 - 目标净利率)
-    P2 = (C + 最低利润) ÷ 净收入比例
-    P = MAX(P1, P2)
-    利润 = P × 净收入比例 - C
-    净利率 = 利润 ÷ P
+本模块采用已确认的运营口径（所有金额均为美元）：
+
+    G = 大建云仓货值（value_total）
+    T = 大建云仓含运费采购总成本（estimated_total = G + S）
+    S = 大建云仓去程物流费（T - G）
+    I = G × 2.5%                 # 每单退货保障保费
+    A = $2                       # 每成交订单广告成本预留
+    B = 退货率 × 60% × G          # 平均保险赔付；确认不包含去程物流 S
+    C = T + I + A - B             # 不随售价变化的期望综合成本
+
+    不退货订单可留存售价的 90%（扣 10% Amazon 佣金）。
+    4% 退货订单会失去这部分收入，并按单笔佣金的 20% 扣退货管理费，最多 $5。
+
+    预期利润 = P × 90% × (1 - 4%)
+             - 4% × MIN(P × 10% × 20%, $5)
+             - C
+
+因此不再使用固定“退货预留比例”：退货管理费会在售价 $250 时达到 $5 封顶，
+且保险赔付基数是货值而非货值加物流。计算会分别求解 $250 以下和以上两个区间。
+每个区间都取满足目标净利率（5%）及最低利润（$10）的较高价格，再向上取美分。
 """
 
 import logging
 import json
 from datetime import datetime
+from decimal import Decimal, ROUND_UP
 
 from app.config import settings
 from app.database import async_session
@@ -39,41 +51,103 @@ def calculate_price(T: float, G: float) -> dict:
     if not T or not G or T <= 0 or G <= 0:
         return None
 
-    net_revenue_rate = settings.PRICING_NET_REVENUE_RATE
+    commission_rate = settings.PRICING_COMMISSION_RATE
+    return_rate = settings.PRICING_RETURN_RATE
+    insurance_rate = settings.PRICING_INSURANCE_RATE
+    insurance_payout_rate = settings.PRICING_INSURANCE_PAYOUT_RATE
+    return_management_fee_rate = settings.PRICING_RETURN_MANAGEMENT_FEE_RATE
+    return_management_fee_cap = settings.PRICING_RETURN_MANAGEMENT_FEE_CAP
+    advertising_cost = settings.PRICING_ADVERTISING_COST
     target_margin_rate = settings.PRICING_TARGET_MARGIN_RATE
     min_profit = settings.PRICING_MIN_PROFIT
-    fixed_cost = settings.PRICING_FIXED_COST
-    return_credit_rate = settings.PRICING_RETURN_CREDIT_RATE
-    if net_revenue_rate <= 0 or target_margin_rate < 0 or net_revenue_rate <= target_margin_rate:
-        raise ValueError("定价配置无效：净收入比例必须大于目标净利率")
+    retained_revenue_rate = (1 - commission_rate) * (1 - return_rate)
+    uncapped_management_fee_rate = return_rate * commission_rate * return_management_fee_rate
+    uncapped_retained_revenue_rate = retained_revenue_rate - uncapped_management_fee_rate
+    if (
+        commission_rate < 0
+        or return_rate < 0
+        or insurance_rate < 0
+        or insurance_payout_rate < 0
+        or return_management_fee_rate < 0
+        or return_management_fee_cap < 0
+        or advertising_cost < 0
+        or target_margin_rate < 0
+        or uncapped_retained_revenue_rate <= target_margin_rate
+    ):
+        raise ValueError("定价配置无效：佣金、退货与退货管理费后的可留存收入必须大于目标净利率")
 
-    # 综合成本：大健含运费成本 + 固定成本预留 - 退货保险抵扣。
-    cost = T + fixed_cost - return_credit_rate * G
+    source_shipping_cost = T - G
+    insurance_cost = G * insurance_rate
+    average_insurance_payout = return_rate * insurance_payout_rate * G
+    # C 不含售价相关的收入、佣金或退货管理费；平均保险赔付只抵扣货值，不抵扣物流。
+    cost = T + insurance_cost + advertising_cost - average_insurance_payout
 
-    # 公式一：确保目标净利率（利润/售价）。
-    P1 = cost / (net_revenue_rate - target_margin_rate)
+    # 单笔管理费 = min(P × 佣金 × 20%, $5)。佣金为售价 10%，所以在 P=$250 达到封顶。
+    management_fee_price_cap = (
+        return_management_fee_cap / (commission_rate * return_management_fee_rate)
+        if commission_rate > 0 and return_management_fee_rate > 0
+        else 0
+    )
 
-    # 公式二：确保单件最低利润。
-    P2 = (cost + min_profit) / net_revenue_rate
+    # 区间 A（P <= $250）：管理费随售价变化，合并进分母。
+    P1_uncapped = cost / (uncapped_retained_revenue_rate - target_margin_rate)
+    P2_uncapped = (cost + min_profit) / uncapped_retained_revenue_rate
+    uncapped_candidate = max(P1_uncapped, P2_uncapped)
 
-    # 取较大值
-    P = max(P1, P2)
+    # 区间 B（P > $250）：平均管理费固定为 退货率 × $5，合并进成本。
+    average_capped_management_fee = return_rate * return_management_fee_cap
+    capped_cost = cost + average_capped_management_fee
+    P1_capped = capped_cost / (retained_revenue_rate - target_margin_rate)
+    P2_capped = (capped_cost + min_profit) / retained_revenue_rate
+    capped_candidate = max(P1_capped, P2_capped, management_fee_price_cap)
+
+    # 美分向上取整，不能采用普通四舍五入而意外落到利润线以下。
+    def round_up_to_cent(value: float) -> float:
+        return float(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_UP))
+
+    if management_fee_price_cap == 0 or uncapped_candidate <= management_fee_price_cap:
+        P1, P2 = P1_uncapped, P2_uncapped
+    else:
+        P1, P2 = P1_capped, P2_capped
+
+    price_for_margin = round_up_to_cent(P1)
+    price_for_min_profit = round_up_to_cent(P2)
+    P = max(price_for_margin, price_for_min_profit)
     selected_rule = "target_margin" if P1 >= P2 else "min_profit"
 
     # 利润率按“利润 / 建议售价”计算，存储为百分数数值：5.0 表示 5%。
-    profit = P * net_revenue_rate - cost
+    commission_fee = P * commission_rate * (1 - return_rate)
+    return_management_fee = min(
+        P * commission_rate * return_management_fee_rate,
+        return_management_fee_cap,
+    ) * return_rate
+    return_revenue_loss = P * (1 - commission_rate) * return_rate
+    return_reserve = return_revenue_loss + return_management_fee - average_insurance_payout
+    net_revenue = P * retained_revenue_rate - return_management_fee
+    profit = net_revenue - cost
     profit_rate = profit / P * 100 if P > 0 else 0
 
-    # 费用明细
+    # 费用明细会存入 product_data.pricing_detail，并显示在商品详情页，供人工复核。
     breakdown = {
-        "net_revenue": round(P * net_revenue_rate, 2),
-        "variable_fee": round(P * (1 - net_revenue_rate), 2),
-        "fixed_cost": round(fixed_cost, 2),
-        "return_credit": round(return_credit_rate * G, 2),
+        "net_revenue": round(net_revenue, 2),
+        "retained_revenue_rate": round((net_revenue / P) * 100, 2),
+        "commission_rate": round(commission_rate * 100, 2),
+        "commission_fee": round(commission_fee, 2),
+        "return_rate": round(return_rate * 100, 2),
+        "return_reserve": round(return_reserve, 2),
+        "return_revenue_loss": round(return_revenue_loss, 2),
+        "return_management_fee": round(return_management_fee, 2),
+        "source_cost": round(T, 2),
+        "source_shipping_cost": round(source_shipping_cost, 2),
+        "insurance_rate": round(insurance_rate * 100, 2),
+        "insurance_cost": round(insurance_cost, 2),
+        "insurance_payout_rate": round(insurance_payout_rate * 100, 2),
+        "average_insurance_payout": round(average_insurance_payout, 2),
+        "advertising_cost": round(advertising_cost, 2),
         "target_margin_rate": round(target_margin_rate * 100, 2),
         "min_profit": round(min_profit, 2),
-        "price_for_margin": round(P1, 2),
-        "price_for_min_profit": round(P2, 2),
+        "price_for_margin": price_for_margin,
+        "price_for_min_profit": price_for_min_profit,
         "selected_rule": selected_rule,
     }
 

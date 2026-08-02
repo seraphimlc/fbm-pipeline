@@ -23,8 +23,7 @@ from sqlalchemy.orm import selectinload
 logger = logging.getLogger(__name__)
 
 LISTING_REWRITE_MAX_ATTEMPTS = 2
-PRODUCT_HIGHLIGHTS_MIN_ITEMS = 3
-PRODUCT_HIGHLIGHTS_MAX_ITEMS = 5
+PRODUCT_HIGHLIGHTS_REQUIRED_ITEMS = 1
 # Amazon permits up to 500 characters, but generated copy should be concise.
 # The wider setting remains the marketplace compatibility ceiling; this target
 # is the automatic-generation ceiling and is rewritten naturally when exceeded.
@@ -52,17 +51,6 @@ _BULLET_STOP_WORDS = {
     "a", "an", "and", "as", "at", "by", "for", "from", "in", "into", "is", "it", "of", "on",
     "or", "the", "this", "that", "to", "with", "your", "you", "product", "supported",
 }
-
-_EXPLICIT_SCENE_RE = re.compile(
-    r"\b(?:when|while|during|whether|before|after)\b"
-    r"|\b(?:at|in|on)\s+(?:home|work|school|the\s+office|the\s+kitchen|the\s+bedroom|"
-    r"the\s+living\s+room|the\s+garage|the\s+patio|the\s+road|the\s+go)\b"
-    r"|\b(?:daily|everyday|travel|trip|camping|hiking|walking|running|workout|gym|"
-    r"commute|cooking|baking|cleaning|organizing|storage|bedtime|feeding|roadside|"
-    r"apartment|office|classroom|garage|patio|garden|beach|kitchen|bedroom|"
-    r"living\s+room|movie\s+night|reading|gaming|hosting|outdoor|indoor)\b",
-    re.IGNORECASE,
-)
 
 SYSTEM_PROMPT = """You are an expert Amazon listing copywriter specializing in the US marketplace.
 Your goal is to write buyer-centered listing copy that attracts the right customers and reduces mismatched clicks.
@@ -174,9 +162,9 @@ Keyword rules:
 - Exclude any keyword that conflicts with product facts. Never use traffic words such as leather, sleeper, recliner, waterproof, certified, non-toxic, etc. unless the facts support them.
 
 Copy rules:
-1. **Title** (hard max {title_max_chars} chars, including spaces and punctuation): Use brand + core product category + one strongest supported conversion point, then add a necessary size/count/fit detail only if the whole title still fits. Keep the core category near the beginning. Do not cut a word, leave a dangling preposition, or mechanically truncate text. Move useful overflow details to Product Highlights. Put color at the end in parentheses only when it fits without displacing product identity or the strongest selling point. Avoid more than two commas.
-2. **Product Highlights** (3-5 items, each hard max {product_highlight_max_chars} chars): This is an independent item-level field, not the five bullets. Start each item with a concise factual benefit label and a colon, then use the structure "advantage + specific use scene or supported parameter + shopper result" (for example, "Easy to Store: ..."). Introduce a concrete scene early enough that shoppers can picture using the product. Across the set, at least one highlight must contain an explicit use scene; use more concrete scenes when supported, but never invent a capability merely to add a scene. Carry useful material, function, fit/audience, compatibility, maintenance, accessory, and long-tail scene details that do not fit the title. Do not duplicate the same sentence or turn Highlights into keyword fragments.
-3. **Five Bullets** (each max {bullet_max_chars} chars): Keep exactly five bullets as a separate field. Each bullet must have one clear selling job and should not repeat the same claim in different words. Turn facts into buyer-relevant outcomes without exaggeration. Product Highlights do not replace or reduce these five bullets.
+1. **Title** (hard max {title_max_chars} chars, including spaces and punctuation): Start with the exact Brand value shown in Product Attributes, then use the core product category + one strongest supported conversion point, adding a necessary size/count/fit detail only if the whole title still fits. The brand must be the very first text, never moved later for keyword placement. Keep the core category near the beginning after the brand. Do not cut a word, leave a dangling preposition, or mechanically truncate text. Move useful overflow details to Product Highlights. Put color at the end in parentheses only when it fits without displacing product identity or the strongest selling point. Avoid more than two commas.
+2. **Product Highlight** (exactly one item, hard max {product_highlight_max_chars} chars): This is one title-complement field, not the five bullets. It may be shown to shoppers when the title is under 75 characters. Use it to add the single most important supported attribute, fit, compatibility, configuration, or use detail that the title does not already cover. Prioritize information density and factual clarity; do not repeat the title, force a use scene, use a label/colon format, or turn it into a keyword fragment. It does not replace or reduce the five bullets.
+3. **Five Bullets** (each max {bullet_max_chars} chars): Keep exactly five bullets as a separate field. Whenever the evidence permits, write each bullet from a different, concrete shopper moment: situation or decision moment + supported feature + practical outcome. For example, prefer “When the path turns dark, the supported beam helps…” over a dry “Bright illumination” claim. Use an actual supported setting, task, fit check, setup moment, or pre-purchase decision; never invent a scene merely to sound vivid. The five bullet roles are distinct decision lenses, not permission to repeat the same feature or scenario in different words. Product Highlights do not replace or reduce these five bullets.
 4. **Product Description** (max 1900 chars): Write a concise Amazon product description that can stand alone before A+ content exists. Use 1-3 short paragraphs in plain text, summarize the product identity, main benefits, use scenes, and important fit/setup boundaries. Do not simply repeat the five bullets verbatim.
 5. **Search Terms** (max 250 bytes total, comma-separated): Algorithm-only field. Separate keyword phrases with ", ". Do not repeat words already used in title/Product Highlights/bullets/description. Do not include punctuation except the comma separators, or claims not supported by facts.
 6. **Compliance Check**: Flag risky claims, unsupported keywords, prohibited words, length/clarity issues, and any conversion risk.
@@ -194,17 +182,17 @@ Competitor reference rules:
 - Any spec, mode, size, age range, certification, safety, durability, waterproof, material, compatibility, or included-part claim must be supported by our Product Attributes.
 
 Bullet structure guidance:
-- Bullet 1 — core_purchase_reason: strongest proven purchase reason and product identity.
-- Bullet 2 — supported_experience: one verified feature/construction detail and the practical result; do not invent performance.
+- Bullet 1 — core_purchase_reason: strongest proven purchase reason and product identity, preferably framed around the buyer's triggering need.
+- Bullet 2 — supported_experience: one verified feature/construction detail and its result in a different supported use or interaction moment; do not invent performance.
 - Bullet 3 — use_scene: one concrete place or moment of use that helps a buyer picture the product.
-- Bullet 4 — fit_and_practicality: dimensions, configuration, setup, included parts, compatibility, or maintenance that affect the purchase decision.
-- Bullet 5 — purchase_boundary: the most useful verified limitation or pre-purchase check that reduces returns.
+- Bullet 4 — fit_and_practicality: dimensions, configuration, setup, included parts, compatibility, or maintenance, preferably anchored to the real space, setup, or care decision where it matters.
+- Bullet 5 — purchase_boundary: the most useful verified limitation or pre-purchase check that reduces returns, preferably stated at the decision moment where the buyer should check it.
 
 Bullet discipline:
 - Target {bullet_target_max_chars} characters or fewer per English bullet. Use fewer words whenever all useful facts are already covered; do not pad toward a length limit.
-- Each bullet must contain one concrete, evidence-supported detail. State at most two factual details per bullet and give each bullet a distinct decision role.
+- Each bullet must contain one concrete, evidence-supported detail. State at most two factual details per bullet and give each bullet a distinct decision role, situation, and shopper outcome whenever the facts support it.
 - Remove empty marketing language such as "high quality", "premium quality", "perfect for", "must-have", "elevate your", or "make life easier" unless a specific supported fact makes the phrase necessary.
-- Do not repeat a claim already made by another bullet or simply restate a Product Highlight. A clear pre-purchase boundary is more useful than a fifth generic benefit.
+- Do not repeat a claim, scenario, or shopper result already made by another bullet, or simply restate a Product Highlight. A clear pre-purchase boundary is more useful than a fifth generic benefit.
 - Write an internal bullet_audit record for each bullet. It is not shopper-facing copy: use the fixed role, name the concrete supported detail, and cite the evidence IDs used by that bullet.
 
 Output JSON:
@@ -222,7 +210,7 @@ Output JSON:
     "conversion_risks": ["..."]
   }},
   "title": "...",
-  "product_highlights": ["...", "...", "..."],
+  "product_highlights": ["..."],
   "bullets": ["...", "...", "...", "...", "..."],
   "bullet_audit": [
     {{"position": 1, "role": "core_purchase_reason", "specific_detail": "...", "evidence_refs": ["product.example"]}},
@@ -234,7 +222,7 @@ Output JSON:
   "description": "...",
   "search_terms": "...",
   "title_zh": "...",
-  "product_highlights_zh": ["...", "...", "..."],
+  "product_highlights_zh": ["..."],
   "bullets_zh": ["...", "...", "...", "...", "..."],
   "description_zh": "...",
   "search_terms_zh": "...",
@@ -398,10 +386,6 @@ def _prepare_listing_output(listing: dict, color: str | None) -> dict:
     return prepared
 
 
-def _has_explicit_highlight_scene(highlights: list[str]) -> bool:
-    return bool(_EXPLICIT_SCENE_RE.search(" ".join(highlights)))
-
-
 def _bullet_tokens(value: str) -> set[str]:
     return {
         token for token in _BULLET_TOKEN_RE.findall(value.lower())
@@ -449,7 +433,11 @@ def _bullet_audit_violations(listing: dict, mindset_context: dict | None) -> lis
     return violations
 
 
-def _listing_contract_violations(listing: dict, mindset_context: dict | None = None) -> list[str]:
+def _listing_contract_violations(
+    listing: dict,
+    mindset_context: dict | None = None,
+    brand: str | None = None,
+) -> list[str]:
     """Return rewriteable contract violations; callers must not trim invalid output."""
     violations: list[str] = []
     title = _clean_text(listing.get("title"))
@@ -459,12 +447,15 @@ def _listing_contract_violations(listing: dict, mindset_context: dict | None = N
         violations.append(
             f"title:length={len(title)} exceeds max={settings.STEP5_TITLE_MAX_CHARS}"
         )
+    normalized_brand = _clean_text(brand)
+    if title and normalized_brand and not title.casefold().startswith(normalized_brand.casefold()):
+        violations.append(f"title:must start with exact brand '{normalized_brand}'")
 
     highlights = _as_text_list(listing.get("product_highlights"))
-    if not PRODUCT_HIGHLIGHTS_MIN_ITEMS <= len(highlights) <= PRODUCT_HIGHLIGHTS_MAX_ITEMS:
+    if len(highlights) != PRODUCT_HIGHLIGHTS_REQUIRED_ITEMS:
         violations.append(
             "product_highlights:count="
-            f"{len(highlights)} outside {PRODUCT_HIGHLIGHTS_MIN_ITEMS}-{PRODUCT_HIGHLIGHTS_MAX_ITEMS}"
+            f"{len(highlights)} expected={PRODUCT_HIGHLIGHTS_REQUIRED_ITEMS}"
         )
     for index, highlight in enumerate(highlights, start=1):
         if len(highlight) > settings.STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS:
@@ -472,9 +463,6 @@ def _listing_contract_violations(listing: dict, mindset_context: dict | None = N
                 f"product_highlights[{index}]:length={len(highlight)} "
                 f"exceeds max={settings.STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS}"
             )
-    if highlights and not _has_explicit_highlight_scene(highlights):
-        violations.append("product_highlights:explicit use scene missing from entire set")
-
     highlights_zh = _as_text_list(listing.get("product_highlights_zh"))
     if len(highlights_zh) != len(highlights):
         violations.append(
@@ -562,7 +550,13 @@ def _rewrite_fields_for_violations(violations: list[str]) -> list[str]:
     return fields
 
 
-def _build_rewrite_prompt(listing: dict, violations: list[str], fields: list[str]) -> str:
+def _build_rewrite_prompt(
+    listing: dict,
+    violations: list[str],
+    fields: list[str],
+    *,
+    brand: str | None = None,
+) -> str:
     return f"""The previous Listing JSON violates hard output requirements.
 
 Violations:
@@ -575,10 +569,10 @@ Rewrite rules:
 - Rewrite the affected copy naturally. Never mechanically truncate a string, cut a word, or drop a list item just to pass validation.
 - Keep every factual claim within the Product Attributes and usable structured own-product evidence from the original Customer Mindset Brief. Visual evidence may confirm only visible appearance/structure. Keywords and competitor content are not product proof. Remove a claim if it cannot be supported.
 - Preserve the valid strategy and meaning of untouched fields. Do not introduce a new buyer, variant, material, specification, compatibility claim, certification, accessory, or performance result.
-- Title must be at most {settings.STEP5_TITLE_MAX_CHARS} characters including spaces and punctuation, front-load the core product identity, and remain a complete natural phrase.
-- Product Highlights must contain {PRODUCT_HIGHLIGHTS_MIN_ITEMS}-{PRODUCT_HIGHLIGHTS_MAX_ITEMS} items, each at most {settings.STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS} characters. Start each item with a concise factual benefit label and a colon, then use "selling point + specific use scene or supported parameter + result". The set must contain at least one explicit where/when/use scene.
+- Title must be at most {settings.STEP5_TITLE_MAX_CHARS} characters including spaces and punctuation, begin with the exact Brand value {json.dumps(_clean_text(brand))} when it is non-empty, front-load the core product identity after the brand, and remain a complete natural phrase.
+- Product Highlights must contain exactly one item, at most {settings.STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS} characters. It complements the title with the most important supported detail that is not already in the title; do not repeat the title, force a use scene, or use a label/colon template.
 - Product Highlights and the five bullets are independent fields. Keep exactly five bullets when those fields are requested.
-- Bullets are a five-part buyer decision contract: core_purchase_reason, supported_experience, use_scene, fit_and_practicality, purchase_boundary. Keep each English bullet between {BULLET_MIN_CHARS} and {BULLET_TARGET_MAX_CHARS} characters unless a shorter supported boundary is clearer; never pad with generic marketing language.
+- Bullets are a five-part buyer decision contract: core_purchase_reason, supported_experience, use_scene, fit_and_practicality, purchase_boundary. Where evidence permits, phrase every bullet around a different shopper moment (situation or decision moment + supported feature + practical outcome); do not reuse the same situation, claim, or result. Keep each English bullet between {BULLET_MIN_CHARS} and {BULLET_TARGET_MAX_CHARS} characters unless a shorter supported boundary is clearer; never pad with generic marketing language.
 - Return a corrected bullet_audit for every rewritten bullet. Each item must contain its 1-5 position, the matching fixed role, one concrete supported detail, and evidence_refs from the original Customer Mindset Brief.
 - Remove repeated claims, generic filler, and text that merely restates a Product Highlight.
 - Chinese fields must faithfully translate their paired English fields without adding claims.
@@ -633,9 +627,10 @@ async def _repair_listing_contract(
     listing: dict,
     color: str | None,
     mindset_context: dict | None = None,
+    brand: str | None = None,
 ) -> dict:
     candidate = _prepare_listing_output(listing, color)
-    violations = _listing_contract_violations(candidate, mindset_context)
+    violations = _listing_contract_violations(candidate, mindset_context, brand)
     last_rewrite_error: RuntimeError | None = None
 
     for attempt in range(1, LISTING_REWRITE_MAX_ATTEMPTS + 1):
@@ -657,7 +652,7 @@ async def _repair_listing_contract(
                     {"role": "assistant", "content": json.dumps(candidate, ensure_ascii=False)},
                     {
                         "role": "user",
-                        "content": _build_rewrite_prompt(candidate, violations, fields),
+                        "content": _build_rewrite_prompt(candidate, violations, fields, brand=brand),
                     },
                 ],
                 purpose=f"contract rewrite {attempt}",
@@ -672,7 +667,7 @@ async def _repair_listing_contract(
             if field in patch:
                 revised[field] = patch[field]
         candidate = _prepare_listing_output(revised, color)
-        violations = _listing_contract_violations(candidate, mindset_context)
+        violations = _listing_contract_violations(candidate, mindset_context, brand)
 
     if not violations:
         return candidate
@@ -688,10 +683,11 @@ def _normalize_listing(
     listing: dict,
     color: str | None,
     mindset_context: dict | None = None,
+    brand: str | None = None,
 ) -> dict:
     """Normalize a contract-valid Listing without truncating generated copy."""
     listing = _prepare_listing_output(listing, color)
-    violations = _listing_contract_violations(listing, mindset_context)
+    violations = _listing_contract_violations(listing, mindset_context, brand)
     if violations:
         raise RuntimeError(f"Listing 输出不合规且不得程序截断: {'; '.join(violations)}")
 
@@ -834,8 +830,9 @@ async def run_listing(product_id: int) -> dict:
             listing,
             pd.color,
             mindset_context,
+            product.brand,
         )
-        listing = _normalize_listing(listing, pd.color, mindset_context)
+        listing = _normalize_listing(listing, pd.color, mindset_context, product.brand)
 
         # 保存到数据库
         pd.listing_title = listing.get("title")

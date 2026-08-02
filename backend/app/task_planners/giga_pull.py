@@ -36,24 +36,33 @@ async def create_giga_pull_runs(
     sources = await _load_enabled_sources(db, body.data_source_ids)
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     runs: list[TaskRun] = []
+    requested_sku_codes = list(dict.fromkeys(str(sku).strip() for sku in (body.sku_codes or []) if str(sku or "").strip()))
     for source in sources:
         context = await resolve_giga_data_source_context(db, source.id, source.site)
-        scope_label = "全部新增 SKU" if body.new_sku_limit is None else f"前 {body.new_sku_limit} 个新增 SKU"
+        if requested_sku_codes:
+            scope_label = f"指定 {len(requested_sku_codes)} 个 SKU"
+        else:
+            scope_label = "全部新增 SKU" if body.new_sku_limit is None else f"前 {body.new_sku_limit} 个新增 SKU"
+        common_payload = {
+            "data_source_id": context.id,
+            "data_source_name": context.name,
+            "site": context.site,
+            "current_category": body.current_category,
+            "page_size": body.page_size,
+            "max_pages": body.max_pages,
+            "new_sku_limit": body.new_sku_limit,
+            "requested_sku_codes": requested_sku_codes,
+            "pipeline_target": body.pipeline_target,
+            "refresh_existing": body.refresh_existing,
+            "test_session_key": body.test_session_key,
+            "skip_existing": not body.refresh_existing,
+        }
         run = TaskRun(
             task_type="giga_pull",
             title=f"同步店铺商品：{context.name} · {scope_label}",
             status="pending",
             created_by=created_by,
-            payload_json=json_dumps({
-                "data_source_id": context.id,
-                "data_source_name": context.name,
-                "site": context.site,
-                "current_category": body.current_category,
-                "page_size": body.page_size,
-                "max_pages": body.max_pages,
-                "new_sku_limit": body.new_sku_limit,
-                "skip_existing": True,
-            }),
+            payload_json=json_dumps(common_payload),
             created_at=datetime.now(),
             updated_at=datetime.now(),
         )
@@ -89,17 +98,7 @@ async def create_giga_pull_runs(
                 step_type="giga_pull_plan",
                 status=STEP_STATUS_READY if auto_start else STEP_STATUS_PENDING,
                 sort_order=1,
-                payload_json=json_dumps({
-                    "batch_id": batch_id,
-                    "site": context.site,
-                    "data_source_id": context.id,
-                    "data_source_name": context.name,
-                    "current_category": body.current_category,
-                    "page_size": body.page_size,
-                    "max_pages": body.max_pages,
-                    "new_sku_limit": body.new_sku_limit,
-                    "skip_existing": True,
-                }),
+                payload_json=json_dumps({**common_payload, "batch_id": batch_id, "origin_task_run_id": run.id}),
                 progress_current=0,
                 progress_total=0,
                 max_attempts=3,

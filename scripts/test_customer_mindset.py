@@ -466,6 +466,28 @@ def test_upstream_readiness_and_fingerprint_contract() -> None:
     missing_fingerprint = dict(brief)
     missing_fingerprint.pop("input_fingerprint", None)
     assert not customer_mindset_matches_product(json.dumps(missing_fingerprint), product)
+
+    # Step5 updates only downstream image-vs-copy diagnostics after final Listing
+    # persistence. Those updates must not invalidate the upstream mindset brief.
+    original_image_analysis = product.images.image_analysis
+    image_analysis = json.loads(original_image_analysis)
+    diagnostics = image_analysis.setdefault("selection_diagnostics", {})
+    diagnostics["listing_image_alignment"] = {
+        "status": "complete",
+        "missing_evidence": ["final listing copy gap"],
+    }
+    diagnostics["image_health"] = {
+        "label": "needs_review_after_listing",
+        "issue_count": 1,
+    }
+    product.images.image_analysis = json.dumps(image_analysis)
+    assert customer_mindset_matches_product(product.data.customer_mindset, product)
+
+    image_analysis["images"][0]["visible_selling_point"] = "changed upstream visual evidence"
+    product.images.image_analysis = json.dumps(image_analysis)
+    assert not customer_mindset_matches_product(product.data.customer_mindset, product)
+
+    product.images.image_analysis = original_image_analysis
     product.data.material = "Velvet"
     assert not customer_mindset_matches_product(product.data.customer_mindset, product)
 

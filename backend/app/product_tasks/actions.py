@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -16,6 +17,7 @@ from app.models import (
     CatalogProduct,
     Product,
     ProductImage,
+    ProductMaterialAsset,
     TaskGroup,
     TaskRun,
     TaskStep,
@@ -37,6 +39,7 @@ from app.models.status import (
     WORKFLOW_NODE_KEYWORD_RESEARCH,
     WORKFLOW_NODE_CUSTOMER_MINDSET,
     WORKFLOW_NODE_LISTING_GENERATION,
+    WORKFLOW_NODE_PREPARE_MATERIALS,
     WORKFLOW_NODE_SEARCH_COMPETITOR,
     WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS,
     WORKFLOW_STATUS_FAILED,
@@ -44,7 +47,9 @@ from app.models.status import (
     WORKFLOW_STATUS_PROCESSING,
     WORKFLOW_STATUS_SUCCEEDED,
 )
-from app.product_tasks.auto_image_selection import run_auto_image_selection
+from app.product_tasks.auto_image_selection import run_auto_image_selection, selection_to_image_analysis
+from app.services.product_material_prepare import prepare_product_materials, write_material_manifest
+from app.services.product_pipeline_artifacts import write_image_selection_artifacts
 from app.pipeline.engine import _assert_step_prerequisites
 from app.pipeline.step2_pricing import run_pricing
 from app.pipeline.step4_category import run_category
@@ -65,6 +70,7 @@ from app.services.amazon_competitor_visual_match import (
 )
 from app.services.amazon_listing_detail import (
     AmazonListingDetailError,
+    AmazonListingDetailEvidenceContext,
     get_amazon_listing_detail_adapter,
     listing_detail_to_dict,
 )
@@ -98,8 +104,8 @@ ACTIVE_RUN_STATUSES = (RUN_STATUS_PENDING, RUN_STATUS_RUNNING)
 ACTIVE_STEP_STATUSES = (STEP_STATUS_PENDING, STEP_STATUS_READY, STEP_STATUS_RUNNING)
 logger = logging.getLogger(__name__)
 
-AUTO_COMPETITOR_SELECTION_MODEL = "rule_based_auto_competitor_v1"
-AUTO_COMPETITOR_SELECTION_RULE_VERSION = "auto_competitor_selection_v1"
+AUTO_COMPETITOR_SELECTION_MODEL = "rule_based_auto_competitor_v2"
+AUTO_COMPETITOR_SELECTION_RULE_VERSION = "auto_competitor_selection_v2"
 AUTO_COMPETITOR_HIGH_THRESHOLD = 0.78
 AUTO_COMPETITOR_MEDIUM_THRESHOLD = 0.68
 _TOKEN_STOPWORDS = {
@@ -128,6 +134,7 @@ _ACCESSORY_TERMS = {
 }
 
 PRODUCT_ACTION_TYPES = {
+    "product_material_prepare",
     "product_auto_image_selection",
     "product_competitor_search",
     "product_competitor_visual_match",
@@ -157,6 +164,8 @@ def _selected_listing_image_ref(item: dict[str, Any] | None) -> str:
 
 
 def _legacy_dedupe_key(task_type: str, product_id: int) -> str | None:
+    if task_type == "product_material_prepare":
+        return f"product_material_prepare:product:{product_id}"
     if task_type == "product_auto_image_selection":
         return f"product_auto_image_selection:product:{product_id}"
     if task_type == "product_competitor_search":
@@ -179,6 +188,8 @@ def _legacy_dedupe_key(task_type: str, product_id: int) -> str | None:
 
 
 def _legacy_correlation_key(task_type: str, product_id: int) -> str | None:
+    if task_type == "product_material_prepare":
+        return f"product:{product_id}:material_prepare"
     if task_type == "product_auto_image_selection":
         return f"product:{product_id}:auto_image_selection"
     if task_type == "product_competitor_search":
@@ -289,7 +300,7 @@ def _listing_content_ready(product: Product) -> bool:
     if not title or len(title) > settings.STEP5_TITLE_MAX_CHARS:
         return False
     highlights = _json_from_text(str(getattr(data, "listing_product_highlights", "") or ""))
-    if not isinstance(highlights, list) or not 3 <= len(highlights) <= 5:
+    if not isinstance(highlights, list) or len(highlights) != 1:
         return False
     if any(
         not str(item or "").strip()
@@ -371,8 +382,13 @@ def _source_product_tokens(product: Product) -> set[str]:
     data = product.data
     if not data:
         return set()
-    features = _list_from_json_text(data.features)
-    return _text_tokens(data.title, data.material, data.product_type, data.description, features, data.leaf_category)
+    return _text_tokens(
+        data.title,
+        data.material,
+        data.product_type,
+        data.color,
+        data.leaf_category,
+    )
 
 
 def _candidate_bullets(row: AmazonCompetitorSearchCandidate) -> list[str]:
@@ -380,20 +396,77 @@ def _candidate_bullets(row: AmazonCompetitorSearchCandidate) -> list[str]:
 
 
 def _candidate_tokens(row: AmazonCompetitorSearchCandidate) -> set[str]:
+    details = _dict_from_json_text(row.product_details_json)
+    selected_details = {
+        key: value
+        for key, value in details.items()
+        if _is_identity_detail_key(key) and len(str(value or "")) <= 500
+    }
     return _text_tokens(
         row.title,
         _candidate_bullets(row),
         row.description,
         row.leaf_category,
         row.category_rank,
-        _dict_from_json_text(row.product_details_json),
+        selected_details,
     )
+
+
+def _candidate_identity_tokens(row: AmazonCompetitorSearchCandidate) -> set[str]:
+    return _text_tokens(row.title, row.leaf_category, row.category_rank)
+
+
+def _is_identity_detail_key(value: Any) -> bool:
+    key = str(value or "").strip().lower()
+    return any(marker in key for marker in (
+        "brand",
+        "color",
+        "size",
+        "material",
+        "style",
+        "type",
+        "dimension",
+        "weight",
+        "finish",
+        "special feature",
+        "compatible",
+        "included component",
+    ))
 
 
 def _overlap_score(source_tokens: set[str], candidate_tokens: set[str]) -> float:
     if not source_tokens or not candidate_tokens:
         return 0.5
     return _clamp(len(source_tokens & candidate_tokens) / max(1, len(source_tokens)))
+
+
+def _category_alignment_score(product: Product, row: AmazonCompetitorSearchCandidate) -> float:
+    data = product.data
+    source_tokens = _category_tokens(
+        getattr(data, "product_type", None) if data else None,
+        getattr(data, "leaf_category", None) if data else None,
+    )
+    candidate_tokens = _category_tokens(row.leaf_category, row.category_rank)
+    if not candidate_tokens:
+        return 0.6
+    if not source_tokens:
+        return 0.5
+    overlap = len(source_tokens & candidate_tokens)
+    return _clamp(overlap / max(1, min(len(source_tokens), len(candidate_tokens))))
+
+
+def _category_tokens(*values: Any) -> set[str]:
+    aliases = {
+        "beds": "bed",
+        "frames": "frame",
+        "bases": "base",
+        "sofas": "sofa",
+        "chairs": "chair",
+        "tables": "table",
+        "cabinets": "cabinet",
+        "shelves": "shelf",
+    }
+    return {aliases.get(token, token) for token in _text_tokens(*values)}
 
 
 def _auto_competitor_hard_reject_reasons(row: AmazonCompetitorSearchCandidate) -> list[str]:
@@ -410,8 +483,8 @@ def _auto_competitor_hard_reject_reasons(row: AmazonCompetitorSearchCandidate) -
         reasons.append("different_visual_product_type")
     if row.is_accessory or row.is_replacement_part or row.is_cover_only:
         reasons.append("accessory_or_replacement")
-    candidate_tokens = _candidate_tokens(row)
-    if candidate_tokens & _ACCESSORY_TERMS:
+    identity_tokens = _candidate_identity_tokens(row)
+    if identity_tokens & _ACCESSORY_TERMS:
         reasons.append("accessory_terms")
     if not str(row.title or "").strip() and not _candidate_bullets(row):
         reasons.append("missing_title_and_bullets")
@@ -455,8 +528,7 @@ def _score_auto_competitor_candidate(
     ]
     detail_completeness = sum(1 for item in detail_checks if item) / len(detail_checks)
 
-    category_tokens = _text_tokens(row.leaf_category, row.category_rank)
-    category_alignment = _overlap_score(source_tokens, category_tokens) if category_tokens else 0.6
+    category_alignment = _category_alignment_score(product, row)
 
     rating = _safe_float(row.rating)
     review_count = _safe_int(row.review_count)
@@ -881,6 +953,185 @@ async def _project_keyword_research_failed(
     await db.commit()
 
 
+async def _project_material_prepare_failed(
+    db: AsyncSession,
+    *,
+    product_id: int,
+    message: str,
+    paused: bool = False,
+) -> None:
+    try:
+        product = await _load_product(db, product_id)
+    except RuntimeError:
+        return
+    now = datetime.now()
+    product.status = PAUSED if paused else FAILED
+    product.current_step = 1
+    product.error_message = message
+    set_product_workflow(
+        product,
+        node=WORKFLOW_NODE_PREPARE_MATERIALS,
+        status=WORKFLOW_STATUS_FAILED,
+        error=message,
+        now=now,
+    )
+    product.updated_at = now
+    _sync_catalog_item(product)
+    await db.commit()
+
+
+class ProductMaterialPrepareAction:
+    """Resolve the GIGA page, download every required package, and register all assets."""
+
+    action_type = "product_material_prepare"
+
+    async def validate(self, db: AsyncSession, payload: dict[str, Any]) -> None:
+        product = await _load_product(db, _product_id(payload))
+        reasons = product_external_result_protection_reasons(product)
+        if reasons:
+            raise RuntimeError("商品已有不可逆外部结果，不能自动刷新供应商素材: " + "；".join(reasons))
+
+    def dedupe_key(self, payload: dict[str, Any]) -> str | None:
+        return f"product_material_prepare:product:{_product_id(payload)}"
+
+    def correlation_key(self, payload: dict[str, Any]) -> str | None:
+        return f"product:{_product_id(payload)}:material_prepare"
+
+    async def reserve(self, db: AsyncSession, payload: dict[str, Any], run: TaskRun) -> None:
+        product = await _load_product(db, _product_id(payload))
+        now = datetime.now()
+        product.status = "created"
+        product.current_step = 1
+        product.error_message = None
+        set_product_workflow(
+            product,
+            node=WORKFLOW_NODE_PREPARE_MATERIALS,
+            status=WORKFLOW_STATUS_PROCESSING,
+            error=None,
+            now=now,
+        )
+        product.updated_at = now
+        _sync_catalog_item(product)
+
+    def build_plan(self, payload: dict[str, Any]) -> TaskRunPlan:
+        product_id = _product_id(payload)
+        task_payload = {
+            "product_id": product_id,
+            "pipeline_target": str(payload.get("pipeline_target") or "export_ready"),
+            "test_session_key": str(payload.get("test_session_key") or "").strip() or None,
+            "origin_task_run_id": payload.get("origin_task_run_id"),
+        }
+        return TaskRunPlan(
+            task_type=self.action_type,
+            title=f"准备供应商素材：商品 #{product_id}",
+            payload=task_payload,
+            groups=[
+                TaskGroupPlan(
+                    group_key="material_prepare",
+                    title="解析商品页并准备素材包",
+                    steps=[
+                        TaskStepPlan(
+                            step_key=f"product:{product_id}:material_prepare",
+                            step_type=self.action_type,
+                            payload=task_payload,
+                            max_attempts=2,
+                        )
+                    ],
+                )
+            ],
+        )
+
+    async def execute_step(self, db: AsyncSession, step: TaskStep, payload: dict[str, Any]) -> dict[str, Any]:
+        product_id = _product_id(payload)
+        await update_step_progress(
+            db,
+            step,
+            current=0,
+            total=1,
+            message="开始解析 GIGA 商品页并下载素材包",
+            data={"product_id": product_id, "test_session_key": payload.get("test_session_key")},
+        )
+        material_result = await prepare_product_materials(
+            db,
+            product_id=product_id,
+            source_task_run_id=int(payload.get("origin_task_run_id") or step.task_run_id or 0) or None,
+            test_session_key=str(payload.get("test_session_key") or "").strip() or None,
+        )
+        return {"product_id": product_id, "material_prepare": material_result}
+
+    async def on_step_success(self, db: AsyncSession, step: TaskStep, result: dict[str, Any]) -> None:
+        product_id = int(result.get("product_id") or _payload_for_step(step).get("product_id") or 0)
+        product = await _load_product(db, product_id)
+        now = datetime.now()
+        product.status = "created"
+        product.current_step = 1
+        product.error_message = None
+        set_product_workflow(
+            product,
+            node=WORKFLOW_NODE_AUTO_SELECT_IMAGES,
+            status=WORKFLOW_STATUS_PENDING,
+            error=None,
+            now=now,
+        )
+        product.updated_at = now
+        _sync_catalog_item(product)
+        await db.commit()
+
+        payload = _payload_for_step(step)
+        async with async_session() as planner_db:
+            runs = await create_product_action_runs(
+                planner_db,
+                "product_auto_image_selection",
+                [{
+                    "product_id": product_id,
+                    "created_by": "product_material_prepare",
+                    "pipeline_target": payload.get("pipeline_target"),
+                    "test_session_key": payload.get("test_session_key"),
+                    "origin_task_run_id": payload.get("origin_task_run_id"),
+                }],
+                created_by="product_material_prepare",
+                auto_start=True,
+            )
+        result["next_task_run_ids"] = [run.id for run in runs]
+        await _best_effort_update_step_progress(
+            db,
+            step,
+            current=1,
+            total=1,
+            message="供应商素材准备完成，已进入自动选图",
+            data={"product_id": product_id, "next_task_run_ids": result["next_task_run_ids"]},
+        )
+
+    async def on_step_failure(self, db: AsyncSession, step: TaskStep, error: Exception) -> None:
+        product_id = int(_payload_for_step(step).get("product_id") or 0)
+        if product_id > 0:
+            await _project_material_prepare_failed(
+                db,
+                product_id=product_id,
+                message=f"供应商素材准备失败: {type(error).__name__}: {error}",
+            )
+
+    async def on_step_interrupted(self, db: AsyncSession, step: TaskStep, reason: str | None = None) -> None:
+        product_id = int(_payload_for_step(step).get("product_id") or 0)
+        if product_id > 0:
+            await _project_material_prepare_failed(
+                db,
+                product_id=product_id,
+                message=f"供应商素材准备任务已中断: {reason or '服务重启或执行锁超时'}",
+                paused=True,
+            )
+
+    async def on_cancel_requested(self, db: AsyncSession, run: TaskRun, reason: str | None = None) -> None:
+        product_id = int(_payload_for_run(run).get("product_id") or 0)
+        if product_id > 0:
+            await _project_material_prepare_failed(
+                db,
+                product_id=product_id,
+                message=f"供应商素材准备任务已取消: {reason or '用户取消'}",
+                paused=True,
+            )
+
+
 async def _create_or_reuse_keyword_research_after_auto_competitor(product_id: int) -> list[int]:
     async with async_session() as planner_db:
         runs = await create_product_action_runs(
@@ -982,12 +1233,14 @@ class ProductAutoImageSelectionAction:
     `raise_if_auto_image_selection_protected` 会阻止覆盖真实 ASIN、导出记录、A+ 上传等
     不可逆外部结果。执行入口是 `run_auto_image_selection`，任务最多尝试 2 次。
 
-    处理规则：模型必须选出 1 张主图；Gallery 去重后最多保存 8 张，且不得重复主图。
+    处理规则：先逐张完成候选图片视觉分析，再选出 1 张主图；Gallery 去重后最多保存
+    8 张，且不得重复主图。
     图片引用优先保留可供 VLM 直接访问的 URL，本地路径仅作为已有素材的兼容形式。
     选择依据、顺序、置信度和所用模型一并保留，不能只留下最终路径。
 
-    落库与下游：结果写入 `ProductImage.main_image_path`、`gallery_images`、
-    `gallery_order`、`image_selection_analysis`、`image_selected_at` 和 `vlm_model`。
+    落库与下游：候选视觉分析结果会沉淀为 `ProductImage.image_analysis`，再写入
+    `main_image_path`、`gallery_images`、`gallery_order`、`image_selection_analysis`、
+    `image_selected_at` 和 `vlm_model`。后续不再对同一组 Listing 图片二次调用 VLM。
     重跑会清理尚可重建的竞品、图片分析、用户心智、Listing 和 A+ 下游产物；成功后
     唯一进入 `search_competitor/pending`。缺少主图、结果格式错误、取消或中断均按
     fail-closed 投影失败状态，不允许用空结果继续流程。
@@ -1025,10 +1278,16 @@ class ProductAutoImageSelectionAction:
 
     def build_plan(self, payload: dict[str, Any]) -> TaskRunPlan:
         product_id = _product_id(payload)
+        task_payload = {
+            "product_id": product_id,
+            "pipeline_target": payload.get("pipeline_target"),
+            "test_session_key": payload.get("test_session_key"),
+            "origin_task_run_id": payload.get("origin_task_run_id"),
+        }
         return TaskRunPlan(
             task_type=self.action_type,
             title=f"自动选图：商品 #{product_id}",
-            payload={"product_id": product_id},
+            payload=task_payload,
             groups=[
                 TaskGroupPlan(
                     group_key="auto_image_selection",
@@ -1037,7 +1296,7 @@ class ProductAutoImageSelectionAction:
                         TaskStepPlan(
                             step_key=f"product:{product_id}:auto_image_selection",
                             step_type=self.action_type,
-                            payload={"product_id": product_id},
+                            payload=task_payload,
                             max_attempts=2,
                         )
                     ],
@@ -1054,7 +1313,7 @@ class ProductAutoImageSelectionAction:
             step,
             current=0,
             total=1,
-            message="开始自动选图",
+            message="开始候选图片视觉分析与自动选图",
             data={"product_id": product_id, "item_code": item_code},
         )
         return {
@@ -1109,8 +1368,80 @@ class ProductAutoImageSelectionAction:
         product.images.gallery_images = json_dumps(gallery_paths)
         product.images.gallery_order = json_dumps(gallery_order)
         product.images.image_selection_analysis = json_dumps(selection)
+        product.images.image_analysis = json_dumps(selection_to_image_analysis(selection), ensure_ascii=False)
+        product.images.analyzed_at = now
+        image_batches = selection.get("image_batches") if isinstance(selection.get("image_batches"), list) else []
+        product.images.contact_sheet_path = str(image_batches[0].get("sheet_path")) if image_batches else None
         product.images.image_selected_at = now
         product.images.vlm_model = str(selection.get("model") or settings.VLM_MODEL)
+
+        reviews = selection.get("image_reviews") if isinstance(selection.get("image_reviews"), list) else []
+        rejected = selection.get("rejected") if isinstance(selection.get("rejected"), list) else []
+        selected_main_asset_id = int(selected_main.get("material_asset_id") or 0) if selected_main else 0
+        selected_gallery_asset_ids = {
+            int(item.get("material_asset_id") or 0)
+            for item in selected_gallery
+            if isinstance(item, dict) and int(item.get("material_asset_id") or 0) > 0
+        }
+        review_by_asset_id = {
+            int(review.get("material_asset_id") or 0): review
+            for review in reviews
+            if isinstance(review, dict) and int(review.get("material_asset_id") or 0) > 0
+        }
+        rejection_by_asset_id = {
+            int(item.get("material_asset_id") or 0): str(item.get("reason") or "not_selected")
+            for item in rejected
+            if isinstance(item, dict) and int(item.get("material_asset_id") or 0) > 0
+        }
+        material_asset_ids = set(review_by_asset_id)
+        if selected_main_asset_id > 0:
+            material_asset_ids.add(selected_main_asset_id)
+        material_asset_ids.update(selected_gallery_asset_ids)
+        if material_asset_ids:
+            asset_result = await db.execute(
+                select(ProductMaterialAsset).where(
+                    ProductMaterialAsset.product_id == product_id,
+                    ProductMaterialAsset.id.in_(material_asset_ids),
+                )
+            )
+            for asset in asset_result.scalars().all():
+                review = review_by_asset_id.get(asset.id, {})
+                usage = json_loads(asset.downstream_usage_json, [])
+                if not isinstance(usage, list):
+                    usage = []
+                for value in (
+                    "contact_sheet_review" if review else None,
+                    "listing_main" if asset.id == selected_main_asset_id else None,
+                    "listing_gallery" if asset.id in selected_gallery_asset_ids else None,
+                ):
+                    if value and value not in usage:
+                        usage.append(value)
+                evidence = review.get("contact_sheet_evidence") if isinstance(review, dict) else {}
+                asset.downstream_usage_json = json_dumps(usage)
+                if asset.id == selected_main_asset_id or asset.id in selected_gallery_asset_ids:
+                    asset.processing_status = "selected"
+                    asset.rejection_reason = None
+                elif asset.id in rejection_by_asset_id:
+                    asset.processing_status = "rejected"
+                    asset.rejection_reason = rejection_by_asset_id[asset.id]
+                else:
+                    asset.processing_status = "analyzed"
+                    asset.rejection_reason = None
+                asset.contact_sheet_path = str(evidence.get("sheet_path") or "") or None
+                asset.contact_sheet_page = int(evidence.get("sheet_page") or 0) or None
+                asset.contact_sheet_label = str(evidence.get("sheet_label") or review.get("image_id") or "") or None
+                asset.updated_at = now
+
+        artifact_paths: dict[str, str] = {}
+        if product.data and product.data.material_dir:
+            await write_material_manifest(db, product.id, Path(product.data.material_dir).expanduser().resolve())
+            artifact_paths = await write_image_selection_artifacts(
+                db,
+                product=product,
+                selection=selection,
+                main_path=main_path,
+                gallery_paths=gallery_paths,
+            )
 
         product.status = "created"
         product.current_step = 1
@@ -1135,6 +1466,41 @@ class ProductAutoImageSelectionAction:
             "main_image_path": main_path,
             "gallery_count": len(gallery_paths),
             "confidence": selection.get("confidence"),
+            "artifact_paths": artifact_paths,
+        })
+        await db.commit()
+        try:
+            competitor_runs = await create_product_action_runs(
+                db,
+                "product_competitor_search",
+                [{
+                    "product_id": product_id,
+                    "created_by": "product_auto_image_selection",
+                    "pipeline_target": product.pipeline_target,
+                    "test_session_key": product.pipeline_test_session_key,
+                    "origin_task_run_id": product.pipeline_origin_task_run_id,
+                }],
+                created_by="product_auto_image_selection",
+                auto_start=True,
+            )
+        except Exception as exc:
+            await db.rollback()
+            message = f"自动选图已完成，但竞品搜索任务创建失败: {type(exc).__name__}: {exc}"
+            await _project_competitor_search_failed(db, product_id=product_id, message=message)
+            result["status"] = "downstream_failed"
+            result["downstream_error"] = message
+            return
+        competitor_run_ids = [run.id for run in competitor_runs]
+        step.task_run.summary_json = json_dumps({
+            "product_id": product_id,
+            "item_code": result.get("item_code"),
+            "status": "auto_image_selection_done",
+            "next_node": WORKFLOW_NODE_SEARCH_COMPETITOR,
+            "main_image_path": main_path,
+            "gallery_count": len(gallery_paths),
+            "confidence": selection.get("confidence"),
+            "competitor_search_task_run_ids": competitor_run_ids,
+            "artifact_paths": artifact_paths,
         })
         await db.commit()
         await _best_effort_update_step_progress(
@@ -1142,11 +1508,17 @@ class ProductAutoImageSelectionAction:
             step,
             current=1,
             total=1,
-            message="自动选图完成，已进入待搜索竞品",
-            data={"product_id": product_id, "item_code": result.get("item_code"), "gallery_count": len(gallery_paths)},
+            message="自动选图完成，已提交竞品搜索任务",
+            data={
+                "product_id": product_id,
+                "item_code": result.get("item_code"),
+                "gallery_count": len(gallery_paths),
+                "competitor_search_task_run_ids": competitor_run_ids,
+            },
         )
         result["status"] = "done"
         result["next_node"] = WORKFLOW_NODE_SEARCH_COMPETITOR
+        result["competitor_search_task_run_ids"] = competitor_run_ids
 
     async def on_step_failure(self, db: AsyncSession, step: TaskStep, error: Exception) -> None:
         product_id = int(_payload_for_step(step).get("product_id") or 0)
@@ -1358,17 +1730,48 @@ class ProductCompetitorSearchAction:
             "candidate_count": written_count,
         })
         await db.commit()
+        try:
+            visual_runs = await create_product_action_runs(
+                db,
+                "product_competitor_visual_match",
+                [{"product_id": product_id, "created_by": "product_competitor_search"}],
+                created_by="product_competitor_search",
+                auto_start=True,
+            )
+        except Exception as exc:
+            await db.rollback()
+            message = f"竞品搜索已完成，但视觉初筛任务创建失败: {type(exc).__name__}: {exc}"
+            await _project_competitor_visual_match_failed(db, product_id=product_id, message=message)
+            result["status"] = "downstream_failed"
+            result["downstream_error"] = message
+            return
+        visual_run_ids = [run.id for run in visual_runs]
+        step.task_run.summary_json = json_dumps({
+            "product_id": product_id,
+            "item_code": result.get("item_code"),
+            "status": "competitor_search_done",
+            "next_node": WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS,
+            "query_count": len(raw_results),
+            "candidate_count": written_count,
+            "competitor_visual_match_task_run_ids": visual_run_ids,
+        })
+        await db.commit()
         await _best_effort_update_step_progress(
             db,
             step,
             current=len(raw_results),
             total=max(len(raw_results), 1),
-            message="自动竞品搜索完成，已进入待视觉初筛",
-            data={"product_id": product_id, "candidate_count": written_count},
+            message="自动竞品搜索完成，已提交视觉初筛任务",
+            data={
+                "product_id": product_id,
+                "candidate_count": written_count,
+                "competitor_visual_match_task_run_ids": visual_run_ids,
+            },
         )
         result["status"] = "done"
         result["next_node"] = WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS
         result["candidate_count"] = written_count
+        result["competitor_visual_match_task_run_ids"] = visual_run_ids
 
     async def on_step_failure(self, db: AsyncSession, step: TaskStep, error: Exception) -> None:
         product_id = int(_payload_for_step(step).get("product_id") or 0)
@@ -1411,29 +1814,8 @@ async def _upsert_competitor_search_candidates(
     search_results: list[dict[str, Any]],
     now: datetime,
 ) -> int:
-    flattened: list[dict[str, Any]] = []
-    seen: set[str] = set()
     max_candidates = max(1, int(settings.AMAZON_SEARCH_MAX_CANDIDATES or 20))
-    for result in search_results:
-        if not isinstance(result, dict):
-            continue
-        candidates = result.get("candidates") if isinstance(result.get("candidates"), list) else []
-        for candidate in candidates:
-            if not isinstance(candidate, dict):
-                continue
-            asin = str(candidate.get("asin") or "").strip().upper()
-            if not asin or asin in seen:
-                continue
-            seen.add(asin)
-            flattened.append({
-                "result": result,
-                "candidate": candidate,
-                "asin": asin,
-            })
-            if len(flattened) >= max_candidates:
-                break
-        if len(flattened) >= max_candidates:
-            break
+    flattened = _round_robin_competitor_candidates(search_results, max_candidates=max_candidates)
 
     if not flattened:
         return 0
@@ -1485,6 +1867,42 @@ async def _upsert_competitor_search_candidates(
         row.updated_at = now
         written += 1
     return written
+
+
+def _round_robin_competitor_candidates(
+    search_results: list[dict[str, Any]],
+    *,
+    max_candidates: int,
+) -> list[dict[str, Any]]:
+    """Deduplicate while preserving evidence from every search intent.
+
+    Sequential flattening allowed the first two 12-result queries to exhaust a
+    20-candidate pool, so the third query never participated. Round-robin by
+    search rank gives each real query a chance before deeper results are used.
+    """
+    buckets: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+    for result in search_results:
+        if not isinstance(result, dict):
+            continue
+        candidates = result.get("candidates") if isinstance(result.get("candidates"), list) else []
+        buckets.append((result, [item for item in candidates if isinstance(item, dict)]))
+
+    flattened: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    depth = max((len(candidates) for _, candidates in buckets), default=0)
+    for rank_offset in range(depth):
+        for result, candidates in buckets:
+            if rank_offset >= len(candidates):
+                continue
+            candidate = candidates[rank_offset]
+            asin = str(candidate.get("asin") or "").strip().upper()
+            if not asin or asin in seen:
+                continue
+            seen.add(asin)
+            flattened.append({"result": result, "candidate": candidate, "asin": asin})
+            if len(flattened) >= max_candidates:
+                return flattened
+    return flattened
 
 
 def _competitor_candidate_flags(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -2126,6 +2544,7 @@ class ProductCompetitorCandidateCaptureAction:
 
     async def execute_step(self, db: AsyncSession, step: TaskStep, payload: dict[str, Any]) -> dict[str, Any]:
         product_id = _product_id(payload)
+        product = await _load_product(db, product_id)
         visual_task_run_id, visual_task_step_id = _visual_ids_from_payload(payload)
         selected_rows = await _current_visual_selected_for_capture(
             db,
@@ -2157,7 +2576,18 @@ class ProductCompetitorCandidateCaptureAction:
         for index, row in enumerate(selected_rows, start=1):
             asin = str(row.asin or "").strip().upper()
             try:
-                detail = await adapter.fetch(asin, url=row.url, marketplace="US")
+                detail = await adapter.fetch(
+                    asin,
+                    url=row.url,
+                    marketplace=(product.source_site or "US").strip().upper(),
+                    evidence_context=AmazonListingDetailEvidenceContext(
+                        task_run_id=step.task_run_id,
+                        task_step_id=step.id,
+                        product_id=product_id,
+                        candidate_id=row.id,
+                        visual_rank=row.visual_rank,
+                    ),
+                )
                 detail_dict = listing_detail_to_dict(detail)
                 qualified = bool(detail.title or detail.bullets)
                 candidate_results.append({
@@ -2741,15 +3171,16 @@ class ProductKeywordResearchAction:
     空结果时才允许 LLM 兜底。只有 OpenAPI 未配置且旧兼容链路需要人工登录时，才可能
     调用浏览器，不能在 API 可用时无故打开浏览器。
 
-    定价：设含运费预估总成本为 T、货值为 G，成本基数
-    C = T + 固定成本 - 退货保险抵扣率 * G；候选售价 P1 = C / (净收入率 - 目标净利率)，
-    P2 = (C + 最低利润) / 净收入率，建议售价 = max(P1, P2)。当前默认净收入率 0.685、
-    目标净利率 0.05、最低利润 $10、固定成本 $9、退货保险抵扣率 0.06；最终事实源是
-    `PRICING_*` 配置。
+    定价：设含运费采购总成本为 T、货值为 G。每单保费 I=2.5%×G、广告预留 A=$2、
+    4% 退货下的平均保障赔付 B=4%×60%×G（只赔货值、不赔物流），固定期望成本
+    C=T+I+A-B。售价留存收入按 10% 佣金、4% 退货收入损失计算；退货管理费为每笔
+    佣金的 20%、最高 $5，再乘实际 4% 退货率。分别求解管理费未封顶与封顶区间，
+    同时满足 5% 目标净利率和 $10 最低利润并向上取美分；最终事实源是 `PRICING_*`
+    配置和 `step2_pricing.py` 的逐项注释。
 
-    类目与下游：根据已选竞品 ASIN 获取 Amazon 叶子类目。只有 `keywords_top`、
-    `suggested_price`、`leaf_category` 三者均已落库，才创建 `product_image_analysis`；
-    缺任何一项均 fail closed，并保留具体失败阶段。
+    类目与下游：根据已选竞品 ASIN 获取 Amazon 叶子类目。候选图片视觉分析已在选图前
+    完成；只有 `keywords_top`、`suggested_price`、`leaf_category` 和该视觉证据均已落库，
+    才创建用户心智任务。缺任何一项均 fail closed，并保留具体失败阶段。
     """
 
     action_type = "product_keyword_research"
@@ -2856,24 +3287,28 @@ class ProductKeywordResearchAction:
         product = await _load_product(db, product_id)
         await db.refresh(product, attribute_names=["data"])
         if not product.data or not product.data.keywords_top:
-            message = "商品准备完成但未落库关键词结果，不能进入图片分析"
+            message = "商品准备完成但未落库关键词结果，不能进入用户心智梳理"
             await _project_keyword_research_failed(db, product_id=product_id, message=message)
             raise RuntimeError(message)
         if product.data.suggested_price is None:
-            message = "商品准备完成但缺少建议售价，不能进入图片分析"
+            message = "商品准备完成但缺少建议售价，不能进入用户心智梳理"
             await _project_keyword_research_failed(db, product_id=product_id, message=message)
             raise RuntimeError(message)
         if not product.data.leaf_category:
-            message = "商品准备完成但缺少 Amazon 类目，不能进入图片分析"
+            message = "商品准备完成但缺少 Amazon 类目，不能进入用户心智梳理"
             await _project_keyword_research_failed(db, product_id=product_id, message=message)
             raise RuntimeError(message)
         now = datetime.now()
-        product.status = "created"
-        product.current_step = 3
+        if not product.images or not image_analysis_ready(product.images.image_analysis):
+            message = "候选图片视觉分析未完成，不能进入用户心智梳理"
+            await _project_image_analysis_creation_failed(db, product_id=product_id, message=message)
+            raise RuntimeError(message)
+        product.status = STEP6_DONE
+        product.current_step = 5
         product.error_message = None
         set_product_workflow(
             product,
-            node=WORKFLOW_NODE_KEYWORD_RESEARCH,
+            node=WORKFLOW_NODE_IMAGE_ANALYSIS,
             status=WORKFLOW_STATUS_SUCCEEDED,
             error=None,
             now=now,
@@ -2882,29 +3317,30 @@ class ProductKeywordResearchAction:
         _sync_catalog_item(product)
         await db.commit()
         try:
-            image_runs = await create_product_action_runs(
+            customer_mindset_runs = await create_product_action_runs(
                 db,
-                "product_image_analysis",
+                "product_customer_mindset",
                 [{"product_id": product_id, "created_by": "product_keyword_research"}],
                 created_by="product_keyword_research",
             )
         except Exception as exc:
             await db.rollback()
-            message = f"关键词采集已完成，但图片分析任务创建失败: {type(exc).__name__}: {exc}"
-            await _project_image_analysis_creation_failed(db, product_id=product_id, message=message)
+            message = f"商品准备已完成，但用户心智任务创建失败: {type(exc).__name__}: {exc}"
+            await _project_customer_mindset_failed(db, product_id=product_id, message=message)
             result["status"] = "downstream_failed"
             result["downstream_error"] = message
             return
-        image_run_ids = [run.id for run in image_runs]
+        customer_mindset_run_ids = [run.id for run in customer_mindset_runs]
         step.task_run.summary_json = json_dumps({
             "product_id": product_id,
             "status": "product_preparation_done",
-            "next_node": WORKFLOW_NODE_IMAGE_ANALYSIS,
+            "next_node": WORKFLOW_NODE_CUSTOMER_MINDSET,
             "keyword_source": "llm_fallback" if result["keyword_result"].get("llm_fallback") else "sellersprite",
             "top_keyword_count": len(result["keyword_result"].get("top_keywords") or []),
             "suggested_price": product.data.suggested_price,
             "leaf_category": product.data.leaf_category,
-            "image_analysis_task_run_ids": image_run_ids,
+            "image_analysis_stage": "candidate_vision_before_selection",
+            "customer_mindset_task_run_ids": customer_mindset_run_ids,
         })
         await db.commit()
         await _best_effort_update_step_progress(
@@ -2912,12 +3348,12 @@ class ProductKeywordResearchAction:
             step,
             current=3,
             total=3,
-            message="商品准备完成，已提交图片分析任务",
-            data={"product_id": product_id, "image_analysis_task_run_ids": image_run_ids},
+            message="商品准备完成，候选图片视觉分析已复用，已提交用户心智梳理",
+            data={"product_id": product_id, "customer_mindset_task_run_ids": customer_mindset_run_ids},
         )
         result["status"] = "done"
-        result["next_node"] = WORKFLOW_NODE_IMAGE_ANALYSIS
-        result["image_analysis_task_run_ids"] = image_run_ids
+        result["next_node"] = WORKFLOW_NODE_CUSTOMER_MINDSET
+        result["customer_mindset_task_run_ids"] = customer_mindset_run_ids
 
     async def on_step_failure(self, db: AsyncSession, step: TaskStep, error: Exception) -> None:
         product_id = int(_payload_for_step(step).get("product_id") or 0)
@@ -3355,15 +3791,15 @@ class ProductListingGenerationAction:
 
     文案硬限制（最终事实源为配置和 `search_terms.py`）：英文标题最大 75 字符
     (`STEP5_TITLE_MAX_CHARS`，含空格和标点)，标题只承担品牌、核心品类、必要规格和
-    一个最强且有证据的差异点；Product Highlights 是独立于旧五点的 3-5 条搜索结果
-    亮点，每条最大 125 字符 (`STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS`)，承接标题放不下的
-    材质、功能、适用对象和具体使用场景。旧五点仍必须恰好 5 条，每条当前最大 500
+    一个最强且有证据的差异点；Product Highlight 是独立于旧五点的单条标题补充，最大
+    120 字符 (`STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS`)，承接标题放不下且最重要的已证实
+    属性、适配、配置或使用信息。旧五点仍必须恰好 5 条，每条当前最大 500
     字符 (`STEP5_BULLET_MAX_CHARS`)；Search Terms 使用逗号分隔，最多 20 个关键词短语
     (`SEARCH_TERMS_MAX_KEYWORDS`)，整体最大 250 个 UTF-8 bytes
     (`STEP5_SEARCH_TERMS_MAX_BYTES`)。LLM 默认 temperature=0.7、最大输出 2000 tokens，
     分别由 `STEP5_LLM_TEMPERATURE`、`STEP5_LLM_MAX_TOKENS` 控制。
 
-    输出与校验：生成英文标题、3-5 条场景化 Product Highlights、恰好五条英文五点、
+    输出与校验：生成英文标题、1 条标题补充 Product Highlight、恰好五条英文五点、
     产品描述、Search Terms、对应中文翻译及 `listing_check`。标题或任一 Product
     Highlight 超限、数量错误或完全没有具体场景时，生成器必须把具体问题反馈给 LLM
     重新写完整语义；不得在单词中间机械截断。达到重写次数仍不合规则任务失败，不能
@@ -3455,6 +3891,10 @@ class ProductListingGenerationAction:
         source_task_run_id = step.task_run_id
         source_task_step_id = step.id
         product = await _load_product(db, product_id)
+        # run_listing() 使用独立数据库会话落库。当前 task-runtime 会话可能刚连续执行完
+        # customer_mindset -> listing，identity map 里的 ProductData 仍是心智落库前旧值；
+        # success hook 必须显式刷新 data，不能把已存在的 durable 心智误判为缺失。
+        await db.refresh(product, attribute_names=["data"])
         _raise_if_e5_export_ready_protected(product, action_label="完成 Listing 并进入待导出")
         _project_listing_completed(product)
         summary = {
@@ -3815,6 +4255,7 @@ async def product_action_worker(ctx: TaskContext) -> dict[str, Any]:
 
 def register_product_task_actions() -> None:
     for action in (
+        ProductMaterialPrepareAction(),
         ProductAutoImageSelectionAction(),
         ProductCompetitorSearchAction(),
         ProductCompetitorVisualMatchAction(),

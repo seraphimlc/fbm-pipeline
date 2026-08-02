@@ -7,6 +7,7 @@ import json
 import re
 import logging
 import asyncio
+import hashlib
 import zipfile
 import glob
 import shutil
@@ -53,6 +54,12 @@ DOWNLOAD_TYPE_DIRS = {
     "unknown": "Unknown",
 }
 
+DOWNLOAD_OPTION_TYPE_KEYS = {
+    "To B素材包": "to_b",
+    "Retail Ready素材包": "retail_ready",
+    "Information": "information",
+}
+
 GIGAB2B_BASE_URL = "https://www.gigab2b.com"
 GIGAB2B_API_TIMEOUT = httpx.Timeout(connect=20, read=180, write=30, pool=20)
 GIGAB2B_RESOURCE_TYPES = {
@@ -90,6 +97,14 @@ def _safe_extract_zip(zip_path: Path, output_dir: Path) -> int:
         archive.extractall(output_dir)
         extracted = len([m for m in archive.infolist() if not m.is_dir()])
     return extracted
+
+
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _existing_download_zips() -> set[Path]:
@@ -218,6 +233,21 @@ def _select_download_option(options: list[str]) -> str:
     return options[0]
 
 
+def _validate_required_download_results(results: list[dict], required_options: set[str]) -> None:
+    required_type_keys = {
+        DOWNLOAD_OPTION_TYPE_KEYS[option]
+        for option in required_options
+        if option in DOWNLOAD_OPTION_TYPE_KEYS
+    }
+    result_type_keys = {str(item.get("type") or "unknown") for item in results}
+    missing_type_keys = sorted(required_type_keys - result_type_keys)
+    if missing_type_keys:
+        raise RuntimeError(
+            "大健云仓必需素材包下载结果缺少类型: "
+            f"{', '.join(missing_type_keys)}；实际类型={sorted(result_type_keys)}"
+        )
+
+
 async def _click_download_option(option_text: str) -> bool:
     js = r'''(function() {
     var targetText = __TARGET_TEXT__;
@@ -237,24 +267,34 @@ async def _click_download_option(option_text: str) -> bool:
     return await chrome_execute_js(js, timeout=15) == "true"
 
 
-def _store_and_extract_zips(zip_paths: list[Path], save_dir: Path) -> list[dict]:
+def _store_and_extract_zips(
+    zip_paths: list[Path],
+    save_dir: Path,
+    explicit_types: dict[Path, str] | None = None,
+) -> list[dict]:
     save_dir.mkdir(parents=True, exist_ok=True)
     extracted_root = save_dir / RAW_EXTRACTED_DIR
     results = []
+    resolved_types = {
+        Path(path).resolve(): type_key
+        for path, type_key in (explicit_types or {}).items()
+    }
 
     for zip_path in zip_paths:
         zip_path = zip_path.resolve()
-        type_key = _match_download_type(zip_path)
+        type_key = resolved_types.get(zip_path) or _match_download_type(zip_path)
         type_dir = DOWNLOAD_TYPE_DIRS.get(type_key, DOWNLOAD_TYPE_DIRS["unknown"])
         target_zip = save_dir / zip_path.name
-        if target_zip.exists():
+        same_existing = target_zip.exists() and _sha256_path(target_zip) == _sha256_path(zip_path)
+        if target_zip.exists() and not same_existing:
             stem, suffix = target_zip.stem, target_zip.suffix
             index = 1
             while target_zip.exists():
                 target_zip = save_dir / f"{stem}_{index}{suffix}"
                 index += 1
 
-        shutil.move(str(zip_path), str(target_zip))
+        if not same_existing:
+            shutil.copy2(str(zip_path), str(target_zip))
         output_dir = extracted_root / type_dir / target_zip.stem
         extracted_count = _safe_extract_zip(target_zip, output_dir)
         results.append({
@@ -825,10 +865,18 @@ async def _download_material_zips_via_api(save_dir: Path, data: dict, cookie: st
     return [await asyncio.to_thread(_store_and_extract_api_zip, target_zip, type_key, save_dir)]
 
 
-async def _download_material_zips_via_chrome(save_dir: Path, item_code: str | None) -> list[dict]:
-    """参考 gigab2b-product-collector：点击下载按钮，并等待 Chrome 下载出的多个 zip。"""
-    existing_zips = _existing_download_zips()
-    download_started_at = time.time()
+async def _download_material_zips_via_chrome(
+    save_dir: Path,
+    item_code: str | None,
+    product_url: str,
+    *,
+    required_options: set[str] | None = None,
+    download_all: bool = False,
+) -> list[dict]:
+    """打开商品页并按顺序下载所需的全部素材包。"""
+    if not await chrome_navigate(product_url, wait=4.0):
+        raise RuntimeError(f"Chrome 无法打开大建商品页: {product_url}")
+    initial_existing = _existing_download_zips()
     clicked = await _click_download_button()
     if not clicked:
         page_info = await chrome_get_page_info()
@@ -836,23 +884,109 @@ async def _download_material_zips_via_chrome(save_dir: Path, item_code: str | No
             "未找到大健云仓“下载素材包”按钮，请确认 Chrome 已登录大健云仓且商品页正常加载: "
             f"{page_info}"
         )
-
     await asyncio.sleep(1.5)
     options = await _get_download_options()
-    if options:
-        selected = _select_download_option(options)
-        logger.info(f"[Step1] 检测到素材包选项: {options}，选择: {selected}")
-        if not await _click_download_option(selected):
-            raise RuntimeError(f"点击大健云仓素材包选项失败: {selected}")
-    else:
-        logger.info("[Step1] 未检测到素材包选项，按普通商品等待直接下载")
+    required = set(required_options or set())
+    if options and required and not required.issubset(set(options)):
+        missing = sorted(required - set(options))
+        raise RuntimeError(f"大健云仓页面缺少必需素材包选项: {', '.join(missing)}；实际选项={options}")
 
-    downloaded_zips = await _wait_for_browser_zips(existing_zips, item_code, download_started_at)
-    if not downloaded_zips:
+    if not options:
+        # 部分详情页的“下载素材包”是直接下载入口，不会展开 resource-type-class
+        # 菜单；一次点击会同时产生 image+file(To B) 与 information 两个 ZIP。
+        # 因此必须先等待真实下载结果，再按文件名分类并校验必需包，不能把
+        # “没有下拉菜单”直接判定为素材缺失。
+        downloaded = await _wait_for_browser_zips(initial_existing, item_code, time.time() - 2)
+        results = await asyncio.to_thread(_store_and_extract_zips, downloaded, save_dir)
+        _validate_required_download_results(results, required)
+        return results
+
+    priority = _download_option_priority()
+    ordered_options = [option for option in priority if option in options]
+    ordered_options.extend(option for option in options if option not in ordered_options)
+    if not download_all:
+        ordered_options = [_select_download_option(options)]
+    logger.info(f"[Step1] 检测到素材包选项: {options}，计划下载: {ordered_options}")
+
+    all_downloaded: list[Path] = []
+    explicit_types: dict[Path, str] = {}
+    for index, option in enumerate(ordered_options):
+        if index > 0:
+            if not await _click_download_button():
+                raise RuntimeError(f"重新打开素材包菜单失败: {option}")
+            await asyncio.sleep(1.0)
+        current_options = await _get_download_options()
+        if option not in current_options:
+            raise RuntimeError(f"素材包选项在下载过程中消失: {option}；当前选项={current_options}")
+        existing_zips = _existing_download_zips()
+        download_started_at = time.time()
+        if not await _click_download_option(option):
+            raise RuntimeError(f"点击大健云仓素材包选项失败: {option}")
+        downloaded = await _wait_for_browser_zips(existing_zips, item_code, download_started_at)
+        logger.info(f"[Step1] 素材包下载完成: option={option}, files={[p.name for p in downloaded]}")
+        for path in downloaded:
+            resolved_path = path.resolve()
+            explicit_types[resolved_path] = DOWNLOAD_OPTION_TYPE_KEYS.get(option, "unknown")
+            if path not in all_downloaded:
+                all_downloaded.append(path)
+
+    if not all_downloaded:
         raise RuntimeError("大健云仓素材下载未产生 ZIP 文件，停止后续步骤")
-    logger.info(f"[Step1] 检测到新下载 ZIP: {[p.name for p in downloaded_zips]}")
+    results = await asyncio.to_thread(_store_and_extract_zips, all_downloaded, save_dir, explicit_types)
+    _validate_required_download_results(results, required)
+    return results
 
-    return await asyncio.to_thread(_store_and_extract_zips, downloaded_zips, save_dir)
+
+async def _download_material_zips(
+    save_dir: Path,
+    data: dict,
+    cookie: str | None,
+    product_url: str,
+    *,
+    required_options: set[str] | None = None,
+    download_all: bool = False,
+) -> list[dict]:
+    """按配置选择素材包下载方式，并在首选方式失败时自动使用另一方式兜底。
+
+    browser（默认）：Chrome 打开商品页并点击“下载素材包”；最贴近人工操作，
+    能处理官方 Buyer OpenAPI 不返回素材 ZIP 的情况。
+
+    api：调用大建网页登录后的 product/product/download 与 downloadZip 接口；
+    该接口同样依赖 Chrome 登录 Cookie，不是官方 Buyer OpenAPI。
+    """
+    mode = str(settings.STEP1_MATERIAL_DOWNLOAD_MODE or "browser").strip().lower()
+    if mode not in {"browser", "api"}:
+        raise RuntimeError(f"不支持的素材包下载方式: {mode}")
+
+    async def download_via_browser() -> list[dict]:
+        return await _download_material_zips_via_chrome(
+            save_dir,
+            data.get("itemCode"),
+            product_url,
+            required_options=required_options,
+            download_all=download_all,
+        )
+
+    async def download_via_api() -> list[dict]:
+        api_cookie = cookie or await _get_gigab2b_cookie(product_url)
+        return await _download_material_zips_via_api(save_dir, data, api_cookie)
+
+    methods = (
+        (("browser", download_via_browser), ("api", download_via_api))
+        if mode == "browser"
+        else (("api", download_via_api), ("browser", download_via_browser))
+    )
+    first_name, first_method = methods[0]
+    fallback_name, fallback_method = methods[1]
+    try:
+        logger.info(f"[Step1] 素材包首选下载方式: {first_name}")
+        return await first_method()
+    except Exception as first_error:
+        logger.warning(
+            f"[Step1] 素材包 {first_name} 下载失败，回退 {fallback_name}: "
+            f"{type(first_error).__name__}: {first_error}"
+        )
+        return await fallback_method()
 
 
 def _download_summary(results: list[dict]) -> tuple[int, int]:
@@ -1263,15 +1397,12 @@ async def _collect_product_locked(product_id: int) -> dict:
         downloaded_files = []
         material_download_failed = False
         try:
-            try:
-                logger.info("[Step1] 尝试通过 GigaB2B API 下载素材 ZIP...")
-                downloaded_files = await _download_material_zips_via_api(raw_file_dir, data, api_cookie)
-            except Exception as api_error:
-                logger.warning(
-                    "[Step1] GigaB2B API 素材下载失败，回退 Chrome 点击下载: "
-                    f"{type(api_error).__name__}: {api_error}"
-                )
-                downloaded_files = await _download_material_zips_via_chrome(raw_file_dir, pd.item_code)
+            downloaded_files = await _download_material_zips(
+                raw_file_dir,
+                data,
+                api_cookie,
+                url,
+            )
         except Exception as e:
             download_unavailable_reason = _download_missing_unavailable_reason(data, pd.stock, e)
             if download_unavailable_reason:

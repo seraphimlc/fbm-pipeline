@@ -63,6 +63,13 @@ Output valid JSON only:
       "filename": "source.jpg",
       "visual_summary": "",
       "visible_selling_point": "",
+      "material_texture": "",
+      "scene_type": "",
+      "size_scale_cues": "",
+      "visible_parts": [],
+      "contains_person": false,
+      "confidence": "high|medium|low",
+      "uncertainty": [],
       "conversion_role": "exact_set|alternate_angle|size_scale|material_detail|function_use|lifestyle|package_contents|proof|exclude",
       "risk_flags": [],
       "slot01_score": 0,
@@ -432,6 +439,86 @@ def _merge_batch_results(batch_results: list[dict[str, Any]], image_batches: lis
             "complete": True,
         },
         "model": model,
+    }
+
+
+def selection_to_image_analysis(selection: dict[str, Any]) -> dict[str, Any]:
+    """Turn the all-candidate vision pass into the downstream visual evidence.
+
+    Automatic selection already requires a complete VLM review of every
+    candidate image.  Reusing the reviews for the selected main/gallery avoids
+    paying for a second, identical vision pass later in the product flow.
+    Unselected reviews remain in ``image_selection_analysis`` for audit while
+    the consumer-facing evidence set contains only Listing images.
+    """
+    reviews = selection.get("image_reviews") if isinstance(selection.get("image_reviews"), list) else []
+    review_by_id = {
+        str(review.get("image_id") or "").strip(): review
+        for review in reviews
+        if isinstance(review, dict) and str(review.get("image_id") or "").strip()
+    }
+    ordered_selection = [selection.get("selected_main"), *(selection.get("selected_gallery") or [])]
+    images: list[dict[str, Any]] = []
+    gallery_selection: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for slot, selected in enumerate(ordered_selection, start=1):
+        if not isinstance(selected, dict):
+            continue
+        image_id = str(selected.get("image_id") or "").strip()
+        if not image_id or image_id in seen_ids:
+            continue
+        seen_ids.add(image_id)
+        review = review_by_id.get(image_id, {})
+        role = "main" if slot == 1 else _story_role(selected.get("role") or review.get("conversion_role"))
+        evidence = {
+            **review,
+            "image_id": image_id,
+            "path": selected.get("path") or review.get("path"),
+            "image_url": selected.get("image_url") or review.get("image_url"),
+            "filename": selected.get("filename") or review.get("filename"),
+            "conversion_role": review.get("conversion_role") or role,
+            "visible_selling_point": review.get("visible_selling_point") or selected.get("reason"),
+            "risk_flags": review.get("risk_flags") if isinstance(review.get("risk_flags"), list) else selected.get("risk_flags") or [],
+            "confidence": review.get("confidence") or selection.get("confidence"),
+            "uncertainty": review.get("uncertainty") if isinstance(review.get("uncertainty"), list) else [],
+            "slot": slot,
+            "selection_role": role,
+        }
+        evidence["multimodal_result"] = {
+            "visual_summary": review.get("visual_summary"),
+            "visible_selling_point": evidence["visible_selling_point"],
+            "material_texture": review.get("material_texture"),
+            "scene_type": review.get("scene_type"),
+            "size_scale_cues": review.get("size_scale_cues"),
+            "visible_parts": review.get("visible_parts"),
+            "confidence": evidence["confidence"],
+            "uncertainty": evidence["uncertainty"],
+        }
+        images.append(evidence)
+        gallery_selection.append({
+            "slot": slot,
+            "image_id": image_id,
+            "path": evidence["path"],
+            "selection_role": role,
+            "decision_reason": selected.get("reason") or review.get("decision_reason"),
+        })
+    if not images:
+        raise AutoImageSelectionError("候选图片视觉分析未生成已选图片证据")
+    return {
+        "images": images,
+        "gallery_selection": gallery_selection,
+        "selection_diagnostics": {
+            "analysis_stage": "candidate_vision_before_selection",
+            "candidate_review_count": len(reviews),
+            "selected_image_count": len(images),
+            "decision_coverage": selection.get("decision_coverage") or {},
+            "warnings": selection.get("warnings") or [],
+        },
+        "selling_points": list(dict.fromkeys(
+            str(image.get("visible_selling_point") or "").strip()
+            for image in images
+            if str(image.get("visible_selling_point") or "").strip()
+        )),
     }
 
 

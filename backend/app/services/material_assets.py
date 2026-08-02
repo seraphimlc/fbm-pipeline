@@ -44,7 +44,7 @@ def _unique_target(directory: Path, filename: str) -> Path:
 
 
 def organize_video_files(material_dir: Path) -> Path | None:
-    """Move collected video files into material_dir/video and return the folder when videos exist."""
+    """Copy collected videos into material_dir/video without modifying extracted originals."""
     if not material_dir.is_dir():
         return None
 
@@ -66,7 +66,7 @@ def organize_video_files(material_dir: Path) -> Path | None:
         if _is_in_dir(path, video_dir):
             continue
         target = _unique_target(video_dir, path.name)
-        shutil.move(str(path), str(target))
+        shutil.copy2(str(path), str(target))
 
     return video_dir
 

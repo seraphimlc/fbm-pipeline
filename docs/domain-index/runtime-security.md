@@ -17,6 +17,7 @@
 - 本地一键启动 `scripts/start.sh` 在启动 uvicorn 前会显式执行 `python -m app.database`，跑可重复 schema maintenance，确保 ORM 新字段和 MySQL 现有测试库对齐；这不改变普通 API lifespan 的默认 no-DDL 边界。
 - 外部 token-bearing 请求默认开启 TLS verify；私有代理应配置 `EXTERNAL_HTTP_CA_BUNDLE`，不要默认关闭校验。
 - 文件/图片代理默认只开放 `PRODUCT_BASE_DIR`，额外目录必须通过 `IMAGE_PROXY_EXTRA_ROOTS` 显式配置；不默认开放 `~/Documents` 或 `/tmp`。
+- 商品素材预览只允许 `ProductData.material_dir` 内的已登记 `ProductMaterialAsset`。图片、视频和 PDF 走受控 FileResponse，HTML/文本先转义并带 restrictive CSP，XLSX/CSV/TSV 只返回限制行列数的结构化预览；任何越界路径返回 403。预览接口只读，ZIP 下载与准备阶段使用 `shutil.copy2` 保留 Downloads 原文件。
 
 ## 关键入口
 
@@ -30,6 +31,7 @@
 - 配置 API：`backend/app/api/config_api.py`；本地环境变量页面通过 `/api/config/local-env` 读取脱敏列表、逐项更新或导入 `backend/.env`，敏感值不得由读取接口返回。
 - 任务 API：`backend/app/api/task_runs.py`
 - 商品/文件/导出 API：`backend/app/api/products.py`
+- GIGA 素材浏览器执行与逐文件登记：`backend/app/services/product_material_prepare.py`, `backend/app/pipeline/step1_collect.py`
 - 数据源 API：`backend/app/api/data_sources.py`
 - 外部 HTTP client：`backend/app/services/aplus_upload.py`, `backend/app/pipeline/step9_aplus_image.py`
 - 领星 ERP A+ 上传/发布：`docs/lingxing-aplus-upload.md`、`docs/superpowers/specs/2026-06-23-lingxing-aplus-publish-after-aplus-done-prd.md`、`docs/superpowers/specs/2026-06-23-lingxing-aplus-publish-technical-plan.md` 和 `docs/superpowers/specs/2026-06-24-lingxing-aplus-enhanced-basic-prd.md`；该链路依赖本机 Chrome 登录态、token-bearing HTTP 请求和真实外部网关。T1 仅新增字段、状态 registry、single writer 和 schema/index bootstrap，不触发真实外部调用。T2 新增 `backend/app/services/lingxing_listing_client.py` 和 `lingxing_listing_sync` task，真实 Listing 读取默认由 `LINGXING_LISTING_SYNC_ALLOW_REAL_EXTERNAL_CALLS=false` fail closed；即使显式开启，也必须同时配置 `LINGXING_APLUS_STORE_NAME` 和 `LINGXING_APLUS_STORE_ID`，缺失时返回 `store_config_required`，不得回落到旧默认店铺。T3 新增 `backend/app/services/lingxing_aplus_publish_client.py` 和 `lingxing_aplus_publish` task，真实草稿保存默认由 `LINGXING_APLUS_ALLOW_REAL_EXTERNAL_CALLS=false` fail closed，`LINGXING_APLUS_SUBMIT_FOR_APPROVAL=false` 且 T3 client 不支持 submit；enhanced `enhanced_basic_aplus_v1` 只增加多 slot 本地 preflight、上传和 mapper assembly，不改变默认外部调用关闭、draft-save-only、submit/edit/draft visibility 禁止边界；task event 只能记录 seller SKU/ASIN/store/site/idHash/slot id/结果摘要，不得记录 cookie、token 或完整 header。

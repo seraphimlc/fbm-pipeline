@@ -126,7 +126,7 @@ On success, write one selected row:
   - `final_reason`
   - `final_risks_json`
   - `final_model="rule_based_auto_competitor_v1"`
-  - `final_rule_version="auto_competitor_selection_v1"`
+  - `final_rule_version="auto_competitor_selection_v2"`
   - `final_raw_json`
   - `final_selected_at=now`
 - non-selected current rows:

@@ -420,10 +420,35 @@ async def _execute_step(step_id: int, worker_id: str) -> bool:
             await emit_event(db, step=step, event_type="error", message=step.error_message)
             await db.commit()
         if success_payload is not None:
-            action = _registered_action_for_step(step.step_type)
+            action = _registered_action_for_step(step_type)
             if action:
                 try:
+                    # Persist scheduler-owned structural success before the business
+                    # hook creates a downstream task. Downstream validators may
+                    # require the current upstream TaskRun/TaskStep to be succeeded;
+                    # leaving the run as running until after the hook creates a false
+                    # "missing successful upstream task" failure.
+                    await _refresh_group_and_run(db, run_id)
+                    result = await db.execute(
+                        select(TaskStep)
+                        .where(TaskStep.id == step_id)
+                        .options(selectinload(TaskStep.task_run), selectinload(TaskStep.task_group))
+                        .execution_options(populate_existing=True)
+                    )
+                    step = result.scalar_one()
                     await action.on_step_success(db, step, success_payload)
+                    # Product success hooks may commit or roll back while creating the
+                    # next task. A rollback expires the caller's ORM objects, so using
+                    # the old step here can trigger async lazy loading/MissingGreenlet.
+                    # Reload inside the current async DB context before writing the
+                    # scheduler-owned terminal projection event.
+                    result = await db.execute(
+                        select(TaskStep)
+                        .where(TaskStep.id == step_id)
+                        .options(selectinload(TaskStep.task_run), selectinload(TaskStep.task_group))
+                        .execution_options(populate_existing=True)
+                    )
+                    step = result.scalar_one()
                     await emit_event(db, step=step, event_type="status", message="step 成功投影完成")
                     await db.commit()
                 except Exception as exc:

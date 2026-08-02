@@ -1,6 +1,7 @@
 from pydantic_settings import BaseSettings
 from pathlib import Path
 import httpx
+import json
 from openai import AsyncOpenAI
 
 
@@ -14,6 +15,27 @@ def _resolve_local_path(path: Path) -> Path:
     if expanded.is_absolute():
         return expanded
     return (BACKEND_DIR / expanded).resolve()
+
+
+def _load_gpt_image_external_config(path: Path | None) -> dict[str, str]:
+    """Load an optional personal GPT Image provider config without exposing credentials."""
+    if path is None:
+        return {}
+    resolved = _resolve_local_path(path)
+    if not resolved.is_file():
+        return {}
+    try:
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError("GPT Image external config is unreadable or invalid JSON") from exc
+    base_url = str(payload.get("base_url") or "").strip().rstrip("/")
+    api_key = str(payload.get("api_key") or "").strip()
+    model = str(payload.get("model") or "").strip()
+    if not base_url or not api_key:
+        raise ValueError("GPT Image external config requires base_url and api_key")
+    if not base_url.endswith("/v1"):
+        base_url += "/v1"
+    return {"base_url": base_url, "api_key": api_key, "model": model}
 
 
 class Settings(BaseSettings):
@@ -60,13 +82,19 @@ class Settings(BaseSettings):
     VLM_API_KEY: str = ""
     VLM_MODEL: str = "gpt-5.5"
     VLM_USE_LLM_API: bool = True  # True 时使用 LLM_API_BASE/LLM_API_KEY 跑图片分析
+    # Step6 会同时处理本地 To B 素材和远程供应商图片。高分辨率图片一次塞太多会让
+    # OpenAI-compatible 网关在默认 60 秒内超时，因此限制每批图片数并给真实视觉
+    # 推理保留足够时间；失败仍然 fail-closed，不下载远程图、不切 Contact Sheet 兜底。
+    STEP6_VLM_BATCH_SIZE: int = 2
+    STEP6_VLM_TIMEOUT_SECONDS: int = 150
 
     # GPT Image API (t8star — A+出图)
     GPT_IMAGE_API_BASE: str = "https://ai.t8star.cn/v1"
     GPT_IMAGE_API_KEY: str = ""
     GPT_IMAGE_MODEL: str = "gpt-image-2"
     GPT_IMAGE_USE_LLM_API: bool = False  # True 时复用 LLM_API_BASE/LLM_API_KEY 跑生图，模型仍使用 GPT_IMAGE_MODEL
-    APLUS_IMAGE_API_MODE: str = "edits"
+    GPT_IMAGE_EXTERNAL_CONFIG_PATH: Path | None = Path.home() / ".codex/skills/gpt-image-async/scripts/config.json"
+    APLUS_IMAGE_API_MODE: str = "generations"
     APLUS_IMAGE_GENERATION_QUALITY: str = "high"
     APLUS_IMAGE_WIDTH: int = 1940
     APLUS_IMAGE_HEIGHT: int = 1200
@@ -74,9 +102,13 @@ class Settings(BaseSettings):
     APLUS_IMAGE_MAX_BYTES: int = 2_000_000
     APLUS_IMAGE_JPEG_QUALITY: int = 88
     APLUS_IMAGE_MIN_JPEG_QUALITY: int = 55
-    APLUS_IMAGE_API_RETRIES: int = 3
+    # A+ generations 失败后必须停在失败态，交给人工决定是否再次消耗生图额度。
+    APLUS_IMAGE_API_RETRIES: int = 1
     APLUS_IMAGE_OVERWRITE_POLICY: str = "skip_success"  # skip_success/overwrite_all
-    AUTO_APLUS_AFTER_EXPORT_READY: bool = False
+    APLUS_PLAN_LLM_TIMEOUT_SECONDS: int = 120
+    APLUS_SCRIPT_LLM_TIMEOUT_SECONDS: int = 180
+    # 新商品默认在 Listing 完成后继续创建 A+ 派生任务；A+ 失败不会回退商品的待导出状态。
+    AUTO_APLUS_AFTER_EXPORT_READY: bool = True
     LINGXING_APLUS_STORE_NAME: str = ""
     LINGXING_APLUS_STORE_ID: str = ""
     LINGXING_APLUS_SITE: str = "US"
@@ -121,6 +153,15 @@ class Settings(BaseSettings):
     AMAZON_SEARCH_BETWEEN_QUERY_DELAY_SECONDS: float = 10.0
     AMAZON_SEARCH_EVIDENCE_DIR: Path | None = None
 
+    # Amazon listing detail adapter. Uses the same dedicated local Chrome worker tab
+    # as search, but remains separately fail-closed and must be explicitly enabled.
+    AMAZON_LISTING_DETAIL_ADAPTER: str = "unconfigured"  # unconfigured/chrome
+    AMAZON_LISTING_DETAIL_ENABLE_REAL_BROWSER: bool = False
+    AMAZON_LISTING_DETAIL_NAV_TIMEOUT_SECONDS: int = 45
+    AMAZON_LISTING_DETAIL_AFTER_LOAD_WAIT_SECONDS: float = 4.0
+    AMAZON_LISTING_DETAIL_BETWEEN_CANDIDATE_DELAY_SECONDS: float = 8.0
+    AMAZON_LISTING_DETAIL_EVIDENCE_DIR: Path | None = None
+
     # Pipeline
     PIPELINE_MAX_CONCURRENCY: int = 2  # 同时运行的Pipeline任务数上限
     BULK_START_MAX_TASKS: int = 100    # 单次批量启动最大任务数
@@ -129,15 +170,22 @@ class Settings(BaseSettings):
     STEP1_EXTRACT_RETRY_DELAY_SECONDS: int = 3  # Step1页面信息提取重试间隔
     STEP1_AFTER_READY_WAIT_SECONDS: float = 1.0  # 页面有内容后再等价格/规格等异步区渲染
     STEP1_DOWNLOAD_TIMEOUT_SECONDS: int = 300  # Step1素材包下载超时时间
+    # browser: 先打开商品页并点击“下载素材包”，失败后回退网页登录接口；api: 顺序相反。
+    STEP1_MATERIAL_DOWNLOAD_MODE: str = "browser"
     STEP1_MATERIAL_PACKAGE_PRIORITY: str = "To B素材包,Retail Ready素材包,Information"
     STEP1_PRICE_MISSING_POLICY: str = "manual_review"  # fail/manual_review/continue
     STEP1_MATERIAL_MISSING_POLICY: str = "manual_review"  # fail/manual_review/continue
     STEP1_ALLOW_EXISTING_MATERIALS: bool = True
-    PRICING_NET_REVENUE_RATE: float = 0.685  # 售价扣除平台/优惠/预估变动费用后的净收入比例
-    PRICING_TARGET_MARGIN_RATE: float = 0.05  # 目标净利率，按利润/售价计算
-    PRICING_MIN_PROFIT: float = 10.0  # 单件最低利润
-    PRICING_FIXED_COST: float = 9.0  # 固定成本预留
-    PRICING_RETURN_CREDIT_RATE: float = 0.06  # 按货值估算的退货保险抵扣比例
+    # Amazon FBM 定价（美元）。完整推导见 pipeline/step2_pricing.py。
+    PRICING_COMMISSION_RATE: float = 0.10  # Amazon 销售佣金：售价的 10%
+    PRICING_RETURN_RATE: float = 0.04  # 实际退货率：4%
+    PRICING_INSURANCE_RATE: float = 0.025  # 大建退货保障保费：货值的 2.5%
+    PRICING_INSURANCE_PAYOUT_RATE: float = 0.60  # 退货保障赔付：只赔货值的 60%，不赔物流
+    PRICING_RETURN_MANAGEMENT_FEE_RATE: float = 0.20  # Amazon 退货管理费：佣金的 20%
+    PRICING_RETURN_MANAGEMENT_FEE_CAP: float = 5.0  # Amazon 单笔退货管理费封顶（美元）
+    PRICING_ADVERTISING_COST: float = 2.0  # 每成交订单的广告成本预留（美元）
+    PRICING_TARGET_MARGIN_RATE: float = 0.05  # 目标净利率，按预期利润/售价计算
+    PRICING_MIN_PROFIT: float = 10.0  # 单件最低预期利润（美元）
     STEP3_MANUAL_LOGIN_ON_AUTH_FAILURE: bool = True  # 卖家精灵未登录/过期时打开页面等待人工登录
     STEP4_MISSING_ASIN_POLICY: str = "manual_review"  # fail/manual_review/continue
     STEP4_CATEGORY_MISSING_POLICY: str = "manual_review"  # fail/manual_review/continue
@@ -147,6 +195,9 @@ class Settings(BaseSettings):
     STEP5_LLM_MAX_TOKENS: int = 4500
     STEP5_LLM_TIMEOUT_SECONDS: int = 120
     STEP5_LLM_RETRY_ATTEMPTS: int = 2
+    # 用户心智要一次回答 15-18 题并生成 Listing/A+ 共用策略，真实输出可达 7500 tokens，
+    # 不应沿用普通 Listing 的短请求超时。
+    CUSTOMER_MINDSET_LLM_TIMEOUT_SECONDS: int = 300
     STEP5_DESCRIPTION_INPUT_MAX_CHARS: int = 8000
     STEP5_FEATURES_INPUT_MAX_CHARS: int = 4000
     STEP5_STRUCTURED_INPUT_MAX_CHARS: int = 6000
@@ -154,7 +205,7 @@ class Settings(BaseSettings):
     STEP5_IMAGE_EVIDENCE_MAX_CHARS: int = 500
     STEP5_IMAGE_DIAGNOSTICS_MAX_CHARS: int = 1000
     STEP5_TITLE_MAX_CHARS: int = 75
-    STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS: int = 125
+    STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS: int = 120
     STEP5_BULLET_MAX_CHARS: int = 500
     STEP5_SEARCH_TERMS_MAX_BYTES: int = 250
     APLUS_CONCURRENCY: int = 1     # A+图并发数
@@ -199,17 +250,42 @@ class Settings(BaseSettings):
     @property
     def resolved_gpt_image_api_base(self) -> str:
         """返回Step9实际使用的生图API地址。"""
-        return self.LLM_API_BASE if self.GPT_IMAGE_USE_LLM_API else self.GPT_IMAGE_API_BASE
+        if self.GPT_IMAGE_USE_LLM_API:
+            return self.LLM_API_BASE
+        external = _load_gpt_image_external_config(self.GPT_IMAGE_EXTERNAL_CONFIG_PATH)
+        base_url = (external.get("base_url") or self.GPT_IMAGE_API_BASE).rstrip("/")
+        # gpt-image-async 的个人配置保存的是服务根地址（例如 https://ai.t8star.cn），
+        # 而应用内独立配置保存的是 /v1 地址。Step 9 使用 OpenAI-compatible paths，
+        # 因此统一为带 /v1 的 base，避免切到 T8Star 后意外请求 /images/... 根路径。
+        return base_url if base_url.endswith("/v1") else f"{base_url}/v1"
 
     @property
     def resolved_gpt_image_api_key(self) -> str:
         """返回Step9实际使用的生图API Key。"""
-        return self.LLM_API_KEY if self.GPT_IMAGE_USE_LLM_API else self.GPT_IMAGE_API_KEY
+        if self.GPT_IMAGE_USE_LLM_API:
+            return self.LLM_API_KEY
+        if self.GPT_IMAGE_API_KEY:
+            return self.GPT_IMAGE_API_KEY
+        return _load_gpt_image_external_config(self.GPT_IMAGE_EXTERNAL_CONFIG_PATH).get("api_key") or ""
+
+    @property
+    def resolved_gpt_image_model(self) -> str:
+        """返回Step9实际使用的生图模型。"""
+        if self.GPT_IMAGE_USE_LLM_API or self.GPT_IMAGE_API_KEY:
+            return self.GPT_IMAGE_MODEL
+        return _load_gpt_image_external_config(self.GPT_IMAGE_EXTERNAL_CONFIG_PATH).get("model") or self.GPT_IMAGE_MODEL
 
     @property
     def gpt_image_api_provider(self) -> str:
         """返回Step9生图通道名称，便于日志和配置页确认。"""
-        return "LLM_API" if self.GPT_IMAGE_USE_LLM_API else "GPT_IMAGE_API"
+        if self.GPT_IMAGE_USE_LLM_API:
+            return "LLM_API"
+        if self.GPT_IMAGE_API_KEY:
+            return "GPT_IMAGE_API"
+        external = _load_gpt_image_external_config(self.GPT_IMAGE_EXTERNAL_CONFIG_PATH)
+        if "ai.t8star.cn" in str(external.get("base_url") or "").lower():
+            return "T8Star"
+        return "GPT_IMAGE_EXTERNAL_CONFIG" if self.resolved_gpt_image_api_key else "GPT_IMAGE_API"
 
     @property
     def external_http_verify(self) -> bool | str:

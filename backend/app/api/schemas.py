@@ -228,6 +228,10 @@ class OfflineTaskGigaPullRequest(BaseModel):
     page_size: int | None = Field(default=None, ge=1, le=200)
     max_pages: int | None = Field(default=None, ge=1)
     new_sku_limit: int | None = Field(default=None, ge=1, le=10000)
+    sku_codes: list[str] | None = Field(default=None, max_length=5000)
+    pipeline_target: Literal["export_ready", "aplus_done"] = "export_ready"
+    refresh_existing: bool = False
+    test_session_key: str | None = Field(default=None, min_length=1, max_length=100)
 
 
 class OfflineTaskGigaDynamicSyncRequest(BaseModel):
@@ -789,6 +793,9 @@ class ProductResponse(BaseModel):
     source_data_source_id: int | None = None
     source_site: str | None = None
     source_batch_id: str | None = None
+    pipeline_target: str | None = None
+    pipeline_test_session_key: str | None = None
+    pipeline_origin_task_run_id: int | None = None
     sales_channel: Literal["amazon", "tiktok"] = "amazon"
     channel_status: str | None = None
     channel_status_label: str | None = None
@@ -889,6 +896,36 @@ class ProductGeneratedFileResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ProductMaterialAssetResponse(BaseModel):
+    id: int
+    product_id: int
+    parent_asset_id: int | None = None
+    source_task_run_id: int | None = None
+    test_session_key: str | None = None
+    package_type: str | None = None
+    asset_kind: str
+    original_filename: str
+    path: str
+    relative_path: str | None = None
+    content_hash: str
+    file_size: int | None = None
+    mime_type: str | None = None
+    width: int | None = None
+    height: int | None = None
+    duration_seconds: float | None = None
+    processing_status: str
+    rejection_reason: str | None = None
+    downstream_usage_json: str | None = None
+    contact_sheet_path: str | None = None
+    contact_sheet_page: int | None = None
+    contact_sheet_label: str | None = None
+    metadata_json: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+    model_config = {"from_attributes": True}
+
+
 class ProductDetail(ProductResponse):
     """完整商品详情（含子表数据）"""
     data: "ProductDataResponse | None" = None
@@ -896,6 +933,8 @@ class ProductDetail(ProductResponse):
     aplus: "ProductAplusResponse | None" = None
     zip_files: list[ProductFileEntry] = Field(default_factory=list)
     generated_files: list[ProductGeneratedFileResponse] = Field(default_factory=list)
+    material_assets: list[ProductMaterialAssetResponse] = Field(default_factory=list)
+    material_summary: dict[str, Any] = Field(default_factory=dict)
     video_folder: ProductFolderEntry | None = None
     aplus_folder: ProductFolderEntry | None = None
     amazon_export_preview: dict[str, Any] | None = None

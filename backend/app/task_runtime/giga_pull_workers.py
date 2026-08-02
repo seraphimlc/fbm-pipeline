@@ -13,6 +13,8 @@ from app.models import (
     GigaRawSkuDetail,
     GigaSku,
     GigaSyncBatch,
+    Product,
+    ProductData,
     TaskGroup,
     TaskStep,
 )
@@ -46,6 +48,61 @@ from app.task_runtime.registry import TaskContext, register_worker
 
 def _chunks(items: list[str], size: int) -> list[list[str]]:
     return [items[index:index + size] for index in range(0, len(items), size)]
+
+
+def _sku_codes_without_materialized_products(
+    listed_skus: list[str],
+    item_code_by_sku: dict[str, str | None],
+    materialized_item_codes: set[str],
+) -> list[str]:
+    """Keep raw GIGA cache separate from actual product-draft existence.
+
+    A SKU already present in `giga_skus` is merely cached source data.  It must
+    remain eligible after its Product/ProductData draft has been deleted.
+    """
+    return [
+        sku
+        for sku in listed_skus
+        if not (str(item_code_by_sku.get(sku) or "").strip() in materialized_item_codes)
+    ]
+
+
+async def _sku_codes_needing_product_drafts(
+    ctx: TaskContext,
+    *,
+    listed_skus: list[str],
+    site: str,
+    data_source_id: int,
+) -> list[str]:
+    cached_result = await ctx.db.execute(
+        select(GigaSku.sku_code, GigaSku.item_code).where(
+            GigaSku.site == site,
+            GigaSku.data_source_id == data_source_id,
+            GigaSku.sku_code.in_(listed_skus),
+        )
+    )
+    item_code_by_sku = {
+        str(sku_code): str(item_code).strip() if item_code else None
+        for sku_code, item_code in cached_result.all()
+        if sku_code
+    }
+    cached_item_codes = {item_code for item_code in item_code_by_sku.values() if item_code}
+    if not cached_item_codes:
+        return listed_skus
+    product_result = await ctx.db.execute(
+        select(ProductData.item_code)
+        .join(Product, Product.id == ProductData.product_id)
+        .where(
+            Product.source_data_source_id == data_source_id,
+            ProductData.item_code.in_(cached_item_codes),
+        )
+    )
+    materialized_item_codes = {
+        str(item_code).strip()
+        for item_code in product_result.scalars().all()
+        if str(item_code or "").strip()
+    }
+    return _sku_codes_without_materialized_products(listed_skus, item_code_by_sku, materialized_item_codes)
 
 
 def _payload(step: TaskStep) -> dict[str, Any]:
@@ -97,6 +154,9 @@ async def giga_pull_plan(ctx: TaskContext) -> dict[str, Any]:
     new_sku_limit = payload.get("new_sku_limit")
     new_sku_limit = int(new_sku_limit) if new_sku_limit else None
     skip_existing = bool(payload.get("skip_existing", True))
+    requested_sku_codes = list(dict.fromkeys(
+        str(sku).strip() for sku in (payload.get("requested_sku_codes") or []) if str(sku or "").strip()
+    ))
 
     batch_result = await ctx.db.execute(
         select(GigaSyncBatch).where(
@@ -140,13 +200,22 @@ async def giga_pull_plan(ctx: TaskContext) -> dict[str, Any]:
     if not listed_skus:
         raise RuntimeError("GIGA 商品列表返回 0 个 SKU")
 
-    sku_codes = listed_skus
+    if requested_sku_codes:
+        listed_set = {sku.lower(): sku for sku in listed_skus}
+        missing_requested = [sku for sku in requested_sku_codes if sku.lower() not in listed_set]
+        if missing_requested:
+            raise RuntimeError(f"指定 SKU 未出现在 GIGA 列表 API: {', '.join(missing_requested)}")
+        sku_codes = [listed_set[sku.lower()] for sku in requested_sku_codes]
+    else:
+        sku_codes = listed_skus
     skipped_existing_count = 0
     if skip_existing:
-        existing_query = select(GigaSku.sku_code).where(GigaSku.site == site, GigaSku.data_source_id == data_source_id)
-        existing_result = await ctx.db.execute(existing_query)
-        existing_skus = {sku for sku in existing_result.scalars().all() if sku}
-        sku_codes = [sku for sku in listed_skus if sku not in existing_skus]
+        sku_codes = await _sku_codes_needing_product_drafts(
+            ctx,
+            listed_skus=listed_skus,
+            site=site,
+            data_source_id=data_source_id,
+        )
         skipped_existing_count = len(listed_skus) - len(sku_codes)
     available_new_sku_count = len(sku_codes)
     if new_sku_limit is not None:
@@ -166,7 +235,7 @@ async def giga_pull_plan(ctx: TaskContext) -> dict[str, Any]:
             group.status = RUN_STATUS_SUCCEEDED
             group.progress_current = 0
             group.progress_total = 0
-            group.summary_json = json_dumps({"status": "noop", "reason": "所有远端 SKU 已存在，本次无需拉取新 SKU"})
+            group.summary_json = json_dumps({"status": "noop", "reason": "所有远端 SKU 均已有商品草稿，本次无需创建新商品"})
             group.started_at = group.started_at or now
             group.finished_at = now
             group.updated_at = now
@@ -194,7 +263,7 @@ async def giga_pull_plan(ctx: TaskContext) -> dict[str, Any]:
             "available_new_sku_count": available_new_sku_count,
             "deferred_new_sku_count": deferred_new_sku_count,
             "chunk_count": 0,
-            "message": "所有远端 SKU 已存在，本次无需拉取新 SKU",
+            "message": "所有远端 SKU 均已有商品草稿，本次无需创建新商品",
         })
         await ctx.db.commit()
         return json_loads(ctx.run.summary_json, {})
@@ -632,6 +701,9 @@ async def giga_pull_materialize_products(ctx: TaskContext) -> dict[str, Any]:
         batch_id=batch_id,
         site=context.site,
         data_source_id=context.id,
+        pipeline_target=str(payload.get("pipeline_target") or "export_ready"),
+        test_session_key=str(payload.get("test_session_key") or "").strip() or None,
+        origin_task_run_id=int(payload.get("origin_task_run_id") or ctx.run.id),
     )
     batch = await _batch(ctx, batch_id, context.site, int(context.id or 0))
     price_count = await ctx.db.scalar(select(func.count(GigaPrice.id)).where(GigaPrice.batch_id == batch_id, GigaPrice.site == context.site, GigaPrice.data_source_id == context.id))

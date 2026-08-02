@@ -235,6 +235,23 @@ def _canonical_source_value(value: Any) -> Any:
         return value
 
 
+def _mindset_image_source_value(field: str, value: Any) -> Any:
+    """Remove diagnostics produced only after Listing copy exists from the upstream fingerprint."""
+    parsed = _canonical_source_value(value)
+    if field != "image_analysis" or not isinstance(parsed, dict):
+        return parsed
+    normalized = dict(parsed)
+    diagnostics = normalized.get("selection_diagnostics")
+    if isinstance(diagnostics, dict):
+        upstream_diagnostics = dict(diagnostics)
+        # Step5 recomputes these from the final title/bullets/description. They are
+        # downstream audit results, not inputs to the customer-mindset brief.
+        upstream_diagnostics.pop("listing_image_alignment", None)
+        upstream_diagnostics.pop("image_health", None)
+        normalized["selection_diagnostics"] = upstream_diagnostics
+    return normalized
+
+
 def keyword_research_ready(value: Any) -> bool:
     """Require at least one real keyword record, not merely a truthy JSON string."""
     parsed = _canonical_source_value(value)
@@ -289,7 +306,7 @@ def build_mindset_input_fingerprint(product: Product) -> str:
             for field in MINDSET_INPUT_DATA_FIELDS
         } if pd else {},
         "images": {
-            field: _canonical_source_value(getattr(pi, field, None))
+            field: _mindset_image_source_value(field, getattr(pi, field, None))
             for field in MINDSET_INPUT_IMAGE_FIELDS
         } if pi else {},
     }
@@ -535,6 +552,18 @@ def build_evidence_catalog(product: Product, competitor: AmazonCompetitorSearchC
                 value=compact_properties,
                 limit=settings.STEP5_STRUCTURED_INPUT_MAX_CHARS,
             )
+            material_facts = snapshot.get("material_facts")
+            if isinstance(material_facts, dict):
+                material_sources = material_facts.get("sources")
+                _add_evidence(
+                    catalog,
+                    evidence_id="supplier_material.information_package",
+                    source="product_data.gigab2b_raw_snapshot.material_facts.sources",
+                    kind="own_product_fact",
+                    reliability="supplier_material",
+                    value=material_sources if isinstance(material_sources, list) else [],
+                    limit=settings.STEP5_STRUCTURED_INPUT_MAX_CHARS,
+                )
 
     image_payload = _json_value(pi.image_analysis, {}) if pi else {}
     if isinstance(image_payload, dict):
@@ -1379,7 +1408,12 @@ def format_customer_mindset_context(value: Any, *, surface: str, required: bool 
 
 async def _llm_json(*, system_prompt: str, user_prompt: str, max_tokens: int, temperature: float) -> dict[str, Any]:
     client = settings.get_llm_client()
-    request_client = client.with_options(timeout=120, max_retries=0) if hasattr(client, "with_options") else client
+    timeout_seconds = max(120, int(settings.CUSTOMER_MINDSET_LLM_TIMEOUT_SECONDS))
+    request_client = (
+        client.with_options(timeout=timeout_seconds, max_retries=0)
+        if hasattr(client, "with_options")
+        else client
+    )
     response = await request_client.chat.completions.create(
         model=settings.LLM_MODEL,
         messages=[

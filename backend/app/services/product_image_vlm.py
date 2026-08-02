@@ -191,11 +191,12 @@ def build_contact_sheets(image_records: list[dict], output_dir: Path, product_ke
     return sheets
 
 
-def build_image_url_batches(image_records: list[dict]) -> list[dict]:
+def build_image_url_batches(image_records: list[dict], *, batch_size: int | None = None) -> list[dict]:
+    resolved_batch_size = max(1, min(int(batch_size or settings.STEP6_VLM_BATCH_SIZE), SHEET_MAX))
     batches: list[dict] = []
-    for offset in range(0, len(image_records), SHEET_MAX):
-        batch_records = image_records[offset:offset + SHEET_MAX]
-        page = offset // SHEET_MAX + 1
+    for offset in range(0, len(image_records), resolved_batch_size):
+        batch_records = image_records[offset:offset + resolved_batch_size]
+        page = offset // resolved_batch_size + 1
         sheet_path = f"url_batch:{page:02d}"
         for record in batch_records:
             record["contact_sheet_evidence"] = {
@@ -427,7 +428,12 @@ async def analyze_image_url_batch(
         ),
     })
 
-    request_client = client.with_options(timeout=60, max_retries=0) if hasattr(client, "with_options") else client
+    timeout_seconds = max(30, int(settings.STEP6_VLM_TIMEOUT_SECONDS))
+    request_client = (
+        client.with_options(timeout=timeout_seconds, max_retries=0)
+        if hasattr(client, "with_options")
+        else client
+    )
     max_attempts = 2 if len(batch_records) > 1 else 3
     response = None
     for attempt in range(1, max_attempts + 1):
@@ -442,7 +448,7 @@ async def analyze_image_url_batch(
                     max_tokens=4000,
                     temperature=0.2,
                 ),
-                timeout=75,
+                timeout=timeout_seconds + 15,
             )
             break
         except Exception as exc:

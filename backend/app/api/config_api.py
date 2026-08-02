@@ -32,15 +32,20 @@ class ConfigUpdateRequest(BaseModel):
     step1_extract_retry_attempts: int | None = Field(default=None, ge=1, le=20)
     step1_extract_retry_delay_seconds: int | None = Field(default=None, ge=0, le=60)
     step1_download_timeout_seconds: int | None = Field(default=None, ge=30, le=1800)
+    step1_material_download_mode: str | None = Field(default=None, pattern="^(browser|api)$")
     step1_material_package_priority: str | None = Field(default=None, min_length=1, max_length=200)
     step1_price_missing_policy: str | None = Field(default=None, pattern="^(fail|manual_review|continue)$")
     step1_material_missing_policy: str | None = Field(default=None, pattern="^(fail|manual_review|continue)$")
     step1_allow_existing_materials: bool | None = None
-    pricing_net_revenue_rate: float | None = Field(default=None, gt=0, lt=1)
+    pricing_commission_rate: float | None = Field(default=None, ge=0, lt=1)
+    pricing_return_rate: float | None = Field(default=None, ge=0, lt=1)
+    pricing_insurance_rate: float | None = Field(default=None, ge=0, lt=1)
+    pricing_insurance_payout_rate: float | None = Field(default=None, ge=0, lt=1)
+    pricing_return_management_fee_rate: float | None = Field(default=None, ge=0, lt=1)
+    pricing_return_management_fee_cap: float | None = Field(default=None, ge=0, le=1000)
+    pricing_advertising_cost: float | None = Field(default=None, ge=0, le=1000)
     pricing_target_margin_rate: float | None = Field(default=None, ge=0, lt=1)
     pricing_min_profit: float | None = Field(default=None, ge=0, le=1000)
-    pricing_fixed_cost: float | None = Field(default=None, ge=0, le=1000)
-    pricing_return_credit_rate: float | None = Field(default=None, ge=0, lt=1)
     step3_manual_login_on_auth_failure: bool | None = None
     step4_missing_asin_policy: str | None = Field(default=None, pattern="^(fail|manual_review|continue)$")
     step4_category_missing_policy: str | None = Field(default=None, pattern="^(fail|manual_review|continue)$")
@@ -56,7 +61,7 @@ class ConfigUpdateRequest(BaseModel):
     step5_image_evidence_max_chars: int | None = Field(default=None, ge=100, le=1500)
     step5_image_diagnostics_max_chars: int | None = Field(default=None, ge=200, le=3000)
     step5_title_max_chars: int | None = Field(default=None, ge=40, le=75)
-    step5_product_highlight_max_chars: int | None = Field(default=None, ge=80, le=125)
+    step5_product_highlight_max_chars: int | None = Field(default=None, ge=80, le=120)
     step5_bullet_max_chars: int | None = Field(default=None, ge=100, le=1000)
     step5_search_terms_max_bytes: int | None = Field(default=None, ge=50, le=500)
     llm_model: str | None = Field(default=None, min_length=1, max_length=100)
@@ -69,18 +74,27 @@ class ConfigUpdateRequest(BaseModel):
     aplus_image_jpeg_quality: int | None = Field(default=None, ge=40, le=100)
     aplus_image_api_retries: int | None = Field(default=None, ge=0, le=10)
     aplus_image_overwrite_policy: str | None = Field(default=None, pattern="^(skip_success|overwrite_all)$")
+    auto_aplus_after_export_ready: bool | None = None
     giga_sync_page_size: int | None = Field(default=None, ge=1, le=200)
 
     @model_validator(mode="after")
     def validate_pricing_rates(self):
-        net_rate = self.pricing_net_revenue_rate
+        commission_rate = self.pricing_commission_rate
+        return_rate = self.pricing_return_rate
+        management_fee_rate = self.pricing_return_management_fee_rate
         margin_rate = self.pricing_target_margin_rate
-        if net_rate is None:
-            net_rate = settings.PRICING_NET_REVENUE_RATE
+        if commission_rate is None:
+            commission_rate = settings.PRICING_COMMISSION_RATE
+        if return_rate is None:
+            return_rate = settings.PRICING_RETURN_RATE
+        if management_fee_rate is None:
+            management_fee_rate = settings.PRICING_RETURN_MANAGEMENT_FEE_RATE
         if margin_rate is None:
             margin_rate = settings.PRICING_TARGET_MARGIN_RATE
-        if net_rate <= margin_rate:
-            raise ValueError("净收入比例必须大于目标净利率")
+        retained_rate = (1 - commission_rate) * (1 - return_rate)
+        retained_rate -= return_rate * commission_rate * management_fee_rate
+        if retained_rate <= margin_rate:
+            raise ValueError("佣金、退货与退货管理费后的可留存收入必须大于目标净利率")
         return self
 
 
@@ -104,15 +118,20 @@ UPDATE_FIELD_MAP = {
     "step1_extract_retry_attempts": "STEP1_EXTRACT_RETRY_ATTEMPTS",
     "step1_extract_retry_delay_seconds": "STEP1_EXTRACT_RETRY_DELAY_SECONDS",
     "step1_download_timeout_seconds": "STEP1_DOWNLOAD_TIMEOUT_SECONDS",
+    "step1_material_download_mode": "STEP1_MATERIAL_DOWNLOAD_MODE",
     "step1_material_package_priority": "STEP1_MATERIAL_PACKAGE_PRIORITY",
     "step1_price_missing_policy": "STEP1_PRICE_MISSING_POLICY",
     "step1_material_missing_policy": "STEP1_MATERIAL_MISSING_POLICY",
     "step1_allow_existing_materials": "STEP1_ALLOW_EXISTING_MATERIALS",
-    "pricing_net_revenue_rate": "PRICING_NET_REVENUE_RATE",
+    "pricing_commission_rate": "PRICING_COMMISSION_RATE",
+    "pricing_return_rate": "PRICING_RETURN_RATE",
+    "pricing_insurance_rate": "PRICING_INSURANCE_RATE",
+    "pricing_insurance_payout_rate": "PRICING_INSURANCE_PAYOUT_RATE",
+    "pricing_return_management_fee_rate": "PRICING_RETURN_MANAGEMENT_FEE_RATE",
+    "pricing_return_management_fee_cap": "PRICING_RETURN_MANAGEMENT_FEE_CAP",
+    "pricing_advertising_cost": "PRICING_ADVERTISING_COST",
     "pricing_target_margin_rate": "PRICING_TARGET_MARGIN_RATE",
     "pricing_min_profit": "PRICING_MIN_PROFIT",
-    "pricing_fixed_cost": "PRICING_FIXED_COST",
-    "pricing_return_credit_rate": "PRICING_RETURN_CREDIT_RATE",
     "step3_manual_login_on_auth_failure": "STEP3_MANUAL_LOGIN_ON_AUTH_FAILURE",
     "step4_missing_asin_policy": "STEP4_MISSING_ASIN_POLICY",
     "step4_category_missing_policy": "STEP4_CATEGORY_MISSING_POLICY",
@@ -141,6 +160,7 @@ UPDATE_FIELD_MAP = {
     "aplus_image_jpeg_quality": "APLUS_IMAGE_JPEG_QUALITY",
     "aplus_image_api_retries": "APLUS_IMAGE_API_RETRIES",
     "aplus_image_overwrite_policy": "APLUS_IMAGE_OVERWRITE_POLICY",
+    "auto_aplus_after_export_ready": "AUTO_APLUS_AFTER_EXPORT_READY",
     "giga_sync_page_size": "GIGA_SYNC_PAGE_SIZE",
 }
 
@@ -316,7 +336,7 @@ class ConfigResponse(settings.__class__):
                 "VLM_USE_LLM_API": True,
                 "GPT_IMAGE_MODEL": "gpt-image-2",
                 "GPT_IMAGE_USE_LLM_API": False,
-                "APLUS_IMAGE_API_MODE": "edits",
+                "APLUS_IMAGE_API_MODE": "generations",
                 "APLUS_IMAGE_GENERATION_QUALITY": "high",
                 "APLUS_IMAGE_WIDTH": 1940,
                 "APLUS_IMAGE_HEIGHT": 1200,
@@ -324,7 +344,7 @@ class ConfigResponse(settings.__class__):
                 "APLUS_IMAGE_MAX_BYTES": 2000000,
                 "APLUS_IMAGE_JPEG_QUALITY": 88,
                 "APLUS_IMAGE_MIN_JPEG_QUALITY": 55,
-                "APLUS_IMAGE_API_RETRIES": 3,
+                "APLUS_IMAGE_API_RETRIES": 1,
                 "APLUS_IMAGE_OVERWRITE_POLICY": "skip_success",
                 "PIPELINE_MAX_CONCURRENCY": 2,
                 "BROWSER_WORKFLOW_CONCURRENCY": 1,
@@ -332,15 +352,20 @@ class ConfigResponse(settings.__class__):
                 "STEP1_EXTRACT_RETRY_ATTEMPTS": 5,
                 "STEP1_EXTRACT_RETRY_DELAY_SECONDS": 3,
                 "STEP1_DOWNLOAD_TIMEOUT_SECONDS": 300,
+                "STEP1_MATERIAL_DOWNLOAD_MODE": "browser",
                 "STEP1_MATERIAL_PACKAGE_PRIORITY": "To B素材包,Retail Ready素材包,Information",
                 "STEP1_PRICE_MISSING_POLICY": "manual_review",
                 "STEP1_MATERIAL_MISSING_POLICY": "manual_review",
                 "STEP1_ALLOW_EXISTING_MATERIALS": True,
-                "PRICING_NET_REVENUE_RATE": 0.685,
+                "PRICING_COMMISSION_RATE": 0.10,
+                "PRICING_RETURN_RATE": 0.04,
+                "PRICING_INSURANCE_RATE": 0.025,
+                "PRICING_INSURANCE_PAYOUT_RATE": 0.60,
+                "PRICING_RETURN_MANAGEMENT_FEE_RATE": 0.20,
+                "PRICING_RETURN_MANAGEMENT_FEE_CAP": 5.0,
+                "PRICING_ADVERTISING_COST": 2.0,
                 "PRICING_TARGET_MARGIN_RATE": 0.05,
                 "PRICING_MIN_PROFIT": 10.0,
-                "PRICING_FIXED_COST": 9.0,
-                "PRICING_RETURN_CREDIT_RATE": 0.06,
                 "STEP3_MANUAL_LOGIN_ON_AUTH_FAILURE": True,
                 "STEP4_MISSING_ASIN_POLICY": "manual_review",
                 "STEP4_CATEGORY_MISSING_POLICY": "manual_review",
@@ -356,7 +381,7 @@ class ConfigResponse(settings.__class__):
                 "STEP5_IMAGE_EVIDENCE_MAX_CHARS": 500,
                 "STEP5_IMAGE_DIAGNOSTICS_MAX_CHARS": 1000,
                 "STEP5_TITLE_MAX_CHARS": 75,
-                "STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS": 125,
+                "STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS": 120,
                 "STEP5_BULLET_MAX_CHARS": 500,
                 "STEP5_SEARCH_TERMS_MAX_BYTES": 250,
             }
@@ -388,6 +413,7 @@ async def get_config():
         "aplus_image_min_jpeg_quality": settings.APLUS_IMAGE_MIN_JPEG_QUALITY,
         "aplus_image_api_retries": settings.APLUS_IMAGE_API_RETRIES,
         "aplus_image_overwrite_policy": settings.APLUS_IMAGE_OVERWRITE_POLICY,
+        "auto_aplus_after_export_ready": settings.AUTO_APLUS_AFTER_EXPORT_READY,
         "product_base_dir": str(settings.PRODUCT_BASE_DIR),
         "pipeline_max_concurrency": settings.PIPELINE_MAX_CONCURRENCY,
         "browser_workflow_concurrency": settings.BROWSER_WORKFLOW_CONCURRENCY,
@@ -398,15 +424,20 @@ async def get_config():
         "step1_extract_retry_attempts": settings.STEP1_EXTRACT_RETRY_ATTEMPTS,
         "step1_extract_retry_delay_seconds": settings.STEP1_EXTRACT_RETRY_DELAY_SECONDS,
         "step1_download_timeout_seconds": settings.STEP1_DOWNLOAD_TIMEOUT_SECONDS,
+        "step1_material_download_mode": settings.STEP1_MATERIAL_DOWNLOAD_MODE,
         "step1_material_package_priority": settings.STEP1_MATERIAL_PACKAGE_PRIORITY,
         "step1_price_missing_policy": settings.STEP1_PRICE_MISSING_POLICY,
         "step1_material_missing_policy": settings.STEP1_MATERIAL_MISSING_POLICY,
         "step1_allow_existing_materials": settings.STEP1_ALLOW_EXISTING_MATERIALS,
-        "pricing_net_revenue_rate": settings.PRICING_NET_REVENUE_RATE,
+        "pricing_commission_rate": settings.PRICING_COMMISSION_RATE,
+        "pricing_return_rate": settings.PRICING_RETURN_RATE,
+        "pricing_insurance_rate": settings.PRICING_INSURANCE_RATE,
+        "pricing_insurance_payout_rate": settings.PRICING_INSURANCE_PAYOUT_RATE,
+        "pricing_return_management_fee_rate": settings.PRICING_RETURN_MANAGEMENT_FEE_RATE,
+        "pricing_return_management_fee_cap": settings.PRICING_RETURN_MANAGEMENT_FEE_CAP,
+        "pricing_advertising_cost": settings.PRICING_ADVERTISING_COST,
         "pricing_target_margin_rate": settings.PRICING_TARGET_MARGIN_RATE,
         "pricing_min_profit": settings.PRICING_MIN_PROFIT,
-        "pricing_fixed_cost": settings.PRICING_FIXED_COST,
-        "pricing_return_credit_rate": settings.PRICING_RETURN_CREDIT_RATE,
         "step3_manual_login_on_auth_failure": settings.STEP3_MANUAL_LOGIN_ON_AUTH_FAILURE,
         "step4_missing_asin_policy": settings.STEP4_MISSING_ASIN_POLICY,
         "step4_category_missing_policy": settings.STEP4_CATEGORY_MISSING_POLICY,

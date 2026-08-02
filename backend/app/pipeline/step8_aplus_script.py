@@ -33,7 +33,9 @@ from app.aplus_publish.module_registry import (
 )
 from app.config import settings
 from app.database import async_session
-from app.models import Product, ProductData, ProductImage, ProductAplus
+from app.models import Product, ProductData, ProductImage, ProductAplus, ProductMaterialAsset
+from app.services.product_material_prepare import write_material_manifest
+from app.services.product_pipeline_artifacts import write_aplus_script_artifacts
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -658,6 +660,9 @@ def _format_reference(candidate: dict, label: str, module: dict, script: dict) -
         "label": label,
         "slot": candidate.get("slot"),
         "image_id": candidate.get("image_id"),
+        "material_asset_id": candidate.get("material_asset_id"),
+        "content_hash": candidate.get("content_hash"),
+        "contact_sheet_evidence": candidate.get("contact_sheet_evidence"),
         "filename": candidate.get("filename") or _reference_filename(path),
         "path": path,
         "use_for": _reference_use_for(candidate, module, script),
@@ -666,6 +671,57 @@ def _format_reference(candidate: dict, label: str, module: dict, script: dict) -
         "avoid_copying": "Do not copy supplier text overlays, logos, watermarks, exact infographic layout, or unsupported props/claims. Do not invent new accessories, mechanisms, construction details, or product features that are not visible here.",
         "path_exists": _is_remote_url(path) or (Path(path).is_file() if path else False),
     }
+
+
+async def _mark_aplus_reference_assets(db, product: Product, scripts_data: dict) -> list[int]:
+    scripts = scripts_data.get("scripts") if isinstance(scripts_data, dict) else []
+    asset_ids: set[int] = set()
+    reference_paths: set[str] = set()
+    for script in scripts if isinstance(scripts, list) else []:
+        if not isinstance(script, dict):
+            continue
+        refs = script.get("reference_images") if isinstance(script.get("reference_images"), list) else []
+        for ref in refs:
+            if isinstance(ref, dict):
+                try:
+                    asset_id = int(ref.get("material_asset_id") or 0)
+                except (TypeError, ValueError):
+                    asset_id = 0
+                if asset_id > 0:
+                    asset_ids.add(asset_id)
+                path = str(ref.get("path") or "").strip()
+            else:
+                path = str(ref or "").strip()
+            if path and not _is_remote_url(path):
+                reference_paths.add(str(Path(path).expanduser().resolve()))
+    if not asset_ids and not reference_paths:
+        return []
+
+    result = await db.execute(
+        select(ProductMaterialAsset).where(
+            ProductMaterialAsset.product_id == product.id,
+            ProductMaterialAsset.asset_kind == "image",
+        )
+    )
+    marked: list[int] = []
+    for asset in result.scalars().all():
+        resolved_path = str(Path(asset.path).expanduser().resolve()) if asset.path else ""
+        if asset.id not in asset_ids and resolved_path not in reference_paths:
+            continue
+        try:
+            usage = json.loads(asset.downstream_usage_json) if asset.downstream_usage_json else []
+        except Exception:
+            usage = []
+        if not isinstance(usage, list):
+            usage = []
+        if "aplus_reference" not in usage:
+            usage.append("aplus_reference")
+        asset.downstream_usage_json = json.dumps(usage, ensure_ascii=False)
+        asset.updated_at = datetime.now()
+        marked.append(asset.id)
+    if marked and product.data and product.data.material_dir:
+        await write_material_manifest(db, product.id, Path(product.data.material_dir).expanduser().resolve())
+    return marked
 
 
 def _strip_previous_regeneration_sections(prompt: str | None) -> str:
@@ -1550,7 +1606,15 @@ async def run_aplus_script(product_id: int) -> dict:
         # 调用 LLM
         client = settings.get_llm_client()
         max_attempts = 2
-        request_client = client.with_options(timeout=45, max_retries=0) if hasattr(client, "with_options") else client
+        timeout_seconds = max(
+            60,
+            int(getattr(settings, "APLUS_SCRIPT_LLM_TIMEOUT_SECONDS", 180)),
+        )
+        request_client = (
+            client.with_options(timeout=timeout_seconds, max_retries=0)
+            if hasattr(client, "with_options")
+            else client
+        )
 
         logger.info(f"[Step8] 调用LLM生成A+脚本: {len(plan.get('modules', []))} 个模块")
         response = None
@@ -1614,6 +1678,8 @@ async def run_aplus_script(product_id: int) -> dict:
         pa.aplus_scripts = json.dumps(scripts_data, ensure_ascii=False)
         pa.aplus_scripts_summary = scripts_data.get("summary")
         pa.scripted_at = datetime.now()
+        await _mark_aplus_reference_assets(db, product, scripts_data)
+        await write_aplus_script_artifacts(db, product=product, scripts_data=scripts_data)
         await db.commit()
 
         scripts = scripts_data.get("scripts", [])
@@ -1857,6 +1923,8 @@ async def regenerate_aplus_module_script(product_id: int, module_position: int, 
         pa.aplus_scripts = json.dumps(scripts_data, ensure_ascii=False)
         pa.aplus_scripts_summary = scripts_data.get("summary")
         pa.scripted_at = datetime.now()
+        await _mark_aplus_reference_assets(db, product, scripts_data)
+        await write_aplus_script_artifacts(db, product=product, scripts_data=scripts_data)
         await db.commit()
 
         logger.info(f"[Step8] A+模块脚本重新生成完成: product={product_id}, module={module_position}")

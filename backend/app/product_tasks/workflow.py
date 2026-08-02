@@ -23,6 +23,7 @@ from app.models.status import (
     WORKFLOW_NODE_IMAGE_ANALYSIS,
     WORKFLOW_NODE_KEYWORD_RESEARCH,
     WORKFLOW_NODE_LISTING_GENERATION,
+    WORKFLOW_NODE_PREPARE_MATERIALS,
     WORKFLOW_NODE_SEARCH_COMPETITOR,
     WORKFLOW_NODE_SELECT_COMPETITOR,
     WORKFLOW_NODE_SELECT_IMAGES,
@@ -60,6 +61,16 @@ class WorkflowNodeView:
 
 
 WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
+    WORKFLOW_NODE_PREPARE_MATERIALS: WorkflowNodeView(
+        label="准备供应商素材",
+        node_type="async",
+        default_work_status=PRODUCT_WORK_STATUS_AUTO_SELECT_IMAGES,
+        default_primary_action="open_task_center",
+        default_primary_action_label="任务中心",
+        default_allowed_actions=("open_task_center",),
+        default_action_reason="正在解析商品页并下载、解压、登记供应商素材包",
+        default_color="processing",
+    ),
     WORKFLOW_NODE_AUTO_SELECT_IMAGES: WorkflowNodeView(
         label="自动选图",
         node_type="async",

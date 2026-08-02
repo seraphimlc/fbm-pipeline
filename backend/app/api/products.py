@@ -1,8 +1,10 @@
 import asyncio
+import csv
 import subprocess
 import zipfile
 import hashlib
 import json
+import html as html_lib
 import re
 from copy import copy
 from io import BytesIO
@@ -11,7 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse
 from openpyxl import Workbook, load_workbook
 from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,6 +43,7 @@ from app.models import (
     ProductImage,
     ProductAplus,
     ProductFile,
+    ProductMaterialAsset,
     TaskRun,
     TaskStep,
     UpcPoolItem,
@@ -81,7 +84,7 @@ from app.models.status import (
 )
 from app.api.schemas import (
     ProductCreate, ProductUpdate, ProductListingImagesUpdate, ProductGigaRefreshRequest, ProductResponse, ProductDetail, ProductImageResponse,
-    PaginatedResponse, ProductFileEntry, AplusRegenerateRequest,
+    PaginatedResponse, ProductFileEntry, AplusRegenerateRequest, ProductMaterialAssetResponse,
     ProductImageReviewDetailResponse, ProductImageReviewQueueResponse,
     AsinSyncBatchDetail, AsinSyncBatchResponse, AsinSyncCreateRequest,
     AplusUploadBatchDetail, AplusUploadBatchResponse, AplusUploadCreateRequest, AplusGenerateRequest,
@@ -214,8 +217,7 @@ AUTO_START_READY_GENERATION_LIMIT = 100
 IMAGE_REVIEW_SELECTED_IMAGE_LIMIT = 9
 IMAGE_REVIEW_INITIAL_GALLERY_LIMIT = 36
 IMAGE_REVIEW_MAX_GALLERY_LIMIT = 200
-PRODUCT_HIGHLIGHT_MIN_COUNT = 3
-PRODUCT_HIGHLIGHT_MAX_COUNT = 5
+PRODUCT_HIGHLIGHT_REQUIRED_COUNT = 1
 
 
 def _product_task_action_queued_stage(product: Product) -> str | None:
@@ -357,7 +359,7 @@ def _listing_content_ready(product: Product) -> bool:
         str(getattr(data, "listing_product_highlights", "") or ""),
         None,
     )
-    if not isinstance(highlights, list) or not PRODUCT_HIGHLIGHT_MIN_COUNT <= len(highlights) <= PRODUCT_HIGHLIGHT_MAX_COUNT:
+    if not isinstance(highlights, list) or len(highlights) != PRODUCT_HIGHLIGHT_REQUIRED_COUNT:
         return False
     if any(
         not str(item or "").strip()
@@ -376,12 +378,15 @@ def _listing_content_ready(product: Product) -> bool:
     )
 
 
-def _normalize_listing_title(value: Any) -> str | None:
+def _normalize_listing_title(value: Any, *, brand: str | None = None) -> str | None:
     if value is None:
         return None
     normalized = str(value).strip()
     if len(normalized) > settings.STEP5_TITLE_MAX_CHARS:
         raise HTTPException(400, f"Listing 标题不能超过 {settings.STEP5_TITLE_MAX_CHARS} 个字符")
+    normalized_brand = " ".join(str(brand or "").split()).strip()
+    if normalized and normalized_brand and not normalized.casefold().startswith(normalized_brand.casefold()):
+        raise HTTPException(400, f"Listing 标题必须以品牌“{normalized_brand}”开头")
     return normalized
 
 
@@ -406,10 +411,10 @@ def _normalize_product_highlights(value: Any, *, label: str) -> list[str] | None
         raise HTTPException(400, f"{label}的每一条都必须是文本")
 
     normalized = [" ".join(item.split()).strip() for item in raw_items if item.strip()]
-    if not PRODUCT_HIGHLIGHT_MIN_COUNT <= len(normalized) <= PRODUCT_HIGHLIGHT_MAX_COUNT:
+    if len(normalized) != PRODUCT_HIGHLIGHT_REQUIRED_COUNT:
         raise HTTPException(
             400,
-            f"{label}必须填写 {PRODUCT_HIGHLIGHT_MIN_COUNT}-{PRODUCT_HIGHLIGHT_MAX_COUNT} 条",
+            f"{label}必须填写 1 条",
         )
     for index, item in enumerate(normalized, start=1):
         if len(item) > settings.STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS:
@@ -3134,13 +3139,11 @@ async def list_products(
         pattern = f"%{sku_code.strip()}%"
         query = query.where(
             (Product.gigab2b_product_id.ilike(pattern))
-            | (Product.source_item_id.ilike(pattern))
             | (ProductData.item_code.ilike(pattern))
             | (ProductData.title.ilike(pattern))
         )
         count_query = count_query.where(
             (Product.gigab2b_product_id.ilike(pattern))
-            | (Product.source_item_id.ilike(pattern))
             | (ProductData.item_code.ilike(pattern))
             | (ProductData.title.ilike(pattern))
         )
@@ -5221,6 +5224,8 @@ def _compact_product_detail(detail: ProductDetail) -> ProductDetail:
         detail.aplus.aplus_images = None
     detail.zip_files = []
     detail.generated_files = []
+    detail.material_assets = []
+    detail.material_summary = {}
     detail.video_folder = None
     detail.aplus_folder = None
     detail.amazon_export_preview = None
@@ -5241,6 +5246,7 @@ async def get_product(
             selectinload(Product.images),
             selectinload(Product.aplus),
             selectinload(Product.files),
+            selectinload(Product.material_assets),
             selectinload(Product.catalog_item),
         )
         .where(Product.id == product_id)
@@ -5268,7 +5274,119 @@ async def get_product(
             detail.video_folder = video_folder_summary(material_dir)
             detail.aplus_folder = aplus_folder_summary(aplus_image_folder(material_dir))
     detail.generated_files = sorted(product.files or [], key=lambda item: item.created_at or datetime.min, reverse=True)
+    detail.material_assets = [
+        ProductMaterialAssetResponse.model_validate(asset)
+        for asset in sorted(product.material_assets or [], key=lambda item: item.id)
+    ]
+    kind_counts: dict[str, int] = {}
+    status_counts: dict[str, int] = {}
+    for asset in product.material_assets or []:
+        kind_counts[asset.asset_kind] = kind_counts.get(asset.asset_kind, 0) + 1
+        status_counts[asset.processing_status] = status_counts.get(asset.processing_status, 0) + 1
+    detail.material_summary = {
+        "asset_count": len(product.material_assets or []),
+        "kind_counts": kind_counts,
+        "status_counts": status_counts,
+        "image_count": kind_counts.get("image", 0),
+        "video_count": kind_counts.get("video", 0),
+        "package_count": kind_counts.get("zip", 0),
+        "analyzed_image_count": sum(
+            1 for asset in product.material_assets or []
+            if asset.asset_kind == "image" and asset.processing_status in {"analyzed", "selected"}
+        ),
+    }
     return detail
+
+
+@router.get("/{product_id}/materials", response_model=list[ProductMaterialAssetResponse])
+async def list_product_material_assets(product_id: int, db: AsyncSession = Depends(get_db)):
+    product = await db.get(Product, product_id)
+    if not product:
+        raise HTTPException(404, "Product not found")
+    result = await db.execute(
+        select(ProductMaterialAsset)
+        .where(ProductMaterialAsset.product_id == product_id)
+        .order_by(ProductMaterialAsset.parent_asset_id.is_(None).desc(), ProductMaterialAsset.id.asc())
+    )
+    return result.scalars().all()
+
+
+@router.get("/{product_id}/materials/{asset_id}/preview")
+async def preview_product_material_asset(
+    product_id: int,
+    asset_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(ProductMaterialAsset, Product)
+        .join(Product, Product.id == ProductMaterialAsset.product_id)
+        .options(selectinload(Product.data))
+        .where(ProductMaterialAsset.id == asset_id, ProductMaterialAsset.product_id == product_id)
+    )
+    row = result.first()
+    if not row:
+        raise HTTPException(404, "素材文件不存在")
+    asset, product = row
+    material_dir = _safe_material_dir(product)
+    path = Path(asset.path).expanduser().resolve()
+    if not _is_in_dir(path, material_dir):
+        raise HTTPException(403, "只能预览当前商品素材目录内的文件")
+    if not path.is_file():
+        raise HTTPException(404, f"素材文件不存在: {path}")
+
+    if asset.asset_kind in {"html", "text"}:
+        text_value = path.read_text(encoding="utf-8", errors="replace")
+        return HTMLResponse(
+            "<html><body><pre style='white-space:pre-wrap;font-family:system-ui'>"
+            + html_lib.escape(text_value)
+            + "</pre></body></html>",
+            headers={"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'"},
+        )
+    if asset.asset_kind == "spreadsheet":
+        suffix = path.suffix.lower()
+        if suffix == ".xlsx":
+            try:
+                workbook = load_workbook(path, read_only=True, data_only=True)
+                try:
+                    sheet = workbook[workbook.sheetnames[0]]
+                    sheet_name = sheet.title
+                    max_row = int(sheet.max_row or 0)
+                    max_column = int(sheet.max_column or 0)
+                    rows = []
+                    for row_index, values in enumerate(sheet.iter_rows(values_only=True), start=1):
+                        rows.append([value for value in values[:20]])
+                        if row_index >= 50:
+                            break
+                finally:
+                    workbook.close()
+            except Exception as exc:
+                raise HTTPException(400, f"Excel 文件无法预览: {type(exc).__name__}: {exc}") from exc
+            return {
+                "asset_id": asset.id,
+                "sheet_name": sheet_name,
+                "rows": rows,
+                "truncated": max_row > 50 or max_column > 20,
+            }
+        if suffix in {".csv", ".tsv"}:
+            delimiter = "\t" if suffix == ".tsv" else ","
+            rows: list[list[str]] = []
+            truncated = False
+            with path.open("r", encoding="utf-8-sig", errors="replace", newline="") as handle:
+                reader = csv.reader(handle, delimiter=delimiter)
+                for row_index, values in enumerate(reader, start=1):
+                    rows.append([str(value) for value in values[:20]])
+                    if len(values) > 20:
+                        truncated = True
+                    if row_index >= 50:
+                        truncated = next(reader, None) is not None or truncated
+                        break
+            return {
+                "asset_id": asset.id,
+                "sheet_name": path.name,
+                "rows": rows,
+                "truncated": truncated,
+            }
+    return FileResponse(path, media_type=asset.mime_type, filename=None)
 
 
 @router.post("/{product_id}/files/open")
@@ -5412,7 +5530,7 @@ async def update_product(
             product.data.leaf_category = leaf_category_value.strip() or None
         for key, value in product_data_updates.items():
             if key == "listing_title":
-                product.data.listing_title = _normalize_listing_title(value)
+                product.data.listing_title = _normalize_listing_title(value, brand=product.brand)
             elif key in {"listing_product_highlights", "listing_product_highlights_zh"}:
                 label = "商品亮点" if key == "listing_product_highlights" else "中文商品亮点"
                 normalized = _normalize_product_highlights(value, label=label)

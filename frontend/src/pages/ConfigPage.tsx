@@ -35,15 +35,20 @@ const ConfigPage: React.FC = () => {
         step1_extract_retry_attempts: data.step1_extract_retry_attempts,
         step1_extract_retry_delay_seconds: data.step1_extract_retry_delay_seconds,
         step1_download_timeout_seconds: data.step1_download_timeout_seconds,
+        step1_material_download_mode: data.step1_material_download_mode,
         step1_material_package_priority: data.step1_material_package_priority,
         step1_price_missing_policy: data.step1_price_missing_policy,
         step1_material_missing_policy: data.step1_material_missing_policy,
         step1_allow_existing_materials: data.step1_allow_existing_materials,
-        pricing_net_revenue_rate: data.pricing_net_revenue_rate,
+        pricing_commission_rate: data.pricing_commission_rate,
+        pricing_return_rate: data.pricing_return_rate,
+        pricing_insurance_rate: data.pricing_insurance_rate,
+        pricing_insurance_payout_rate: data.pricing_insurance_payout_rate,
+        pricing_return_management_fee_rate: data.pricing_return_management_fee_rate,
+        pricing_return_management_fee_cap: data.pricing_return_management_fee_cap,
+        pricing_advertising_cost: data.pricing_advertising_cost,
         pricing_target_margin_rate: data.pricing_target_margin_rate,
         pricing_min_profit: data.pricing_min_profit,
-        pricing_fixed_cost: data.pricing_fixed_cost,
-        pricing_return_credit_rate: data.pricing_return_credit_rate,
         step3_manual_login_on_auth_failure: data.step3_manual_login_on_auth_failure,
         step4_missing_asin_policy: data.step4_missing_asin_policy,
         step4_category_missing_policy: data.step4_category_missing_policy,
@@ -71,7 +76,8 @@ const ConfigPage: React.FC = () => {
 	        aplus_image_height: data.aplus_image_height,
 	        aplus_image_jpeg_quality: data.aplus_image_jpeg_quality,
 	        aplus_image_api_retries: data.aplus_image_api_retries,
-	        aplus_image_overwrite_policy: data.aplus_image_overwrite_policy,
+        aplus_image_overwrite_policy: data.aplus_image_overwrite_policy,
+        auto_aplus_after_export_ready: data.auto_aplus_after_export_ready,
       });
     } catch {
       message.error('系统配置加载失败');
@@ -159,6 +165,14 @@ const ConfigPage: React.FC = () => {
             <Form.Item label="素材包优先级" name="step1_material_package_priority" rules={[{ required: true }]}>
               <Input placeholder="To B素材包,Retail Ready素材包,Information" />
             </Form.Item>
+            <Form.Item label="素材包下载方式" name="step1_material_download_mode" rules={[{ required: true }]}>
+              <Select
+                options={[
+                  { value: 'browser', label: '浏览器点击优先（默认）' },
+                  { value: 'api', label: '网页登录接口优先' },
+                ]}
+              />
+            </Form.Item>
             <Form.Item label="价格缺失策略" name="step1_price_missing_policy" rules={[{ required: true }]}>
               <Select
                 options={[
@@ -185,20 +199,32 @@ const ConfigPage: React.FC = () => {
 
         <Card title="Step 2 定价/利润" size="small" style={{ marginBottom: 16 }}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(180px, 1fr))', gap: 16 }}>
-            <Form.Item label="净收入比例" name="pricing_net_revenue_rate" rules={[{ required: true }]}>
+            <Form.Item label="Amazon 佣金比例" name="pricing_commission_rate" rules={[{ required: true }]}>
               <InputNumber min={0.01} max={0.99} step={0.005} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item label="实际退货率" name="pricing_return_rate" rules={[{ required: true }]}>
+              <InputNumber min={0} max={0.5} step={0.005} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item label="退货保险费率（按货值）" name="pricing_insurance_rate" rules={[{ required: true }]}>
+              <InputNumber min={0} max={0.5} step={0.005} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item label="保险赔付比例（仅货值）" name="pricing_insurance_payout_rate" rules={[{ required: true }]}>
+              <InputNumber min={0} max={1} step={0.05} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item label="退货管理费比例（佣金的比例）" name="pricing_return_management_fee_rate" rules={[{ required: true }]}>
+              <InputNumber min={0} max={1} step={0.05} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item label="退货管理费封顶（美元）" name="pricing_return_management_fee_cap" rules={[{ required: true }]}>
+              <InputNumber min={0} max={1000} step={0.5} style={{ width: '100%' }} />
+            </Form.Item>
+            <Form.Item label="广告预留（美元/单）" name="pricing_advertising_cost" rules={[{ required: true }]}>
+              <InputNumber min={0} max={1000} step={0.5} style={{ width: '100%' }} />
             </Form.Item>
             <Form.Item label="目标净利率" name="pricing_target_margin_rate" rules={[{ required: true }]}>
               <InputNumber min={0} max={0.5} step={0.005} style={{ width: '100%' }} />
             </Form.Item>
             <Form.Item label="最低利润（美元）" name="pricing_min_profit" rules={[{ required: true }]}>
               <InputNumber min={0} max={1000} step={0.5} style={{ width: '100%' }} />
-            </Form.Item>
-            <Form.Item label="固定成本（美元）" name="pricing_fixed_cost" rules={[{ required: true }]}>
-              <InputNumber min={0} max={1000} step={0.5} style={{ width: '100%' }} />
-            </Form.Item>
-            <Form.Item label="退货抵扣比例" name="pricing_return_credit_rate" rules={[{ required: true }]}>
-              <InputNumber min={0} max={0.99} step={0.005} style={{ width: '100%' }} />
             </Form.Item>
           </div>
         </Card>
@@ -252,8 +278,8 @@ const ConfigPage: React.FC = () => {
             <Form.Item label="标题字符上限" name="step5_title_max_chars" rules={[{ required: true }]}>
               <InputNumber min={40} max={75} style={{ width: '100%' }} />
             </Form.Item>
-            <Form.Item label="商品亮点单条字符上限" name="step5_product_highlight_max_chars" rules={[{ required: true }]}>
-              <InputNumber min={80} max={125} style={{ width: '100%' }} />
+            <Form.Item label="标题补充字符上限" name="step5_product_highlight_max_chars" rules={[{ required: true }]}>
+              <InputNumber min={80} max={120} style={{ width: '100%' }} />
             </Form.Item>
             <Form.Item label="五点字符上限" name="step5_bullet_max_chars" rules={[{ required: true }]}>
               <InputNumber min={100} max={1000} style={{ width: '100%' }} />
@@ -322,14 +348,17 @@ const ConfigPage: React.FC = () => {
 	            <Form.Item label="图片 API 重试次数" name="aplus_image_api_retries" rules={[{ required: true }]}>
 	              <InputNumber min={0} max={10} style={{ width: '100%' }} />
 	            </Form.Item>
-	            <Form.Item label="A+ 出图覆盖策略" name="aplus_image_overwrite_policy" rules={[{ required: true }]}>
+            <Form.Item label="A+ 出图覆盖策略" name="aplus_image_overwrite_policy" rules={[{ required: true }]}>
 	              <Select
 	                options={[
 	                  { value: 'skip_success', label: '跳过已成功，只补缺失/失败' },
 	                  { value: 'overwrite_all', label: '全部重新生成' },
 	                ]}
-	              />
-	            </Form.Item>
+              />
+            </Form.Item>
+            <Form.Item label="Listing 完成后自动生成 A+" name="auto_aplus_after_export_ready" valuePropName="checked">
+              <Switch checkedChildren="开启" unCheckedChildren="关闭" />
+            </Form.Item>
 	          </div>
 	        </Card>
       </Form>
@@ -347,6 +376,9 @@ const ConfigPage: React.FC = () => {
           <Descriptions.Item label="SellerSprite 开放接口">{yesNo(config.sellersprite_openapi_configured)}</Descriptions.Item>
           <Descriptions.Item label="SellerSprite 浏览器令牌">{yesNo(config.sellersprite_browser_token_configured)}</Descriptions.Item>
           <Descriptions.Item label="图片通道">{config.gpt_image_api_provider}</Descriptions.Item>
+          <Descriptions.Item label="A+ 生图模式">{config.aplus_image_api_mode}</Descriptions.Item>
+          <Descriptions.Item label="A+ 图片比例">{config.aplus_image_aspect_ratio}</Descriptions.Item>
+          <Descriptions.Item label="A+ 成图流程">97:60 大母图（当前 T8Star 为 3104×1920）→ {config.aplus_image_width}×{config.aplus_image_height} JPEG</Descriptions.Item>
           <Descriptions.Item label="版本">{config.version}</Descriptions.Item>
         </Descriptions>
       </Card>

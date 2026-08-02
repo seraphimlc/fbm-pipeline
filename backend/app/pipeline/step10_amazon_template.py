@@ -515,8 +515,8 @@ def _listing_template_warnings(pd: ProductData, mapping: dict | None = None) -> 
             "商品亮点已保存在系统中，但当前 Amazon 导入模板没有 Item Highlights 字段；"
             "本次仅导出旧五点，商品亮点需在支持该属性的模板或后台中补充。"
         )
-    if not 3 <= len(highlights) <= 5:
-        warnings.append(f"商品亮点应为 3-5 条，当前为 {len(highlights)} 条。")
+    if len(highlights) != 1:
+        warnings.append(f"商品亮点应为 1 条标题补充，当前为 {len(highlights)} 条。")
     for index, highlight in enumerate(highlights, start=1):
         if len(str(highlight)) > settings.STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS:
             warnings.append(

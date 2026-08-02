@@ -19,6 +19,7 @@ from app.task_runtime.json_utils import json_loads
 
 
 PRODUCT_MAIN_ACTION_TYPES = (
+    "product_material_prepare",
     "product_auto_image_selection",
     "product_competitor_search",
     "product_competitor_visual_match",
@@ -191,15 +192,21 @@ async def should_auto_start_aplus(
     auto_enabled: bool | None = None,
 ) -> AplusAutoStartDecision:
     """Return a structured A+ auto-start decision without side effects."""
-    enabled = settings.AUTO_APLUS_AFTER_EXPORT_READY if auto_enabled is None else bool(auto_enabled)
-    if not enabled:
-        return _decision(False, "disabled_by_config", "A+ 自动触发配置未开启", auto_enabled=False)
-
     loaded = await _load_product(db, product)
     if not loaded:
         return _decision(False, "not_completed", "商品不存在或未落库", product_id=getattr(product, "id", None))
     product = loaded
     catalog = product.catalog_item
+    target_enabled = str(product.pipeline_target or "").strip() == "aplus_done"
+    enabled = (settings.AUTO_APLUS_AFTER_EXPORT_READY or target_enabled) if auto_enabled is None else bool(auto_enabled)
+    if not enabled:
+        return _decision(
+            False,
+            "disabled_by_config",
+            "A+ 自动触发配置未开启，且商品未使用 aplus_done 目标模式",
+            auto_enabled=False,
+            pipeline_target=product.pipeline_target,
+        )
 
     if product.status != COMPLETED:
         return _decision(False, "not_completed", "商品主流程尚未 completed", product_id=product.id, status=product.status)
@@ -273,6 +280,8 @@ async def should_auto_start_aplus(
         catalog_product_id=catalog.id,
         confirmed_at=catalog.confirmed_at.isoformat(),
         aplus_status=normalized_aplus_status or None,
+        pipeline_target=product.pipeline_target,
+        test_session_key=product.pipeline_test_session_key,
     )
 
 

@@ -33,9 +33,7 @@ def _valid_listing() -> dict:
         "positioning": {"target_buyer": "apartment households", "conversion_risks": []},
         "title": "Vindhvisk Modular Sofa, Flexible Three-Piece Living Room Seating",
         "product_highlights": [
-            "Flexible Layout: Reconfigure three modules for movie night or reading as the room changes.",
-            "Woven Upholstery: The supported fabric detail adds a clear tactile finish to everyday seating.",
-            "Three-Piece Format: Separate modules make placement easier when arranging an apartment living room.",
+            "Three modular pieces support flexible seating arrangements beyond the title's core product identity.",
         ],
         "bullets": [
             "Flexible seating supports the documented modular layout.",
@@ -55,9 +53,7 @@ def _valid_listing() -> dict:
         "search_terms": "apartment couch, flexible seating",
         "title_zh": "Vindhvisk 模块化沙发，灵活三件套客厅座椅",
         "product_highlights_zh": [
-            "灵活布局：在客厅观影或阅读时重新组合三个模块，适应空间变化。",
-            "织物表面：有依据的面料细节为日常坐卧提供清晰可见的触感表现。",
-            "三件式结构：在公寓客厅布置时，独立模块更方便安排摆放位置。",
+            "三件模块支持更灵活的座椅布局，补充标题未涵盖的产品配置信息。",
         ],
         "bullets_zh": [
             "灵活座椅布局与已有模块化结构证据保持一致。",
@@ -101,7 +97,7 @@ def test_valid_contract_and_no_program_truncation() -> None:
     assert normalized["product_highlights"] == listing["product_highlights"]
     assert normalized["bullets"] == listing["bullets"]
     assert normalized["compliance_check"]["title_max_chars"] == settings.STEP5_TITLE_MAX_CHARS
-    assert normalized["compliance_check"]["product_highlights_count"] == 3
+    assert normalized["compliance_check"]["product_highlights_count"] == 1
     assert normalized["compliance_check"]["bullet_contract"]["target_max_chars"] == 320
     assert len(normalized["compliance_check"]["bullet_contract"]["audit"]) == 5
 
@@ -118,14 +114,19 @@ def test_valid_contract_and_no_program_truncation() -> None:
     else:
         raise AssertionError("Overlong title must be rejected instead of truncated")
 
+    wrong_brand_order = _valid_listing()
+    wrong_brand_order["title"] = "Modular Sofa by Vindhvisk for Flexible Living Room Seating"
+    violations = _listing_contract_violations(wrong_brand_order, brand="Vindhvisk")
+    assert "title:must start with exact brand 'Vindhvisk'" in violations
+    assert _rewrite_fields_for_violations(violations) == ["title", "title_zh"]
 
-def test_highlight_count_length_scene_and_rewrite_fields() -> None:
+
+def test_highlight_count_length_and_rewrite_fields() -> None:
     invalid = _valid_listing()
     invalid["product_highlights"] = ["Supported feature and practical result."] * 2
     invalid["product_highlights_zh"] = ["有依据的功能与实际结果。"] * 2
     violations = _listing_contract_violations(invalid)
     assert any(item.startswith("product_highlights:count=") for item in violations)
-    assert any("explicit use scene missing" in item for item in violations)
     assert _rewrite_fields_for_violations(violations) == [
         "product_highlights",
         "product_highlights_zh",
@@ -141,8 +142,8 @@ def test_highlight_count_length_scene_and_rewrite_fields() -> None:
     prompt = _build_rewrite_prompt(invalid, violations, _rewrite_fields_for_violations(violations))
     assert "Never mechanically truncate" in prompt
     assert "Keywords and competitor content are not product proof" in prompt
-    assert "concise factual benefit label and a colon" in prompt
-    assert "selling point + specific use scene or supported parameter + result" in prompt
+    assert "exactly one item" in prompt
+    assert "complements the title" in prompt
 
 
 def test_bullet_contract_rejects_padding_repetition_and_missing_audit() -> None:
@@ -155,6 +156,10 @@ def test_bullet_contract_rejects_padding_repetition_and_missing_audit() -> None:
     assert any("overlapping claims" in item for item in violations)
     assert any(item.startswith("bullet_audit:count=") for item in violations)
     assert _rewrite_fields_for_violations(violations) == ["bullets", "bullets_zh", "bullet_audit"]
+
+    prompt = _build_rewrite_prompt(invalid, violations, _rewrite_fields_for_violations(violations))
+    assert "different shopper moment" in prompt
+    assert "do not reuse the same situation, claim, or result" in prompt
 
 
 def test_bullet_audit_must_match_mindset_evidence() -> None:
@@ -210,7 +215,7 @@ async def test_targeted_rewrite_and_bounded_failure() -> None:
 
 def main() -> None:
     test_valid_contract_and_no_program_truncation()
-    test_highlight_count_length_scene_and_rewrite_fields()
+    test_highlight_count_length_and_rewrite_fields()
     test_bullet_contract_rejects_padding_repetition_and_missing_audit()
     test_bullet_audit_must_match_mindset_evidence()
     asyncio.run(test_targeted_rewrite_and_bounded_failure())

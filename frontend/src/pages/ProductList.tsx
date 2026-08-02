@@ -575,7 +575,11 @@ const ProductList: React.FC = () => {
         setLatestGigaPullTask(detail.data);
         setPullModalOpen(false);
         await refreshWorkbenchRows();
-        navigate('/task-runs');
+        // A one-SKU pull can complete before navigation finishes.  Pin the
+        // newly created run in the all-history view so it never appears to
+        // disappear merely because the default "current" view hides completed
+        // tasks.
+        navigate(`/task-runs?view=all&q=%23${firstRun.id}`);
       },
       {
         errorFallback: '提交店铺商品同步失败',

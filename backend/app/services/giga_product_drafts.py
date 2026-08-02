@@ -27,13 +27,13 @@ from app.models import (
     ProductImage,
 )
 from app.models.status import (
-    WORKFLOW_NODE_AUTO_SELECT_IMAGES,
+    WORKFLOW_NODE_PREPARE_MATERIALS,
     WORKFLOW_NODE_SELECT_IMAGES,
     WORKFLOW_STATUS_FAILED,
     WORKFLOW_STATUS_PENDING,
 )
 from app.pipeline.step2_pricing import calculate_price
-from app.task_planners.product_auto_image_selection import create_product_auto_image_selection_runs
+from app.task_planners.product_material_prepare import create_product_material_prepare_runs
 from app.product_tasks.workflow import set_product_workflow
 from app.services.product_duplicates import find_duplicate_by_item_code
 from app.services.upc_pool import ensure_product_upc
@@ -370,6 +370,9 @@ async def create_product_draft_from_giga_item(
     data_source_id: int | None = None,
     item_code: str,
     brand: str | None = None,
+    pipeline_target: str = "export_ready",
+    test_session_key: str | None = None,
+    origin_task_run_id: int | None = None,
 ) -> tuple[Product, bool]:
     """Create a product draft so the detail page can confirm the search/listing images."""
     normalized_site = site.strip().upper()
@@ -460,8 +463,11 @@ async def create_product_draft_from_giga_item(
         had_aplus = product.aplus is not None
     else:
         product = Product(
-            gigab2b_url=f"https://www.gigab2b.com/product-detail/{normalized_item_code}",
-            gigab2b_product_id=normalized_item_code,
+            gigab2b_url=(
+                "https://www.gigab2b.com/index.php?route=product/search"
+                f"&search={normalized_item_code}&search_source=0&search_dimension=1"
+            ),
+            gigab2b_product_id=None,
             competitor_asin=None,
             brand=brand or settings.DEFAULT_BRAND,
             status="created",
@@ -472,7 +478,7 @@ async def create_product_draft_from_giga_item(
         )
         set_product_workflow(
             product,
-            node=WORKFLOW_NODE_AUTO_SELECT_IMAGES,
+            node=WORKFLOW_NODE_PREPARE_MATERIALS,
             status=WORKFLOW_STATUS_PENDING,
             error=None,
             now=now,
@@ -483,17 +489,25 @@ async def create_product_draft_from_giga_item(
         had_images = False
         had_aplus = False
 
-    product.gigab2b_url = product.gigab2b_url or f"https://www.gigab2b.com/product-detail/{normalized_item_code}"
-    product.gigab2b_product_id = product.gigab2b_product_id or normalized_item_code
+    if not product.gigab2b_url or "/product-detail/" in product.gigab2b_url:
+        product.gigab2b_url = (
+            "https://www.gigab2b.com/index.php?route=product/search"
+            f"&search={normalized_item_code}&search_source=0&search_dimension=1"
+        )
+    if product.gigab2b_product_id and not str(product.gigab2b_product_id).isdigit():
+        product.gigab2b_product_id = None
     product.source_data_source_id = giga_item.data_source_id
     product.source_site = normalized_site
     product.source_batch_id = batch_id
+    product.pipeline_target = pipeline_target if pipeline_target in {"export_ready", "aplus_done"} else "export_ready"
+    product.pipeline_test_session_key = test_session_key
+    product.pipeline_origin_task_run_id = origin_task_run_id
     if product.status == "created" and product.current_step <= 0:
         product.error_message = product.error_message or (None if created else "待确认商品图片")
         if not product.workflow_node and not product.workflow_status and not product.competitor_asin:
             set_product_workflow(
                 product,
-                node=WORKFLOW_NODE_AUTO_SELECT_IMAGES if created else WORKFLOW_NODE_SELECT_IMAGES,
+                node=WORKFLOW_NODE_PREPARE_MATERIALS if created else WORKFLOW_NODE_SELECT_IMAGES,
                 status=WORKFLOW_STATUS_PENDING,
                 error=None,
                 now=now,
@@ -565,11 +579,15 @@ async def create_product_draft_from_giga_item(
         db.add(ProductAplus(product_id=product.id))
     await db.commit()
     await db.refresh(product)
-    if created:
+    should_prepare_materials = created or pipeline_target == "aplus_done"
+    if should_prepare_materials:
         try:
-            await create_product_auto_image_selection_runs(
+            await create_product_material_prepare_runs(
                 db,
                 [product.id],
+                pipeline_target=product.pipeline_target or "export_ready",
+                test_session_key=test_session_key,
+                origin_task_run_id=origin_task_run_id,
                 created_by="giga_product_draft",
                 auto_start=True,
             )
@@ -577,7 +595,7 @@ async def create_product_draft_from_giga_item(
         except Exception as exc:
             await db.rollback()
             failed_at = datetime.now()
-            message = f"自动选图任务创建失败: {type(exc).__name__}: {exc}"
+            message = f"素材准备任务创建失败: {type(exc).__name__}: {exc}"
             result = await db.execute(
                 select(Product)
                 .options(selectinload(Product.catalog_item))
@@ -590,7 +608,7 @@ async def create_product_draft_from_giga_item(
                 failed_product.error_message = message
                 set_product_workflow(
                     failed_product,
-                    node=WORKFLOW_NODE_AUTO_SELECT_IMAGES,
+                    node=WORKFLOW_NODE_PREPARE_MATERIALS,
                     status=WORKFLOW_STATUS_FAILED,
                     error=message,
                     now=failed_at,
@@ -612,6 +630,9 @@ async def upsert_product_drafts_from_giga_batch(
     site: str = "US",
     data_source_id: int | None = None,
     brand: str | None = None,
+    pipeline_target: str = "export_ready",
+    test_session_key: str | None = None,
+    origin_task_run_id: int | None = None,
 ) -> GigaProductDraftSyncResult:
     normalized_site = site.strip().upper()
     query = select(GigaItem).where(GigaItem.batch_id == batch_id, GigaItem.site == normalized_site)
@@ -641,6 +662,9 @@ async def upsert_product_drafts_from_giga_batch(
                 data_source_id=data_source_id,
                 item_code=item_code,
                 brand=brand,
+                pipeline_target=pipeline_target,
+                test_session_key=test_session_key,
+                origin_task_run_id=origin_task_run_id,
             )
             sync_result.product_ids.append(product.id)
             if created:

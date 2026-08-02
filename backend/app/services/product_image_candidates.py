@@ -6,7 +6,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import GigaProductImage, Product
+from app.models import GigaProductImage, Product, ProductMaterialAsset
 
 PRIMARY_TYPES = {"main", "gallery"}
 VARIANT_TYPES = {"variant_main", "variant_gallery"}
@@ -73,26 +73,34 @@ def _candidate_rank(candidate: dict[str, Any]) -> tuple[int, int, int, str]:
     except (TypeError, ValueError):
         sort_value = 9999
     is_rep = bool(candidate.get("is_representative_sku"))
-    if image_type in PRIMARY_TYPES and is_rep:
+    if source == "giga_material_package":
         tier = 1
-    elif image_type in VARIANT_TYPES:
+    elif image_type in PRIMARY_TYPES and is_rep:
         tier = 2
-    elif source in {"giga_detail", "giga_listing_images", "giga_listing_imageUrls"}:
+    elif image_type in VARIANT_TYPES:
         tier = 3
-    elif image_type in LOW_PRIORITY_TYPES:
+    elif source in {"giga_detail", "giga_listing_images", "giga_listing_imageUrls"}:
         tier = 4
-    else:
+    elif image_type in LOW_PRIORITY_TYPES:
         tier = 5
+    else:
+        tier = 6
     url_bonus = 0 if candidate.get("image_url") else 1
     return tier, url_bonus, sort_value, normalize_image_path(candidate)
 
 
-def _dedupe_key(candidate: dict[str, Any]) -> str:
+def _dedupe_keys(candidate: dict[str, Any]) -> list[str]:
+    keys: list[str] = []
+    content_hash = _text(candidate.get("content_hash"))
+    if content_hash:
+        keys.append(f"sha256:{content_hash}")
     image_url = _text(candidate.get("image_url"))
     if image_url:
-        return f"url:{image_url}"
+        keys.append(f"url:{image_url}")
     path = _text(candidate.get("path") or candidate.get("local_path"))
-    return f"path:{path}"
+    if path:
+        keys.append(f"path:{path}")
+    return list(dict.fromkeys(keys))
 
 
 def _add_candidate(candidates: list[dict[str, Any]], seen: dict[str, dict[str, Any]], candidate: dict[str, Any]) -> None:
@@ -115,19 +123,25 @@ def _add_candidate(candidates: list[dict[str, Any]], seen: dict[str, dict[str, A
         "representative_sku": _text(candidate.get("representative_sku")) or None,
         "is_representative_sku": bool(candidate.get("is_representative_sku")),
         "download_status": _text(candidate.get("download_status")) or None,
+        "content_hash": _text(candidate.get("content_hash")) or None,
+        "material_asset_id": candidate.get("material_asset_id"),
     }
     candidate["asset_source"] = candidate["asset_source"] or _candidate_asset_source(candidate["image_type"])
-    key = _dedupe_key(candidate)
-    if key in seen:
-        sources = seen[key].setdefault("merged_sources", [])
+    keys = _dedupe_keys(candidate)
+    existing = next((seen[key] for key in keys if key in seen), None)
+    if existing is not None:
+        sources = existing.setdefault("merged_sources", [])
         sources.append({
             "source": candidate["source"],
             "asset_source": candidate["asset_source"],
             "image_type": candidate["image_type"],
             "sku_code": candidate["sku_code"],
         })
+        for key in keys:
+            seen[key] = existing
         return
-    seen[key] = candidate
+    for key in keys:
+        seen[key] = candidate
     candidates.append(candidate)
 
 
@@ -154,6 +168,35 @@ async def collect_product_image_candidates(db: AsyncSession, product: Product) -
     candidates: list[dict[str, Any]] = []
     seen: dict[str, dict[str, Any]] = {}
 
+    material_result = await db.execute(
+        select(ProductMaterialAsset)
+        .where(
+            ProductMaterialAsset.product_id == product.id,
+            ProductMaterialAsset.asset_kind == "image",
+            ProductMaterialAsset.package_type == "to_b",
+            ProductMaterialAsset.processing_status.in_(("ready", "analyzed", "selected")),
+        )
+        .order_by(ProductMaterialAsset.id.asc())
+    )
+    for index, asset in enumerate(material_result.scalars().all(), start=1):
+        _add_candidate(candidates, seen, {
+            "path": asset.path,
+            "local_path": asset.path,
+            "image_type": "file",
+            "source": "giga_material_package",
+            "asset_source": "giga_material_package",
+            "sku_code": representative_sku or item_code,
+            "sort_order": index,
+            "download_status": "done",
+            "batch_id": batch_id,
+            "site": site,
+            "item_code": item_code,
+            "representative_sku": representative_sku,
+            "is_representative_sku": True,
+            "content_hash": asset.content_hash,
+            "material_asset_id": asset.id,
+        })
+
     if item_code:
         query = select(GigaProductImage).where(GigaProductImage.item_code == item_code)
         if batch_id:
@@ -179,6 +222,7 @@ async def collect_product_image_candidates(db: AsyncSession, product: Product) -
                 "sku_code": row.sku_code,
                 "sort_order": row.sort_order,
                 "download_status": row.download_status,
+                "content_hash": row.content_hash,
                 "batch_id": row.batch_id,
                 "site": row.site,
                 "item_code": row.item_code,

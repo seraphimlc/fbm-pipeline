@@ -81,13 +81,13 @@ Listing 生成使用以下本地配置：
 
 ```env
 STEP5_TITLE_MAX_CHARS=75
-STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS=125
+STEP5_PRODUCT_HIGHLIGHT_MAX_CHARS=120
 STEP5_BULLET_MAX_CHARS=500
 # 自动生成五点以 320 字符为目标；500 仍是 Amazon 字段兼容上限。
 STEP5_SEARCH_TERMS_MAX_BYTES=250
 ```
 
-标题上限包含空格和标点。Product Highlights 是独立于旧五点的 3-5 条短亮点，单条不得超过 125 字符；标题或亮点超限时生成器会把具体违规原因反馈给 LLM 重写，不会直接截断文本。旧五点继续保留并写入当前 Amazon 模板的 `bullet_point #1-#5`。现有模板尚未提供 Item Highlights 列，因此商品亮点会保存在系统中并在导出警告中提示，不会猜测或伪造模板字段。
+标题上限包含空格和标点。Product Highlight 是独立于旧五点的一条标题补充，最多 120 字符；标题或补充超限时生成器会把具体违规原因反馈给 LLM 重写，不会直接截断文本。它用于补足标题未覆盖的已证实属性、适配或配置信息。旧五点继续保留并写入当前 Amazon 模板的 `bullet_point #1-#5`。现有模板尚未提供 Item Highlights 列，因此标题补充会保存在系统中并在导出警告中提示，不会猜测或伪造模板字段。
 
 ### Amazon 人像图片元数据
 

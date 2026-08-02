@@ -7,10 +7,11 @@ import {
   PauseOutlined, ReloadOutlined, DeleteOutlined,
   FolderOpenOutlined, FileZipOutlined, InboxOutlined, FileExcelOutlined,
   CheckOutlined, DragOutlined, CopyOutlined, ExportOutlined,
-  PictureOutlined, PlusOutlined,
+  PictureOutlined, EyeOutlined, VideoCameraOutlined,
+  FilePdfOutlined, FileTextOutlined,
 } from '@ant-design/icons';
-import { getProduct, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, generateProductAplus, runProductFromStep, updateProduct, updateProductListingImages, listCategoryOptions } from '../api';
-import type { CategoryOption, ProductDetail } from '../api';
+import { getProduct, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, generateProductAplus, runProductFromStep, runPipelineStep, updateProduct, updateProductListingImages, listCategoryOptions, getProductMaterialSpreadsheetPreview, productMaterialPreviewUrl } from '../api';
+import type { CategoryOption, ProductDetail, ProductMaterialAsset, ProductMaterialSpreadsheetPreview } from '../api';
 import type { MutationCallsiteId } from '../api/mutationInventory.generated.ts';
 import { runMutationWithUX } from '../api/mutationRunner.ts';
 import {
@@ -48,7 +49,7 @@ const WORK_STATUS_META: Record<string, { label: string; shortLabel: string; colo
   failed: { label: '失败', shortLabel: '失败', color: 'error' },
 };
 const WORKFLOW_STEP_GROUPS = [
-  { key: 'images', title: '图片选择', nodes: ['workflow_uninitialized', 'auto_select_images', 'select_images'] },
+  { key: 'images', title: '素材与图片选择', nodes: ['workflow_uninitialized', 'prepare_materials', 'auto_select_images', 'select_images'] },
   { key: 'search', title: '搜索竞品', nodes: ['search_competitor'] },
   { key: 'visual', title: '视觉初筛', nodes: ['visual_match_competitors'] },
   { key: 'capture', title: '抓取详情', nodes: ['capture_competitor_candidates', 'capture_competitor_detail'] },
@@ -116,7 +117,7 @@ const parseJson = (value: string | null | undefined, fallback: any = null) => {
 const productHighlightValues = (value: string | null | undefined) => {
   const parsed = parseJson(value, []);
   if (!Array.isArray(parsed)) return [];
-  return parsed.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 5);
+  return parsed.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 1);
 };
 
 const productHighlightDrafts = (
@@ -125,10 +126,9 @@ const productHighlightDrafts = (
 ) => {
   const english = productHighlightValues(englishValue);
   const chinese = productHighlightValues(chineseValue);
-  const count = Math.max(3, Math.min(5, Math.max(english.length, chinese.length)));
   return {
-    english: Array.from({ length: count }, (_, index) => english[index] || ''),
-    chinese: Array.from({ length: count }, (_, index) => chinese[index] || ''),
+    english: [english[0] || ''],
+    chinese: [chinese[0] || ''],
   };
 };
 
@@ -368,6 +368,11 @@ const ProductDetail: React.FC = () => {
   const [pipelineRetryLoading, setPipelineRetryLoading] = useState(false);
   const [restartLoading, setRestartLoading] = useState(false);
   const [activeTabKey, setActiveTabKey] = useState('basic');
+  const [fullDetailProductId, setFullDetailProductId] = useState<number | null>(null);
+  const [fullDetailLoading, setFullDetailLoading] = useState(false);
+  const [spreadsheetPreview, setSpreadsheetPreview] = useState<ProductMaterialSpreadsheetPreview | null>(null);
+  const [spreadsheetPreviewTitle, setSpreadsheetPreviewTitle] = useState('');
+  const [spreadsheetPreviewLoading, setSpreadsheetPreviewLoading] = useState(false);
   const [categoryEditOpen, setCategoryEditOpen] = useState(false);
   const [categoryOptions, setCategoryOptions] = useState<CategoryOption[]>([]);
   const [selectedCategoryKey, setSelectedCategoryKey] = useState<string | undefined>();
@@ -376,12 +381,12 @@ const ProductDetail: React.FC = () => {
   const [listingEditOpen, setListingEditOpen] = useState(false);
   const [listingTitleInput, setListingTitleInput] = useState('');
   const [listingBulletsInput, setListingBulletsInput] = useState('');
-  const [listingProductHighlightsInput, setListingProductHighlightsInput] = useState<string[]>(['', '', '']);
+  const [listingProductHighlightsInput, setListingProductHighlightsInput] = useState<string[]>(['']);
   const [listingDescriptionInput, setListingDescriptionInput] = useState('');
   const [listingSearchTermsInput, setListingSearchTermsInput] = useState('');
   const [listingTitleZhInput, setListingTitleZhInput] = useState('');
   const [listingBulletsZhInput, setListingBulletsZhInput] = useState('');
-  const [listingProductHighlightsZhInput, setListingProductHighlightsZhInput] = useState<string[]>(['', '', '']);
+  const [listingProductHighlightsZhInput, setListingProductHighlightsZhInput] = useState<string[]>(['']);
   const [listingDescriptionZhInput, setListingDescriptionZhInput] = useState('');
   const [listingSearchTermsZhInput, setListingSearchTermsZhInput] = useState('');
   const [listingPrimaryKeywordInput, setListingPrimaryKeywordInput] = useState('');
@@ -398,11 +403,13 @@ const ProductDetail: React.FC = () => {
   const autoTabProductIdRef = useRef<number | null>(null);
   const userTouchedTabRef = useRef(false);
 
-  const fetchDetail = async () => {
+  const fetchDetail = async (full = false) => {
     if (!id) return;
     try {
-      const { data } = await getProduct(Number(id), { compact: true });
+      if (full) setFullDetailLoading(true);
+      const { data } = await getProduct(Number(id), { compact: !full });
       setProduct(data);
+      if (full) setFullDetailProductId(data.id);
       const nextDefaultTab = defaultProductDetailTab(data);
       const isNewProduct = autoTabProductIdRef.current !== data.id;
       if (isNewProduct) {
@@ -416,10 +423,19 @@ const ProductDetail: React.FC = () => {
     } catch {
       message.error('加载失败');
       setLoading(false);
+    } finally {
+      if (full) setFullDetailLoading(false);
     }
   };
 
+  const loadFullDetail = async (force = false) => {
+    if (!id || fullDetailLoading) return;
+    if (!force && fullDetailProductId === Number(id)) return;
+    await fetchDetail(true);
+  };
+
   useEffect(() => {
+    setFullDetailProductId(null);
     fetchDetail();
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [id]);
@@ -433,12 +449,12 @@ const ProductDetail: React.FC = () => {
     const isRunning = (product.workflow ? workflowIsRunning : legacyProductIsRunning)
       || APLUS_REGEN_ACTIVE_STATUSES.includes(product.aplus?.aplus_status || '');
     if (isRunning) {
-      pollRef.current = setInterval(fetchDetail, 3000);
+      pollRef.current = setInterval(() => fetchDetail(activeTabKey === 'files'), 3000);
     } else {
       if (pollRef.current) clearInterval(pollRef.current);
     }
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [product?.status, product?.workflow?.stage_status, product?.workflow?.work_status, product?.aplus?.aplus_status]);
+  }, [product?.status, product?.workflow?.stage_status, product?.workflow?.work_status, product?.aplus?.aplus_status, activeTabKey]);
 
   useEffect(() => {
     if (!product) return;
@@ -574,6 +590,15 @@ const ProductDetail: React.FC = () => {
   };
   const generatedFiles = product.generated_files || [];
   const visibleGeneratedFiles = generatedFiles.filter((file: any) => file?.file_type !== 'amazon_import_template');
+  const materialAssets: ProductMaterialAsset[] = product.material_assets || [];
+  const materialSummary = product.material_summary || {};
+  const materialChildrenByParent = materialAssets.reduce((result: Map<number, ProductMaterialAsset[]>, asset) => {
+    if (!asset.parent_asset_id) return result;
+    const children = result.get(asset.parent_asset_id) || [];
+    children.push(asset);
+    result.set(asset.parent_asset_id, children);
+    return result;
+  }, new Map<number, ProductMaterialAsset[]>());
   const dimensionLine = (length?: number | string | null, width?: number | string | null, height?: number | string | null, unit = 'in') => (
     length != null && width != null && height != null ? `${length} × ${width} × ${height} ${unit}` : '-'
   );
@@ -831,6 +856,19 @@ const ProductDetail: React.FC = () => {
     fileOpening === fileOpenOperationKey(path, directory)
   );
 
+  const previewSpreadsheet = async (asset: ProductMaterialAsset) => {
+    setSpreadsheetPreviewTitle(asset.original_filename || '表格预览');
+    setSpreadsheetPreviewLoading(true);
+    try {
+      const { data: preview } = await getProductMaterialSpreadsheetPreview(product.id, asset.id);
+      setSpreadsheetPreview(preview);
+    } catch (error: any) {
+      message.error(error?.response?.data?.detail || '表格预览失败');
+    } finally {
+      setSpreadsheetPreviewLoading(false);
+    }
+  };
+
   const copyText = async (value?: string | null) => {
     const text = String(value || '').trim();
     if (!text) return;
@@ -849,7 +887,7 @@ const ProductDetail: React.FC = () => {
       async (metadata) => {
         await extractProductZip(product.id, path, metadata);
         message.success('已解压');
-        await fetchDetail();
+        await fetchDetail(true);
       },
       {
         errorFallback: '解压失败',
@@ -934,6 +972,27 @@ const ProductDetail: React.FC = () => {
         errorFallback: 'Listing 文案重新生成失败',
         onError: (errorMessage) => message.error(errorMessage),
         clearLoading: () => setListingRegenerateLoading(false),
+      },
+    ).catch(() => undefined);
+  };
+
+  const generateCustomerMindset = async () => {
+    setPipelineRetryLoading(true);
+    await runMutationWithUX(
+      'runPipelineStep|frontend/src/pages/ProductDetail.tsx|generateCustomerMindset',
+      async (metadata) => {
+        const { data: result } = await runPipelineStep(product.id, 6, metadata);
+        if (result.workflow_node !== 'customer_mindset') {
+          message.info('用户心智已完成，后续 Listing 任务已提交');
+        } else {
+          message.success('已提交任务中心：生成用户心智');
+        }
+        await fetchDetail();
+      },
+      {
+        errorFallback: '用户心智任务创建失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setPipelineRetryLoading(false),
       },
     ).catch(() => undefined);
   };
@@ -1178,18 +1237,6 @@ const ProductDetail: React.FC = () => {
     setter((current) => current.map((item, itemIndex) => (itemIndex === index ? value : item)));
   };
 
-  const addProductHighlight = () => {
-    if (listingProductHighlightsInput.length >= 5) return;
-    setListingProductHighlightsInput((current) => [...current, '']);
-    setListingProductHighlightsZhInput((current) => [...current, '']);
-  };
-
-  const removeProductHighlight = (index: number) => {
-    if (listingProductHighlightsInput.length <= 3) return;
-    setListingProductHighlightsInput((current) => current.filter((_, itemIndex) => itemIndex !== index));
-    setListingProductHighlightsZhInput((current) => current.filter((_, itemIndex) => itemIndex !== index));
-  };
-
   const saveListing = async () => {
     if (!listingTitleInput.trim()) {
       message.warning('请填写标题');
@@ -1200,22 +1247,22 @@ const ProductDetail: React.FC = () => {
       return;
     }
     const productHighlights = listingProductHighlightsInput.map((item) => item.trim());
-    if (productHighlights.length < 3 || productHighlights.length > 5 || productHighlights.some((item) => !item)) {
-      message.warning('请完整填写 3-5 条商品亮点');
+    if (productHighlights.length !== 1 || !productHighlights[0]) {
+      message.warning('请填写 1 条标题补充');
       return;
     }
-    if (productHighlights.some((item) => item.length > 125)) {
-      message.warning('每条商品亮点不能超过 125 个字符');
+    if (productHighlights[0].length > 120) {
+      message.warning('标题补充不能超过 120 个字符');
       return;
     }
     const productHighlightsZh = listingProductHighlightsZhInput.map((item) => item.trim());
     const hasChineseProductHighlights = productHighlightsZh.some(Boolean);
-    if (hasChineseProductHighlights && productHighlightsZh.some((item) => !item)) {
-      message.warning('中文商品亮点填写后，需要与英文亮点逐条对应');
+    if (hasChineseProductHighlights && !productHighlightsZh[0]) {
+      message.warning('中文标题补充填写后，需要与英文标题补充对应');
       return;
     }
-    if (productHighlightsZh.some((item) => item.length > 125)) {
-      message.warning('每条中文商品亮点不能超过 125 个字符');
+    if (productHighlightsZh[0]?.length > 120) {
+      message.warning('中文标题补充不能超过 120 个字符');
       return;
     }
     setListingSaving(true);
@@ -1343,6 +1390,151 @@ const ProductDetail: React.FC = () => {
     { title: '高', dataIndex: 'height', width: 90, render: (v) => numberText(v) },
     { title: '重量', dataIndex: 'weight_value', width: 100, render: (v, record) => numberText(v ?? record.weight) },
     { title: '原始文本', dataIndex: 'dimensions', render: (v, record) => v || record.weight || '-' },
+  ];
+
+  const materialKindLabel = (kind?: string | null) => ({
+    zip: '素材包',
+    image: '图片',
+    video: '视频',
+    spreadsheet: '表格',
+    html: 'HTML',
+    pdf: 'PDF',
+    text: '文本',
+    other: '其他',
+  }[String(kind || '')] || String(kind || '未知'));
+
+  const materialPackageLabel = (kind?: string | null) => ({
+    to_b: 'To B 素材包',
+    information: 'Information',
+    retail_ready: 'Retail Ready',
+  }[String(kind || '')] || String(kind || '未分类'));
+
+  const materialStatusMeta = (status?: string | null) => ({
+    ready: { color: 'processing', label: '待分析' },
+    analyzed: { color: 'cyan', label: '已分析' },
+    selected: { color: 'success', label: '已选用' },
+    rejected: { color: 'error', label: '已拒绝' },
+    stale: { color: 'default', label: '历史素材' },
+  }[String(status || '')] || { color: 'default', label: String(status || '未知') });
+
+  const materialUsageLabels: Record<string, string> = {
+    source_archive: '来源压缩包',
+    product_detail_preview: '商品详情预览',
+    preview_only: '仅供预览',
+    auto_image_selection_candidate: '自动选图候选',
+    product_fact_source: '商品事实来源',
+    unsupported_for_fact_extraction: '暂不支持事实提取',
+    fact_extraction_failed: '事实提取失败',
+    contact_sheet_review: 'Contact Sheet 分析',
+    listing_main: 'Listing 主图',
+    listing_gallery: 'Listing Gallery',
+    aplus_reference: 'A+ 参考图',
+  };
+
+  const materialPreview = (asset: ProductMaterialAsset) => {
+    const url = productMaterialPreviewUrl(product.id, asset.id);
+    const suffix = String(asset.original_filename || '').toLowerCase();
+    if (asset.asset_kind === 'image') {
+      return <Image src={url} width={92} height={68} style={{ objectFit: 'cover', borderRadius: 4 }} />;
+    }
+    if (asset.asset_kind === 'video') {
+      return <video src={url} controls preload="metadata" style={{ width: 190, maxHeight: 112, borderRadius: 4, background: '#111' }} />;
+    }
+    if (asset.asset_kind === 'spreadsheet' && (suffix.endsWith('.xlsx') || suffix.endsWith('.csv') || suffix.endsWith('.tsv'))) {
+      return (
+        <Button size="small" icon={<EyeOutlined />} loading={spreadsheetPreviewLoading} onClick={() => previewSpreadsheet(asset)}>
+          预览表格
+        </Button>
+      );
+    }
+    if (asset.asset_kind === 'pdf' || asset.asset_kind === 'html' || asset.asset_kind === 'text') {
+      return (
+        <Button size="small" icon={asset.asset_kind === 'pdf' ? <FilePdfOutlined /> : <FileTextOutlined />} onClick={() => window.open(url, '_blank', 'noopener,noreferrer')}>
+          浏览器预览
+        </Button>
+      );
+    }
+    if (asset.asset_kind === 'zip') {
+      return <Text type="secondary">展开查看成员</Text>;
+    }
+    return <Text type="secondary">使用右侧打开</Text>;
+  };
+
+  const materialColumns = [
+    {
+      title: '类型',
+      dataIndex: 'asset_kind',
+      width: 110,
+      render: (value: string) => <Tag icon={value === 'video' ? <VideoCameraOutlined /> : undefined}>{materialKindLabel(value)}</Tag>,
+    },
+    {
+      title: '文件与来源',
+      dataIndex: 'original_filename',
+      width: 320,
+      render: (value: string, record: ProductMaterialAsset) => (
+        <Space direction="vertical" size={2} style={{ maxWidth: 300 }}>
+          <Text strong ellipsis={{ tooltip: value }}>{value}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>{materialPackageLabel(record.package_type)}</Text>
+          <Text type="secondary" copyable style={{ fontSize: 11 }} ellipsis={{ tooltip: record.relative_path || record.path }}>
+            {record.relative_path || record.path}
+          </Text>
+        </Space>
+      ),
+    },
+    {
+      title: '预览',
+      key: 'preview',
+      width: 220,
+      render: (_: unknown, record: ProductMaterialAsset) => materialPreview(record),
+    },
+    {
+      title: '文件信息',
+      key: 'facts',
+      width: 170,
+      render: (_: unknown, record: ProductMaterialAsset) => (
+        <Space direction="vertical" size={1}>
+          <Text>{fileSize(record.file_size)}</Text>
+          {record.width && record.height ? <Text type="secondary">{record.width} × {record.height}</Text> : null}
+          <Text type="secondary" style={{ fontSize: 11 }}>SHA-256 {record.content_hash.slice(0, 12)}…</Text>
+        </Space>
+      ),
+    },
+    {
+      title: '状态与用途',
+      key: 'status',
+      width: 250,
+      render: (_: unknown, record: ProductMaterialAsset) => {
+        const status = materialStatusMeta(record.processing_status);
+        const usages = parseJson(record.downstream_usage_json, []);
+        return (
+          <Space direction="vertical" size={4}>
+            <Space wrap>
+              <Tag color={status.color}>{status.label}</Tag>
+              {record.contact_sheet_page ? <Tag>Sheet {record.contact_sheet_page} · {record.contact_sheet_label || '-'}</Tag> : null}
+            </Space>
+            <Space wrap>
+              {(Array.isArray(usages) ? usages : []).map((usage: string) => (
+                <Tag key={usage} color={usage === 'listing_main' ? 'green' : undefined}>{materialUsageLabels[usage] || usage}</Tag>
+              ))}
+              {(!Array.isArray(usages) || usages.length === 0) && <Text type="secondary">尚未进入下游</Text>}
+            </Space>
+            {record.rejection_reason ? <Text type="danger">{record.rejection_reason}</Text> : null}
+          </Space>
+        );
+      },
+    },
+    {
+      title: '操作',
+      key: 'actions',
+      width: 220,
+      fixed: 'right',
+      render: (_: unknown, record: ProductMaterialAsset) => (
+        <Space size="small">
+          <Button size="small" loading={isFileOpening(record.path)} onClick={() => openPath(record.path)}>打开</Button>
+          <Button size="small" icon={<FolderOpenOutlined />} loading={isFileOpening(record.path, true)} onClick={() => openPath(record.path, true)}>文件夹</Button>
+        </Space>
+      ),
+    },
   ];
 
   const zipColumns = [
@@ -1793,10 +1985,18 @@ const ProductDetail: React.FC = () => {
               </Descriptions.Item>
               {pricingDetail && (
                 <>
-                  <Descriptions.Item label="净收入">{money(pricingDetail.net_revenue)}</Descriptions.Item>
-                  <Descriptions.Item label="变动费用">{money(pricingDetail.variable_fee)}</Descriptions.Item>
-                  <Descriptions.Item label="固定成本">{money(pricingDetail.fixed_cost)}</Descriptions.Item>
-                  <Descriptions.Item label="退货抵扣">{money(pricingDetail.return_credit)}</Descriptions.Item>
+                  <Descriptions.Item label="可留存收入">{money(pricingDetail.net_revenue)}</Descriptions.Item>
+                  <Descriptions.Item label="可留存收入比例">{pricingDetail.retained_revenue_rate != null ? `${pricingDetail.retained_revenue_rate}%` : '-'}</Descriptions.Item>
+                  <Descriptions.Item label="Amazon 佣金">{money(pricingDetail.commission_fee)}（{pricingDetail.commission_rate != null ? `${pricingDetail.commission_rate}%` : '-'}）</Descriptions.Item>
+                  <Descriptions.Item label="实际退货率">{pricingDetail.return_rate != null ? `${pricingDetail.return_rate}%` : '-'}</Descriptions.Item>
+                  <Descriptions.Item label="退货净影响">{money(pricingDetail.return_reserve)}</Descriptions.Item>
+                  <Descriptions.Item label="其中退款收入损失">{money(pricingDetail.return_revenue_loss)}</Descriptions.Item>
+                  <Descriptions.Item label="其中退货管理费">{money(pricingDetail.return_management_fee)}</Descriptions.Item>
+                  <Descriptions.Item label="货值+GIGA物流">{money(pricingDetail.source_cost)}</Descriptions.Item>
+                  <Descriptions.Item label="其中 GIGA物流">{money(pricingDetail.source_shipping_cost)}</Descriptions.Item>
+                  <Descriptions.Item label="退货保险">{money(pricingDetail.insurance_cost)}（货值的 {pricingDetail.insurance_rate != null ? `${pricingDetail.insurance_rate}%` : '-'}）</Descriptions.Item>
+                  <Descriptions.Item label="平均保险赔付">{money(pricingDetail.average_insurance_payout)}（货值的 {pricingDetail.insurance_payout_rate != null ? `${pricingDetail.insurance_payout_rate}%` : '-'}）</Descriptions.Item>
+                  <Descriptions.Item label="广告预留">{money(pricingDetail.advertising_cost)}</Descriptions.Item>
                   <Descriptions.Item label="目标净利率">{pricingDetail.target_margin_rate != null ? `${pricingDetail.target_margin_rate}%` : '-'}</Descriptions.Item>
                   <Descriptions.Item label="最低利润">{money(pricingDetail.min_profit)}</Descriptions.Item>
                   <Descriptions.Item label="净利率线价格">{money(pricingDetail.price_for_margin)}</Descriptions.Item>
@@ -2246,7 +2446,23 @@ const ProductDetail: React.FC = () => {
           </Card>
         </div>
       ) : (
-        <Empty description={isCustomerMindsetFailed ? '用户心智梳理失败，请在任务中心查看并重试' : '等待图片分析完成后自动梳理'} />
+        <Empty
+          description={isCustomerMindsetFailed ? '用户心智梳理失败，可重新提交任务' : '等待图片分析完成后自动梳理'}
+        >
+          <Space direction="vertical" align="center">
+            <Button
+              type="primary"
+              icon={<PlayCircleOutlined />}
+              loading={pipelineRetryLoading}
+              disabled={!hasImageAnalysis || isPipelineRunning}
+              onClick={generateCustomerMindset}
+            >
+              生成用户心智
+            </Button>
+            {!hasImageAnalysis && <Text type="secondary">请先完成图片分析，才能生成用户心智。</Text>}
+            {isPipelineRunning && <Text type="secondary">当前流程正在运行，请等待当前任务结束。</Text>}
+          </Space>
+        </Empty>
       ),
     },
     {
@@ -2290,9 +2506,9 @@ const ProductDetail: React.FC = () => {
           <Card
             title={(
               <Space size="small">
-                <span>商品亮点（Product Highlights）</span>
-                <Tag color={listingProductHighlights.length >= 3 ? 'blue' : 'default'}>
-                  {listingProductHighlights.length}/5 条
+                <span>标题补充（Product Highlight）</span>
+                <Tag color={listingProductHighlights.length === 1 ? 'blue' : 'default'}>
+                  {listingProductHighlights.length}/1 条
                 </Tag>
               </Space>
             )}
@@ -2305,10 +2521,10 @@ const ProductDetail: React.FC = () => {
                   <li key={`${index}-${highlight}`} style={{ marginBottom: 10 }}>
                     <Space direction="vertical" size={2} style={{ width: '100%' }}>
                       <Text>{highlight}</Text>
-                      <Text type="secondary">{highlight.length}/125 字符</Text>
+                      <Text type="secondary">{highlight.length}/120 字符</Text>
                       {listingProductHighlightsZh[index] && (
                         <Text type="secondary">
-                          中文：{listingProductHighlightsZh[index]}（{listingProductHighlightsZh[index].length}/125 字符）
+                          中文：{listingProductHighlightsZh[index]}（{listingProductHighlightsZh[index].length}/120 字符）
                         </Text>
                       )}
                     </Space>
@@ -3181,6 +3397,61 @@ const ProductDetail: React.FC = () => {
       children: (
         <div>
           <Card
+            title="素材包与附件"
+            size="small"
+            loading={fullDetailLoading}
+            style={{ marginBottom: 16 }}
+            extra={(
+              <Button size="small" icon={<ReloadOutlined />} loading={fullDetailLoading} onClick={() => loadFullDetail(true)}>
+                刷新素材
+              </Button>
+            )}
+          >
+            <Space wrap style={{ marginBottom: 12 }}>
+              <Tag color="blue">素材 {materialSummary.asset_count || materialAssets.length}</Tag>
+              <Tag color="cyan">图片 {materialSummary.image_count || 0}</Tag>
+              <Tag color="purple">视频 {materialSummary.video_count || 0}</Tag>
+              <Tag color="gold">素材包 {materialSummary.package_count || 0}</Tag>
+              <Tag color="green">已分析图片 {materialSummary.analyzed_image_count || 0}</Tag>
+            </Space>
+            <Table
+              size="small"
+              columns={materialColumns}
+              dataSource={materialAssets}
+              rowKey="id"
+              pagination={{ pageSize: 20, hideOnSinglePage: true }}
+              scroll={{ x: 1320 }}
+              locale={{ emptyText: fullDetailProductId === product.id ? '当前商品还没有登记素材' : '正在加载完整素材信息' }}
+              expandable={{
+                rowExpandable: (record: ProductMaterialAsset) => record.asset_kind === 'zip' && Boolean(materialChildrenByParent.get(record.id)?.length),
+                expandedRowRender: (record: ProductMaterialAsset) => {
+                  const children = materialChildrenByParent.get(record.id) || [];
+                  return (
+                    <List
+                      size="small"
+                      header={<Text strong>压缩包成员（{children.length}）</Text>}
+                      dataSource={children}
+                      renderItem={(child) => (
+                        <List.Item
+                          actions={[
+                            <Button key="open" type="link" size="small" onClick={() => openPath(child.path)}>打开</Button>,
+                            <Button key="folder" type="link" size="small" onClick={() => openPath(child.path, true)}>文件夹</Button>,
+                          ]}
+                        >
+                          <List.Item.Meta
+                            title={<Space><Tag>{materialKindLabel(child.asset_kind)}</Tag><Text>{child.relative_path || child.original_filename}</Text></Space>}
+                            description={`${fileSize(child.file_size)} · SHA-256 ${child.content_hash.slice(0, 16)}…`}
+                          />
+                        </List.Item>
+                      )}
+                    />
+                  );
+                },
+              }}
+            />
+          </Card>
+
+          <Card
             title="生成文件"
             size="small"
             style={{ marginBottom: 16 }}
@@ -3251,7 +3522,7 @@ const ProductDetail: React.FC = () => {
           商品 #{product.id}
         </Title>
         <Space>
-          <Button icon={<ReloadOutlined />} onClick={fetchDetail}>刷新</Button>
+          <Button icon={<ReloadOutlined />} onClick={() => fetchDetail(activeTabKey === 'files')}>刷新</Button>
           {hasWorkflow && renderWorkflowActionButton(workflow?.primary_action, workflow?.primary_action_label, true)}
           {hasWorkflow && workflowSecondaryActions.map((action: string) => (
             <React.Fragment key={action}>
@@ -3480,9 +3751,41 @@ const ProductDetail: React.FC = () => {
         onChange={(key) => {
           userTouchedTabRef.current = true;
           setActiveTabKey(key);
+          if (key === 'files') void loadFullDetail();
         }}
       />
     </div>
+    <Modal
+      title={spreadsheetPreviewTitle || '表格预览'}
+      open={Boolean(spreadsheetPreview)}
+      footer={null}
+      width={1000}
+      onCancel={() => setSpreadsheetPreview(null)}
+    >
+      {spreadsheetPreview && (
+        <div>
+          <Space style={{ marginBottom: 12 }}>
+            <Tag color="blue">工作表：{spreadsheetPreview.sheet_name}</Tag>
+            <Tag>{spreadsheetPreview.rows.length} 行预览</Tag>
+            {spreadsheetPreview.truncated ? <Tag color="warning">仅展示前 50 行、20 列</Tag> : null}
+          </Space>
+          <div style={{ overflow: 'auto', maxHeight: 600, border: '1px solid #eee' }}>
+            <table style={{ borderCollapse: 'collapse', minWidth: '100%', fontSize: 12 }}>
+              <tbody>
+                {spreadsheetPreview.rows.map((row, rowIndex) => (
+                  <tr key={rowIndex}>
+                    <td style={{ position: 'sticky', left: 0, background: '#fafafa', border: '1px solid #eee', padding: '6px 8px', color: '#999' }}>{rowIndex + 1}</td>
+                    {row.map((cell, cellIndex) => (
+                      <td key={cellIndex} style={{ border: '1px solid #eee', padding: '6px 8px', whiteSpace: 'nowrap' }}>{String(cell ?? '')}</td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </Modal>
     <Modal
       title={`重新生成A+模块 ${regenTarget?.module_position || ''}`}
       open={!!regenTarget}
@@ -3575,49 +3878,27 @@ const ProductDetail: React.FC = () => {
           />
         </div>
         <div>
-          <Space style={{ width: '100%', justifyContent: 'space-between' }} align="center">
-            <Text type="secondary">商品亮点（3-5 条，每条最多 125 字符）</Text>
-            <Button
-              size="small"
-              icon={<PlusOutlined />}
-              disabled={listingProductHighlightsInput.length >= 5}
-              onClick={addProductHighlight}
-            >
-              添加亮点
-            </Button>
-          </Space>
+          <Text type="secondary">标题补充（仅 1 条，最多 120 字符；标题少于 75 字符时可向买家展示）</Text>
           {listingProductHighlightsInput.map((highlight, index) => (
             <div
               key={`product-highlight-${index}`}
               style={{ borderTop: index ? '1px solid #f0f0f0' : undefined, marginTop: 10, paddingTop: 10 }}
             >
-              <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 6 }} align="center">
-                <Text strong>亮点 {index + 1}</Text>
-                <Button
-                  type="text"
-                  danger
-                  size="small"
-                  icon={<DeleteOutlined />}
-                  title={`删除第 ${index + 1} 条亮点`}
-                  aria-label={`删除第 ${index + 1} 条亮点`}
-                  disabled={listingProductHighlightsInput.length <= 3}
-                  onClick={() => removeProductHighlight(index)}
-                />
-              </Space>
+              <Text strong>标题补充</Text>
               <Input.TextArea
                 value={highlight}
                 onChange={(event) => updateProductHighlight(index, event.target.value)}
-                placeholder="英文商品亮点"
+                placeholder="英文标题补充"
                 rows={2}
-                maxLength={125}
+                maxLength={120}
                 showCount
               />
               <Input.TextArea
                 value={listingProductHighlightsZhInput[index] || ''}
                 onChange={(event) => updateProductHighlight(index, event.target.value, true)}
-                placeholder="中文翻译（可选，填写后需逐条对应）"
+                placeholder="中文翻译（可选）"
                 rows={2}
-                maxLength={125}
+                maxLength={120}
                 showCount
                 style={{ marginTop: 8 }}
               />

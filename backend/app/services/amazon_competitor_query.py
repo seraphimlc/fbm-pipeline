@@ -8,7 +8,7 @@ from typing import Any
 from app.models import Product
 
 
-RULE_VERSION = "amazon_competitor_query_v1"
+RULE_VERSION = "amazon_competitor_query_v2"
 
 STOPWORDS = {
     "and",
@@ -38,6 +38,14 @@ NOISE_PATTERNS = (
 )
 
 CORE_PRODUCT_TERMS = (
+    "platform bed frame",
+    "upholstered bed frame",
+    "storage bed frame",
+    "bed frame",
+    "platform bed",
+    "sectional sofa",
+    "sleeper sofa",
+    "sofa bed",
     "sofa",
     "loveseat",
     "chair",
@@ -62,6 +70,20 @@ CORE_PRODUCT_TERMS = (
     "patio umbrella",
     "fire pit",
     "storage box",
+)
+
+STANDARD_SIZE_TERMS = (
+    "california king",
+    "cal king",
+    "queen size",
+    "king size",
+    "full size",
+    "twin xl",
+    "twin size",
+    "queen",
+    "king",
+    "full",
+    "twin",
 )
 
 ATTRIBUTE_TERMS = (
@@ -124,7 +146,9 @@ def build_amazon_competitor_queries(product: Product) -> dict[str, Any]:
     attribute_terms = _terms_in_text(normalized_text, ATTRIBUTE_TERMS)
     use_case_terms = _terms_in_text(normalized_text, USE_CASE_TERMS)
     material_terms = _split_terms(facts.get("material"), max_terms=2)
-    dimension_terms = _dimension_terms(product)
+    size_terms = _explicit_size_terms(facts)
+    dimension_terms = [] if size_terms else _dimension_terms(product)
+    color_terms = _split_terms(facts.get("color"), max_terms=1)
 
     if not core_terms:
         fallback = _fallback_core_terms(facts.get("title"))
@@ -133,7 +157,13 @@ def build_amazon_competitor_queries(product: Product) -> dict[str, Any]:
         raise CompetitorQueryError("insufficient_product_facts_for_competitor_search: missing reliable product type")
 
     queries: list[AmazonCompetitorQuery] = []
-    core = _query_terms([core_terms[0], *attribute_terms[:2], *material_terms[:1], *use_case_terms[:1]])
+    core = _query_terms([
+        core_terms[0],
+        *size_terms[:1],
+        *attribute_terms[:2],
+        *material_terms[:1],
+        *color_terms[:1],
+    ])
     queries.append(AmazonCompetitorQuery(
         query=" ".join(core),
         intent="core_product",
@@ -143,7 +173,14 @@ def build_amazon_competitor_queries(product: Product) -> dict[str, Any]:
         source_facts=_source_fact_names(facts, ("title", "features", "material", "description")),
     ))
 
-    material_size = _query_terms([core_terms[0], *material_terms[:2], *dimension_terms[:2], *attribute_terms[:1]])
+    material_size = _query_terms([
+        core_terms[0],
+        *size_terms[:1],
+        *material_terms[:2],
+        *color_terms[:1],
+        *dimension_terms[:1],
+        *attribute_terms[:1],
+    ])
     if len(material_size) >= 3 and material_size != core:
         queries.append(AmazonCompetitorQuery(
             query=" ".join(material_size),
@@ -154,7 +191,14 @@ def build_amazon_competitor_queries(product: Product) -> dict[str, Any]:
             source_facts=_source_fact_names(facts, ("title", "material", "dimensions", "packages")),
         ))
 
-    use_case = _query_terms([core_terms[0], *use_case_terms[:2], *attribute_terms[:2], *material_terms[:1]])
+    use_case = _query_terms([
+        core_terms[0],
+        *size_terms[:1],
+        *use_case_terms[:1],
+        *attribute_terms[:2],
+        *material_terms[:1],
+        *color_terms[:1],
+    ])
     if len(use_case) >= 3 and use_case not in (core, material_size):
         queries.append(AmazonCompetitorQuery(
             query=" ".join(use_case),
@@ -212,6 +256,8 @@ def _product_facts(product: Product) -> dict[str, Any]:
         "title": getattr(data, "title", None) if data else None,
         "description": getattr(data, "description", None) if data else None,
         "features": features,
+        "product_type": getattr(data, "product_type", None) if data else None,
+        "color": getattr(data, "color", None) if data else None,
         "material": getattr(data, "material", None) if data else None,
         "dimensions": dimensions,
         "packages": packages,
@@ -268,6 +314,33 @@ def _fallback_core_terms(title: Any) -> list[str]:
     if len(tokens) >= 2:
         return [" ".join(tokens[:2])]
     return tokens
+
+
+def _explicit_size_terms(facts: dict[str, Any]) -> list[str]:
+    """Prefer buyer-facing variant sizes over physical package dimensions.
+
+    A product length such as ``82 inch`` is useful as a fact but often broadens
+    Amazon search into sheets, rails, and other products. Variant/title sizes
+    such as ``queen`` or ``4 tier`` describe the purchasable form more reliably.
+    """
+    text = _normalize_text({
+        "title": facts.get("title"),
+        "product_type": facts.get("product_type"),
+        "variants": facts.get("variants"),
+    })
+    found = _terms_in_text(text, STANDARD_SIZE_TERMS)
+    canonical: list[str] = []
+    for term in found:
+        normalized = {
+            "queen size": "queen",
+            "king size": "king",
+            "full size": "full",
+            "twin size": "twin",
+            "cal king": "california king",
+        }.get(term, term)
+        if normalized not in canonical:
+            canonical.append(normalized)
+    return canonical[:2]
 
 
 def _dimension_terms(product: Product) -> list[str]:

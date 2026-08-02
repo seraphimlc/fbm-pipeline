@@ -71,8 +71,4 @@ export const mutationExportAllowlist = {
     classification: 'unused',
     reason: 'The direct product refresh client has no current pages/components/hooks owner.',
   },
-  runPipelineStep: {
-    classification: 'unused',
-    reason: 'The direct single-step pipeline client has no current pages/components/hooks owner.',
-  },
 };

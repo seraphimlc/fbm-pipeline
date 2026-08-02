@@ -32,6 +32,7 @@ async def init_db():
         await _ensure_mysql_registered_tables(conn)
         await _ensure_mysql_product_data_source_columns(conn)
         await _ensure_mysql_product_source_columns_and_indexes(conn)
+        await _ensure_mysql_product_pipeline_columns(conn)
         await _ensure_mysql_product_workflow_columns(conn)
         await _ensure_mysql_product_image_selection_columns(conn)
         await _ensure_mysql_customer_mindset_columns(conn)
@@ -210,6 +211,16 @@ async def _ensure_mysql_product_workflow_columns(conn) -> None:
         ("workflow_status", "VARCHAR(40) NULL"),
         ("workflow_error", "LONGTEXT NULL"),
         ("workflow_updated_at", "DATETIME NULL"),
+    ):
+        if not await _mysql_column_exists(conn, "products", column_name):
+            await conn.execute(text(f"ALTER TABLE `products` ADD COLUMN `{column_name}` {column_type}"))
+
+
+async def _ensure_mysql_product_pipeline_columns(conn) -> None:
+    for column_name, column_type in (
+        ("pipeline_target", "VARCHAR(30) NULL DEFAULT 'export_ready'"),
+        ("pipeline_test_session_key", "VARCHAR(100) NULL"),
+        ("pipeline_origin_task_run_id", "INTEGER NULL"),
     ):
         if not await _mysql_column_exists(conn, "products", column_name):
             await conn.execute(text(f"ALTER TABLE `products` ADD COLUMN `{column_name}` {column_type}"))

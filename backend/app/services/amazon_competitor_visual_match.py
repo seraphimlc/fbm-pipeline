@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 TASK_TYPE_COMPETITOR_SEARCH = "product_competitor_search"
 FAKE_VISUAL_MATCH_MODEL = "fake_competitor_visual_match_v1"
-VISUAL_MATCH_RULE_VERSION = "amazon_competitor_visual_match_direct_url_v1"
+VISUAL_MATCH_RULE_VERSION = "amazon_competitor_visual_match_direct_url_v2"
 MAX_CANDIDATES = 20
 MAX_SELECTED = 6
 MIN_SELECTED = 4
@@ -177,13 +177,22 @@ async def _analyze_direct_url_reviews(product: Product, source_image_url: str, r
 
 def _direct_visual_match_prompt(product: Product, source_image_url: str, records: list[dict[str, Any]]) -> dict[str, str]:
     title = getattr(getattr(product, "data", None), "title", None) or getattr(product, "gigab2b_product_id", "") or ""
+    product_type = getattr(getattr(product, "data", None), "product_type", None) or ""
+    color = getattr(getattr(product, "data", None), "color", None) or ""
+    material = getattr(getattr(product, "data", None), "material", None) or ""
     facts = [
         "Compare every candidate image against the reference product image.",
         "The first attached image is the source/reference product image.",
         f"Our product title: {title}",
+        f"Our product type: {product_type}",
+        f"Our product color: {color}",
+        f"Our product material: {material}",
         f"Source image URL: {source_image_url}",
         "Each candidate is attached as its own image immediately after its slot metadata.",
         "Do not use contact sheets. Do not infer slot or asin from order if the metadata conflicts.",
+        "Score visual_similarity as direct market comparability, not exact SKU identity.",
+        "A 0.65-0.89 candidate is the same product type and form factor that the same buyer would directly compare, even when brand, standard size, color, legs, stitching, or cosmetic silhouette differs.",
+        "Reserve 0.90-1.00 for near-identical designs; use 0.40-0.64 for related products with a materially different form factor or key function.",
     ]
     output_schema = [
         "Return valid JSON only with this exact top-level shape:",
@@ -193,7 +202,9 @@ def _direct_visual_match_prompt(product: Product, source_image_url: str, records
         "- Use the exact slot and asin values from the metadata.",
         "- Scores must be numbers from 0 to 1.",
         "- image_loaded=false requires reject=true and a reject_reason.",
-        "- reject=true for accessories, replacement parts, covers only, wrong product types, bad variants, low similarity, or unreadable images.",
+        "- reject=true only for hard exclusions: accessories, replacement parts, covers only, incomplete products, wrong product types, materially incompatible form factors, or unreadable images.",
+        "- Do not reject a valid competing product only because its brand, standard size, color, styling, headboard shape, legs, or upholstery details differ.",
+        "- Do not reject only because a score is below 0.65; return the calibrated score and let deterministic code apply the threshold.",
         "Candidate slots:",
     ]
     output_schema.extend(_candidate_descriptor(record) for record in records)
@@ -202,15 +213,17 @@ def _direct_visual_match_prompt(product: Product, source_image_url: str, records
 
 def _candidate_descriptor(record: dict[str, Any]) -> str:
     return (
-        f"slot={record['slot']} asin={record['asin']} search_rank={record['search_rank']} "
+        f"slot={record['slot']} asin={record['asin']} query_index={record.get('query_index') or ''} "
+        f"query_intent={record.get('query_intent') or ''} search_query={record.get('search_query') or ''} "
+        f"search_rank={record['search_rank']} "
         f"price={record.get('price') or ''} rating={record.get('rating') or ''} review_count={record.get('review_count') or ''} "
         f"title={record.get('title') or ''} image_url={record['image_url']}"
     )
 
 
 def _normalize_direct_visual_review(item: dict[str, Any], record: dict[str, Any], analysis: dict[str, Any]) -> dict[str, Any]:
-    image_loaded = bool(item.get("image_loaded"))
-    reject = bool(item.get("reject")) or not image_loaded
+    image_loaded = _coerce_bool(item.get("image_loaded"))
+    reject = _coerce_bool(item.get("reject")) or not image_loaded
     reject_reason = str(item.get("reject_reason") or ("image_not_loaded" if not image_loaded else ""))
     raw = {
         "review": item,
@@ -226,7 +239,7 @@ def _normalize_direct_visual_review(item: dict[str, Any], record: dict[str, Any]
         "search_rank": int(record["search_rank"]),
         "image_loaded": image_loaded,
         "visual_similarity": _coerce_score(item.get("visual_similarity")),
-        "same_product_type": bool(item.get("same_product_type")),
+        "same_product_type": _coerce_bool(item.get("same_product_type")),
         "attribute_match": _coerce_score(item.get("attribute_match")),
         "title_match": _coerce_score(item.get("title_match")),
         "reject": reject,
@@ -323,6 +336,9 @@ def _record_for_candidate(candidate: AmazonCompetitorSearchCandidate, index: int
         "price": candidate.price or "",
         "rating": candidate.rating or "",
         "review_count": candidate.review_count or "",
+        "search_query": candidate.search_query or "",
+        "query_intent": candidate.query_intent or "",
+        "query_index": candidate.query_index,
     }
 
 
@@ -367,6 +383,16 @@ def _coerce_score(value: object) -> float:
         return max(0.0, min(1.0, float(value)))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _coerce_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes"}
+    return False
 
 
 def _visual_exclusion_reason(review: dict[str, Any]) -> str | None:

@@ -23,8 +23,10 @@ _chrome_lock = asyncio.Lock()
 # “打开页面 -> 等待 -> 执行JS/点击/下载”的业务流程，避免并发任务串页。
 _browser_workflow_semaphore = asyncio.Semaphore(max(1, settings.BROWSER_WORKFLOW_CONCURRENCY))
 
-# 专用标签页标记。所有采集/类目操作都在这个 tab 里执行，不抢用户当前页面。
-FBM_TAB_MARKER = "#fbm-pipeline-worker"
+# 所有采集/类目操作都在持久化 tab id 对应的专用标签页里执行，
+# 不抢用户当前页面。不要通过遍历所有标签页 URL 查找 worker：
+# Chrome 扩展控制的标签页可能让 AppleScript 读取 URL 长时间阻塞，
+# 而且导航后的业务 URL 本来也不会保留额外的 marker。
 FBM_TAB_ID_FILE = Path("/tmp/fbm_pipeline_chrome_tab_id")
 _last_chrome_error: str | None = None
 
@@ -89,8 +91,8 @@ async def chrome_workflow(name: str):
 async def chrome_navigate(url: str, wait: float = 3.0) -> bool:
     """在 Chrome 专用标签页打开 URL，不切换用户当前标签页。"""
     async with _chrome_lock:
-        worker_tab_id = _read_worker_tab_id()
-        script = f'''tell application "Google Chrome"
+        def navigation_script(worker_tab_id: str) -> str:
+            return f'''tell application "Google Chrome"
     if (count of windows) = 0 then make new window
     set workerTab to missing value
     set workerTabId to "{worker_tab_id}"
@@ -105,15 +107,6 @@ async def chrome_navigate(url: str, wait: float = 3.0) -> bool:
             if workerTab is not missing value then exit repeat
         end repeat
     end if
-    repeat with w in windows
-        repeat with t in tabs of w
-            if (URL of t contains "{FBM_TAB_MARKER}") then
-                set workerTab to t
-                exit repeat
-            end if
-        end repeat
-        if workerTab is not missing value then exit repeat
-    end repeat
     if workerTab is missing value then
         set workerTab to make new tab at end of tabs of front window
     end if
@@ -122,20 +115,34 @@ async def chrome_navigate(url: str, wait: float = 3.0) -> bool:
         return ((id of workerTab) as string)
     end tell
 end tell'''
-        try:
-            _set_last_chrome_error(None)
-            stdout, stderr = _run_osascript(script)
-            if stderr and "error" in stderr.lower():
-                _set_last_chrome_error(stderr)
-                logger.error(f"Chrome导航错误: {stderr}")
+
+        for attempt in range(2):
+            worker_tab_id = _read_worker_tab_id() if attempt == 0 else ""
+            try:
+                _set_last_chrome_error(None)
+                stdout, stderr = _run_osascript(navigation_script(worker_tab_id))
+                if stderr and "error" in stderr.lower():
+                    _set_last_chrome_error(stderr)
+                    logger.error(f"Chrome导航错误: {stderr}")
+                    return False
+                _write_worker_tab_id(stdout)
+                await asyncio.sleep(wait)
+                return True
+            except subprocess.TimeoutExpired as exc:
+                _set_last_chrome_error(str(exc))
+                if attempt == 0 and worker_tab_id:
+                    logger.warning(
+                        f"Chrome worker tab 导航超时，清除陈旧 tab id 后重试: tab_id={worker_tab_id}"
+                    )
+                    FBM_TAB_ID_FILE.unlink(missing_ok=True)
+                    continue
+                logger.error(f"Chrome导航超时: {exc}")
                 return False
-            _write_worker_tab_id(stdout)
-            await asyncio.sleep(wait)
-            return True
-        except Exception as e:
-            _set_last_chrome_error(str(e))
-            logger.error(f"Chrome导航失败: {e}")
-            return False
+            except Exception as exc:
+                _set_last_chrome_error(str(exc))
+                logger.error(f"Chrome导航失败: {exc}")
+                return False
+        return False
 
 
 async def chrome_open_url_for_user(url: str, wait: float = 1.0) -> bool:
@@ -183,15 +190,6 @@ async def chrome_execute_js(js_code: str, timeout: int = 30) -> str | None:
             if workerTab is not missing value then exit repeat
         end repeat
     end if
-    repeat with w in windows
-        repeat with t in tabs of w
-            if (URL of t contains "{FBM_TAB_MARKER}") then
-                set workerTab to t
-                exit repeat
-            end if
-        end repeat
-        if workerTab is not missing value then exit repeat
-    end repeat
     if workerTab is missing value then error "FBM Pipeline worker tab not found"
     tell workerTab
         set jsFile to do shell script "cat " & quoted form of "{js_path}"
@@ -231,15 +229,6 @@ async def chrome_get_page_info() -> dict | None:
             if workerTab is not missing value then exit repeat
         end repeat
     end if
-    repeat with w in windows
-        repeat with t in tabs of w
-            if (URL of t contains "#fbm-pipeline-worker") then
-                set workerTab to t
-                exit repeat
-            end if
-        end repeat
-        if workerTab is not missing value then exit repeat
-    end repeat
     if workerTab is missing value then return ""
     tell workerTab
         return URL & "|||" & title

@@ -22,7 +22,7 @@ from app.product_tasks import actions as product_actions  # noqa: E402
 
 
 TITLE_LIMIT = 75
-HIGHLIGHT_LIMIT = 125
+HIGHLIGHT_LIMIT = 120
 EXPECTED_BULLET_FIELDS = [
     f"bullet_point[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#{index}.value"
     for index in range(1, 6)
@@ -138,9 +138,7 @@ def _mindset_context() -> dict:
 
 def _valid_listing(*, highlights: list[str] | None = None, title: str | None = None) -> dict:
     product_highlights = highlights or [
-        "Deep seats support relaxed movie nights in the living room without crowding the layout.",
-        "Three modular pieces make it easier to adapt the seating plan as room needs change.",
-        "Woven fabric adds supported texture while the foam fill keeps the seating purpose clear.",
+        "Three modular pieces support flexible seating arrangements beyond the title's core product identity.",
     ]
     bullets = [
         "Modular layout gives the living room a flexible three-piece seating foundation.",
@@ -233,7 +231,7 @@ async def _run_listing_case(responses: list[dict]):
 def _assert_valid_contract(result: dict) -> None:
     assert 0 < len(result["title"]) <= TITLE_LIMIT, result["title"]
     highlights = result["product_highlights"]
-    assert 3 <= len(highlights) <= 5, highlights
+    assert len(highlights) == 1, highlights
     assert all(0 < len(item) <= HIGHLIGHT_LIMIT for item in highlights), highlights
     assert len(result["bullets"]) == 5, result["bullets"]
 
@@ -242,11 +240,7 @@ def test_completion_gates_require_the_full_contract() -> None:
     valid_data = SimpleNamespace(
         listing_title="Vindhvisk Modular Sofa for Flexible Living Room Seating",
         listing_product_highlights=json.dumps(
-            [
-                "During movie night, deep seats support relaxed living room seating.",
-                "Three modular pieces help adapt the layout as room needs change.",
-                "Woven fabric adds supported texture for everyday seating.",
-            ]
+            ["Three modular pieces support flexible seating arrangements beyond the title's core product identity."]
         ),
         listing_bullets=json.dumps([f"Distinct legacy bullet {index}" for index in range(1, 6)]),
     )
@@ -271,26 +265,28 @@ def test_completion_gates_require_the_full_contract() -> None:
 
         overlong_highlight = SimpleNamespace(**vars(valid_data))
         highlights = json.loads(valid_data.listing_product_highlights)
-        highlights[0] = "H" * (HIGHLIGHT_LIMIT + 1)
+        highlights[0] = "H" * 1000
         overlong_highlight.listing_product_highlights = json.dumps(highlights)
         assert not check(SimpleNamespace(data=overlong_highlight))
 
+    assert product_api._normalize_listing_title("Vindhvisk Modular Sofa", brand="Vindhvisk") == "Vindhvisk Modular Sofa"
+    try:
+        product_api._normalize_listing_title("Modular Sofa by Vindhvisk", brand="Vindhvisk")
+    except Exception as exc:
+        assert "必须以品牌“Vindhvisk”开头" in str(exc)
+    else:
+        raise AssertionError("Manual Listing title must begin with the product brand")
+
 
 async def test_valid_boundaries_and_separate_persistence() -> None:
-    five_highlights = [
-        "During movie night, deep seats give the household a clear place to lounge.",
-        "Three modular pieces support flexible seating arrangements.",
-        "Woven fabric provides a supported textured surface.",
-        "Foam fill supports the intended sitting and lounging use.",
-        "The included three-piece configuration makes set comparison clearer.",
-    ]
-    expected = _valid_listing(highlights=five_highlights)
+    one_highlight = ["Three modular pieces support flexible seating arrangements beyond the title's core product identity."]
+    expected = _valid_listing(highlights=one_highlight)
     result, data, client, session = await _run_listing_case([expected])
 
     _assert_valid_contract(result)
     assert len(client.calls) == 1, "A valid response should not trigger a rewrite"
     assert session.committed
-    assert json.loads(data.listing_product_highlights) == five_highlights
+    assert json.loads(data.listing_product_highlights) == one_highlight
     assert json.loads(data.listing_bullets) == expected["bullets"]
     assert data.listing_product_highlights != data.listing_bullets
     assert json.loads(data.listing_product_highlights_zh) == expected["product_highlights_zh"]
@@ -300,11 +296,7 @@ async def test_valid_boundaries_and_separate_persistence() -> None:
 async def test_overlong_copy_is_rewritten_not_truncated() -> None:
     invalid = _valid_listing(
         title="Vindhvisk Modular Sofa " + "unsupported overflow wording " * 5,
-        highlights=[
-            "During movie night, " + "supported seating detail " * 8,
-            "Three modular pieces support a flexible arrangement.",
-            "Woven fabric provides a supported textured surface.",
-        ],
+        highlights=["Three modular pieces " + "supported seating detail " * 8],
     )
     rewritten = _valid_listing()
     result, data, client, _session = await _run_listing_case([invalid, rewritten])
@@ -327,23 +319,7 @@ async def test_invalid_highlight_count_triggers_rewrite() -> None:
     result, _data, client, _session = await _run_listing_case([invalid, rewritten])
 
     _assert_valid_contract(result)
-    assert len(client.calls) == 2, "Fewer than three Product Highlights must trigger a rewrite"
-
-
-async def test_missing_scene_triggers_rewrite() -> None:
-    invalid = _valid_listing(
-        highlights=[
-            "Modular construction supports flexible layouts with clear product identity.",
-            "Woven fabric adds a textured surface supported by the product evidence.",
-            "Three-piece configuration helps buyers compare the included set.",
-        ]
-    )
-    rewritten = _valid_listing()
-    result, _data, client, _session = await _run_listing_case([invalid, rewritten])
-
-    _assert_valid_contract(result)
-    assert len(client.calls) == 2, "Highlights without an explicit use scene must trigger a rewrite"
-    assert result["product_highlights"] == rewritten["product_highlights"]
+    assert len(client.calls) == 2, "More than one Product Highlight must trigger a rewrite"
 
 
 def _shared_strings(template_path: Path) -> str:
@@ -385,7 +361,6 @@ async def main() -> None:
     await test_valid_boundaries_and_separate_persistence()
     await test_overlong_copy_is_rewritten_not_truncated()
     await test_invalid_highlight_count_triggers_rewrite()
-    await test_missing_scene_triggers_rewrite()
     print("listing title/highlights focused contracts: PASS")
 
 

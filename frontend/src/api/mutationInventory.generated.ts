@@ -59,6 +59,7 @@ export type MutationCallsiteId =
   | "retryStep|frontend/src/pages/ProductList.tsx|renderPrimaryRowAction|2"
   | "retryStep|frontend/src/pages/ProductList.tsx|runProductWorkflowAction"
   | "retryTaskStep|frontend/src/pages/TaskRunCenter.tsx|retryOneStep"
+  | "runPipelineStep|frontend/src/pages/ProductDetail.tsx|generateCustomerMindset"
   | "runProductFromStep|frontend/src/pages/ProductDetail.tsx|regenerateListing"
   | "runProductFromStep|frontend/src/pages/ProductDetail.tsx|retryInterruptedPipeline"
   | "updateCatalogTemplateFileStatus|frontend/src/pages/CatalogList.tsx|toggleTemplateFile"
@@ -497,6 +498,15 @@ export const mutationInventory = [
     "via": "direct"
   },
   {
+    "id": "runPipelineStep|frontend/src/pages/ProductDetail.tsx|generateCustomerMindset",
+    "client": "runPipelineStep",
+    "endpoint": "`/products/${id}/step/${step}`",
+    "method": "post",
+    "source": "frontend/src/pages/ProductDetail.tsx",
+    "handler": "generateCustomerMindset",
+    "via": "direct"
+  },
+  {
     "id": "runProductFromStep|frontend/src/pages/ProductDetail.tsx|regenerateListing",
     "client": "runProductFromStep",
     "endpoint": "`/products/${id}/run-from-step`",
@@ -671,11 +681,6 @@ export const mutationExportExceptions = [
     "client": "refreshProductFromGiga",
     "classification": "unused",
     "reason": "The direct product refresh client has no current pages/components/hooks owner."
-  },
-  {
-    "client": "runPipelineStep",
-    "classification": "unused",
-    "reason": "The direct single-step pipeline client has no current pages/components/hooks owner."
   },
   {
     "client": "syncGigaInventory",

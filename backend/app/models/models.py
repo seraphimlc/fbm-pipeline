@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Integer, String, Float, Text, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import Integer, String, Float, Text, DateTime, ForeignKey, UniqueConstraint, Index
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
@@ -30,6 +30,9 @@ class Product(Base):
     source_data_source_id: Mapped[int | None] = mapped_column(Integer)
     source_site: Mapped[str | None] = mapped_column(String(20))
     source_batch_id: Mapped[str | None] = mapped_column(String(100))
+    pipeline_target: Mapped[str | None] = mapped_column(String(30), default="export_ready")
+    pipeline_test_session_key: Mapped[str | None] = mapped_column(String(100))
+    pipeline_origin_task_run_id: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(30), default="created")
     current_step: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text)
@@ -45,6 +48,12 @@ class Product(Base):
     images: Mapped["ProductImage | None"] = relationship("ProductImage", back_populates="product", uselist=False, cascade="all, delete-orphan")
     aplus: Mapped["ProductAplus | None"] = relationship("ProductAplus", back_populates="product", uselist=False, cascade="all, delete-orphan")
     files: Mapped[list["ProductFile"]] = relationship("ProductFile", back_populates="product", cascade="all, delete-orphan")
+    material_assets: Mapped[list["ProductMaterialAsset"]] = relationship(
+        "ProductMaterialAsset",
+        back_populates="product",
+        cascade="all, delete-orphan",
+        foreign_keys="ProductMaterialAsset.product_id",
+    )
     catalog_item: Mapped["CatalogProduct | None"] = relationship("CatalogProduct", back_populates="source_product", uselist=False, cascade="all, delete-orphan")
     competitor_search_candidates: Mapped[list["AmazonCompetitorSearchCandidate"]] = relationship(
         "AmazonCompetitorSearchCandidate",
@@ -623,6 +632,49 @@ class ProductFile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
     product: Mapped["Product"] = relationship("Product", back_populates="files")
+
+
+class ProductMaterialAsset(Base):
+    """One supplier package or extracted material with traceable downstream usage."""
+
+    __tablename__ = "product_material_assets"
+    __table_args__ = (
+        UniqueConstraint("product_id", "content_hash", "asset_kind", name="uq_product_material_asset_content"),
+        Index("ix_product_material_assets_product_status", "product_id", "processing_status", "id"),
+        Index("ix_product_material_assets_test_session", "test_session_key", "product_id", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    product_id: Mapped[int] = mapped_column(Integer, ForeignKey("products.id"), nullable=False)
+    parent_asset_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("product_material_assets.id"))
+    source_task_run_id: Mapped[int | None] = mapped_column(Integer)
+    test_session_key: Mapped[str | None] = mapped_column(String(100))
+    package_type: Mapped[str | None] = mapped_column(String(40))
+    asset_kind: Mapped[str] = mapped_column(String(30), nullable=False)
+    original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    relative_path: Mapped[str | None] = mapped_column(Text)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    file_size: Mapped[int | None] = mapped_column(Integer)
+    mime_type: Mapped[str | None] = mapped_column(String(100))
+    width: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[int | None] = mapped_column(Integer)
+    duration_seconds: Mapped[float | None] = mapped_column(Float)
+    processing_status: Mapped[str] = mapped_column(String(30), default="ready")
+    rejection_reason: Mapped[str | None] = mapped_column(Text)
+    downstream_usage_json: Mapped[str | None] = mapped_column(Text)
+    contact_sheet_path: Mapped[str | None] = mapped_column(Text)
+    contact_sheet_page: Mapped[int | None] = mapped_column(Integer)
+    contact_sheet_label: Mapped[str | None] = mapped_column(String(40))
+    metadata_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+    product: Mapped["Product"] = relationship(
+        "Product",
+        back_populates="material_assets",
+        foreign_keys=[product_id],
+    )
 
 
 class GigaSyncBatch(Base):

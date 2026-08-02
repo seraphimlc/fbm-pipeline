@@ -92,6 +92,9 @@ export interface Product {
   source_data_source_id?: number | null;
   source_site?: string | null;
   source_batch_id?: string | null;
+  pipeline_target?: 'export_ready' | 'aplus_done' | null;
+  pipeline_test_session_key?: string | null;
+  pipeline_origin_task_run_id?: number | null;
   sales_channel: 'amazon' | 'tiktok';
   channel_status?: TikTokChannelStatus | null;
   channel_status_label?: string | null;
@@ -259,6 +262,8 @@ export interface ProductDetail extends Product {
   video_folder: ProductFolderEntry | null;
   aplus_folder: ProductFolderEntry | null;
   amazon_export_preview: Record<string, any> | null;
+  material_assets: ProductMaterialAsset[];
+  material_summary: ProductMaterialSummary;
 }
 
 export interface ProductImageReviewQueueItem {
@@ -327,6 +332,51 @@ export interface ProductGeneratedFile {
   metadata_json: string | null;
   created_at: string | null;
   updated_at: string | null;
+}
+
+export interface ProductMaterialAsset {
+  id: number;
+  product_id: number;
+  parent_asset_id: number | null;
+  source_task_run_id: number | null;
+  test_session_key: string | null;
+  package_type: string | null;
+  asset_kind: 'zip' | 'image' | 'video' | 'spreadsheet' | 'html' | 'pdf' | 'text' | 'other' | string;
+  original_filename: string;
+  path: string;
+  relative_path: string | null;
+  content_hash: string;
+  file_size: number | null;
+  mime_type: string | null;
+  width: number | null;
+  height: number | null;
+  duration_seconds: number | null;
+  processing_status: 'ready' | 'analyzed' | 'selected' | 'rejected' | string;
+  rejection_reason: string | null;
+  downstream_usage_json: string | null;
+  contact_sheet_path: string | null;
+  contact_sheet_page: number | null;
+  contact_sheet_label: string | null;
+  metadata_json: string | null;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ProductMaterialSummary {
+  asset_count?: number;
+  kind_counts?: Record<string, number>;
+  status_counts?: Record<string, number>;
+  image_count?: number;
+  video_count?: number;
+  package_count?: number;
+  analyzed_image_count?: number;
+}
+
+export interface ProductMaterialSpreadsheetPreview {
+  asset_id: number;
+  sheet_name: string;
+  rows: unknown[][];
+  truncated: boolean;
 }
 
 export interface ProductFileEntry {
@@ -1182,11 +1232,15 @@ export interface SystemConfig {
   gpt_image_model: string;
   gpt_image_use_llm_api: boolean;
   gpt_image_api_provider: string;
+  aplus_image_api_mode: string;
+  aplus_image_generation_quality: string;
+  aplus_image_aspect_ratio: string;
   aplus_image_width: number;
   aplus_image_height: number;
   aplus_image_jpeg_quality: number;
   aplus_image_api_retries: number;
   aplus_image_overwrite_policy: 'skip_success' | 'overwrite_all';
+  auto_aplus_after_export_ready: boolean;
   product_base_dir: string;
   pipeline_max_concurrency: number;
   browser_workflow_concurrency: number;
@@ -1197,15 +1251,20 @@ export interface SystemConfig {
   step1_extract_retry_attempts: number;
   step1_extract_retry_delay_seconds: number;
   step1_download_timeout_seconds: number;
+  step1_material_download_mode: 'browser' | 'api';
   step1_material_package_priority: string;
   step1_price_missing_policy: 'fail' | 'manual_review' | 'continue';
   step1_material_missing_policy: 'fail' | 'manual_review' | 'continue';
   step1_allow_existing_materials: boolean;
-  pricing_net_revenue_rate: number;
+  pricing_commission_rate: number;
+  pricing_return_rate: number;
+  pricing_insurance_rate: number;
+  pricing_insurance_payout_rate: number;
+  pricing_return_management_fee_rate: number;
+  pricing_return_management_fee_cap: number;
+  pricing_advertising_cost: number;
   pricing_target_margin_rate: number;
   pricing_min_profit: number;
-  pricing_fixed_cost: number;
-  pricing_return_credit_rate: number;
   step3_manual_login_on_auth_failure: boolean;
   step4_missing_asin_policy: 'fail' | 'manual_review' | 'continue';
   step4_category_missing_policy: 'fail' | 'manual_review' | 'continue';
@@ -1246,15 +1305,20 @@ export type SystemConfigUpdate = Partial<Pick<
   | 'step1_extract_retry_attempts'
   | 'step1_extract_retry_delay_seconds'
   | 'step1_download_timeout_seconds'
+  | 'step1_material_download_mode'
   | 'step1_material_package_priority'
   | 'step1_price_missing_policy'
   | 'step1_material_missing_policy'
   | 'step1_allow_existing_materials'
-  | 'pricing_net_revenue_rate'
+  | 'pricing_commission_rate'
+  | 'pricing_return_rate'
+  | 'pricing_insurance_rate'
+  | 'pricing_insurance_payout_rate'
+  | 'pricing_return_management_fee_rate'
+  | 'pricing_return_management_fee_cap'
+  | 'pricing_advertising_cost'
   | 'pricing_target_margin_rate'
   | 'pricing_min_profit'
-  | 'pricing_fixed_cost'
-  | 'pricing_return_credit_rate'
   | 'step3_manual_login_on_auth_failure'
   | 'step4_missing_asin_policy'
   | 'step4_category_missing_policy'
@@ -1278,6 +1342,7 @@ export type SystemConfigUpdate = Partial<Pick<
   | 'vlm_use_llm_api'
   | 'gpt_image_model'
   | 'gpt_image_use_llm_api'
+  | 'auto_aplus_after_export_ready'
 > & {
 	  aplus_image_width: number;
 	  aplus_image_height: number;
@@ -1495,7 +1560,7 @@ export const syncMissingGigaProducts = (body: { site?: string; data_source_id: n
 export const syncMissingGigaProductsBackground = (body: { site?: string; data_source_id: number; task_id?: string | null; current_category?: string | null; page_size?: number | null; max_pages?: number | null }, metadata?: MutationMetadataConfig) =>
   api.post<GigaSyncQueuedResult>('/giga/sync-missing/background', body, mutationRequestConfig(metadata, { timeout: 30000 }));
 
-export const createGigaPullTaskRuns = (body: { data_source_ids: number[]; current_category?: string | null; page_size?: number | null; max_pages?: number | null; new_sku_limit?: number | null }, metadata?: MutationMetadataConfig) =>
+export const createGigaPullTaskRuns = (body: { data_source_ids: number[]; current_category?: string | null; page_size?: number | null; max_pages?: number | null; new_sku_limit?: number | null; sku_codes?: string[] | null; pipeline_target?: 'export_ready' | 'aplus_done'; refresh_existing?: boolean; test_session_key?: string | null }, metadata?: MutationMetadataConfig) =>
   api.post<TaskRunBatchQueuedResult>('/task-runs/giga-pull', body, mutationRequestConfig(metadata, { timeout: 30000 }));
 
 export const createGigaInventorySyncTaskRuns = (body: { data_source_ids: number[]; sku_codes?: string[] | null }, metadata?: MutationMetadataConfig) =>
@@ -1608,6 +1673,15 @@ export const getAplusUploadBatch = (id: number) =>
 
 export const getProduct = (id: number, params?: { compact?: boolean }) =>
   api.get<ProductDetail>(`/products/${id}`, { params });
+
+export const listProductMaterialAssets = (id: number) =>
+  api.get<ProductMaterialAsset[]>(`/products/${id}/materials`);
+
+export const getProductMaterialSpreadsheetPreview = (id: number, assetId: number) =>
+  api.get<ProductMaterialSpreadsheetPreview>(`/products/${id}/materials/${assetId}/preview`);
+
+export const productMaterialPreviewUrl = (id: number, assetId: number) =>
+  `/api/products/${id}/materials/${assetId}/preview`;
 
 export const updateProduct = (id: number, data: Partial<Product> & {
   categories?: string | string[];

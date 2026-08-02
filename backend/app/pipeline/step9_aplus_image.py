@@ -1,13 +1,15 @@
 """待导出后的 A+ 派生节点 3：按脚本和参考图生成、校验并保存 A+ 图片。
 
 输入来自 Step 8。每个脚本必须至少包含 1 个真实存在或可访问的 `reference_images`；
-缺少参考图直接报错，禁止退化为纯文字生图。默认 API mode 为 `edits`，并发数由
+缺少参考图直接报错，禁止退化为纯文字生图。默认 API mode 为 `generations`，并发数由
 `APLUS_CONCURRENCY` 控制（当前默认 1），API 尝试次数由 `APLUS_IMAGE_API_RETRIES`
 控制（当前默认 3）。耗时取决于外部 API，不在代码中承诺固定的单图生成时间。
 
-当前默认目标为 1940x1200、97:60，分别由 `APLUS_IMAGE_WIDTH`、
-`APLUS_IMAGE_HEIGHT`、`APLUS_IMAGE_ASPECT_RATIO` 控制。生成结果会被验证并在必要时转为
-JPEG/压缩，文件最大 2,000,000 bytes；初始 JPEG quality 默认 88，最低默认 55，事实源
+当前默认交付目标为 1940x1200、97:60，分别由 `APLUS_IMAGE_WIDTH`、
+`APLUS_IMAGE_HEIGHT`、`APLUS_IMAGE_ASPECT_RATIO` 控制。T8Star 的 generations 通道按比例
+生成大母图（当前实测为 3104x1920），再本地等比缩小为交付图。供应商原图宽高不得低于
+交付目标，禁止把小图放大伪装成可用 A+ 图片；合格结果会在必要时裁切并转为 JPEG/压缩，
+文件最大 2,000,000 bytes；初始 JPEG quality 默认 88，最低默认 55，事实源
 为 `APLUS_IMAGE_MAX_BYTES`、`APLUS_IMAGE_JPEG_QUALITY`、
 `APLUS_IMAGE_MIN_JPEG_QUALITY`。无法在最低质量下满足尺寸/字节限制时必须失败。
 
@@ -19,6 +21,7 @@ JPEG/压缩，文件最大 2,000,000 bytes；初始 JPEG quality 默认 88，最
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import math
@@ -31,7 +34,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import httpx
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
 from app.aplus_publish.module_registry import (
     APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1,
@@ -128,7 +131,17 @@ def _generation_quality() -> str:
 
 
 def _generation_quality_attempts() -> list[str]:
-    return ["high", "auto"]
+    # A+ 成图只走 high 的 generations 母图流程。不要因一次失败自动降为 auto，
+    # 更不要切到 edits：调用方需要得到明确失败并人工决定是否重试。
+    return ["high"]
+
+
+def _resolved_gpt_image_model() -> str:
+    """兼容测试/旧调用方的轻量 settings，同时使用运行时解析后的专用模型。"""
+    return str(
+        getattr(settings, "resolved_gpt_image_model", None)
+        or getattr(settings, "GPT_IMAGE_MODEL", "gpt-image-2")
+    )
 
 
 def _image_size(img_bytes: bytes) -> tuple[int, int]:
@@ -282,6 +295,85 @@ def _provider_image_metadata(image_payload: dict, size_info: dict) -> dict:
     return metadata
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _image_sidecar_path(output_path: Path) -> Path:
+    return output_path.with_name(f"{output_path.stem}.metadata.json")
+
+
+def _image_file_evidence(path: Path | None) -> dict | None:
+    if path is None or not path.is_file():
+        return None
+    width = None
+    height = None
+    try:
+        with Image.open(path) as image:
+            width, height = image.size
+    except Exception:
+        pass
+    return {
+        "path": str(path),
+        "size": path.stat().st_size,
+        "sha256": _sha256_file(path),
+        "width": width,
+        "height": height,
+    }
+
+
+def _write_image_metadata_sidecar(
+    output_path: Path,
+    *,
+    raw_path: Path | None,
+    evidence: dict,
+) -> dict:
+    sidecar_path = _image_sidecar_path(output_path)
+    payload = {
+        "schema": "fbm-aplus-image-evidence.v1",
+        "recorded_at": datetime.now().isoformat(timespec="seconds"),
+        **evidence,
+        "raw_image": _image_file_evidence(raw_path),
+        "final_image": _image_file_evidence(output_path),
+    }
+    temp_path = sidecar_path.with_name(f"{sidecar_path.name}.tmp")
+    temp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    temp_path.replace(sidecar_path)
+    return {
+        "metadata_path": str(sidecar_path),
+        "raw_sha256": (payload.get("raw_image") or {}).get("sha256"),
+        "final_sha256": (payload.get("final_image") or {}).get("sha256"),
+    }
+
+
+def _validate_standard_scripts(scripts: object) -> list[dict]:
+    if not isinstance(scripts, list) or len(scripts) != 5:
+        count = len(scripts) if isinstance(scripts, list) else 0
+        raise ValueError(f"普通 A+ 必须恰好包含 5 个生图脚本，实际 {count} 个")
+    if not all(isinstance(script, dict) for script in scripts):
+        raise ValueError("普通 A+ 生图脚本必须全部是对象")
+    positions: list[int] = []
+    for script in scripts:
+        try:
+            positions.append(int(script.get("module_position") or 0))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("普通 A+ 生图脚本 module_position 必须是整数") from exc
+    if sorted(positions) != [1, 2, 3, 4, 5]:
+        raise ValueError(f"普通 A+ 生图脚本位置必须完整覆盖 1-5，实际 {positions}")
+    missing_references = [
+        int(script.get("module_position") or 0)
+        for script in scripts
+        if not _reference_image_sources(script)
+    ]
+    if missing_references:
+        raise ValueError(f"普通 A+ 每个生图脚本都必须引用真实参考图，缺失模块 {missing_references}")
+    return scripts
+
+
 def _scripts_publish_profile(scripts_data: dict | None) -> str | None:
     if not isinstance(scripts_data, dict):
         return None
@@ -428,17 +520,55 @@ def _existing_result_map(pa: ProductAplus | None) -> dict[int, dict]:
     return result
 
 
-def _file_result(output_path: Path, position: int, script: dict, reused_from: str, oss_info: dict | None = None) -> dict:
+def _provider_backed_result(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    provider_source = str(value.get("provider_source") or "").strip()
+    return provider_source in {"b64_json", "data_url", "url"}
+
+
+def _validate_existing_final_image(output_path: Path, script: dict) -> bool:
+    if not output_path.is_file() or output_path.stat().st_size > settings.APLUS_IMAGE_MAX_BYTES:
+        return False
+    width = int(script.get("target_width") or script.get("width") or settings.APLUS_IMAGE_WIDTH)
+    height = int(script.get("target_height") or script.get("height") or settings.APLUS_IMAGE_HEIGHT)
+    try:
+        with Image.open(output_path) as image:
+            return image.size == (width, height)
+    except Exception:
+        return False
+
+
+def _load_image_sidecar(output_path: Path) -> dict:
+    sidecar_path = _image_sidecar_path(output_path)
+    if not sidecar_path.is_file():
+        return {}
+    try:
+        payload = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _file_result(
+    output_path: Path,
+    position: int,
+    script: dict,
+    reused_from: str,
+    oss_info: dict | None = None,
+    prior_result: dict | None = None,
+) -> dict:
     oss_info = oss_info or {}
     display_url = oss_info.get("oss_url") or str(output_path)
     return {
+        **(prior_result or {}),
         "position": position,
         "status": "done",
         "path": str(output_path),
         "url": display_url,
         "display_url": display_url,
         "size": output_path.stat().st_size,
-        "model": settings.GPT_IMAGE_MODEL,
+        "model": _resolved_gpt_image_model(),
         "target_width": settings.APLUS_IMAGE_WIDTH,
         "target_height": settings.APLUS_IMAGE_HEIGHT,
         "reference_count": len(_reference_image_sources(script)),
@@ -456,7 +586,7 @@ def _existing_success_result(position: int, script: dict, output_path: Path, old
     old = old_results.get(position)
     if old and old.get("status") == "done":
         old_path = Path(str(old.get("path") or output_path)).expanduser()
-        if old_path.is_file():
+        if old_path.is_file() and _provider_backed_result(old) and _validate_existing_final_image(old_path, script):
             if bool(script.get("contains_person")):
                 ensure_synthetic_performer_subject(old_path)
             oss_info = _upload_generated_image_to_oss(old_path, product_key, position) if bool(script.get("contains_person")) else (old if old.get("oss_url") else _upload_generated_image_to_oss(old_path, product_key, position))
@@ -477,18 +607,60 @@ def _existing_success_result(position: int, script: dict, output_path: Path, old
             })
             if bool(script.get("contains_person")):
                 result["image_compliance"] = _apply_aplus_compliance(script, old_path, oss_info)
+            raw_value = str(result.get("raw_path") or "").strip()
+            raw_path = Path(raw_value).expanduser() if raw_value else None
+            result.update(_write_image_metadata_sidecar(
+                old_path,
+                raw_path=raw_path,
+                evidence={
+                    "status": "done",
+                    "product_key": product_key,
+                    "module_position": position,
+                    "model": result.get("model") or _resolved_gpt_image_model(),
+                    "provider": settings.gpt_image_api_provider,
+                    "api_mode": _api_mode(),
+                    "reference_images": _reference_image_sources(script),
+                    "reused_existing": True,
+                    "reused_from": "database",
+                    "result": result,
+                },
+            ))
             return result
+        logger.info("[Step9] 模块 %s 的旧数据库图片缺少真实 provider 证据或尺寸不合格，将重新生成", position)
     if output_path.is_file():
-        return _file_result(output_path, position, script, "file", _upload_generated_image_to_oss(output_path, product_key, position))
+        sidecar = _load_image_sidecar(output_path)
+        prior_result = sidecar.get("result") if isinstance(sidecar.get("result"), dict) else {}
+        if sidecar.get("status") == "done" and _provider_backed_result(prior_result) and _validate_existing_final_image(output_path, script):
+            oss_info = _upload_generated_image_to_oss(output_path, product_key, position)
+            result = _file_result(output_path, position, script, "file_sidecar", oss_info, prior_result)
+            raw_value = str(prior_result.get("raw_path") or "").strip()
+            raw_path = Path(raw_value).expanduser() if raw_value else None
+            result.update(_write_image_metadata_sidecar(
+                output_path,
+                raw_path=raw_path,
+                evidence={
+                    "status": "done",
+                    "product_key": product_key,
+                    "module_position": position,
+                    "model": result.get("model") or _resolved_gpt_image_model(),
+                    "provider": settings.gpt_image_api_provider,
+                    "api_mode": _api_mode(),
+                    "reference_images": _reference_image_sources(script),
+                    "reused_existing": True,
+                    "reused_from": "file_sidecar",
+                    "result": result,
+                },
+            ))
+            return result
+        logger.info("[Step9] 模块 %s 的本地图片没有可信 sidecar/provider 证据，将重新生成", position)
     return None
 
 
 def _api_mode() -> str:
     mode = (settings.APLUS_IMAGE_API_MODE or "generations").strip().lower()
-    if mode not in {"generations", "edits"}:
-        logger.warning(f"[Step9] 未识别的A+生图通道 {mode!r}，回退到 generations")
-        return "generations"
-    return mode
+    if mode != "generations":
+        logger.warning(f"[Step9] A+ 生图仅允许 generations 大母图流程，忽略配置值 {mode!r}")
+    return "generations"
 
 
 def _edit_provider_size(width: int, height: int) -> str:
@@ -589,7 +761,7 @@ async def _image_payload_from_result(client: httpx.AsyncClient, result: dict) ->
 async def _submit_reference_generations(prompt: str, ref_sources: list[str], quality: str = "high") -> dict:
     generation_quality = quality if quality in {"high", "auto"} else _generation_quality()
     payload = {
-        "model": settings.GPT_IMAGE_MODEL,
+        "model": _resolved_gpt_image_model(),
         "prompt": prompt,
         "aspect_ratio": settings.APLUS_IMAGE_ASPECT_RATIO,
         "quality": generation_quality,
@@ -611,7 +783,7 @@ async def _submit_reference_generations(prompt: str, ref_sources: list[str], qua
             attempt_started = time.monotonic()
             try:
                 logger.info(
-                    f"[Step9] 提交A+参考图生图: model={settings.GPT_IMAGE_MODEL}, "
+                    f"[Step9] 提交A+参考图生图: model={_resolved_gpt_image_model()}, "
                     f"provider={settings.gpt_image_api_provider}, "
                     f"endpoint=images/generations, aspect_ratio={payload['aspect_ratio']}, "
                     f"quality={payload['quality']}, references={len(ref_sources)}, attempt={attempt}/{retries}"
@@ -644,10 +816,11 @@ async def _submit_reference_generations(prompt: str, ref_sources: list[str], qua
 
 def _ensure_provider_image_large_enough(image_payload: dict, width: int, height: int, label: str) -> dict:
     raw_width, raw_height = _image_size(image_payload["bytes"])
-    min_width = min(width, 970)
-    min_height = min(height, 600)
-    if raw_width < min_width or raw_height < min_height:
-        raise RuntimeError(f"{label} 返回图片尺寸低于A+最低要求: {raw_width}x{raw_height}, 最低 {min_width}x{min_height}")
+    if raw_width < width or raw_height < height:
+        raise RuntimeError(
+            f"{label} 返回图片尺寸低于目标，禁止放大伪装成A+成图: "
+            f"{raw_width}x{raw_height}, 目标至少 {width}x{height}"
+        )
     image_payload["provider_raw_width"] = raw_width
     image_payload["provider_raw_height"] = raw_height
     return image_payload
@@ -655,7 +828,7 @@ def _ensure_provider_image_large_enough(image_payload: dict, width: int, height:
 
 async def _submit_reference_edits(prompt: str, ref_sources: list[str], width: int, height: int) -> dict:
     data = {
-        "model": settings.GPT_IMAGE_MODEL,
+        "model": _resolved_gpt_image_model(),
         "prompt": prompt,
         "size": _edit_provider_size(width, height),
         "n": "1",
@@ -675,7 +848,7 @@ async def _submit_reference_edits(prompt: str, ref_sources: list[str], width: in
             attempt_started = time.monotonic()
             try:
                 logger.info(
-                    f"[Step9] 提交A+参考图生图: model={settings.GPT_IMAGE_MODEL}, "
+                    f"[Step9] 提交A+参考图生图: model={_resolved_gpt_image_model()}, "
                     f"provider={settings.gpt_image_api_provider}, "
                     f"endpoint=images/edits, size={data['size']}, "
                     f"references={len(ref_sources)}, attempt={attempt}/{retries}"
@@ -713,41 +886,16 @@ async def _submit_reference_generation(prompt: str, ref_sources: list[str], widt
     if not ref_sources:
         raise ValueError("A+生图缺少 reference_images，停止纯文字生图；请先重新执行 Step8 生成带参考图的脚本")
 
-    preferred_mode = _api_mode()
-    modes = [preferred_mode, "edits" if preferred_mode == "generations" else "generations"]
-    errors: list[str] = []
-    for mode in modes:
-        try:
-            if mode == "generations":
-                last_generation_error: Exception | None = None
-                quality_attempts = _generation_quality_attempts()
-                for quality in quality_attempts:
-                    try:
-                        return _ensure_provider_image_large_enough(
-                            await _submit_reference_generations(prompt, ref_sources, quality),
-                            width,
-                            height,
-                            f"generations/{quality}",
-                        )
-                    except Exception as generation_error:
-                        last_generation_error = generation_error
-                        if quality != quality_attempts[-1]:
-                            logger.warning(f"[Step9] A+ generations/{quality} 失败，切换 auto 重试: {generation_error}")
-                if last_generation_error:
-                    raise last_generation_error
-            return _ensure_provider_image_large_enough(
-                await _submit_reference_edits(prompt, ref_sources, width, height),
-                width,
-                height,
-                "edits",
-            )
-        except Exception as e:
-            error_msg = f"{mode}: {type(e).__name__}: {e}"
-            errors.append(error_msg)
-            if mode != modes[-1]:
-                logger.warning(f"[Step9] A+ {mode} 通道失败，切换备用通道: {e}")
-
-    raise RuntimeError(" | ".join(errors))
+    # 只走 T8Star/OpenAI-compatible generations 的 97:60 大母图路径。若 provider
+    # 不能返回至少 1940x1200 的原图，立即失败；禁止 high→auto 或 generations→edits
+    # 的无声降级，以免用小图冒充 A+ 成图。
+    quality = _generation_quality_attempts()[0]
+    return _ensure_provider_image_large_enough(
+        await _submit_reference_generations(prompt, ref_sources, quality),
+        width,
+        height,
+        f"generations/{quality}",
+    )
 
 
 def _save_exact_size_image(img_bytes: bytes, raw_path: Path, final_path: Path, width: int, height: int) -> dict:
@@ -758,6 +906,11 @@ def _save_exact_size_image(img_bytes: bytes, raw_path: Path, final_path: Path, w
     with Image.open(raw_path) as image:
         image = image.convert("RGB")
         raw_width, raw_height = image.size
+        if raw_width < width or raw_height < height:
+            raise RuntimeError(
+                "供应商原图尺寸低于目标，禁止放大伪装成A+成图: "
+                f"{raw_width}x{raw_height}, 目标至少 {width}x{height}"
+            )
         if raw_width == width and raw_height == height:
             final = image.copy()
         else:
@@ -793,7 +946,7 @@ def _save_exact_size_image(img_bytes: bytes, raw_path: Path, final_path: Path, w
         "jpeg_quality": final_quality,
         "max_bytes": settings.APLUS_IMAGE_MAX_BYTES,
         "compressed": final_size < len(img_bytes) or raw_width != final_width or raw_height != final_height,
-        "upscaled_from_provider": raw_width < final_width or raw_height < final_height,
+        "upscaled_from_provider": False,
     }
 
 
@@ -832,69 +985,6 @@ def _apply_aplus_compliance(script: dict, output_path: Path, oss_info: dict) -> 
     return result
 
 
-def _create_fallback_aplus_image(output_path: Path, script: dict, ref_sources: list[str], width: int, height: int) -> dict:
-    canvas = Image.new("RGB", (width, height), "#f8fafc")
-    draw = ImageDraw.Draw(canvas)
-    title = str(script.get("conversion_goal") or script.get("prompt") or "A+ content image")[:120]
-    headline = f"A+ Module {script.get('module_position') or ''}".strip()
-    try:
-        font_title = ImageFont.truetype("Arial.ttf", 56)
-        font_body = ImageFont.truetype("Arial.ttf", 34)
-        font_small = ImageFont.truetype("Arial.ttf", 24)
-    except Exception:
-        font_title = font_body = font_small = ImageFont.load_default()
-
-    draw.rectangle((0, 0, width, 118), fill="#111827")
-    draw.text((56, 34), headline, fill="#ffffff", font=font_title)
-    draw.text((56, 150), "Fallback A+ visual", fill="#0f172a", font=font_title)
-    draw.text((56, 230), title, fill="#334155", font=font_body)
-    draw.text(
-        (56, height - 76),
-        "Image generation service was unavailable. This placeholder preserves the pipeline and can be regenerated later.",
-        fill="#64748b",
-        font=font_small,
-    )
-
-    slots = [
-        (56, 320, width // 2 - 28, height - 130),
-        (width // 2 + 28, 320, width - 56, height - 130),
-    ]
-    pasted = 0
-    for source, box in zip(ref_sources[:2], slots):
-        if _is_remote_url(source):
-            continue
-        path = Path(source).expanduser()
-        if not path.exists():
-            continue
-        try:
-            with Image.open(path) as ref:
-                ref = ref.convert("RGB")
-                max_w = box[2] - box[0]
-                max_h = box[3] - box[1]
-                ref.thumbnail((max_w, max_h), Image.Resampling.LANCZOS)
-                x = box[0] + (max_w - ref.width) // 2
-                y = box[1] + (max_h - ref.height) // 2
-                draw.rounded_rectangle(box, radius=18, fill="#ffffff", outline="#cbd5e1", width=2)
-                canvas.paste(ref, (x, y))
-                pasted += 1
-        except Exception:
-            continue
-    if pasted == 0:
-        draw.rounded_rectangle((56, 320, width - 56, height - 130), radius=18, fill="#ffffff", outline="#cbd5e1", width=2)
-        draw.text((96, 380), "No local reference image available", fill="#64748b", font=font_body)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    canvas.save(output_path, format="JPEG", quality=92, optimize=True)
-    return {
-        "fallback_image": True,
-        "fallback_reason": "A+ image generation service failed; placeholder generated locally.",
-        "target_width": width,
-        "target_height": height,
-        "reference_count": len(ref_sources),
-        "local_reference_count": pasted,
-    }
-
-
 async def _generate_single_image(
     script: dict,
     output_path: Path,
@@ -918,11 +1008,12 @@ async def _generate_single_image(
         asset_key = None
         if script.get("asset_slot_id"):
             asset_key = f"aplus_{_safe_asset_name(script.get('asset_slot_id'))}"
+        raw_path: Path | None = None
 
         try:
             logger.info(
                 f"[Step9] 生成模块 {position} 图片 ({width}x{height}), references={len(ref_sources)}, "
-                f"model={settings.GPT_IMAGE_MODEL}, provider={settings.gpt_image_api_provider}, "
+                f"model={_resolved_gpt_image_model()}, provider={settings.gpt_image_api_provider}, "
                 f"reference_files={_reference_image_names(ref_sources)}..."
             )
             image_payload = await _submit_reference_generation(prompt, ref_sources, width, height)
@@ -940,7 +1031,7 @@ async def _generate_single_image(
 
             logger.info(f"[Step9] 模块 {position} 图片已保存: {output_path.name}, 耗时={time.monotonic() - image_started:.1f}s")
             provider_metadata = _provider_image_metadata(image_payload, size_info)
-            return {
+            result_item = {
                 "position": position,
                 "status": "done",
                 "path": str(output_path),
@@ -951,7 +1042,7 @@ async def _generate_single_image(
                 "provider_source": image_payload.get("provider_source"),
                 "provider_content_type": image_payload.get("provider_content_type"),
                 "size": output_path.stat().st_size,
-                "model": settings.GPT_IMAGE_MODEL,
+                "model": _resolved_gpt_image_model(),
                 "generation_quality": _generation_quality(),
                 "target_width": width,
                 "target_height": height,
@@ -963,11 +1054,59 @@ async def _generate_single_image(
                 **provider_metadata,
                 "image_compliance": compliance,
             }
+            result_item.update(_write_image_metadata_sidecar(
+                output_path,
+                raw_path=raw_path,
+                evidence={
+                    "status": "done",
+                    "product_key": product_key,
+                    "module_position": position,
+                    "asset_slot_id": script.get("asset_slot_id"),
+                    "model": _resolved_gpt_image_model(),
+                    "provider": settings.gpt_image_api_provider,
+                    "api_mode": _api_mode(),
+                    "generation_quality": _generation_quality(),
+                    "script_prompt": script.get("prompt"),
+                    "generation_prompt": prompt,
+                    "negative_prompt": script.get("negative_prompt"),
+                    "reference_images": ref_sources,
+                    "result": result_item,
+                },
+            ))
+            return result_item
 
         except Exception as e:
             error_msg = f"{type(e).__name__}: {str(e)}"
             logger.error(f"[Step9] 模块 {position} 生成失败: {error_msg}, 耗时={time.monotonic() - image_started:.1f}s")
-            return {"position": position, "status": "failed", "error": error_msg, **_image_result_metadata(script)}
+            failed_result = {"position": position, "status": "failed", "error": error_msg, **_image_result_metadata(script)}
+            if output_path.is_file() or (raw_path is not None and raw_path.is_file()):
+                try:
+                    failed_result.update(_write_image_metadata_sidecar(
+                        output_path,
+                        raw_path=raw_path,
+                        evidence={
+                            "status": "failed",
+                            "product_key": product_key,
+                            "module_position": position,
+                            "asset_slot_id": script.get("asset_slot_id"),
+                            "model": _resolved_gpt_image_model(),
+                            "provider": settings.gpt_image_api_provider,
+                            "api_mode": _api_mode(),
+                            "script_prompt": script.get("prompt"),
+                            "generation_prompt": prompt,
+                            "negative_prompt": script.get("negative_prompt"),
+                            "reference_images": ref_sources,
+                            "error": error_msg,
+                        },
+                    ))
+                except Exception as sidecar_error:
+                    logger.warning(
+                        "[Step9] 模块 %s 失败证据文件写入失败: %s: %s",
+                        position,
+                        type(sidecar_error).__name__,
+                        sidecar_error,
+                    )
+            return failed_result
 
 
 def _sanitize_generation_prompt(
@@ -985,7 +1124,10 @@ def _sanitize_generation_prompt(
     ).strip()
     target_width = width or settings.APLUS_IMAGE_WIDTH
     target_height = height or settings.APLUS_IMAGE_HEIGHT
-    size_rule = f"Output size requirement: exactly {target_width} x {target_height} pixels."
+    size_rule = (
+        f"Compose for a {target_width} x {target_height} pixel final canvas with the same aspect ratio. "
+        "The provider may return a larger master image; preserve the full wide composition without borders."
+    )
     required = (
         f"{size_rule} "
         "Use the uploaded reference images as product identity anchors. "
@@ -1121,12 +1263,14 @@ async def run_aplus_image(product_id: int) -> dict:
                 "results": image_results,
                 "output_dir": str(output_dir),
             }
+
+        scripts = _validate_standard_scripts(scripts)
         
         # 默认只生成缺失/失败图片，避免重复消耗生图费用。
         tasks = []
         image_results = []
         skipped_count = 0
-        for script in scripts[:5]:
+        for script in scripts:
             script = _with_script_source_metadata(scripts_data, script)
             position = script.get("module_position", 0)
             output_path = _module_output_path(output_dir, position)
@@ -1161,7 +1305,7 @@ async def run_aplus_image(product_id: int) -> dict:
         image_results.sort(key=lambda item: item.get("position") or 0)
         pa.aplus_images = json.dumps(image_results, ensure_ascii=False)
         pa.aplus_image_count = success_count
-        pa.aplus_status = "done" if success_count == min(len(scripts), 5) else "partial"
+        pa.aplus_status = "done" if success_count == 5 else "partial"
         pa.generated_at = datetime.now()
         await db.commit()
 
@@ -1169,7 +1313,7 @@ async def run_aplus_image(product_id: int) -> dict:
             f"[Step9] A+出图完成: {success_count}/{len(scripts)} 成功, "
             f"目录={output_dir}, 耗时={time.monotonic() - step_started:.1f}s"
         )
-        expected_count = min(len(scripts), 5)
+        expected_count = 5
         if success_count < expected_count:
             errors = [
                 f"模块{item.get('position')}: {item.get('error')}"

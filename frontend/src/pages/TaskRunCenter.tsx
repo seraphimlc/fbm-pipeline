@@ -66,6 +66,8 @@ const groupLabel = (key: string) => {
     finalize: '校验',
     aggregate: '聚合',
     materialize: '生成草稿',
+    material_prepare: '准备供应商素材',
+    auto_image_selection: '自动选图',
     keyword_research: '关键词采集',
     image_analysis: '图片分析',
     customer_mindset: '用户心智梳理',
@@ -88,6 +90,8 @@ const stepLabel = (type: string) => {
     giga_pull_finalize_snapshot: '快照校验',
     giga_pull_aggregate_items: '聚合 Item/Group',
     giga_pull_materialize_products: '生成商品草稿',
+    product_material_prepare: '准备供应商素材',
+    product_auto_image_selection: '自动选图',
     product_keyword_research: '关键词采集',
     product_image_analysis: '图片分析',
     product_customer_mindset: '用户心智梳理',
@@ -104,6 +108,8 @@ const stepLabel = (type: string) => {
 const taskTypeLabel = (type: string) => {
   const map: Record<string, string> = {
     giga_pull: 'GIGA 拉品',
+    product_material_prepare: '准备供应商素材',
+    product_auto_image_selection: '自动选图',
     product_keyword_research: '关键词采集',
     product_image_analysis: '图片分析',
     product_customer_mindset: '用户心智梳理',

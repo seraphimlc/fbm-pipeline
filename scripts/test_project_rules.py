@@ -4,6 +4,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import json
 import os
 import subprocess
 import sys
@@ -236,6 +237,7 @@ def test_amazon_workflow_t1_fields_and_enums_exist() -> None:
 from app.models.status import AMAZON_WORKFLOW_NODES, AMAZON_WORKFLOW_STATUSES
 
 assert AMAZON_WORKFLOW_NODES == (
+    "prepare_materials",
     "auto_select_images",
     "select_images",
     "search_competitor",
@@ -269,6 +271,7 @@ for forbidden in ("export", "catalog_export", "amazon_upload"):
     assert_true(
         "AMAZON_WORKFLOW_NODES" in status_text
         and "AMAZON_WORKFLOW_STATUSES" in status_text
+        and "WORKFLOW_NODE_PREPARE_MATERIALS" in status_text
         and "WORKFLOW_NODE_SELECT_IMAGES" in status_text
         and "WORKFLOW_NODE_KEYWORD_RESEARCH" in status_text
         and "WORKFLOW_NODE_CUSTOMER_MINDSET" in status_text
@@ -369,7 +372,12 @@ from datetime import datetime
 from types import SimpleNamespace
 from app.api.products import _product_list_work_status
 from app.product_tasks.workflow import build_product_workflow, set_product_workflow
-from app.pipeline.customer_mindset import DYNAMIC_QUESTION_FOCUSES, FIXED_QUESTIONS, SCHEMA_VERSION
+from app.pipeline.customer_mindset import (
+    DYNAMIC_QUESTION_FOCUSES,
+    FIXED_QUESTIONS,
+    SCHEMA_VERSION,
+    STRATEGY_FIELD_QUESTION_IDS,
+)
 from app.models.status import (
     COMPLETED,
     FAILED,
@@ -404,6 +412,8 @@ def customer_mindset_fixture():
             "id": f"dynamic_{index:02d}",
             "question_type": "dynamic",
             "focus": focus,
+            "closest_fixed_question_id": FIXED_QUESTIONS[(index - 1) % len(FIXED_QUESTIONS)]["id"],
+            "incremental_decision_gap": f"fixture incremental gap {index}",
             "trigger_evidence_refs": [evidence_id],
             "answer": {"conclusion": f"fixture dynamic {index}", "evidence_refs": [evidence_id]},
         }
@@ -419,6 +429,17 @@ def customer_mindset_fixture():
             "purchase_trigger": "fixture trigger",
             "primary_job": "fixture job",
             "core_value_proposition": "fixture value",
+            "strategy_field_evidence": {
+                field: {
+                    "question_id": question_id,
+                    "status": "inferred",
+                    "confidence": "medium",
+                    "evidence_refs": [evidence_id],
+                    "planning_usable": True,
+                    "copy_claim_usable": False,
+                }
+                for field, question_id in STRATEGY_FIELD_QUESTION_IDS.items()
+            },
             "content_direction": {
                 "bullet_jobs": [{"position": index} for index in range(1, 6)],
                 "claims_to_avoid": ["unsupported fixture claim"],
@@ -806,7 +827,10 @@ def test_product_detail_uses_workflow_as_primary_display_source() -> None:
     api_import_section = product_detail_text.split("import { getProduct", 1)[1].split("} from '../api';", 1)[0]
     run_action_section = product_detail_text.split("const runWorkflowAction", 1)[1].split("const renderWorkflowActionButton", 1)[0]
     render_action_section = product_detail_text.split("const renderWorkflowActionButton", 1)[1].split("const workflowSecondaryActions", 1)[0]
-    top_action_section = product_detail_text.split("<Button icon={<ReloadOutlined />} onClick={fetchDetail}>刷新</Button>", 1)[1].split('<Popconfirm\n            title="确定删除此商品？"', 1)[0]
+    top_action_section = product_detail_text.split(
+        "<Button icon={<ReloadOutlined />} onClick={() => fetchDetail(activeTabKey === 'files')}>刷新</Button>",
+        1,
+    )[1].split('<Popconfirm\n            title="确定删除此商品？"', 1)[0]
 
     manifest_api_clients = {
         str(item["client_export"])
@@ -3532,6 +3556,8 @@ class FakeDb:
         return FakeResult(self.rows)
     async def commit(self):
         self.commit_count += 1
+    async def flush(self):
+        return None
     async def rollback(self):
         self.rollback_count += 1
 
@@ -3647,7 +3673,7 @@ async def main():
                 aplus_uploaded_at=None,
                 aplus_upload_error=None,
                 data=None,
-                images=SimpleNamespace(image_analysis="{\"images\":[{\"filename\":\"fixture.jpg\"}],\"fixture\":true}"),
+                images=SimpleNamespace(image_analysis="{\"images\":[{\"filename\":\"fixture.jpg\",\"visible_selling_point\":\"fixture product identity\"}],\"fixture\":true}"),
                 files=[],
                 catalog_item=None,
                 workflow_node=None,
@@ -3826,6 +3852,7 @@ def test_image_analysis_listing_e5_contract() -> None:
     image_section = actions_text.split("class ProductImageAnalysisAction", 1)[1].split("class ProductCustomerMindsetAction", 1)[0]
     mindset_section = actions_text.split("class ProductCustomerMindsetAction", 1)[1].split("class ProductListingGenerationAction", 1)[0]
     listing_section = actions_text.split("class ProductListingGenerationAction", 1)[1].split("async def _existing_active_run", 1)[0]
+    listing_success_section = listing_section.split("async def on_step_success", 1)[1].split("async def on_step_failure", 1)[0]
     retry_section = products_text.split("async def retry_step", 1)[1].split("async def run_product_from_step", 1)[0]
     e5_sections = image_section + "\n" + mindset_section + "\n" + listing_section
     manifest_by_action = {item["action"]: item for item in workflow_manifest}
@@ -3872,9 +3899,12 @@ def test_image_analysis_listing_e5_contract() -> None:
         and "customer_mindset_matches_product" in products_text
         and "customer_mindset_matches_product" in engine_text
         and "_raise_if_customer_mindset_missing(product)" in listing_section
+        and 'await db.refresh(product, attribute_names=["data"])' in listing_success_section
+        and listing_success_section.index('await db.refresh(product, attribute_names=["data"])')
+        < listing_success_section.index("_project_listing_completed(product)")
         and "_queue_product_post_image_generation" in products_text
         and "_queue_product_customer_mindset" in products_text,
-        "API、engine 和 ProductTaskAction 必须共用正式心智校验，所有 Step 6 入口缺产物时先排用户心智",
+        "API、engine 和 ProductTaskAction 必须共用正式心智校验；Listing success 投影前须刷新独立会话已落库的心智数据",
     )
     assert_true(
         "DYNAMIC_QUESTION_MIN = 2" in mindset_text
@@ -5435,8 +5465,10 @@ def test_aplus_fallback_script_and_provider_resize_metadata_behaviour() -> None:
     assert_true(
         "provider_raw_width" in step9_text
         and "provider_raw_height" in step9_text
-        and "_provider_image_metadata(image_payload, size_info)" in step9_text,
-        "Step9 最终 image manifest 必须持久化 provider raw size 与 upscaled_from_provider",
+        and "_provider_image_metadata(image_payload, size_info)" in step9_text
+        and "禁止放大伪装成A+成图" in step9_text
+        and "_create_fallback_aplus_image" not in step9_text,
+        "Step9 必须持久化 provider 原始尺寸，拒绝小图放大，并且不得保留占位图成功路径",
     )
     assert_true(
         "Selected reference images for this final prompt:" in step8_text
@@ -5552,19 +5584,28 @@ async def exercise_step8_fallback():
     original_session = step8.async_session
     original_settings = step8.settings
     original_sleep = step8.asyncio.sleep
+    original_mark_references = step8._mark_aplus_reference_assets
+    original_write_artifacts = step8.write_aplus_script_artifacts
 
     async def no_sleep(seconds):
         return None
+
+    async def no_op_artifact(*args, **kwargs):
+        return {}
 
     try:
         step8.async_session = lambda: FakeSession(product)
         step8.settings = fake_settings
         step8.asyncio.sleep = no_sleep
+        step8._mark_aplus_reference_assets = no_op_artifact
+        step8.write_aplus_script_artifacts = no_op_artifact
         result = await step8.run_aplus_script(product.id)
     finally:
         step8.async_session = original_session
         step8.settings = original_settings
         step8.asyncio.sleep = original_sleep
+        step8._mark_aplus_reference_assets = original_mark_references
+        step8.write_aplus_script_artifacts = original_write_artifacts
 
     assert client.completions.calls == 2, client.completions.calls
     assert result["fallback"] is True
@@ -5583,8 +5624,8 @@ def image_bytes(width, height):
 
 
 async def fake_reference_generation(prompt, ref_sources, width, height):
-    raw_width = min(width, 970)
-    raw_height = min(height, 600)
+    raw_width = width
+    raw_height = height
     payload = {"bytes": image_bytes(raw_width, raw_height), "provider_source": "fake-provider"}
     return step9._ensure_provider_image_large_enough(payload, width, height, "fake-provider")
 
@@ -5604,13 +5645,14 @@ def fallback_legacy_scripts():
         "fallback_reason": "LLM timeout while generating A+ scripts",
         "scripts": [
             {
-                "module_position": 1,
+                "module_position": position,
                 "fallback_script": True,
-                "prompt": "Create a fallback legacy A+ image",
+                "prompt": f"Create fallback legacy A+ image {position}",
                 "width": 1940,
                 "height": 1200,
                 "reference_images": [{"path": "/tmp/reference-a.jpg"}],
             }
+            for position in range(1, 6)
         ],
     }
 
@@ -5685,6 +5727,7 @@ async def exercise_step9_manifest(scripts_data):
             GPT_IMAGE_MODEL="fake-image-model",
             DEFAULT_BRAND="Brand",
             gpt_image_api_provider="fake",
+            APLUS_IMAGE_API_MODE="generations",
         )
         original_session = step9.async_session
         original_settings = step9.settings
@@ -5717,11 +5760,11 @@ async def main():
 
     legacy_manifest = await exercise_step9_manifest(fallback_legacy_scripts())
     legacy_item = legacy_manifest[0]
-    assert legacy_item["provider_raw_width"] == 970
-    assert legacy_item["provider_raw_height"] == 600
+    assert legacy_item["provider_raw_width"] == 1940
+    assert legacy_item["provider_raw_height"] == 1200
     assert legacy_item["width"] == 1940
     assert legacy_item["height"] == 1200
-    assert legacy_item["upscaled_from_provider"] is True
+    assert legacy_item["upscaled_from_provider"] is False
 
     enhanced_manifest = await exercise_step9_manifest(fallback_enhanced_scripts())
     assert len(enhanced_manifest) == len(required_image_slots(APLUS_PUBLISH_PROFILE_ENHANCED_BASIC_APLUS_V1))
@@ -5900,21 +5943,18 @@ def test_auto_image_selection_phase_a_contract() -> None:
         and "from app.services.product_image_vlm import" in service_text
         and "from app.services.product_image_vlm import" in step6_text
         and "def analyze_image_url_batch" in vlm_service_text,
-        "自动选图和旧图片分析必须共享 product_image_vlm 的 direct image URL 底层能力，不能让新逻辑反向依赖 step6_image 私有实现",
+        "自动选图和 Step6 必须共享 product_image_vlm 能力层，不能让自动选图反向依赖 step6_image 私有实现",
     )
-    for forbidden in (
-        "analyze_contact_sheet",
-        "build_contact_sheets",
-        "download_image_records",
-        "Contact Sheet",
-        "contact_sheets",
-    ):
-        assert_true(forbidden not in service_text, f"自动选图默认路径不得保留下载/Contact Sheet 兜底: {forbidden}")
     assert_true(
-        "image_batches" in service_text
-        and "build_image_url_batches(records)" in service_text
-        and "AutoImageSelectionError(f\"自动选图 direct image URL VLM 失败" in service_text,
-        "自动选图必须只走 direct image URL 批量分析，失败后显式失败等待重试/人工纠偏",
+        "download_image_records" in service_text
+        and "build_contact_sheets" in service_text
+        and "analyze_contact_sheet" in service_text
+        and "require_complete_batch_reviews" in service_text
+        and '"decision_coverage"' in service_text
+        and '"complete": True' in service_text
+        and "not_selected_after_global_merge" in service_text
+        and "自动选图 Contact Sheet VLM 失败" in service_text,
+        "自动选图必须本地化供应商图片、按 Contact Sheet 逐图分析，并在多 Sheet 全局合并后证明所有图片均被选择或明确拒绝",
     )
     step6_run_section = step6_text.split("async def run_image_analysis", 1)[1]
     assert_true(
@@ -5937,6 +5977,90 @@ def test_auto_image_selection_phase_a_contract() -> None:
     )
 
 
+def test_giga_material_prepare_and_aplus_target_chain_contract() -> None:
+    models_text = (ROOT / "backend" / "app" / "models" / "models.py").read_text(encoding="utf-8")
+    database_text = (ROOT / "backend" / "app" / "database.py").read_text(encoding="utf-8")
+    status_text = (ROOT / "backend" / "app" / "models" / "status.py").read_text(encoding="utf-8")
+    step1_text = (ROOT / "backend" / "app" / "pipeline" / "step1_collect.py").read_text(encoding="utf-8")
+    prepare_text = (ROOT / "backend" / "app" / "services" / "product_material_prepare.py").read_text(encoding="utf-8")
+    drafts_text = (ROOT / "backend" / "app" / "services" / "giga_product_drafts.py").read_text(encoding="utf-8")
+    actions_text = (ROOT / "backend" / "app" / "product_tasks" / "actions.py").read_text(encoding="utf-8")
+    products_api_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    schemas_text = (ROOT / "backend" / "app" / "api" / "schemas.py").read_text(encoding="utf-8")
+    frontend_api_text = (ROOT / "frontend" / "src" / "api" / "index.ts").read_text(encoding="utf-8")
+    product_detail_text = (ROOT / "frontend" / "src" / "pages" / "ProductDetail.tsx").read_text(encoding="utf-8")
+
+    assert_true(
+        "class ProductMaterialAsset" in models_text
+        and "pipeline_target" in models_text
+        and "pipeline_test_session_key" in models_text
+        and "pipeline_origin_task_run_id" in models_text
+        and '__tablename__ = "product_material_assets"' in models_text
+        and "await conn.run_sync(Base.metadata.create_all)" in database_text
+        and "_ensure_mysql_product_pipeline_columns" in database_text,
+        "目标链路必须持久化商品目标、测试会话、来源任务和逐文件素材事实",
+    )
+    assert_true(
+        "WORKFLOW_NODE_PREPARE_MATERIALS" in status_text
+        and '"prepare_materials"' in status_text
+        and "class ProductMaterialPrepareAction" in actions_text
+        and '"product_material_prepare"' in actions_text
+        and "create_product_material_prepare_runs" in drafts_text,
+        "GIGA 草稿后必须通过正式 prepare_materials 任务进入素材准备节点",
+    )
+    assert_true(
+        "DOWNLOAD_OPTION_TYPE_KEYS" in step1_text
+        and '"Information": "information"' in step1_text
+        and "explicit_types" in step1_text
+        and "required_type_keys" in step1_text
+        and "shutil.copy2" in step1_text
+        and "shutil.move" not in step1_text.split("def _store_and_extract_zips", 1)[1].split("def _unique_target_path", 1)[0],
+        "浏览器素材下载必须按页面选项登记 To B/Information 类型，并复制而非移动 Downloads 原文件",
+    )
+    assert_true(
+        "resolve_gigab2b_product_page" in prepare_text
+        and "data-gmd-attr-product_id" in prepare_text
+        and "详情页 Item Code 二次校验失败" in prepare_text
+        and 'required_options={"To B素材包", "Information"}' in prepare_text
+        and "download_all=True" in prepare_text
+        and "To B 素材包已下载，但没有登记到可读取图片" in prepare_text
+        and "write_material_manifest" in prepare_text
+        and 'processing_status = "stale"' in prepare_text,
+        "素材准备必须精确映射数字 ID、下载全部必需 ZIP、验证 To B 图片并维护幂等 manifest",
+    )
+    assert_true(
+        '"product_competitor_search"' in actions_text
+        and 'created_by="product_auto_image_selection"' in actions_text
+        and '"product_competitor_visual_match"' in actions_text
+        and 'created_by="product_competitor_search"' in actions_text,
+        "自动选图和竞品搜索成功后必须自动创建下一节点任务，不能停在 pending 等人工点击",
+    )
+    assert_true(
+        'pipeline_target: Literal["export_ready", "aplus_done"]' in schemas_text
+        and '"pipeline_target": body.pipeline_target' in (ROOT / "backend" / "app" / "task_planners" / "giga_pull.py").read_text(encoding="utf-8")
+        and "pipeline_target=str(payload.get(\"pipeline_target\")" in (ROOT / "backend" / "app" / "task_runtime" / "giga_pull_workers.py").read_text(encoding="utf-8"),
+        "GIGA 列表入口的 aplus_done 目标必须传播到创建出的 Product",
+    )
+    assert_true(
+        '@router.get("/{product_id}/materials"' in products_api_text
+        and '@router.get("/{product_id}/materials/{asset_id}/preview")' in products_api_text
+        and "Content-Security-Policy" in products_api_text
+        and "只能预览当前商品素材目录内的文件" in products_api_text
+        and "detail.material_assets = []" in products_api_text,
+        "素材接口必须支持安全预览，且首屏 compact 详情仍保持轻量",
+    )
+    assert_true(
+        "export interface ProductMaterialAsset" in frontend_api_text
+        and "productMaterialPreviewUrl" in frontend_api_text
+        and "loadFullDetail" in product_detail_text
+        and "素材包与附件" in product_detail_text
+        and "压缩包成员" in product_detail_text
+        and "预览表格" in product_detail_text
+        and "video src={url}" in product_detail_text,
+        "商品详情文件页必须懒加载并展示图片、视频、表格、ZIP 成员和素材用途",
+    )
+
+
 def test_auto_image_selection_candidate_priority_behaviour() -> None:
     code = r'''
 import asyncio
@@ -5953,7 +6077,18 @@ class Result:
         return self.rows
 
 class FakeDb:
+    def __init__(self):
+        self.calls = 0
     async def execute(self, _statement):
+        self.calls += 1
+        if self.calls == 1:
+            return Result([
+                SimpleNamespace(
+                    id=91,
+                    path="/tmp/to-b-material.jpg",
+                    content_hash="material-hash",
+                )
+            ])
         return Result([
             SimpleNamespace(
                 id=1,
@@ -5967,6 +6102,7 @@ class FakeDb:
                 image_type="main",
                 sort_order=1,
                 download_status="done",
+                content_hash="giga-main-hash",
             ),
             SimpleNamespace(
                 id=2,
@@ -5980,6 +6116,7 @@ class FakeDb:
                 image_type="main",
                 sort_order=2,
                 download_status="pending",
+                content_hash="giga-other-hash",
             ),
         ])
 
@@ -5996,6 +6133,7 @@ async def main():
         ],
     }
     product = SimpleNamespace(
+        id=7001,
         source_batch_id="B1",
         source_site="US",
         source_data_source_id=7,
@@ -6007,9 +6145,12 @@ async def main():
     )
     candidates = await collect_product_image_candidates(FakeDb(), product)
     paths = [item["path"] for item in candidates]
-    assert paths[0] == "https://img.test/main.jpg", candidates
-    assert candidates[0]["image_type"] == "main", candidates
-    assert candidates[0]["is_representative_sku"] is True, candidates
+    assert paths[0] == "/tmp/to-b-material.jpg", candidates
+    assert candidates[0]["source"] == "giga_material_package", candidates
+    assert candidates[0]["material_asset_id"] == 91, candidates
+    giga_main = next(item for item in candidates if item["path"] == "https://img.test/main.jpg")
+    assert giga_main["image_type"] == "main", candidates
+    assert giga_main["is_representative_sku"] is True, candidates
     assert any(item["image_type"] == "variant_main" for item in candidates), candidates
     assert paths.count("https://img.test/main.jpg") == 1, candidates
     assert "https://img.test/brand.jpg" == paths[-1], candidates
@@ -6029,6 +6170,7 @@ asyncio.run(main())
 def test_auto_image_selection_service_and_action_behaviour() -> None:
     code = r'''
 import asyncio
+import json
 from types import SimpleNamespace
 from app.models import ProductImage
 from app.models.status import (
@@ -6061,12 +6203,17 @@ class FakeDb:
         return EmptyResult()
     async def commit(self):
         self.commit_count += 1
+    async def flush(self):
+        return None
     async def rollback(self):
         pass
 
 def make_product():
     return SimpleNamespace(
         id=123,
+        pipeline_target="export_ready",
+        pipeline_test_session_key=None,
+        pipeline_origin_task_run_id=None,
         status="created",
         current_step=0,
         error_message=None,
@@ -6077,6 +6224,7 @@ def make_product():
         updated_at=None,
         data=SimpleNamespace(
             item_code="ITEM",
+            material_dir=None,
             gigab2b_raw_snapshot="{}",
             categories="old",
             leaf_category="old",
@@ -6129,11 +6277,17 @@ async def main():
         raise AssertionError("low confidence must fail")
 
     original_load_product = product_actions._load_product
+    original_create_product_action_runs = product_actions.create_product_action_runs
     try:
         product = make_product()
         async def fake_load_product(_db, _product_id):
             return product
         product_actions._load_product = fake_load_product
+        async def fake_create_product_action_runs(_db, action_type, items, **kwargs):
+            assert action_type == "product_competitor_search", action_type
+            assert items[0]["created_by"] == "product_auto_image_selection", items
+            return [SimpleNamespace(id=88001)]
+        product_actions.create_product_action_runs = fake_create_product_action_runs
         action = product_actions.ProductAutoImageSelectionAction()
         db = FakeDb(product)
 
@@ -6201,13 +6355,14 @@ async def main():
         }
         await action.on_step_success(db, step, result)
         assert product.images.main_image_path == "https://img.test/main.jpg"
-        assert product.images.gallery_images == '["https://img.test/gallery.jpg"]'
+        assert json.loads(product.images.gallery_images) == ["https://img.test/gallery.jpg"], product.images.gallery_images
         assert product.images.main_image_source == "model_selected"
         assert product.images.image_selection_analysis
         assert product.images.image_selected_at is not None
         assert product.images.image_analysis is None
         assert product.workflow_node == WORKFLOW_NODE_SEARCH_COMPETITOR
         assert product.workflow_status == WORKFLOW_STATUS_PENDING
+        assert result["competitor_search_task_run_ids"] == [88001]
         assert product.competitor_asin is None
         assert product.data.listing_title is None
 
@@ -6222,6 +6377,7 @@ async def main():
         assert "自动选图失败" in protected.workflow_error
     finally:
         product_actions._load_product = original_load_product
+        product_actions.create_product_action_runs = original_create_product_action_runs
 
 asyncio.run(main())
 '''
@@ -6245,19 +6401,20 @@ def test_auto_image_selection_phase_b_contract() -> None:
     commit_index = giga_product_drafts_text.find("await db.commit()")
     create_run_index = giga_product_drafts_text.find("created_by=\"giga_product_draft\"")
     assert_true(
-        "WORKFLOW_NODE_AUTO_SELECT_IMAGES" in giga_product_drafts_text
-        and "node=WORKFLOW_NODE_AUTO_SELECT_IMAGES" in giga_product_drafts_text
+        "WORKFLOW_NODE_PREPARE_MATERIALS" in giga_product_drafts_text
+        and "node=WORKFLOW_NODE_PREPARE_MATERIALS" in giga_product_drafts_text
+        and "create_product_material_prepare_runs" in giga_product_drafts_text
         and "created_by=\"giga_product_draft\"" in giga_product_drafts_text
         and "WORKFLOW_STATUS_FAILED" in giga_product_drafts_text
         and commit_index >= 0
         and create_run_index > commit_index,
-        "Phase B 新建商品必须先完整落库，再创建/复用自动选图 task run，失败落 auto_select_images/failed",
+        "新建商品必须先完整落库，再创建/复用素材准备 task run，失败落 prepare_materials/failed",
     )
     assert_true(
         "if created:" in giga_product_drafts_text
         and "if not product.workflow_node and not product.workflow_status and not product.competitor_asin" in giga_product_drafts_text
-        and "node=WORKFLOW_NODE_AUTO_SELECT_IMAGES if created else WORKFLOW_NODE_SELECT_IMAGES" in giga_product_drafts_text,
-        "Phase B 只能切新建商品入口，duplicate/update 商品不得静默迁移既有 workflow",
+        and "node=WORKFLOW_NODE_PREPARE_MATERIALS if created else WORKFLOW_NODE_SELECT_IMAGES" in giga_product_drafts_text,
+        "素材准备只能切新建商品入口，duplicate/update 商品不得静默迁移既有 workflow",
     )
 
     retry_route_start = products_text.find('@router.post("/{product_id}/auto-image-selection/retry"')
@@ -6327,6 +6484,20 @@ def test_auto_image_selection_phase_b_contract() -> None:
         and "product_auto_competitor" not in giga_product_drafts_text
         and "product_auto_competitor" not in products_text,
         "Phase B 不得夹带 Step 10/template_mappings 或自动竞品实现",
+    )
+
+
+def test_product_list_sku_filter_uses_mapped_columns() -> None:
+    products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
+    list_start = products_text.index("async def list_products(")
+    list_end = products_text.index('@router.get("/image-review-queue"', list_start)
+    list_text = products_text[list_start:list_end]
+
+    assert_true(
+        "Product.source_item_id.ilike" not in list_text
+        and "Product.gigab2b_product_id.ilike(pattern)" in list_text
+        and "ProductData.item_code.ilike(pattern)" in list_text,
+        "商品列表 sku_code 筛选只能使用 SQLAlchemy 映射列，不能对 Python property 调用 ilike 导致 500",
     )
 
 
@@ -6638,7 +6809,7 @@ product.images = ProductImage(product_id=88, main_image_path="/tmp/main.jpg", ma
 plan = build_amazon_competitor_queries(product)
 assert 1 <= len(plan["queries"]) <= 3, plan
 for item in plan["queries"]:
-    assert item["rule_version"] == "amazon_competitor_query_v1", item
+    assert item["rule_version"] == "amazon_competitor_query_v2", item
     assert 3 <= len(item["included_terms"]) <= 7, item
     assert "Modern Modular Sofa with Storage Chaise for Living Room SKU S-123 188cm".lower() != item["query"], item
     assert "replacement part" in item["excluded_terms"], item
@@ -6652,6 +6823,26 @@ except CompetitorQueryError as exc:
     assert "insufficient_product_facts_for_competitor_search" in str(exc), exc
 else:
     raise AssertionError("low quality product facts must fail")
+
+bed = Product(id=90, gigab2b_url="https://example.test/item/90", status="created", current_step=1)
+bed.data = ProductData(
+    product_id=90,
+    title="Queen Size Upholstered Platform Bed Frame with Adjustable Headboard, Beige",
+    product_type="Beds, Frames & Bases",
+    color="Beige",
+    material="Fabric,Linen,Plywood,Wood",
+    dimension_length=81.89,
+    dimension_width=62.2,
+    dimension_height=47.64,
+    variants='[{"attributes":{"Bed Size":"Queen","Bed Type":"Bed Frame"}}]',
+    features='["adjustable headboard", "no box spring needed"]',
+    description="Queen platform bed with linen upholstered headboard",
+)
+bed.images = ProductImage(product_id=90, main_image_path="/tmp/bed-main.jpg", main_image_source="model_selected")
+bed_plan = build_amazon_competitor_queries(bed)
+assert all("bed frame" in item["query"] for item in bed_plan["queries"]), bed_plan
+assert any("queen" in item["included_terms"] for item in bed_plan["queries"]), bed_plan
+assert all("82 inch" not in item["included_terms"] for item in bed_plan["queries"]), bed_plan
 
 html = """
 <html><body>
@@ -6806,6 +6997,7 @@ def test_auto_competitor_visual_match_phase_b_contract() -> None:
     visual_retry_section = products_text.split('@router.post("/{product_id}/competitor-visual-match/retry"', 1)[1].split('@router.delete("/{product_id}"', 1)[0]
     create_runs_section = actions_text.split("async def create_product_action_runs", 1)[1].split("async def product_action_worker", 1)[0]
     visual_action_section = actions_text.split("class ProductCompetitorVisualMatchAction", 1)[1].split("async def _latest_successful_competitor_search_ids", 1)[0]
+    visual_match_actions_scope = actions_text.split("class ProductCompetitorVisualMatchAction", 1)[1].split("class ProductCompetitorCandidateCaptureAction", 1)[0]
     product_worker_section = actions_text.split("async def product_action_worker", 1)[1].split("def register_product_task_actions", 1)[0]
 
     for field in (
@@ -6847,6 +7039,18 @@ def test_auto_competitor_visual_match_phase_b_contract() -> None:
         and "result = await db.execute(" in scheduler_text.split("except Exception as exc:", 1)[1].split("await emit_event", 1)[0]
         and "step_id" in scheduler_text.split("except Exception as exc:", 1)[1].split("await emit_event", 1)[0],
         "ProductTaskAction worker/scheduler failure path 必须 rollback 后重载 step 并隔离 failure hook 二次异常，防止 MissingGreenlet 崩 runner",
+    )
+    success_projection_section = scheduler_text.split("if success_payload is not None:", 1)[1].split("if success_projection_error:", 1)[0]
+    assert_true(
+        "await action.on_step_success(db, step, success_payload)" in success_projection_section
+        and "await _refresh_group_and_run(db, run_id)" in success_projection_section
+        and ".where(TaskStep.id == step_id)" in success_projection_section
+        and ".execution_options(populate_existing=True)" in success_projection_section
+        and success_projection_section.index("await _refresh_group_and_run(db, run_id)")
+        < success_projection_section.index("await action.on_step_success(db, step, success_payload)")
+        and success_projection_section.index("await action.on_step_success(db, step, success_payload)")
+        < success_projection_section.index('message="step 成功投影完成"'),
+        "scheduler 必须先投影 upstream succeeded 再执行 success hook，并在 hook 提交/回滚后重载 step，避免下游前置误判和 MissingGreenlet",
     )
     assert_true(
         "await action.validate(db, payload)" in create_runs_section
@@ -6897,10 +7101,10 @@ def test_auto_competitor_visual_match_phase_b_contract() -> None:
         assert_true(forbidden not in service_text, f"竞品视觉初筛默认路径不得保留 Contact Sheet/下载主流程: {forbidden}")
     assert_true(
         "contact_sheet_evidence" not in service_text
-        and "contact_sheet_evidence" not in actions_text
-        and "row.visual_sheet_path = None" in actions_text
-        and "row.visual_sheet_page = None" in actions_text
-        and "row.visual_sheet_label = None" in actions_text,
+        and "contact_sheet_evidence" not in visual_match_actions_scope
+        and "row.visual_sheet_path = None" in visual_match_actions_scope
+        and "row.visual_sheet_page = None" in visual_match_actions_scope
+        and "row.visual_sheet_label = None" in visual_match_actions_scope,
         "竞品视觉初筛不得继续写 Contact Sheet evidence；legacy visual_sheet_* 字段只能清空/停写",
     )
     assert_true(
@@ -6951,6 +7155,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from app.services.amazon_competitor_visual_match import (
+    _coerce_bool,
+    _direct_visual_match_prompt,
     _fake_visual_reviews,
     _record_for_candidate,
 )
@@ -6969,6 +7175,9 @@ with TemporaryDirectory(prefix="fbm_visual_match_fixture_") as tmp:
             price="$99.99",
             rating="4.5",
             review_count="100",
+            search_query="modular sofa fabric living room",
+            query_intent="core_product",
+            query_index=1,
         )
         records.append(_record_for_candidate(candidate, index))
     reviews = _fake_visual_reviews(product, records)
@@ -6982,6 +7191,11 @@ with TemporaryDirectory(prefix="fbm_visual_match_fixture_") as tmp:
     accessory_review = _fake_visual_reviews(product, [accessory])[0]
     assert accessory_review["reject"] is True
     assert accessory_review["reject_reason"] == "accessory_or_replacement", accessory_review
+    prompt = _direct_visual_match_prompt(product, "/tmp/main.jpg", records)
+    assert "direct market comparability, not exact SKU identity" in prompt["reference_text"], prompt
+    assert "Do not reject only because a score is below 0.65" in prompt["output_schema"], prompt
+    assert _coerce_bool("false") is False
+    assert _coerce_bool("true") is True
 '''
     result = subprocess.run(
         [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
@@ -7172,13 +7386,19 @@ def test_auto_competitor_candidate_capture_and_selection_phase1_contract() -> No
     assert_true(
         "FixtureAmazonListingDetailAdapter" in detail_service_text
         and "UnconfiguredAmazonListingDetailAdapter" in detail_service_text
+        and "ChromeAmazonListingDetailAdapter" in detail_service_text
+        and "AMAZON_LISTING_DETAIL_ENABLE_REAL_BROWSER" in detail_service_text
+        and "AmazonListingDetailEvidenceContext" in detail_service_text
         and "adapter_not_configured" in detail_service_text
         and "parse_amazon_listing_detail_html" in detail_service_text
-        and "listing_detail_to_dict" in detail_service_text,
-        "Amazon listing detail service 必须只有 fixture/default adapter 边界和 fixture parser",
+        and "listing_detail_to_dict" in detail_service_text
+        and "chrome_ctrl.chrome_workflow" in detail_service_text
+        and "task_run_id" in detail_service_text
+        and "task_step_id" in detail_service_text,
+        "Amazon listing detail service 必须有 fail-closed fixture/default 边界和显式启用的 Chrome evidence adapter",
     )
-    for forbidden in ("requests", "httpx", "aiohttp", "playwright", "selenium", "urlopen"):
-        assert_true(forbidden not in detail_service_text, f"Phase 1 listing detail adapter 禁止真实网络/浏览器依赖: {forbidden}")
+    for forbidden in ("import requests", "import httpx", "import aiohttp", "playwright", "selenium", "urlopen"):
+        assert_true(forbidden not in detail_service_text, f"listing detail adapter 不得绕开本机 Chrome 执行器直接访问 Amazon: {forbidden}")
     assert_true(
         "Phase 1 候选详情抓取与自动选竞品结构契约对账" in prd_text
         and "Phase 2A 候选详情抓取 fixture 执行与 current-set 对账" in prd_text
@@ -7195,8 +7415,10 @@ def test_auto_competitor_candidate_capture_fixture_adapter_behaviour() -> None:
 import asyncio
 from app.services.amazon_listing_detail import (
     AmazonListingDetailError,
+    ChromeAmazonListingDetailAdapter,
     FixtureAmazonListingDetailAdapter,
     UnconfiguredAmazonListingDetailAdapter,
+    _canonical_listing_url,
     listing_detail_to_dict,
     parse_amazon_listing_detail_html,
 )
@@ -7217,10 +7439,11 @@ html = """
     </ul>
   </div>
   <div id="productDescription"><span>Comfortable upholstered seating for apartments.</span></div>
-  <table>
+  <table id="productDetails_techSpec_section_1">
     <tr><th>Brand</th><td>Vindhvisk</td></tr>
     <tr><th>Best Sellers Rank</th><td>#12 in Home & Kitchen &gt; Furniture &gt; Sofas</td></tr>
   </table>
+  <div><span class="a-text-bold">Protection Coverage:</span><span>Replacement parts included.</span></div>
   <div id="aplus">Premium fabric and sturdy frame.</div>
 </body></html>
 """
@@ -7232,12 +7455,16 @@ assert detail.brand == "Visit the Vindhvisk Store", detail
 assert detail.seller == "Furniture Seller LLC", detail
 assert detail.main_image_url == "https://images.example/detail-main.jpg", detail
 assert len(detail.bullets) == 2, detail.bullets
+assert all("Home & Kitchen" not in bullet for bullet in detail.bullets), detail.bullets
 assert detail.product_details["Brand"] == "Vindhvisk", detail.product_details
+assert "Protection Coverage" not in detail.product_details, detail.product_details
 assert detail.category_rank == "#12 in Home & Kitchen > Furniture > Sofas", detail.category_rank
 assert detail.leaf_category == "Sofas", detail.leaf_category
 assert listing_detail_to_dict(detail)["raw"]["parser"] == "fixture_html_v1"
 
 async def main():
+    assert _canonical_listing_url("B0DETAIL001", marketplace="US").endswith("/dp/B0DETAIL001?language=en_US")
+    assert ChromeAmazonListingDetailAdapter.__name__ == "ChromeAmazonListingDetailAdapter"
     fixture = FixtureAmazonListingDetailAdapter({"B0DETAIL001": html})
     fetched = await fixture.fetch("B0DETAIL001", url="https://www.amazon.com/dp/B0DETAIL001")
     assert fetched.title == detail.title, fetched
@@ -7281,6 +7508,11 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
 
     assert_true(playbook.is_file(), "必须有子 agent 派发 playbook，不能只在公共规约里叙述")
     assert_true(delivery_playbook.is_file(), "必须有若命交付编排 playbook，不能把分支/阶段/提交 SOP 放在公共规约里")
+    # Personal Codex skills live outside the repository and are not guaranteed on
+    # every developer/CI machine. Validate the synced templates only when that
+    # optional personal skill is installed; repository-owned playbooks remain required.
+    if not skill_doc.is_file():
+        return
     assert_true(skill_doc.is_file(), "multi-agent-collaboration skill 必须存在并同步子 agent 规约")
     assert_true(init_script.is_file(), "multi-agent-collaboration 初始化脚本必须存在并同步子 agent 模板")
     assert_true(skill_playbook.is_file(), "multi-agent-collaboration skill 必须把 playbook 拆到 templates/collaboration/playbooks")
@@ -7622,10 +7854,12 @@ def main() -> int:
         test_aplus_fallback_script_and_provider_resize_metadata_behaviour,
         test_product_action_worker_does_not_project_failure_for_interrupted,
         test_product_action_final_progress_failure_is_best_effort,
+        test_giga_material_prepare_and_aplus_target_chain_contract,
         test_auto_image_selection_phase_a_contract,
         test_auto_image_selection_candidate_priority_behaviour,
         test_auto_image_selection_service_and_action_behaviour,
         test_auto_image_selection_phase_b_contract,
+        test_product_list_sku_filter_uses_mapped_columns,
         test_auto_image_selection_phase_b_work_status_behaviour,
         test_auto_image_selection_phase_b_protection_behaviour,
         test_auto_competitor_search_phase_a_contract,

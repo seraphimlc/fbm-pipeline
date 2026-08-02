@@ -42,6 +42,7 @@ from app.pipeline.customer_mindset import (
     customer_mindset_matches_product,
     image_analysis_ready,
 )
+from app.services.product_pipeline_artifacts import write_aplus_plan_artifacts
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -1379,7 +1380,15 @@ async def run_aplus_plan(product_id: int) -> dict:
         # 调用 LLM
         client = settings.get_llm_client()
         max_attempts = 2
-        request_client = client.with_options(timeout=35, max_retries=0) if hasattr(client, "with_options") else client
+        timeout_seconds = max(
+            60,
+            int(getattr(settings, "APLUS_PLAN_LLM_TIMEOUT_SECONDS", 120)),
+        )
+        request_client = (
+            client.with_options(timeout=timeout_seconds, max_retries=0)
+            if hasattr(client, "with_options")
+            else client
+        )
 
         logger.info(f"[Step7] 调用LLM生成A+规划: {pd.title}")
         response = None
@@ -1455,6 +1464,7 @@ async def run_aplus_plan(product_id: int) -> dict:
         pa.aplus_plan_summary = plan.get("plan_summary")
         pa.planned_at = datetime.now()
         pa.llm_model = settings.LLM_MODEL
+        await write_aplus_plan_artifacts(db, product=product, plan=plan)
         await db.commit()
 
         logger.info(f"[Step7] A+规划完成: {len(plan.get('modules') or [])} 个模块, 风格={plan.get('tone')}")
