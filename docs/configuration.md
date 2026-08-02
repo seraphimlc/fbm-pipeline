@@ -93,6 +93,13 @@ STEP5_SEARCH_TERMS_MAX_BYTES=250
 
 含人物的 A+ 或 Listing 投放图片会写入 `XMP-dc:Subject=contains-synthetic-performer`。工作节点必须安装 ExifTool，并可按需指定其路径：
 
+macOS 开发机使用 Homebrew 安装：
+
+```bash
+brew install exiftool
+exiftool -ver
+```
+
 ```env
 IMAGE_COMPLIANCE_EXIFTOOL_PATH=exiftool
 IMAGE_COMPLIANCE_VERIFY_OSS_ROUND_TRIP=true
