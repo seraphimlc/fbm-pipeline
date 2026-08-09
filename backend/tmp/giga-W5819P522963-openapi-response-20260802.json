@@ -1,0 +1,144 @@
+{
+  "_query": {
+    "data_source_id": 1,
+    "data_source_name": "大健美国-亚马逊",
+    "site": "US",
+    "endpoint": "/b2b-overseas-api/v1/buyer/product/detailInfo/v1",
+    "request_body": {
+      "skus": [
+        "W5819P522963"
+      ]
+    }
+  },
+  "_response": {
+    "success": true,
+    "code": "200",
+    "data": [
+      {
+        "sku": "W5819P522963",
+        "mpn": "JBNA175-Q",
+        "weightUnit": "lb",
+        "lengthUnit": "in",
+        "weight": 80.47,
+        "length": 63.58,
+        "width": 24.61,
+        "height": 5.91,
+        "weightKg": 36.5,
+        "lengthCm": 161.49,
+        "widthCm": 62.51,
+        "heightCm": 15.01,
+        "productName": "(ETA:7.28-CA:127) Queen Size Bed Frame Upholstered Platform Bed with Adjustable Headboard,Linen Fabric Padded,Modern Simple Style Platform Bed No Box Spring Needed, Easy Assembly, Beige",
+        "description": "<div style=\"width:100%; margin-top:24px;display:flex;align-items:center;\">\n<div style=\"width: calc(33% - 16px);\">\n<div\nstyle=\"font-size: 16px; font-weight:bold;line-height:24px;color: #333333;word-break: break-word;\">ADJUSTABLE HEIGHT OF BED BOARD</div>\n<div style=\"margin-top:12px;word-break: break-word;white-space:pre-line;line-height:18px;\">The headboard has two adjustable heights, a minimum of 32.87 inches and a maximum of 37 inches.\n</div>\n</div>\n<div style=\"width: calc(33% - 16px);margin-left:24px;position: relative;\">\n<div style=\"width:100%;position: relative;padding-top: 100%;\">\n<img src=https://b2bfiles1.gigab2b.cn/image/wkseller/108774/629ff7077d049e227798a1260dc90dba.jpg?x-cc=10&x-cu=108774&x-ct=1783666800&x-cs=824c112dbab37175e9e25696da0a59cc alt=\"\" style=\"max-width: 100%;display:block;max-height: 100%;position: absolute;left: 50%;top: 50%;transform: translate(-50%,-50%);\">\n</div>\n</div>\n<div style=\"width: calc(33% - 16px);margin-left:24px;position: relative;\">\n<div style=\"width:100%;position: relative;padding-top: 100%;\">\n<img src=https://b2bfiles1.gigab2b.cn/image/wkseller/108774/df797a773c7567dce6b154329c0d7a94.jpg?x-cc=10&x-cu=108774&x-ct=1783666800&x-cs=0ec264b5ee7fd3715b11d0f6bf0bb94f alt=\"\" style=\"max-width: 100%;display:block;max-height: 100%;position: absolute;left: 50%;top: 50%;transform: translate(-50%,-50%);\">\n</div>\n</div>\n</div>\n<div style=\"width:100%; margin-top:24px;\">\n<div style=\"font-size: 16px; font-weight:bold;line-height:24px;color: #333333;\">Product Information</div>\n<table style=\"width:100%; margin-top:12px;border: 1px solid #E5E5E5;border-bottom:0;\" cellspacing=\"0\">\n<tbody>\n<tr>\n<td\nstyle=\"width: 40%;line-height:24px;padding: 12px 16px;background: #F7F8FA;border-right: 1px solid #E5E5E5;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Color</td>\n<td\nstyle=\"width: 60%;line-height:18px;padding: 12px 16px;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Beige</td>\n</tr>\n<tr>\n<td\nstyle=\"width: 40%;line-height:24px;padding: 12px 16px;background: #F7F8FA;border-right: 1px solid #E5E5E5;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Material</td>\n<td\nstyle=\"width: 60%;line-height:18px;padding: 12px 16px;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Poplar wood+Plywood+Linen fabric+foam+Plastic bed feet</td>\n</tr>\n<tr>\n<td\nstyle=\"width: 40%;line-height:24px;padding: 12px 16px;background: #F7F8FA;border-right: 1px solid #E5E5E5;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Bed Type</td>\n<td\nstyle=\"width: 60%;line-height:18px;padding: 12px 16px;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Platform Bed</td>\n</tr>\n<tr>\n<td\nstyle=\"width: 40%;line-height:24px;padding: 12px 16px;background: #F7F8FA;border-right: 1px solid #E5E5E5;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Size</td>\n<td\nstyle=\"width: 60%;line-height:18px;padding: 12px 16px;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Queen</td>\n</tr>\n<tr>\n<td\nstyle=\"width: 40%;line-height:24px;padding: 12px 16px;background: #F7F8FA;border-right: 1px solid #E5E5E5;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Numbers of Package</td>\n<td\nstyle=\"width: 60%;line-height:18px;padding: 12px 16px;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">1</td>\n</tr>\n<tr>\n<td\nstyle=\"width: 40%;line-height:24px;padding: 12px 16px;background: #F7F8FA;border-right: 1px solid #E5E5E5;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Spring Box</td>\n<td\nstyle=\"width: 60%;line-height:18px;padding: 12px 16px;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">No need</td>\n</tr>\n<tr>\n<td\nstyle=\"width: 40%;line-height:24px;padding: 12px 16px;background: #F7F8FA;border-right: 1px solid #E5E5E5;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Product Dimension/Weight</td>\n<td\nstyle=\"width: 60%;line-height:18px;padding: 12px 16px;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">81.89''L x 62.20''W x 47.64''H, 72.97 lbs</td>\n</tr>\n<tr>\n<td\nstyle=\"width: 40%;line-height:24px;padding: 12px 16px;background: #F7F8FA;border-right: 1px solid #E5E5E5;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Package Dimensions/Weight</td>\n<td\nstyle=\"width: 60%;line-height:18px;padding: 12px 16px;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">63.58\"L x 24.61\"W x 5.91\"H,  80.47 lbs</td>\n</tr>\n<tr>\n<td\nstyle=\"width: 40%;line-height:24px;padding: 12px 16px;background: #F7F8FA;border-right: 1px solid #E5E5E5;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Number of Bed Slats</td>\n<td\nstyle=\"width: 60%;line-height:18px;padding: 12px 16px;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">12pcs</td>\n</tr>\n<tr>\n<td\nstyle=\"width: 40%;line-height:24px;padding: 12px 16px;background: #F7F8FA;border-right: 1px solid #E5E5E5;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Bed Weight Capability</td>\n<td\nstyle=\"width: 60%;line-height:18px;padding: 12px 16px;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">1000 lbs</td>\n</tr>\n<tr>\n<td\nstyle=\"width: 40%;line-height:24px;padding: 12px 16px;background: #F7F8FA;border-right: 1px solid #E5E5E5;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Bed Mattress Thickness</td>\n<td\nstyle=\"width: 60%;line-height:18px;padding: 12px 16px;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">8\"-12\"(Mattress not included)</td>\n</tr>\n<tr>\n<td\nstyle=\"width: 40%;line-height:24px;padding: 12px 16px;background: #F7F8FA;border-right: 1px solid #E5E5E5;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Assembly Required</td>\n<td\nstyle=\"width: 60%;line-height:18px;padding: 12px 16px;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Yes</td>\n</tr>\n<tr>\n<td\nstyle=\"width: 40%;line-height:24px;padding: 12px 16px;background: #F7F8FA;border-right: 1px solid #E5E5E5;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Adjustable headboard</td>\n<td\nstyle=\"width: 60%;line-height:18px;padding: 12px 16px;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">32.87“-37” two heights adjustable</td>\n</tr>\n<tr>\n<td\nstyle=\"width: 40%;line-height:24px;padding: 12px 16px;background: #F7F8FA;border-right: 1px solid #E5E5E5;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Origin</td>\n<td\nstyle=\"width: 60%;line-height:18px;padding: 12px 16px;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">China</td>\n</tr>\n</tbody>\n</table>\n</div>\n<div style=\"width:100%; margin-top:24px;\">\n<div style=\"font-size: 16px; font-weight:bold;line-height:24px;color: #333333;\">Notice</div>\n<table style=\"width:100%; margin-top:12px;border: 1px solid #E5E5E5;border-bottom:0;\" cellspacing=\"0\">\n<tbody>\n<tr>\n<td\nstyle=\"width: 40%;line-height:24px;padding: 12px 16px;background: #F7F8FA;border-right: 1px solid #E5E5E5;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Color</td>\n<td\nstyle=\"width: 60%;line-height:18px;padding: 12px 16px;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Real Product's Color may be a little different from the image due to the lighting or monitor's display.</td>\n</tr>\n<tr>\n<td\nstyle=\"width: 40%;line-height:24px;padding: 12px 16px;background: #F7F8FA;border-right: 1px solid #E5E5E5;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Dimension</td>\n<td\nstyle=\"width: 60%;line-height:18px;padding: 12px 16px;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Manual measurement has been used, there may be some reasonable error.</td>\n</tr>\n<tr>\n<td\nstyle=\"width: 40%;line-height:24px;padding: 12px 16px;background: #F7F8FA;border-right: 1px solid #E5E5E5;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">Mattress not included</td>\n<td\nstyle=\"width: 60%;line-height:18px;padding: 12px 16px;border-bottom: 1px solid #E5E5E5;word-break: break-word;white-space: pre-wrap\">This product does not include a mattress. Please refer to the product dimensions to ensure compatibility with your existing mattress.</td>\n</tr>\n</tbody>\n</table>\n</div>\n",
+        "characteristics": [
+          "Sleek and Modern Design: Enhance the aesthetic appeal of your bedroom with our sleek and modern platform bed. The streamlined design of the bed frame, along with the elegant headboard and footboard, adds a touch of sophistication to any decor.The thoughtful design maximizes functionality without sacrificing aesthetics, making it ideal for apartments, guest rooms, or anyone seeking clever storage solutions.",
+          "Adjustable Height:The headboards for adjustable bed adapts various mattress and box spring combinations, allowing you to find the perfect height for a comfortable match.The headboard has two adjustable heights, a minimum of 32.87 inches and a maximum of 37 inches.",
+          "Premium Material:The comfortable soft headboard is made of linen fabric, sponge, and plywood, offering a supportive and pressure-relieving backrest.Linen material prevents fading while providing an excellent touch; the excellent resilience of foam can give you long-lasting comfort when leaning against the fabric headboard.",
+          "Plastic Bed Feet Design: Features oak-colored plastic feet at footboard base, providing a sleek finish and reliable support.",
+          "Strong and Durable: Equipped with 12 hardwood slats and an upgraded frame for a sturdy and stable bed frame. No need for a spring box for increased strength and noiseless use brings restful sleep. It can support up to 1000 pounds, giving you the peace of mind to enjoy quality rest year after year.",
+          "Easy to assemble: The simple design makes assembly very easy, all hardware and detailed instructions are provided, and the queen-size bed frame is easy to complete."
+        ],
+        "mainMaterial": "Fabric,Linen,Plywood,Wood",
+        "mainColor": "Beige",
+        "imageUrls": [
+          "https://b2bfiles1.gigab2b.cn/image/wkseller/108774/1cf984803307d528f5c7cbf3238988e0.jpg?x-cc=20&x-cu=59221&x-ct=1785567600&x-cs=4c01ced893f74f8e238ef5c5eafb0174",
+          "https://b2bfiles1.gigab2b.cn/image/wkseller/108774/4c3d9df094061c17f871c6ed9c0d8f50.jpg?x-cc=20&x-cu=59221&x-ct=1785567600&x-cs=12176cf1bcfc7cba1eed08956411f0d7",
+          "https://b2bfiles1.gigab2b.cn/image/wkseller/108774/7f915361ce8a460fb50364a90c188bc2.jpg?x-cc=20&x-cu=59221&x-ct=1785567600&x-cs=0fa73d4cf3f128e3501d8b7eb05e5235",
+          "https://b2bfiles1.gigab2b.cn/image/wkseller/108774/42a6405a2c3cfffb9c2728267333cadd.jpg?x-cc=20&x-cu=59221&x-ct=1785567600&x-cs=77c8646c4935951c66a74921ccbd6c61",
+          "https://b2bfiles1.gigab2b.cn/image/wkseller/108774/eaac35c47e06ca0561558dc8439b55fc.jpg?x-cc=20&x-cu=59221&x-ct=1785567600&x-cs=a2c03fb5061cb877a0dc3090ae53d125",
+          "https://b2bfiles1.gigab2b.cn/image/wkseller/108774/a433c000d4645d5edf60594718a9dbd7.jpg?x-cc=20&x-cu=59221&x-ct=1785567600&x-cs=f5450ea734259df780ead771e89568ab",
+          "https://b2bfiles1.gigab2b.cn/image/wkseller/108774/844a271890ba9501bafd3515eb234cc0.jpg?x-cc=20&x-cu=59221&x-ct=1785567600&x-cs=15d7bedb238fda6648aa05303193a534",
+          "https://b2bfiles1.gigab2b.cn/image/wkseller/108774/629ff7077d049e227798a1260dc90dba.jpg?x-cc=20&x-cu=59221&x-ct=1785567600&x-cs=97adf6d17a82e5e1ce17ca55b5becd58",
+          "https://b2bfiles1.gigab2b.cn/image/wkseller/108774/df797a773c7567dce6b154329c0d7a94.jpg?x-cc=20&x-cu=59221&x-ct=1785567600&x-cs=f81d15f0d1d7fef5959cc904b05ab30b",
+          "https://b2bfiles1.gigab2b.cn/image/wkseller/108774/4517e58e4fdbb9b7c13216858957cd67.jpg?x-cc=20&x-cu=59221&x-ct=1785567600&x-cs=cd47e536aba553d54caa14f06e8d5588",
+          "https://b2bfiles1.gigab2b.cn/image/wkseller/108774/e89185648af3c987d6af74ac4be6cdd4.jpg?x-cc=20&x-cu=59221&x-ct=1785567600&x-cs=1e751b9b898783c63e3162d1b0e8125f",
+          "https://b2bfiles1.gigab2b.cn/image/wkseller/108774/1fdcbd570b54cc8dad4569a8fbdac99f.jpg?x-cc=20&x-cu=59221&x-ct=1785567600&x-cs=9277d51d2955214a18b01fbb5c2b10be"
+        ],
+        "mainImageUrl": "https://b2bfiles1.gigab2b.cn/image/wkseller/108774/1cf984803307d528f5c7cbf3238988e0.jpg?x-cc=20&x-cu=59221&x-ct=1785567600&x-cs=4c01ced893f74f8e238ef5c5eafb0174",
+        "productVideoUrl": "",
+        "categoryCode": 10015,
+        "category": "Beds, Frames & Bases",
+        "comboFlag": false,
+        "overSizeFlag": false,
+        "isLGP": false,
+        "partFlag": false,
+        "upc": "",
+        "customized": "No",
+        "placeOfOrigin": "",
+        "lithiumBatteryContained": "No",
+        "assembledLength": "81.89",
+        "assembledWidth": "62.20",
+        "assembledHeight": "47.64",
+        "assembledWeight": "72.97",
+        "assembledLengthUnit": "inches",
+        "assembledWeightUnit": "lbs",
+        "customList": [],
+        "associateProductList": [],
+        "brandInfo": {
+          "brandName": null,
+          "brandPictures": null,
+          "brandIntro": null
+        },
+        "certificationList": [],
+        "fileUrls": [],
+        "videoUrls": [],
+        "protectionServiceRates": [
+          {
+            "protectionService": "Basic•Return Protection Service",
+            "rate": "2.00%"
+          },
+          {
+            "protectionService": "Advanced•Return Protection Service",
+            "rate": "3.50%"
+          },
+          {
+            "protectionService": "Drop Shipping•Logistics Protection Service",
+            "rate": "3.20%"
+          },
+          {
+            "protectionService": "CWF•Logistics Protection Service",
+            "rate": "4.00%"
+          }
+        ],
+        "afterSalesPolicy": null,
+        "attributes": {
+          "Box Spring Requirements": "Box Spring Not Required",
+          "Bed Size": "Queen",
+          "Main Color": "Beige",
+          "Use Case": "Bedroom",
+          "Bed Type": "Bed Frame",
+          "Upholstery Material": "Linen",
+          "Main Material": "Fabric,Linen,Plywood,Wood"
+        },
+        "whiteLabel": "No",
+        "comboInfo": [],
+        "firstArrivalDate": "2026-07-31",
+        "returnRate": "N/A",
+        "sellerInfo": {
+          "sellerStore": "Relaxu",
+          "sellerType": "GENERAL",
+          "gigaIndex": "N/A",
+          "sellerCode": "W5819",
+          "sellerReturnRate": "Low",
+          "sellerReturnApprovalRate": "Moderate",
+          "sellerMessageResponseRate": "N/A"
+        },
+        "skuAvailable": true,
+        "unAvailablePlatform": [
+          {
+            "id": "1",
+            "name": "Wayfair"
+          },
+          {
+            "id": "13",
+            "name": "Temu"
+          }
+        ],
+        "newArrivalFlag": true
+      }
+    ],
+    "requestId": "49051fec43d9587f",
+    "msg": "success",
+    "subMsg": null,
+    "recommend": "https://www.gigab2b.com/index.php?route=information/open_api/index&doc_id=6"
+  }
+}

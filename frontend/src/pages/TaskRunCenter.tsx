@@ -146,7 +146,7 @@ const heartbeatText = (value: string | null) => {
 
 const initialViewFromParams = (params: URLSearchParams): 'current' | 'history' | 'all' => {
   const value = params.get('view');
-  return value === 'history' || value === 'all' ? value : 'current';
+  return value === 'current' || value === 'history' ? value : 'all';
 };
 
 const UNSUPPORTED_LIST_DISPLAY_STATUSES = new Set(['stale_running', 'waiting_dependency', 'planned']);
@@ -575,7 +575,7 @@ const TaskRunCenter: React.FC = () => {
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 16 }}>
         <div>
           <Title level={4} style={{ margin: 0 }}>任务中心</Title>
-          <Text type="secondary">展示任务框架 V1；当前承载 GIGA 拉品、库存/价格同步、图片分析、用户心智、Listing、批量推进、导出文件和 A+生成。</Text>
+          <Text type="secondary">展示 GIGA 拉品、素材处理、图片分析、用户心智、Listing、导出和 A+ 等任务的执行状态。</Text>
         </div>
         <Space>
           <Select

@@ -1429,6 +1429,7 @@ class WorkbenchOverview(BaseModel):
     capture_detail: int = 0
     ready_to_generate: int = 0
     running: int = 0
+    confirm_images_aplus: int = 0
     export_ready: int = 0
     export_ready_unexported: int = 0
     export_ready_exported: int = 0

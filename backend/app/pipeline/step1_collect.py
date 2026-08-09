@@ -148,6 +148,10 @@ async def _wait_for_browser_zips(existing: set[Path], item_code: str | None, sin
     started_at = time.monotonic()
     last_log = 0.0
     timeout = settings.STEP1_DOWNLOAD_TIMEOUT_SECONDS
+    start_timeout = max(
+        1,
+        min(timeout, int(settings.STEP1_BROWSER_DOWNLOAD_START_TIMEOUT_SECONDS)),
+    )
 
     while time.monotonic() - started_at < timeout:
         active = _active_chrome_downloads()
@@ -165,6 +169,12 @@ async def _wait_for_browser_zips(existing: set[Path], item_code: str | None, sin
             await asyncio.sleep(3)
             if not _active_chrome_downloads():
                 return _new_download_zips(existing, item_code, since_ts)
+
+        if not active and not new_zips and elapsed >= start_timeout:
+            raise RuntimeError(
+                "大健云仓素材下载未在 "
+                f"{start_timeout}s 内开始，改用 API 下载兜底"
+            )
 
         await asyncio.sleep(2)
 
@@ -862,7 +872,10 @@ async def _download_material_zips_via_api(save_dir: Path, data: dict, cookie: st
                 tmp_zip.unlink(missing_ok=True)
                 raise
 
-    return [await asyncio.to_thread(_store_and_extract_api_zip, target_zip, type_key, save_dir)]
+    results = [await asyncio.to_thread(_store_and_extract_api_zip, target_zip, type_key, save_dir)]
+    for result in results:
+        result["download_method"] = "api"
+    return results
 
 
 async def _download_material_zips_via_chrome(
@@ -968,8 +981,29 @@ async def _download_material_zips(
         )
 
     async def download_via_api() -> list[dict]:
-        api_cookie = cookie or await _get_gigab2b_cookie(product_url)
-        return await _download_material_zips_via_api(save_dir, data, api_cookie)
+        # Material-preparation runs resolve a product page from its SKU and use
+        # the browser downloader first.  If that browser route fails, their
+        # lightweight page mapping only has product_id, while the authenticated
+        # download API also requires seller_id.  Refreshing the API payload here
+        # makes the fallback self-sufficient instead of turning a recoverable
+        # browser download failure into a manual-data problem.
+        api_data = data
+        api_cookie = cookie
+        if not api_data.get("_gigab2bProductId") or not api_data.get("_gigab2bSellerId"):
+            product_id = str(api_data.get("_gigab2bProductId") or extract_product_id(product_url) or "").strip()
+            if not product_id:
+                raise RuntimeError("GigaB2B API 下载缺少 product_id，无法自动补全 seller_id")
+            try:
+                refreshed_data, refreshed_cookie = await _collect_product_data_via_api(product_id, product_url)
+            except Exception as exc:
+                raise RuntimeError(
+                    "GigaB2B API 下载无法自动补全 seller_id: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
+            api_data = {**data, **refreshed_data}
+            api_cookie = api_cookie or refreshed_cookie
+        api_cookie = api_cookie or await _get_gigab2b_cookie(product_url)
+        return await _download_material_zips_via_api(save_dir, api_data, api_cookie)
 
     methods = (
         (("browser", download_via_browser), ("api", download_via_api))

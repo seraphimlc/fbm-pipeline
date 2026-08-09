@@ -53,6 +53,8 @@ def _is_transient_llm_error(exc: Exception) -> bool:
         or "connection error" in text
         or "server disconnected" in text
         or "temporarily unavailable" in text
+        or "transport closed" in text
+        or "handler is closed" in text
     )
 
 
@@ -1602,6 +1604,10 @@ async def run_aplus_script(product_id: int) -> dict:
             output_width=settings.APLUS_IMAGE_WIDTH,
             output_height=settings.APLUS_IMAGE_HEIGHT,
         )
+
+        # Release the read transaction before the potentially long LLM call;
+        # the script/result write below must use a fresh live DB connection.
+        await db.commit()
 
         # 调用 LLM
         client = settings.get_llm_client()

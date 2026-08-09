@@ -64,6 +64,8 @@ def _is_transient_llm_error(exc: Exception) -> bool:
         or "connection error" in text
         or "server disconnected" in text
         or "temporarily unavailable" in text
+        or "transport closed" in text
+        or "handler is closed" in text
     )
 
 SYSTEM_PROMPT = """You are an Amazon A+ Content strategist. You design compelling A+ Content layouts that:
@@ -1376,6 +1378,12 @@ async def run_aplus_plan(product_id: int) -> dict:
             primary_keyword=pd.listing_primary_keyword or "N/A",
             customer_mindset=json.dumps(mindset_context, ensure_ascii=False, indent=2),
         )
+
+        # The read transaction above must not hold a MySQL connection across
+        # two long LLM attempts. MySQL may close that idle transport before
+        # the fallback plan is persisted; the later write then obtains a fresh
+        # connection.
+        await db.commit()
 
         # 调用 LLM
         client = settings.get_llm_client()

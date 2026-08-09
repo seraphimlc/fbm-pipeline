@@ -19,7 +19,9 @@ from app.models.status import (
     WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES,
     WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
     WORKFLOW_NODE_CUSTOMER_MINDSET,
+    WORKFLOW_NODE_CONFIRM_IMAGES_APLUS,
     WORKFLOW_NODE_FLOW_DONE,
+    WORKFLOW_NODE_GENERATE_APLUS,
     WORKFLOW_NODE_IMAGE_ANALYSIS,
     WORKFLOW_NODE_KEYWORD_RESEARCH,
     WORKFLOW_NODE_LISTING_GENERATION,
@@ -36,6 +38,7 @@ from app.models.status import (
 from app.product_tasks.work_status import (
     PRODUCT_WORK_STATUS_AUTO_SELECT_IMAGES,
     PRODUCT_WORK_STATUS_CAPTURE_DETAIL,
+    PRODUCT_WORK_STATUS_CONFIRM_IMAGES_APLUS,
     PRODUCT_WORK_STATUS_COMPETITOR_SEARCHING,
     PRODUCT_WORK_STATUS_EXPORTED,
     PRODUCT_WORK_STATUS_EXPORT_READY,
@@ -190,6 +193,26 @@ WORKFLOW_NODE_VIEWS: dict[str, WorkflowNodeView] = {
         default_allowed_actions=("open_task_center",),
         default_action_reason="Listing 生成正在执行或等待执行",
         default_color="processing",
+    ),
+    WORKFLOW_NODE_GENERATE_APLUS: WorkflowNodeView(
+        label="生成 A+ 图片",
+        node_type="async",
+        default_work_status=PRODUCT_WORK_STATUS_RUNNING,
+        default_primary_action="open_task_center",
+        default_primary_action_label="任务中心",
+        default_allowed_actions=("open_task_center",),
+        default_action_reason="Listing 已完成，正在生成 A+ 规划、脚本和图片",
+        default_color="processing",
+    ),
+    WORKFLOW_NODE_CONFIRM_IMAGES_APLUS: WorkflowNodeView(
+        label="确认图片与 A+",
+        node_type="review",
+        default_work_status=PRODUCT_WORK_STATUS_CONFIRM_IMAGES_APLUS,
+        default_primary_action="confirm_product",
+        default_primary_action_label="确认图片与 A+",
+        default_allowed_actions=("confirm_product", "open_detail"),
+        default_action_reason="A+ 图片已生成，请核对 Listing 图片和 A+ 后确认进入待导出",
+        default_color="cyan",
     ),
     WORKFLOW_NODE_FLOW_DONE: WorkflowNodeView(
         label="主流程完成",
@@ -752,6 +775,16 @@ def _status_overrides(product: Any, node: str, status: str) -> dict[str, Any]:
 
 
 def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
+    if node == WORKFLOW_NODE_PREPARE_MATERIALS:
+        return {
+            "label": "供应商素材准备失败",
+            "work_status": PRODUCT_WORK_STATUS_FAILED,
+            "primary_action": "retry_material_prepare",
+            "primary_action_label": "重试素材准备",
+            "allowed_actions": ("retry_material_prepare", "open_task_center"),
+            "action_reason": "供应商素材准备失败，可在修复来源后重试",
+            "color": "error",
+        }
     if node == WORKFLOW_NODE_AUTO_SELECT_IMAGES:
         return {
             "label": "自动选图失败",
@@ -817,10 +850,10 @@ def _failed_overrides(product: Any, node: str) -> dict[str, Any]:
         return {
             "label": "关键词采集失败",
             "work_status": PRODUCT_WORK_STATUS_FAILED,
-            "primary_action": "open_task_center",
-            "primary_action_label": "任务中心",
-            "allowed_actions": ("open_task_center",),
-            "action_reason": "关键词采集失败，请在任务中心查看原因并重试任务",
+            "primary_action": "retry_keyword_research",
+            "primary_action_label": "重试关键词采集",
+            "allowed_actions": ("retry_keyword_research", "open_task_center"),
+            "action_reason": "关键词采集失败，可创建新的受控任务重试",
             "color": "error",
         }
     if node == WORKFLOW_NODE_IMAGE_ANALYSIS:

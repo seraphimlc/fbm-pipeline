@@ -14,6 +14,7 @@ from app.database import async_session
 from app.models import Product, ProductData
 from app.pipeline.chrome_ctrl import chrome_navigate, chrome_execute_js, chrome_get_page_info, chrome_workflow
 from app.pipeline.ride_on_category import select_ride_on_category
+from app.pipeline.template_category_fallback import select_template_category_fallback
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -59,6 +60,11 @@ def _handle_category_issue(issue: str, policy: str, pd: ProductData | None) -> d
     fallback = _ride_on_category_fallback(pd)
     if fallback:
         logger.warning(f"[Step4] {issue}，使用 RIDE_ON_TOY 模板类目兜底: {fallback['leafCategory']}")
+        return fallback
+
+    fallback = select_template_category_fallback(pd)
+    if fallback:
+        logger.warning(f"[Step4] {issue}，使用已登记模板类目兜底: {fallback['leafCategory']}")
         return fallback
 
     policy = _policy_value(policy)
@@ -280,7 +286,14 @@ async def run_category(product_id: int) -> dict:
 
         # 获取类目
         try:
-            cat_data = await fetch_categories(asin)
+            # Chrome/AppleScript navigation can occasionally never return even
+            # though its surrounding task still has a healthy lease heartbeat.
+            # Bound this optional evidence read so a serial task runner can
+            # reach its registered-category fallback rather than waiting forever.
+            cat_data = await asyncio.wait_for(
+                fetch_categories(asin),
+                timeout=max(1, int(settings.STEP4_CATEGORY_FETCH_TIMEOUT_SECONDS)),
+            )
         except Exception as e:
             result = _handle_category_issue(
                 f"亚马逊类目获取失败: {type(e).__name__}: {e}",

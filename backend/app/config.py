@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings
 from pathlib import Path
+from typing import Literal
 import httpx
 import json
 from openai import AsyncOpenAI
@@ -46,7 +47,13 @@ class Settings(BaseSettings):
 
     # 数据库
     DATA_DIR: Path = REPO_ROOT / "data"
-    DATABASE_URL: str = ""  # 必须配置 MySQL 连接串
+    # DATABASE_BACKEND is deliberately restart-only.  A live process cannot
+    # safely swap an async engine while requests and task workers hold sessions.
+    DATABASE_BACKEND: Literal["mysql", "sqlite"] = "mysql"
+    DATABASE_URL: str = ""  # MySQL 模式必填；SQLite 模式不读取此项
+    SQLITE_DATABASE_PATH: Path = REPO_ROOT / "data" / "fbm-pipeline.db"
+    DATABASE_CONNECT_TIMEOUT_SECONDS: int = 15
+    DATABASE_READ_TIMEOUT_SECONDS: int = 120
 
     # 服务端口
     BACKEND_HOST: str = "127.0.0.1"
@@ -60,6 +67,10 @@ class Settings(BaseSettings):
     STARTUP_RUN_BACKFILLS: bool = False
     STARTUP_RECOVER_TASKS: bool = False
     STARTUP_KICK_TASK_RUNTIME: bool = False
+    # 常驻任务巡检：只重新唤醒 ready 或确认已卡死的运行步骤；业务失败不会自动重跑。
+    TASK_RUNTIME_AUTO_WAKE_ENABLED: bool = True
+    TASK_RUNTIME_AUTO_WAKE_INTERVAL_SECONDS: int = 30 * 60
+    TASK_RUNTIME_AUTO_WAKE_MAX_ATTEMPTS_PER_ISSUE: int = 30
     EXTERNAL_HTTP_VERIFY_TLS: bool = True
     EXTERNAL_HTTP_CA_BUNDLE: Path | None = None
     IMAGE_PROXY_EXTRA_ROOTS: str = ""
@@ -87,6 +98,13 @@ class Settings(BaseSettings):
     # 推理保留足够时间；失败仍然 fail-closed，不下载远程图、不切 Contact Sheet 兜底。
     STEP6_VLM_BATCH_SIZE: int = 2
     STEP6_VLM_TIMEOUT_SECONDS: int = 150
+    # Supplier image contact sheets are independent within one product.  Keep
+    # this modest to shorten large galleries without overwhelming the VLM API.
+    AUTO_IMAGE_SELECTION_VLM_CONCURRENCY: int = 2
+    # 用户心智梳理会在两次长模型调用后才持久化结果。远程 MySQL 连接若在此期间
+    # 被中间网络回收，使用新 session 对幂等 UPDATE 做有限重试，避免浪费生成结果。
+    CUSTOMER_MINDSET_PERSIST_RETRY_ATTEMPTS: int = 3
+    CUSTOMER_MINDSET_DYNAMIC_QUESTION_ATTEMPTS: int = 3
 
     # GPT Image API (t8star — A+出图)
     GPT_IMAGE_API_BASE: str = "https://ai.t8star.cn/v1"
@@ -170,6 +188,7 @@ class Settings(BaseSettings):
     STEP1_EXTRACT_RETRY_DELAY_SECONDS: int = 3  # Step1页面信息提取重试间隔
     STEP1_AFTER_READY_WAIT_SECONDS: float = 1.0  # 页面有内容后再等价格/规格等异步区渲染
     STEP1_DOWNLOAD_TIMEOUT_SECONDS: int = 300  # Step1素材包下载超时时间
+    STEP1_BROWSER_DOWNLOAD_START_TIMEOUT_SECONDS: int = 60  # Chrome 点击下载后未开始时，尽快回退 API
     # browser: 先打开商品页并点击“下载素材包”，失败后回退网页登录接口；api: 顺序相反。
     STEP1_MATERIAL_DOWNLOAD_MODE: str = "browser"
     STEP1_MATERIAL_PACKAGE_PRIORITY: str = "To B素材包,Retail Ready素材包,Information"
@@ -187,9 +206,11 @@ class Settings(BaseSettings):
     PRICING_TARGET_MARGIN_RATE: float = 0.05  # 目标净利率，按预期利润/售价计算
     PRICING_MIN_PROFIT: float = 10.0  # 单件最低预期利润（美元）
     STEP3_MANUAL_LOGIN_ON_AUTH_FAILURE: bool = True  # 卖家精灵未登录/过期时打开页面等待人工登录
+    STEP3_LLM_TIMEOUT_SECONDS: int = 120  # 卖家精灵无结果时的关键词 LLM 兜底上限
     STEP4_MISSING_ASIN_POLICY: str = "manual_review"  # fail/manual_review/continue
     STEP4_CATEGORY_MISSING_POLICY: str = "manual_review"  # fail/manual_review/continue
     STEP4_ALLOW_EXISTING_CATEGORY: bool = True
+    STEP4_CATEGORY_FETCH_TIMEOUT_SECONDS: int = 45
     # Listing 需要完整的买家心智和商品事实；输出采用较低随机性，避免改写时漂移。
     STEP5_LLM_TEMPERATURE: float = 0.3
     STEP5_LLM_MAX_TOKENS: int = 4500
@@ -214,6 +235,7 @@ class Settings(BaseSettings):
     def model_post_init(self, __context):
         self.DATA_DIR = _resolve_local_path(self.DATA_DIR)
         self.PRODUCT_BASE_DIR = _resolve_local_path(self.PRODUCT_BASE_DIR)
+        self.SQLITE_DATABASE_PATH = _resolve_local_path(self.SQLITE_DATABASE_PATH)
         self.PRICE_QUANTITY_TEMPLATE_PATH = _resolve_local_path(self.PRICE_QUANTITY_TEMPLATE_PATH)
         if self.AMAZON_SEARCH_EVIDENCE_DIR is None:
             self.AMAZON_SEARCH_EVIDENCE_DIR = self.DATA_DIR / "task_evidence" / "amazon_search_page"
@@ -221,10 +243,29 @@ class Settings(BaseSettings):
             self.AMAZON_SEARCH_EVIDENCE_DIR = _resolve_local_path(self.AMAZON_SEARCH_EVIDENCE_DIR)
         if self.EXTERNAL_HTTP_CA_BUNDLE:
             self.EXTERNAL_HTTP_CA_BUNDLE = _resolve_local_path(self.EXTERNAL_HTTP_CA_BUNDLE)
-        if not self.DATABASE_URL:
-            raise ValueError("DATABASE_URL is required; configure mysql+asyncmy://... for fbm-pipeline.")
-        if not self.DATABASE_URL.startswith("mysql+asyncmy://"):
-            raise ValueError("DATABASE_URL must be a MySQL asyncmy connection string, e.g. mysql+asyncmy://user:pass@host:3306/fbm_pipeline?charset=utf8mb4.")
+        if self.DATABASE_BACKEND == "mysql":
+            if not self.DATABASE_URL:
+                raise ValueError("DATABASE_URL is required in mysql mode; configure mysql+asyncmy://... for fbm-pipeline.")
+            if not self.DATABASE_URL.startswith("mysql+asyncmy://"):
+                raise ValueError("DATABASE_URL must be a MySQL asyncmy connection string in mysql mode, e.g. mysql+asyncmy://user:pass@host:3306/fbm_pipeline?charset=utf8mb4.")
+        else:
+            # SQLite is intentionally local and single-user.  These values are
+            # consumed during module import, so enforce the safe limits before
+            # worker/pipeline modules construct their semaphores.
+            self.PIPELINE_MAX_CONCURRENCY = 1
+            self.APLUS_CONCURRENCY = 1
+            self.AUTO_IMAGE_SELECTION_VLM_CONCURRENCY = 1
+
+    @property
+    def is_sqlite(self) -> bool:
+        return self.DATABASE_BACKEND == "sqlite"
+
+    @property
+    def effective_database_url(self) -> str:
+        """Return the only connection URL the current process may use."""
+        if self.is_sqlite:
+            return f"sqlite+aiosqlite:///{self.SQLITE_DATABASE_PATH}"
+        return self.DATABASE_URL
 
     model_config = {"env_file": BACKEND_DIR / ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 

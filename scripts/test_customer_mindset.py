@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,8 +34,10 @@ from app.pipeline.customer_mindset import (  # noqa: E402
     customer_mindset_matches_product,
     image_analysis_ready,
     keyword_research_ready,
+    load_customer_mindset,
     normalize_dynamic_questions,
     normalize_mindset_answers,
+    _write_customer_mindset_artifact,
 )
 
 
@@ -492,6 +495,22 @@ def test_upstream_readiness_and_fingerprint_contract() -> None:
     assert not customer_mindset_matches_product(product.data.customer_mindset, product)
 
 
+def test_large_mindset_uses_a_verified_local_file_reference() -> None:
+    product = _product_fixture()
+    brief = _valid_customer_mindset_brief(product)
+    serialized = json.dumps(brief, ensure_ascii=False)
+    with tempfile.TemporaryDirectory() as temporary_dir:
+        product.data.material_dir = temporary_dir
+        reference = _write_customer_mindset_artifact(product, serialized)
+        assert len(reference) < 400
+        restored = load_customer_mindset(reference)
+        assert restored == brief
+        assert customer_mindset_matches_product(reference, product)
+        artifact = Path(temporary_dir) / "image analysis" / "customer_mindset.json"
+        artifact.write_text("{}", encoding="utf-8")
+        _assert_raises("tampered artifact must fail closed", lambda: load_customer_mindset(reference))
+
+
 async def test_listing_prerequisite_cannot_bypass_customer_mindset() -> None:
     product = _product_fixture()
     try:
@@ -539,6 +558,7 @@ def main() -> None:
     test_fixed_and_dynamic_question_contract()
     test_evidence_answer_and_prompt_contract()
     test_upstream_readiness_and_fingerprint_contract()
+    test_large_mindset_uses_a_verified_local_file_reference()
     asyncio.run(test_listing_prerequisite_cannot_bypass_customer_mindset())
     test_downstream_consumers_use_the_same_brief()
     print("customer mindset fixed/dynamic/evidence/downstream contract checks passed")

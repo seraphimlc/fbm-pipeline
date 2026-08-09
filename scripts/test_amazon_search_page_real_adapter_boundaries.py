@@ -13,6 +13,7 @@ from app.config import settings
 from app.services import amazon_search_page
 from app.services.amazon_search_page import (
     AmazonSearchEvidenceContext,
+    AmazonSearchPageCandidate,
     AmazonSearchPageError,
     ChromeAmazonSearchPageAdapter,
     classify_amazon_search_page,
@@ -157,6 +158,35 @@ async def _assert_empty_results_writes_attributed_evidence() -> None:
         amazon_search_page.chrome_ctrl.chrome_navigate = original_navigate
         amazon_search_page.chrome_ctrl.chrome_last_error = original_last_error
         amazon_search_page.chrome_ctrl.chrome_execute_js = original_execute_js
+
+
+async def _assert_one_empty_narrow_query_keeps_valid_candidates() -> None:
+    class MixedResultAdapter:
+        async def search(self, query: str, **_kwargs):
+            if query == "too narrow":
+                raise AmazonSearchPageError("empty_results", "no natural result")
+            return [
+                AmazonSearchPageCandidate(
+                    asin="B012345678",
+                    url="https://www.amazon.com/dp/B012345678",
+                    title="Broad query result",
+                    image_url="https://images.example/result.jpg",
+                    price=None,
+                    rating=None,
+                    review_count=None,
+                    sponsored=False,
+                    search_query=query,
+                    search_rank=1,
+                )
+            ]
+
+    results = await run_amazon_search_queries(
+        [{"query": "broad query", "intent": "core"}, {"query": "too narrow", "intent": "variant"}],
+        adapter=MixedResultAdapter(),
+    )
+    assert len(results) == 1, results
+    assert results[0].query == "broad query", results
+    assert results[0].candidates[0].asin == "B012345678", results
 
 
 def _assert_search_results_with_location_nav_are_not_region_page() -> None:
@@ -332,6 +362,7 @@ async def main() -> None:
     await _assert_default_fail_closed()
     await _assert_chrome_unavailable_typed_failure_with_evidence()
     await _assert_empty_results_writes_attributed_evidence()
+    await _assert_one_empty_narrow_query_keeps_valid_candidates()
 
 
 if __name__ == "__main__":

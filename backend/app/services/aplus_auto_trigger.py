@@ -12,7 +12,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.models import CatalogProduct, Product, ProductFile, TaskRun, TaskStep
-from app.models.status import COMPLETED, WORKFLOW_NODE_FLOW_DONE, WORKFLOW_STATUS_SUCCEEDED
+from app.models.status import PENDING_REVIEW, WORKFLOW_NODE_GENERATE_APLUS, WORKFLOW_STATUS_PENDING
 from app.task_planners.aplus_generate import create_aplus_generate_runs
 from app.task_runtime.constants import RUN_STATUS_PENDING, RUN_STATUS_RUNNING, STEP_STATUS_PENDING, STEP_STATUS_READY, STEP_STATUS_RUNNING
 from app.task_runtime.json_utils import json_loads
@@ -140,6 +140,10 @@ async def _has_active_main_workflow_task(db: AsyncSession, product_id: int, *, e
         .join(TaskStep, TaskStep.task_run_id == TaskRun.id)
         .where(TaskRun.task_type.in_(PRODUCT_MAIN_ACTION_TYPES))
         .where(TaskRun.status.in_(ACTIVE_RUN_STATUSES))
+        # A retry/replacement run leaves its predecessor in the audit trail.
+        # It must not prevent the completed replacement workflow from creating
+        # its A+ task; the scheduler will never execute superseded runs either.
+        .where(TaskRun.superseded_by_run_id.is_(None))
         .where(TaskStep.status.in_(ACTIVE_STEP_STATUSES))
         .where(
             (TaskRun.correlation_key.like(f"product:{product_id}:%"))
@@ -169,6 +173,7 @@ async def _has_active_aplus_task(db: AsyncSession, product_id: int) -> tuple[boo
         .join(TaskStep, TaskStep.task_run_id == TaskRun.id)
         .where(TaskStep.step_type == "aplus_generate_product")
         .where(TaskRun.status.in_(ACTIVE_RUN_STATUSES))
+        .where(TaskRun.superseded_by_run_id.is_(None))
         .where(TaskStep.status.in_(ACTIVE_STEP_STATUSES))
         .order_by(TaskRun.id.asc(), TaskStep.id.asc())
     )
@@ -208,19 +213,19 @@ async def should_auto_start_aplus(
             pipeline_target=product.pipeline_target,
         )
 
-    if product.status != COMPLETED:
-        return _decision(False, "not_completed", "商品主流程尚未 completed", product_id=product.id, status=product.status)
-    if product.workflow_node != WORKFLOW_NODE_FLOW_DONE or product.workflow_status != WORKFLOW_STATUS_SUCCEEDED:
+    if product.status != PENDING_REVIEW:
+        return _decision(False, "not_listing_ready", "商品 Listing 尚未完成并进入 A+ 图片生成", product_id=product.id, status=product.status)
+    if product.workflow_node != WORKFLOW_NODE_GENERATE_APLUS or product.workflow_status != WORKFLOW_STATUS_PENDING:
         return _decision(
             False,
-            "not_flow_done",
-            "商品 workflow 尚未到 flow_done/succeeded",
+            "not_listing_ready",
+            "商品 workflow 尚未到 generate_aplus/pending",
             product_id=product.id,
             workflow_node=product.workflow_node,
             workflow_status=product.workflow_status,
         )
-    if not catalog or catalog.confirmed_at is None:
-        return _decision(False, "missing_catalog_export_ready", "缺少待导出 CatalogProduct.confirmed_at 证据", product_id=product.id)
+    if not catalog:
+        return _decision(False, "missing_catalog", "缺少 A+ 生成所需的 CatalogProduct", product_id=product.id)
     if not _has_listing_content(product):
         return _decision(False, "missing_listing_content", "Listing 标题或五点未完成", product_id=product.id)
     if not _has_image_analysis(product):
@@ -278,7 +283,7 @@ async def should_auto_start_aplus(
         "商品满足 A+ 自动触发 A1 eligibility",
         product_id=product.id,
         catalog_product_id=catalog.id,
-        confirmed_at=catalog.confirmed_at.isoformat(),
+        review_required=True,
         aplus_status=normalized_aplus_status or None,
         pipeline_target=product.pipeline_target,
         test_session_key=product.pipeline_test_session_key,
@@ -305,11 +310,11 @@ async def try_auto_start_aplus_after_export_ready(
     source_task_step_id: int | None = None,
     created_by: str = "auto_after_export_ready",
 ) -> dict[str, Any]:
-    """Best-effort A+ trigger after Listing success has committed export-ready.
+    """Best-effort A+ trigger after Listing success has entered review.
 
     The helper returns structured evidence for task summaries and logs. Planner
     failures are contained here so callers do not roll back the product main
-    workflow after it reached export-ready.
+    workflow before the user confirms images and A+ for export.
     """
     result = await db.execute(
         select(Product)

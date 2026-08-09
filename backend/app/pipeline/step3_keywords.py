@@ -5,6 +5,7 @@
 POST /v3/api/relation/ta/export-keyword-new?market=1
 """
 
+import asyncio
 import io
 import json
 import logging
@@ -400,16 +401,28 @@ async def generate_llm_keywords_from_product(product: Product, limit: int = LLM_
         bullets="\n".join(f"- {item}" for item in bullets) if bullets else "- N/A",
     )
     logger.info(f"[Step3] 调用LLM生成关键词兜底: product_id={product.id}, title={title[:80]}")
-    response = await client.chat.completions.create(
-        model=settings.LLM_MODEL,
-        messages=[
-            {"role": "system", "content": LLM_KEYWORD_SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.35,
-        max_tokens=1800,
-        response_format={"type": "json_object"},
+    timeout_seconds = max(30, int(settings.STEP3_LLM_TIMEOUT_SECONDS))
+    request_client = (
+        client.with_options(timeout=timeout_seconds, max_retries=0)
+        if hasattr(client, "with_options")
+        else client
     )
+    try:
+        response = await asyncio.wait_for(
+            request_client.chat.completions.create(
+                model=settings.LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": LLM_KEYWORD_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.35,
+                max_tokens=1800,
+                response_format={"type": "json_object"},
+            ),
+            timeout=timeout_seconds,
+        )
+    except TimeoutError as exc:
+        raise TimeoutError(f"LLM keyword generation timed out after {timeout_seconds}s") from exc
     content = response.choices[0].message.content
     if not content:
         raise RuntimeError("LLM 返回空关键词结果")

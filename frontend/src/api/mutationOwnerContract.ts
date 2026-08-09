@@ -11,6 +11,22 @@ export interface MutationOwnerContract {
 }
 
 export const mutationOwnerContract = {
+  'confirmProduct|frontend/src/pages/ProductDetail.tsx|runWorkflowAction': {
+    owner_component: 'ProductDetail',
+    owner_state: 'product, activeTabKey, listingTitleInput, selectedCategoryKey, listingImageDraftPaths, and regenReason',
+    loading_state: 'pipelineRetryLoading for API workflow actions',
+    catch_policy: 'runMutationWithUX apiErrorMessage -> message.error; preserve loaded detail and drafts',
+    finally_policy: 'runMutationWithUX clearLoading: pipelineRetryLoading for the API workflow action',
+    playwright_case: 'runtime case: image and A+ confirmation state-retention case',
+  },
+  'confirmProduct|frontend/src/pages/ProductList.tsx|runProductWorkflowAction': {
+    owner_component: 'ProductList',
+    owner_state: 'filters, pagination, selected rows, current data, and workflow row context',
+    loading_state: 'rerunningId for API workflow actions',
+    catch_policy: 'runMutationWithUX apiErrorMessage -> message.error; preserve product-list owner state',
+    finally_policy: 'runMutationWithUX clearLoading: rerunningId for the API workflow action',
+    playwright_case: 'runtime case: image and A+ confirmation list state-retention case',
+  },
   'cancelTaskRun|frontend/src/pages/TaskRunCenter.tsx|cancelRun': {
     owner_component: 'TaskRunCenter',
     owner_state: 'filters, pagination, expandedRowKeys, and details cache',
@@ -283,6 +299,14 @@ export const mutationOwnerContract = {
     finally_policy: 'runMutationWithUX clearLoading: pipelineRetryLoading for the API workflow action',
     playwright_case: 'runtime case: workflow auto-image retry on product detail state-retention case',
   },
+  'retryProductMaterialPrepare|frontend/src/pages/ProductDetail.tsx|runWorkflowAction': {
+    owner_component: 'ProductDetail',
+    owner_state: 'product, activeTabKey, listingTitleInput, selectedCategoryKey, listingImageDraftPaths, and regenReason',
+    loading_state: 'pipelineRetryLoading for API workflow actions',
+    catch_policy: 'runMutationWithUX apiErrorMessage -> message.error; preserve loaded detail and drafts',
+    finally_policy: 'runMutationWithUX clearLoading: pipelineRetryLoading for the API workflow action',
+    playwright_case: 'runtime case: workflow material-prepare retry on product detail state-retention case',
+  },
   'retryProductAutoImageSelection|frontend/src/pages/ProductList.tsx|runProductWorkflowAction': {
     owner_component: 'ProductList',
     owner_state: 'filters, pagination, selected rows, current data, and workflow row context',
@@ -290,6 +314,14 @@ export const mutationOwnerContract = {
     catch_policy: 'runMutationWithUX apiErrorMessage -> message.error; preserve product-list owner state',
     finally_policy: 'runMutationWithUX clearLoading: rerunningId for the API workflow action',
     playwright_case: 'runtime case: workflow auto-image retry on product list state-retention case',
+  },
+  'retryProductMaterialPrepare|frontend/src/pages/ProductList.tsx|runProductWorkflowAction': {
+    owner_component: 'ProductList',
+    owner_state: 'filters, pagination, selected rows, current data, and workflow row context',
+    loading_state: 'rerunningId for API workflow actions',
+    catch_policy: 'runMutationWithUX apiErrorMessage -> message.error; preserve product-list owner state',
+    finally_policy: 'runMutationWithUX clearLoading: rerunningId for the API workflow action',
+    playwright_case: 'runtime case: workflow material-prepare retry on product list state-retention case',
   },
   'retryProductCompetitorSearch|frontend/src/pages/ProductDetail.tsx|runWorkflowAction': {
     owner_component: 'ProductDetail',
@@ -322,6 +354,22 @@ export const mutationOwnerContract = {
     catch_policy: 'runMutationWithUX apiErrorMessage -> message.error; preserve product-list owner state',
     finally_policy: 'runMutationWithUX clearLoading: rerunningId for the API workflow action',
     playwright_case: 'runtime case: workflow visual-match retry on product list state-retention case',
+  },
+  'retryProductKeywordResearch|frontend/src/pages/ProductDetail.tsx|runWorkflowAction': {
+    owner_component: 'ProductDetail',
+    owner_state: 'product, activeTabKey, listingTitleInput, selectedCategoryKey, listingImageDraftPaths, and regenReason',
+    loading_state: 'pipelineRetryLoading for API workflow actions',
+    catch_policy: 'runMutationWithUX apiErrorMessage -> message.error; preserve loaded detail and drafts',
+    finally_policy: 'runMutationWithUX clearLoading: pipelineRetryLoading for the API workflow action',
+    playwright_case: 'runtime case: workflow keyword-research retry on product detail state-retention case',
+  },
+  'retryProductKeywordResearch|frontend/src/pages/ProductList.tsx|runProductWorkflowAction': {
+    owner_component: 'ProductList',
+    owner_state: 'filters, pagination, selected rows, current data, and workflow row context',
+    loading_state: 'rerunningId for API workflow actions',
+    catch_policy: 'runMutationWithUX apiErrorMessage -> message.error; preserve product-list owner state',
+    finally_policy: 'runMutationWithUX clearLoading: rerunningId for the API workflow action',
+    playwright_case: 'runtime case: workflow keyword-research retry on product list state-retention case',
   },
   'retryStep|frontend/src/pages/ProductDetail.tsx|runWorkflowAction': {
     owner_component: 'ProductDetail',

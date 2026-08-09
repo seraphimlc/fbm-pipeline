@@ -63,10 +63,6 @@ export const mutationExportAllowlist = {
     classification: 'unused',
     reason: 'A+ upload batch creation is not currently exposed by a pages/components/hooks owner.',
   },
-  confirmProduct: {
-    classification: 'unused',
-    reason: 'The legacy product confirmation client has no current pages/components/hooks owner.',
-  },
   refreshProductFromGiga: {
     classification: 'unused',
     reason: 'The direct product refresh client has no current pages/components/hooks owner.',

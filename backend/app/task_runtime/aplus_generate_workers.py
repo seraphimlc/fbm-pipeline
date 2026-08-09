@@ -1,4 +1,5 @@
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -6,6 +7,15 @@ from sqlalchemy.orm import selectinload
 
 from app.database import async_session
 from app.models import Product, ProductAplus
+from app.models.status import (
+    PENDING_REVIEW,
+    WORKFLOW_NODE_CONFIRM_IMAGES_APLUS,
+    WORKFLOW_NODE_GENERATE_APLUS,
+    WORKFLOW_STATUS_FAILED,
+    WORKFLOW_STATUS_PENDING,
+    WORKFLOW_STATUS_PROCESSING,
+)
+from app.product_tasks.workflow import set_product_workflow
 from app.pipeline.step7_aplus_plan import run_aplus_plan
 from app.pipeline.step8_aplus_script import run_aplus_script
 from app.pipeline.step9_aplus_image import run_aplus_image
@@ -50,6 +60,35 @@ async def _set_aplus_status(
             product.aplus.scripted_at = None
             product.aplus.generated_at = None
         product.aplus.aplus_status = status
+        # Auto A+ is the final generated asset gate before export.  Preserve
+        # already confirmed/exported products when a user manually regenerates
+        # A+, but make the automatic pending-review path explicitly reviewable.
+        is_pre_export_review = (
+            product.status == PENDING_REVIEW
+            and product.workflow_node in {WORKFLOW_NODE_GENERATE_APLUS, WORKFLOW_NODE_CONFIRM_IMAGES_APLUS}
+        )
+        if is_pre_export_review:
+            if status in {"done", "regen_done"}:
+                set_product_workflow(
+                    product,
+                    node=WORKFLOW_NODE_CONFIRM_IMAGES_APLUS,
+                    status=WORKFLOW_STATUS_PENDING,
+                    error=None,
+                )
+            elif status == "failed":
+                set_product_workflow(
+                    product,
+                    node=WORKFLOW_NODE_GENERATE_APLUS,
+                    status=WORKFLOW_STATUS_FAILED,
+                    error=error or "A+ 图片生成失败",
+                )
+            else:
+                set_product_workflow(
+                    product,
+                    node=WORKFLOW_NODE_GENERATE_APLUS,
+                    status=WORKFLOW_STATUS_PROCESSING,
+                    error=None,
+                )
         if error:
             product.error_message = error
         elif product.error_message and product.error_message.startswith("A+生成"):
@@ -58,6 +97,53 @@ async def _set_aplus_status(
         if product.catalog_item:
             product.catalog_item.updated_at = product.updated_at
         await session.commit()
+
+
+async def _has_verified_complete_aplus_images(product_id: int) -> bool:
+    """Return true only for a fully persisted, locally readable five-image result."""
+    async with async_session() as session:
+        aplus = await session.scalar(select(ProductAplus).where(ProductAplus.product_id == product_id))
+        if not aplus or int(aplus.aplus_image_count or 0) != 5:
+            return False
+        images = json_loads(aplus.aplus_images, [])
+        if not isinstance(images, list) or len(images) != 5:
+            return False
+        positions: set[int] = set()
+        for image in images:
+            if not isinstance(image, dict) or image.get("status") != "done":
+                return False
+            position = int(image.get("position") or 0)
+            path = str(image.get("path") or "").strip()
+            if position < 1 or position > 5 or not path or not Path(path).is_file():
+                return False
+            positions.add(position)
+        return positions == {1, 2, 3, 4, 5}
+
+
+async def _load_verified_aplus_phase(product_id: int, field_name: str, item_key: str) -> dict[str, Any] | None:
+    """Reuse a persisted Step 7/8 artifact after a runner restart.
+
+    Step 7 and Step 8 commit their own validated artifacts before the next
+    network phase starts.  Recalling an LLM only because the worker stopped
+    later is wasteful and can turn a recoverable transport close into a second
+    failure.  Require all five ordered modules/scripts before reuse.
+    """
+    async with async_session() as session:
+        aplus = await session.scalar(select(ProductAplus).where(ProductAplus.product_id == product_id))
+        raw_value = getattr(aplus, field_name, None) if aplus else None
+        value = json_loads(raw_value, {})
+        items = value.get(item_key) if isinstance(value, dict) else None
+        if not isinstance(items, list) or len(items) != 5:
+            return None
+        positions: set[int] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                return None
+            position = int(item.get("position") or item.get("module_position") or 0)
+            if position < 1 or position > 5:
+                return None
+            positions.add(position)
+        return value if positions == {1, 2, 3, 4, 5} else None
 
 
 async def aplus_generate_product(ctx: TaskContext) -> dict[str, Any]:
@@ -78,7 +164,18 @@ async def aplus_generate_product(ctx: TaskContext) -> dict[str, Any]:
             message="开始生成 A+ 规划",
             data={"product_id": product_id, "item_code": item_code},
         )
-        plan = await run_aplus_plan(product_id)
+        plan = await _load_verified_aplus_phase(product_id, "aplus_plan", "modules")
+        if plan is None:
+            plan = await run_aplus_plan(product_id)
+        else:
+            await update_step_progress(
+                ctx.db,
+                ctx.step,
+                current=0,
+                total=3,
+                message="复用已验证 A+ 规划，开始生成脚本",
+                data={"product_id": product_id, "item_code": item_code, "reused_phase": "plan"},
+            )
         await update_step_progress(
             ctx.db,
             ctx.step,
@@ -89,7 +186,18 @@ async def aplus_generate_product(ctx: TaskContext) -> dict[str, Any]:
         )
 
         await _set_aplus_status(product_id, "scripting")
-        script = await run_aplus_script(product_id)
+        script = await _load_verified_aplus_phase(product_id, "aplus_scripts", "scripts")
+        if script is None:
+            script = await run_aplus_script(product_id)
+        else:
+            await update_step_progress(
+                ctx.db,
+                ctx.step,
+                current=1,
+                total=3,
+                message="复用已验证 A+ 脚本，开始出图",
+                data={"product_id": product_id, "item_code": item_code, "reused_phase": "script"},
+            )
         await update_step_progress(
             ctx.db,
             ctx.step,
@@ -100,7 +208,21 @@ async def aplus_generate_product(ctx: TaskContext) -> dict[str, Any]:
         )
 
         await _set_aplus_status(product_id, "imaging")
-        image_result = await run_aplus_image(product_id)
+        try:
+            image_result = await run_aplus_image(product_id)
+        except Exception as image_exc:
+            # A provider transport can close while Step 9 is exiting its HTTP
+            # client after it has already committed all five validated images.
+            # Treat that verifiable completed state as success instead of
+            # rerunning paid image generation or overwriting it as failed.
+            if not await _has_verified_complete_aplus_images(product_id):
+                raise
+            image_result = {
+                "total": 5,
+                "success": 5,
+                "generated": 0,
+                "recovered_after_image_transport_error": f"{type(image_exc).__name__}: {image_exc}",
+            }
         await _set_aplus_status(product_id, "done")
     except Exception as exc:
         error = f"A+生成失败: {type(exc).__name__}: {exc}"

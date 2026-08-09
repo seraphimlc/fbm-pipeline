@@ -69,10 +69,13 @@ from app.models.status import (
     WORKFLOW_NODE_CAPTURE_COMPETITOR_CANDIDATES,
     WORKFLOW_NODE_CAPTURE_COMPETITOR_DETAIL,
     WORKFLOW_NODE_CUSTOMER_MINDSET,
+    WORKFLOW_NODE_CONFIRM_IMAGES_APLUS,
     WORKFLOW_NODE_FLOW_DONE,
+    WORKFLOW_NODE_GENERATE_APLUS,
     WORKFLOW_NODE_IMAGE_ANALYSIS,
     WORKFLOW_NODE_KEYWORD_RESEARCH,
     WORKFLOW_NODE_LISTING_GENERATION,
+    WORKFLOW_NODE_PREPARE_MATERIALS,
     WORKFLOW_NODE_SEARCH_COMPETITOR,
     WORKFLOW_NODE_SELECT_COMPETITOR,
     WORKFLOW_NODE_SELECT_IMAGES,
@@ -179,8 +182,10 @@ from app.services.tiktok_status import (
 from app.task_planners.aplus_generate import create_aplus_generate_runs
 from app.task_planners.product_bulk_advance import create_product_bulk_advance_run
 from app.task_planners.product_auto_image_selection import create_product_auto_image_selection_runs
+from app.task_planners.product_material_prepare import create_product_material_prepare_runs
 from app.task_planners.product_competitor_search import create_product_competitor_search_runs
 from app.task_planners.product_competitor_visual_match import create_product_competitor_visual_match_runs
+from app.task_planners.product_keyword_research import create_product_keyword_research_runs
 from app.task_planners.product_image_analysis import create_product_image_analysis_runs
 from app.task_planners.product_customer_mindset import create_product_customer_mindset_runs
 from app.task_planners.product_listing import create_product_listing_runs
@@ -960,10 +965,37 @@ def _running_condition():
                 WORKFLOW_NODE_IMAGE_ANALYSIS,
                 WORKFLOW_NODE_CUSTOMER_MINDSET,
                 WORKFLOW_NODE_LISTING_GENERATION,
+                WORKFLOW_NODE_GENERATE_APLUS,
             )
         )
         & (Product.workflow_status == WORKFLOW_STATUS_PROCESSING)
     )
+
+
+def _confirm_images_aplus_condition():
+    return _workflow_present_condition() & (
+        (Product.workflow_node == WORKFLOW_NODE_CONFIRM_IMAGES_APLUS)
+        & (Product.workflow_status == WORKFLOW_STATUS_PENDING)
+    )
+
+
+def _aplus_images_complete(product: Product) -> bool:
+    """Require the five persisted A+ image outputs before allowing export review."""
+    aplus = product.aplus
+    if not aplus or int(aplus.aplus_image_count or 0) != 5:
+        return False
+    images = _json_loads(aplus.aplus_images, [])
+    if not isinstance(images, list) or len(images) != 5:
+        return False
+    positions: set[int] = set()
+    for image in images:
+        if not isinstance(image, dict) or str(image.get("status") or "").strip() != "done":
+            return False
+        position = int(image.get("position") or 0)
+        if position < 1 or position > 5 or not str(image.get("path") or "").strip():
+            return False
+        positions.add(position)
+    return positions == {1, 2, 3, 4, 5}
 
 
 def _work_status_condition(work_status: str):
@@ -984,6 +1016,7 @@ def _work_status_condition(work_status: str):
         "capture_detail": (_capture_detail_condition, False),
         "ready_to_generate": (_ready_to_generate_condition, False),
         "running": (_running_condition, False),
+        "confirm_images_aplus": (_confirm_images_aplus_condition, False),
         "export_ready_unexported": (_export_ready_unexported_condition, True),
         "exported": (_exported_condition, True),
         "failed": (_failed_work_status_condition, False),
@@ -2976,6 +3009,7 @@ async def get_workbench_overview(
         capture_detail=status_counts["capture_detail"],
         ready_to_generate=status_counts["ready_to_generate"],
         running=status_counts["running"],
+        confirm_images_aplus=status_counts["confirm_images_aplus"],
         export_ready=export_ready_unexported,
         export_ready_unexported=export_ready_unexported,
         export_ready_exported=export_ready_exported,
@@ -5169,10 +5203,10 @@ async def get_aplus_upload_batch(batch_id: int, db: AsyncSession = Depends(get_d
 
 @router.post("/{product_id}/confirm", response_model=ProductResponse)
 async def confirm_product(product_id: int, db: AsyncSession = Depends(get_db)):
-    """人工确认商品生成结果，并同步进入待导出列表。"""
+    """确认 Listing 图片与完整 A+ 后，才同步进入待导出列表。"""
     result = await db.execute(
         select(Product)
-        .options(selectinload(Product.data), selectinload(Product.aplus), selectinload(Product.catalog_item))
+        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
         .where(Product.id == product_id)
     )
     product = result.scalar_one_or_none()
@@ -5180,17 +5214,32 @@ async def confirm_product(product_id: int, db: AsyncSession = Depends(get_db)):
         raise HTTPException(404, "Product not found")
     if is_running(product.id):
         raise HTTPException(400, "任务还在运行中，完成后再确认")
-    if product.current_step < 6:
-        raise HTTPException(400, "Listing 内容还没有生成完成")
+    if product.workflow_node != WORKFLOW_NODE_CONFIRM_IMAGES_APLUS or product.workflow_status != WORKFLOW_STATUS_PENDING:
+        raise HTTPException(400, "A+ 图片尚未完成，暂不能确认进入待导出")
     if not _customer_mindset_ready(product):
         raise HTTPException(400, "用户心智梳理还没有完成，不能确认进入待导出")
     if not _listing_content_ready(product):
         raise HTTPException(400, "Listing 标题、商品亮点和五点还没有完整生成")
+    if not product.images or not str(product.images.main_image_path or "").strip() or not str(product.images.image_analysis or "").strip():
+        raise HTTPException(400, "商品图片未完成，不能确认进入待导出")
+    if (
+        not product.aplus
+        or str(product.aplus.aplus_status or "").strip() not in {"done", "regen_done"}
+        or not _aplus_images_complete(product)
+    ):
+        raise HTTPException(400, "A+ 图片未完整生成，不能确认进入待导出")
 
     product.status = COMPLETED
     product.current_step = 6
     product.error_message = None
     product.updated_at = datetime.now()
+    set_product_workflow(
+        product,
+        node=WORKFLOW_NODE_FLOW_DONE,
+        status=WORKFLOW_STATUS_SUCCEEDED,
+        error=None,
+        now=product.updated_at,
+    )
     _sync_catalog_item(product, db, confirm=True)
     await db.commit()
     await db.refresh(product)
@@ -5650,6 +5699,60 @@ async def retry_product_auto_image_selection(product_id: int, db: AsyncSession =
     return queued_product
 
 
+@router.post("/{product_id}/material-prepare/retry", response_model=ProductResponse)
+async def retry_product_material_prepare(product_id: int, db: AsyncSession = Depends(get_db)):
+    """Create a replacement material-preparation task after a safe source repair."""
+    result = await db.execute(
+        select(Product)
+        .options(
+            selectinload(Product.data),
+            selectinload(Product.images),
+            selectinload(Product.aplus),
+            selectinload(Product.catalog_item),
+        )
+        .where(Product.id == product_id)
+    )
+    product = result.scalar_one_or_none()
+    if not product:
+        raise HTTPException(404, "Product not found")
+    if product.workflow_node != WORKFLOW_NODE_PREPARE_MATERIALS:
+        raise HTTPException(400, "当前商品不在供应商素材准备节点，不能重试")
+    if product.workflow_status == WORKFLOW_STATUS_PROCESSING:
+        product.workflow = _workflow_state(product)
+        product.current_task_status = product.workflow["action_reason"]
+        return product
+    if product.workflow_status not in {WORKFLOW_STATUS_FAILED, WORKFLOW_STATUS_PENDING}:
+        raise HTTPException(400, "当前供应商素材准备状态不可重试")
+    try:
+        await create_product_material_prepare_runs(
+            db,
+            [product.id],
+            pipeline_target=product.pipeline_target or "export_ready",
+            test_session_key=product.pipeline_test_session_key,
+            origin_task_run_id=product.pipeline_origin_task_run_id,
+            created_by="web",
+            auto_start=True,
+        )
+    except RuntimeError as exc:
+        await db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(502, f"供应商素材准备重试任务创建失败: {type(exc).__name__}: {exc}") from exc
+
+    refreshed = await db.execute(
+        select(Product)
+        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
+        .where(Product.id == product_id)
+    )
+    queued_product = refreshed.scalar_one_or_none()
+    if not queued_product:
+        raise HTTPException(404, "Product not found")
+    queued_product.workflow = _workflow_state(queued_product)
+    queued_product.current_task_status = queued_product.workflow["action_reason"]
+    return queued_product
+
+
 @router.post("/{product_id}/competitor-search/retry", response_model=ProductResponse)
 async def retry_product_competitor_search(product_id: int, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
@@ -5672,7 +5775,11 @@ async def retry_product_competitor_search(product_id: int, db: AsyncSession = De
         product.workflow = _workflow_state(product)
         product.current_task_status = product.workflow["action_reason"]
         return product
-    if product.workflow_node == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS and product.workflow_status not in {WORKFLOW_STATUS_FAILED, WORKFLOW_STATUS_PENDING}:
+    if product.workflow_node == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS and product.workflow_status not in {
+        WORKFLOW_STATUS_FAILED,
+        WORKFLOW_STATUS_PENDING,
+        WORKFLOW_STATUS_PROCESSING,
+    }:
         raise HTTPException(400, "当前视觉初筛状态不可重新搜索竞品")
     if product.workflow_status not in {WORKFLOW_STATUS_FAILED, WORKFLOW_STATUS_PENDING}:
         raise HTTPException(400, "当前搜索竞品状态不可启动自动竞品搜索")
@@ -5716,12 +5823,26 @@ async def retry_product_competitor_visual_match(product_id: int, db: AsyncSessio
         raise HTTPException(404, "Product not found")
     if product.workflow_node != WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS:
         raise HTTPException(400, "当前商品不在视觉初筛竞品节点，不能启动视觉初筛")
-    if product.workflow_status == WORKFLOW_STATUS_PROCESSING:
-        product.workflow = _workflow_state(product)
-        product.current_task_status = product.workflow["action_reason"]
-        return product
-    if product.workflow_status not in {WORKFLOW_STATUS_FAILED, WORKFLOW_STATUS_PENDING}:
+    # ``processing`` is normally a no-op retry, but an older visual-match run
+    # can have been superseded after the product status was projected.  Do not
+    # leave that product indefinitely claiming it is queued: the shared action
+    # creator will reuse an actually active run, or create a replacement when
+    # every historical run is superseded.
+    if product.workflow_status not in {WORKFLOW_STATUS_FAILED, WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_PROCESSING}:
         raise HTTPException(400, "当前视觉初筛状态不可启动或重试")
+    if product.workflow_status == WORKFLOW_STATUS_PROCESSING:
+        active_run_id = await db.scalar(
+            select(TaskRun.id)
+            .where(TaskRun.correlation_key == f"product:{product.id}:competitor_visual_match")
+            .where(TaskRun.status.in_(("pending", "running")))
+            .where(TaskRun.superseded_by_run_id.is_(None))
+            .order_by(TaskRun.id.desc())
+            .limit(1)
+        )
+        if active_run_id:
+            product.workflow = _workflow_state(product)
+            product.current_task_status = product.workflow["action_reason"]
+            return product
     try:
         await create_product_competitor_visual_match_runs(db, [product.id], created_by="web", auto_start=True)
     except RuntimeError as exc:
@@ -5730,6 +5851,52 @@ async def retry_product_competitor_visual_match(product_id: int, db: AsyncSessio
     except Exception as exc:
         await db.rollback()
         raise HTTPException(502, f"竞品视觉初筛任务创建失败: {type(exc).__name__}: {exc}") from exc
+
+    refreshed = await db.execute(
+        select(Product)
+        .options(selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus), selectinload(Product.catalog_item))
+        .where(Product.id == product_id)
+    )
+    queued_product = refreshed.scalar_one_or_none()
+    if not queued_product:
+        raise HTTPException(404, "Product not found")
+    queued_product.workflow = _workflow_state(queued_product)
+    queued_product.current_task_status = queued_product.workflow["action_reason"]
+    return queued_product
+
+
+@router.post("/{product_id}/keyword-research/retry", response_model=ProductResponse)
+async def retry_product_keyword_research(product_id: int, db: AsyncSession = Depends(get_db)):
+    """Create a fresh, bounded keyword task after a terminal task-runtime failure."""
+    result = await db.execute(
+        select(Product)
+        .options(
+            selectinload(Product.data),
+            selectinload(Product.images),
+            selectinload(Product.aplus),
+            selectinload(Product.catalog_item),
+        )
+        .where(Product.id == product_id)
+    )
+    product = result.scalar_one_or_none()
+    if not product:
+        raise HTTPException(404, "Product not found")
+    if product.workflow_node != WORKFLOW_NODE_KEYWORD_RESEARCH:
+        raise HTTPException(400, "当前商品不在关键词采集节点，不能启动关键词采集")
+    if product.workflow_status == WORKFLOW_STATUS_PROCESSING:
+        product.workflow = _workflow_state(product)
+        product.current_task_status = product.workflow["action_reason"]
+        return product
+    if product.workflow_status not in {WORKFLOW_STATUS_FAILED, WORKFLOW_STATUS_PENDING}:
+        raise HTTPException(400, "当前关键词采集状态不可启动或重试")
+    try:
+        await create_product_keyword_research_runs(db, [product.id], created_by="web", auto_start=True)
+    except RuntimeError as exc:
+        await db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(502, f"关键词采集重试任务创建失败: {type(exc).__name__}: {exc}") from exc
 
     refreshed = await db.execute(
         select(Product)

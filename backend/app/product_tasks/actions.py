@@ -26,6 +26,7 @@ from app.models.status import (
     COMPLETED,
     FAILED,
     PAUSED,
+    PENDING_REVIEW,
     STEP3_KEYWORDS,
     STEP5_LISTING,
     STEP6_CURATING,
@@ -38,6 +39,7 @@ from app.models.status import (
     WORKFLOW_NODE_IMAGE_ANALYSIS,
     WORKFLOW_NODE_KEYWORD_RESEARCH,
     WORKFLOW_NODE_CUSTOMER_MINDSET,
+    WORKFLOW_NODE_GENERATE_APLUS,
     WORKFLOW_NODE_LISTING_GENERATION,
     WORKFLOW_NODE_PREPARE_MATERIALS,
     WORKFLOW_NODE_SEARCH_COMPETITOR,
@@ -97,6 +99,7 @@ from app.task_runtime.events import update_step_progress
 from app.task_runtime.exceptions import TaskStepCanceled, TaskStepInterrupted
 from app.task_runtime.json_utils import json_dumps, json_loads
 from app.task_runtime.registry import TaskContext, register_worker
+from app.task_runtime.retry_policy import is_transient_task_error
 from app.task_runtime.scheduler import kick_task_runtime
 
 
@@ -1179,19 +1182,19 @@ async def _best_effort_update_step_progress(
         )
 
 
-def _project_listing_completed(product: Product) -> None:
+def _project_listing_ready_for_aplus_review(product: Product) -> None:
     _raise_if_customer_mindset_missing(product)
     if not _listing_content_ready(product):
-        raise RuntimeError("Listing 生成未落库标题、商品亮点和五点，不能进入待导出")
-    _raise_if_e5_export_ready_protected(product, action_label="完成 Listing 并进入待导出")
+        raise RuntimeError("Listing 生成未落库标题、商品亮点和五点，不能进入 A+ 图片生成")
+    _raise_if_e5_export_ready_protected(product, action_label="完成 Listing 并进入 A+ 图片生成")
     now = datetime.now()
-    product.status = COMPLETED
+    product.status = PENDING_REVIEW
     product.current_step = 6
     product.error_message = None
     set_product_workflow(
         product,
-        node=WORKFLOW_NODE_FLOW_DONE,
-        status=WORKFLOW_STATUS_SUCCEEDED,
+        node=WORKFLOW_NODE_GENERATE_APLUS,
+        status=WORKFLOW_STATUS_PENDING,
         error=None,
         now=now,
     )
@@ -1222,7 +1225,8 @@ def _project_listing_completed(product: Product) -> None:
     item.title = pd.title if pd else None
     item.leaf_category = pd.leaf_category if pd else None
     item.status = product.status
-    item.confirmed_at = item.confirmed_at or now
+    # Listing 只是 A+ 生成的前置，不能提前赋予 Amazon 导出权限。
+    item.confirmed_at = None
     item.updated_at = now
 
 
@@ -1368,7 +1372,9 @@ class ProductAutoImageSelectionAction:
         product.images.gallery_images = json_dumps(gallery_paths)
         product.images.gallery_order = json_dumps(gallery_order)
         product.images.image_selection_analysis = json_dumps(selection)
-        product.images.image_analysis = json_dumps(selection_to_image_analysis(selection), ensure_ascii=False)
+        # task-runtime 的 JSON helper 已固定使用 UTF-8 JSON；不要传 stdlib json.dumps
+        # 才支持的参数，否则会在选图成功后的下游投影阶段中断。
+        product.images.image_analysis = json_dumps(selection_to_image_analysis(selection))
         product.images.analyzed_at = now
         image_batches = selection.get("image_batches") if isinstance(selection.get("image_batches"), list) else []
         product.images.contact_sheet_path = str(image_batches[0].get("sheet_path")) if image_batches else None
@@ -1581,9 +1587,23 @@ class ProductCompetitorSearchAction:
             raise RuntimeError("当前商品不在搜索竞品节点，不能启动自动竞品搜索")
         if (
             product.workflow_node == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS
-            and product.workflow_status not in {WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_FAILED}
+            and product.workflow_status not in {WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_FAILED, WORKFLOW_STATUS_PROCESSING}
         ):
             raise RuntimeError("当前视觉初筛状态不可重新搜索竞品")
+        if (
+            product.workflow_node == WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS
+            and product.workflow_status == WORKFLOW_STATUS_PROCESSING
+        ):
+            running_visual_step = await db.scalar(
+                select(TaskStep.id)
+                .join(TaskRun, TaskRun.id == TaskStep.task_run_id)
+                .where(TaskRun.task_type == "product_competitor_visual_match")
+                .where(TaskRun.correlation_key == f"product:{product_id}:competitor_visual_match")
+                .where(TaskStep.status == STEP_STATUS_RUNNING)
+                .limit(1)
+            )
+            if running_visual_step:
+                raise RuntimeError("当前视觉初筛正在执行，不能并发重新搜索竞品")
         if (
             product.workflow_node == WORKFLOW_NODE_SEARCH_COMPETITOR
             and product.workflow_status in {WORKFLOW_STATUS_FAILED, WORKFLOW_STATUS_PROCESSING}
@@ -1635,7 +1655,7 @@ class ProductCompetitorSearchAction:
                             step_key=f"product:{product_id}:competitor_search",
                             step_type=self.action_type,
                             payload={"product_id": product_id},
-                            max_attempts=1,
+                            max_attempts=2,
                         )
                     ],
                 )
@@ -1958,7 +1978,7 @@ class ProductCompetitorVisualMatchAction:
     URL，候选使用各自 `image_url`，两者直接交给 VLM。此节点不会下载候选图，也不会
     拼 Contact Sheet，因此模型判断必须可追溯到原始 URL 和当前搜索批次。
 
-    处理与限制：目标是选出 Top 4-6 个外观和产品类型相符的候选，记录视觉排名、
+    处理与限制：目标是选出 1-6 个外观和产品类型相符的候选，记录视觉排名、
     相似度、选择理由、风险及 `visual_selected_for_capture`。任务最多尝试 1 次；选择
     数量必须大于 0，后续详情抓取还会执行最多 6 个候选的硬校验。
 
@@ -1977,7 +1997,11 @@ class ProductCompetitorVisualMatchAction:
             raise RuntimeError("当前商品已有不可逆外部结果，不能自动视觉初筛竞品：" + "；".join(reasons))
         if product.workflow_node != WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS:
             raise RuntimeError("当前商品不在视觉初筛竞品节点，不能启动视觉初筛")
-        if product.workflow_status not in {WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_FAILED}:
+        # The API has already ruled out a healthy active run before it reaches
+        # this creator.  Permit a projected ``processing`` state here so a
+        # superseded historical run can be replaced instead of leaving the
+        # product permanently stuck in a fake queue.
+        if product.workflow_status not in {WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_FAILED, WORKFLOW_STATUS_PROCESSING}:
             raise RuntimeError("当前视觉初筛状态不可启动或重试")
         await _latest_successful_competitor_search_ids(db, product_id)
 
@@ -2020,7 +2044,7 @@ class ProductCompetitorVisualMatchAction:
                             step_key=f"product:{product_id}:competitor_visual_match",
                             step_type=self.action_type,
                             payload={"product_id": product_id},
-                            max_attempts=1,
+                            max_attempts=2,
                         )
                     ],
                 )
@@ -2163,6 +2187,17 @@ class ProductCompetitorVisualMatchAction:
     async def on_step_failure(self, db: AsyncSession, step: TaskStep, error: Exception) -> None:
         product_id = int(_payload_for_step(step).get("product_id") or 0)
         if product_id <= 0:
+            return
+        product = await _load_product(db, product_id)
+        if product.workflow_node != WORKFLOW_NODE_VISUAL_MATCH_COMPETITORS:
+            # A newer search can intentionally supersede this queued visual
+            # pass.  Its validation failure must not move the product back from
+            # that newer stage to a stale visual-match failure.
+            logger.info(
+                "[ProductCompetitorVisualMatch] ignoring stale failure projection: product_id=%s current_node=%s",
+                product_id,
+                product.workflow_node,
+            )
             return
         prefix = "竞品视觉初筛失败"
         message = f"{prefix}: {error}" if isinstance(error, CompetitorVisualMatchError) else f"{prefix}: {type(error).__name__}: {error}"
@@ -2535,7 +2570,7 @@ class ProductCompetitorCandidateCaptureAction:
                             step_key=f"product:{product_id}:competitor_candidate_capture",
                             step_type=self.action_type,
                             payload=plan_payload,
-                            max_attempts=1,
+                            max_attempts=2,
                         )
                     ],
                 )
@@ -3265,6 +3300,23 @@ class ProductKeywordResearchAction:
             message="关键词采集完成，开始计算建议售价",
             data={"product_id": product_id},
         )
+        pricing_backfill = None
+        if product.data and (product.data.value_total is None or product.data.estimated_total is None):
+            # Import here to avoid the product-draft -> material planner ->
+            # product-actions registration cycle during application startup.
+            from app.services.giga_product_drafts import restore_product_pricing_from_source_batch
+
+            pricing_backfill = await restore_product_pricing_from_source_batch(db, product)
+            if pricing_backfill:
+                await db.commit()
+                await update_step_progress(
+                    db,
+                    step,
+                    current=1,
+                    total=3,
+                    message="已从本次 GIGA 同步批次恢复成本，开始计算建议售价",
+                    data={"product_id": product_id, "pricing_backfill": pricing_backfill},
+                )
         pricing_result = await run_pricing(product_id)
         await update_step_progress(
             db,
@@ -3280,6 +3332,7 @@ class ProductKeywordResearchAction:
             "keyword_result": keyword_result,
             "pricing_result": pricing_result,
             "category_result": category_result,
+            "pricing_backfill": pricing_backfill,
         }
 
     async def on_step_success(self, db: AsyncSession, step: TaskStep, result: dict[str, Any]) -> None:
@@ -3663,7 +3716,9 @@ class ProductCustomerMindsetAction:
         return {
             "product_id": product_id,
             "item_code": item_code,
-            "customer_mindset": await run_customer_mindset(product_id),
+            # The full brief lives in the product's verified local artifact.  Do
+            # not duplicate an 80KB+ result into task_steps.result_json.
+            "customer_mindset_persisted": bool(await run_customer_mindset(product_id)),
         }
 
     async def on_step_success(self, db: AsyncSession, step: TaskStep, result: dict[str, Any]) -> None:
@@ -3696,7 +3751,7 @@ class ProductCustomerMindsetAction:
             return
 
         await db.refresh(product, attribute_names=["data"])
-        if not isinstance(result.get("customer_mindset"), dict) or not _customer_mindset_ready(product):
+        if not result.get("customer_mindset_persisted") or not _customer_mindset_ready(product):
             message = "用户心智梳理任务完成但未落库有效结果，不能创建 Listing 任务"
             await _project_customer_mindset_failed(db, product_id=product_id, message=message)
             result["status"] = "downstream_failed"
@@ -3720,7 +3775,10 @@ class ProductCustomerMindsetAction:
             listing_runs = await create_product_action_runs(
                 db,
                 "product_listing_generation",
-                [{"product_id": product_id, "created_by": "product_customer_mindset"}],
+                [{
+                    "product_id": product_id,
+                    "created_by": "product_customer_mindset",
+                }],
                 created_by="product_customer_mindset",
             )
         except Exception as exc:
@@ -3783,7 +3841,7 @@ class ProductCustomerMindsetAction:
 
 
 class ProductListingGenerationAction:
-    """节点 9：把完整商品证据转成 Amazon Listing，并将主流程推进到待导出。
+    """节点 9：把完整商品证据转成 Amazon Listing，并推进到 A+ 生图。
 
     前置与输入：必须消费商品事实、卖家精灵/兜底关键词、已选竞品的市场参考、图片
     分析以及结构完整的用户心智简报；竞品事实不能改写成本商品事实。已有真实 ASIN、
@@ -3803,13 +3861,13 @@ class ProductListingGenerationAction:
     产品描述、Search Terms、对应中文翻译及 `listing_check`。标题或任一 Product
     Highlight 超限、数量错误或完全没有具体场景时，生成器必须把具体问题反馈给 LLM
     重新写完整语义；不得在单词中间机械截断。达到重写次数仍不合规则任务失败，不能
-    以不完整文案进入待导出。用户心智中的证据缺口和买错风险应进入合适亮点、五点或
+    以不完整文案进入 A+ 生图。用户心智中的证据缺口和买错风险应进入合适亮点、五点或
     描述，而非被隐藏。
 
     落库与下游：仅当标题、Product Highlights 和五点等必要结果已成功落库，才投影为
-    `flow_done/succeeded`、`Product.status=completed`，并在商品列表显示“待导出”。这是
-    主 workflow 的唯一完成入口。A+ 是待导出后的独立派生链路，默认自动触发关闭
-    (`AUTO_APLUS_AFTER_EXPORT_READY=False`)；A+ 失败不得让商品退出待导出。
+    `generate_aplus/pending`、`Product.status=pending_review`，随后自动触发 A+。
+    A+ 五张图片完成后，商品进入“确认图片与 A+”；只有人工确认才会写
+    `flow_done/succeeded`、`Product.status=completed` 并开放待导出。
     """
 
     action_type = "product_listing_generation"
@@ -3895,13 +3953,13 @@ class ProductListingGenerationAction:
         # customer_mindset -> listing，identity map 里的 ProductData 仍是心智落库前旧值；
         # success hook 必须显式刷新 data，不能把已存在的 durable 心智误判为缺失。
         await db.refresh(product, attribute_names=["data"])
-        _raise_if_e5_export_ready_protected(product, action_label="完成 Listing 并进入待导出")
-        _project_listing_completed(product)
+        _raise_if_e5_export_ready_protected(product, action_label="完成 Listing 并进入 A+ 图片生成")
+        _project_listing_ready_for_aplus_review(product)
         summary = {
             "product_id": product_id,
             "item_code": result.get("item_code"),
             "status": "listing_done",
-            "next_step": "export",
+        "next_step": "generate_aplus",
         }
         step.task_run.summary_json = json_dumps(summary)
         await db.commit()
@@ -3915,7 +3973,7 @@ class ProductListingGenerationAction:
         except Exception as exc:
             await db.rollback()
             logger.exception(
-                "A+ auto trigger failed after listing export-ready commit: product_id=%s task_run_id=%s",
+                "A+ auto trigger failed after listing review commit: product_id=%s task_run_id=%s",
                 product_id,
                 source_task_run_id,
             )
@@ -3954,11 +4012,11 @@ class ProductListingGenerationAction:
             step,
             current=1,
             total=1,
-            message="Listing 生成完成，已进入待导出",
+            message="Listing 生成完成，已进入 A+ 生图",
             data={"product_id": product_id, "item_code": result.get("item_code"), "aplus_auto_trigger": aplus_auto_trigger},
         )
         result["status"] = "done"
-        result["next_step"] = "export"
+        result["next_step"] = "generate_aplus"
         result["aplus_auto_trigger"] = aplus_auto_trigger
 
     async def on_step_failure(self, db: AsyncSession, step: TaskStep, error: Exception) -> None:
@@ -3997,6 +4055,7 @@ async def _existing_active_run(db: AsyncSession, action: TaskAction, payload: di
             select(TaskRun)
             .where(TaskRun.dedupe_key == dedupe_key)
             .where(TaskRun.status.in_(ACTIVE_RUN_STATUSES))
+            .where(TaskRun.superseded_by_run_id.is_(None))
             .options(selectinload(TaskRun.steps))
             .order_by(TaskRun.id.asc())
         )
@@ -4012,6 +4071,7 @@ async def _existing_active_run(db: AsyncSession, action: TaskAction, payload: di
         .join(TaskStep, TaskStep.task_run_id == TaskRun.id)
         .where(TaskRun.task_type == action.action_type)
         .where(TaskRun.status.in_(ACTIVE_RUN_STATUSES))
+        .where(TaskRun.superseded_by_run_id.is_(None))
         .where(TaskStep.step_key.in_(step_keys))
         .where(TaskStep.status.in_(ACTIVE_STEP_STATUSES))
         .options(selectinload(TaskRun.steps))
@@ -4130,8 +4190,12 @@ async def create_product_action_runs(
         payload = dict(raw_payload)
         if created_by and not payload.get("created_by"):
             payload["created_by"] = created_by
-        await action.validate(db, payload)
+        # Acquire the per-product write lock before any validation read.  With
+        # MySQL repeatable-read, validating first can establish an old snapshot;
+        # a timed-out client retry then fails to see the first request's newly
+        # created active run and queues a duplicate external call.
         await _lock_product_for_action_payload(db, payload)
+        await action.validate(db, payload)
         existing = await _existing_active_run(db, action, payload)
         if existing:
             plan = action.build_plan(payload)
@@ -4234,6 +4298,11 @@ async def product_action_worker(ctx: TaskContext) -> dict[str, Any]:
             raise TaskStepCanceled(ctx.run.cancel_reason or "用户取消")
     except Exception as exc:
         if isinstance(exc, (TaskStepCanceled, TaskStepInterrupted)):
+            raise
+        # The scheduler owns bounded retries for transient infrastructure
+        # failures.  Keep the product workflow processing until that budget is
+        # exhausted instead of prematurely projecting a manual-retry failure.
+        if is_transient_task_error(exc):
             raise
         await ctx.db.rollback()
         try:

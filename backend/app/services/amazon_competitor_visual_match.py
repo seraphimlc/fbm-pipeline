@@ -23,7 +23,11 @@ FAKE_VISUAL_MATCH_MODEL = "fake_competitor_visual_match_v1"
 VISUAL_MATCH_RULE_VERSION = "amazon_competitor_visual_match_direct_url_v2"
 MAX_CANDIDATES = 20
 MAX_SELECTED = 6
-MIN_SELECTED = 4
+# A niche product can have only one to three genuinely comparable Amazon
+# candidates.  Downstream detail capture and deterministic selection both
+# support 1-6 records, so reject only when the VLM finds none above the strict
+# similarity threshold; do not manufacture a fourth weak competitor.
+MIN_SELECTED = 1
 MIN_VISUAL_SIMILARITY = 0.65
 
 

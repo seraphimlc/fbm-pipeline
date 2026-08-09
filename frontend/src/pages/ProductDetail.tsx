@@ -26,10 +26,13 @@ const { Title, Text } = Typography;
 const PRODUCT_LIST_RETURN_KEY = 'fbm.productList.returnPath';
 const DEFAULT_LISTING_IMAGE_LIMIT = 9;
 const PRODUCT_DETAIL_WORKFLOW_CALLSITE_IDS = {
+  confirmProduct: 'confirmProduct|frontend/src/pages/ProductDetail.tsx|runWorkflowAction',
   resumePipeline: 'resumePipeline|frontend/src/pages/ProductDetail.tsx|runWorkflowAction',
+  retryProductMaterialPrepare: 'retryProductMaterialPrepare|frontend/src/pages/ProductDetail.tsx|runWorkflowAction',
   retryProductAutoImageSelection: 'retryProductAutoImageSelection|frontend/src/pages/ProductDetail.tsx|runWorkflowAction',
   retryProductCompetitorSearch: 'retryProductCompetitorSearch|frontend/src/pages/ProductDetail.tsx|runWorkflowAction',
   retryProductCompetitorVisualMatch: 'retryProductCompetitorVisualMatch|frontend/src/pages/ProductDetail.tsx|runWorkflowAction',
+  retryProductKeywordResearch: 'retryProductKeywordResearch|frontend/src/pages/ProductDetail.tsx|runWorkflowAction',
   retryStep: 'retryStep|frontend/src/pages/ProductDetail.tsx|runWorkflowAction',
 } satisfies Record<ProductWorkflowApiClientExport, MutationCallsiteId>;
 
@@ -44,6 +47,7 @@ const WORK_STATUS_META: Record<string, { label: string; shortLabel: string; colo
   capture_detail: { label: '抓取竞品详情中', shortLabel: '抓详情', color: 'processing' },
   ready_to_generate: { label: '待自动生成 Listing', shortLabel: '待自动生成', color: 'warning' },
   running: { label: '生成中', shortLabel: '生成中', color: 'processing' },
+  confirm_images_aplus: { label: '待确认图片与 A+', shortLabel: '确认图片与 A+', color: 'cyan' },
   export_ready: { label: '待导出', shortLabel: '待导出', color: 'success' },
   exported: { label: '已导出可重导', shortLabel: '已导出', color: 'green' },
   failed: { label: '失败', shortLabel: '失败', color: 'error' },
@@ -58,6 +62,7 @@ const WORKFLOW_STEP_GROUPS = [
   { key: 'image_analysis', title: '图片分析', nodes: ['image_analysis'] },
   { key: 'customer_mindset', title: '用户心智', nodes: ['customer_mindset'] },
   { key: 'listing', title: 'Listing文案', nodes: ['listing_generation'] },
+  { key: 'aplus', title: 'A+ 生图与确认', nodes: ['generate_aplus', 'confirm_images_aplus'] },
   { key: 'export', title: '待导出', nodes: ['flow_done'] },
 ];
 const PRODUCT_NON_RUNNING_STATUSES = [
@@ -434,11 +439,31 @@ const ProductDetail: React.FC = () => {
     await fetchDetail(true);
   };
 
+  // The compact detail response deliberately omits the large A+ plan/script/image
+  // payloads.  An A+ task can therefore finish while the polling response still
+  // leaves this tab looking empty.  Load the complete record as soon as the user
+  // opens A+, then keep using it for the active-tab polling below.
+  useEffect(() => {
+    if (activeTabKey === 'aplus') {
+      void loadFullDetail();
+    }
+  }, [activeTabKey, id, fullDetailProductId, fullDetailLoading]);
+
   useEffect(() => {
     setFullDetailProductId(null);
     fetchDetail();
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [id]);
+
+  // A+ plan/scripts/images are deliberately omitted from the compact first
+  // response.  Load the full record as soon as this tab becomes active so a
+  // completed A+ run never looks like it has no generated images.
+  useEffect(() => {
+    if (activeTabKey === 'aplus') void loadFullDetail();
+    // loadFullDetail is intentionally left out: its identity changes on each
+    // render, while id/tab are the actual loading boundary.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTabKey, id]);
 
   // 自动轮询：任务运行中时每3秒刷新
   useEffect(() => {
@@ -449,7 +474,7 @@ const ProductDetail: React.FC = () => {
     const isRunning = (product.workflow ? workflowIsRunning : legacyProductIsRunning)
       || APLUS_REGEN_ACTIVE_STATUSES.includes(product.aplus?.aplus_status || '');
     if (isRunning) {
-      pollRef.current = setInterval(() => fetchDetail(activeTabKey === 'files'), 3000);
+      pollRef.current = setInterval(() => fetchDetail(activeTabKey === 'files' || activeTabKey === 'aplus'), 3000);
     } else {
       if (pollRef.current) clearInterval(pollRef.current);
     }
@@ -3522,7 +3547,7 @@ const ProductDetail: React.FC = () => {
           商品 #{product.id}
         </Title>
         <Space>
-          <Button icon={<ReloadOutlined />} onClick={() => fetchDetail(activeTabKey === 'files')}>刷新</Button>
+          <Button icon={<ReloadOutlined />} onClick={() => fetchDetail(activeTabKey === 'files' || activeTabKey === 'aplus')}>刷新</Button>
           {hasWorkflow && renderWorkflowActionButton(workflow?.primary_action, workflow?.primary_action_label, true)}
           {hasWorkflow && workflowSecondaryActions.map((action: string) => (
             <React.Fragment key={action}>
@@ -3751,7 +3776,7 @@ const ProductDetail: React.FC = () => {
         onChange={(key) => {
           userTouchedTabRef.current = true;
           setActiveTabKey(key);
-          if (key === 'files') void loadFullDetail();
+          if (key === 'files' || key === 'aplus') void loadFullDetail();
         }}
       />
     </div>

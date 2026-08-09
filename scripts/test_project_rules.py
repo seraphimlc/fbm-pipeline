@@ -250,6 +250,8 @@ assert AMAZON_WORKFLOW_NODES == (
     "image_analysis",
     "customer_mindset",
     "listing_generation",
+    "generate_aplus",
+    "confirm_images_aplus",
     "flow_done",
 ), AMAZON_WORKFLOW_NODES
 assert AMAZON_WORKFLOW_STATUSES == (
@@ -2092,6 +2094,7 @@ def test_giga_pull_tasks_expose_live_sku_progress_without_group_closure_during_p
 
 def test_task_runtime_v1_uses_new_tables_and_keeps_old_offline_tasks_compatibility() -> None:
     models_text = (ROOT / "backend" / "app" / "models" / "models.py").read_text(encoding="utf-8")
+    config_text = (ROOT / "backend" / "app" / "config.py").read_text(encoding="utf-8")
     database_text = (ROOT / "backend" / "app" / "database.py").read_text(encoding="utf-8")
     spec_text = (ROOT / "docs" / "superpowers" / "specs" / "2026-06-13-task-runtime-giga-pull-design.md").read_text(encoding="utf-8")
     task_runs_api = (ROOT / "backend" / "app" / "api" / "task_runs.py").read_text(encoding="utf-8")
@@ -2159,11 +2162,13 @@ def test_task_runtime_v1_uses_new_tables_and_keeps_old_offline_tasks_compatibili
         "任务中心 API 必须派生 display/action 字段，ready step 显示 queued，并禁止 superseded 历史任务继续重试",
     )
     assert_true(
-        'conn.dialect.name not in {"mysql", "mariadb"}' in database_text
-        and "fbm-pipeline now requires MySQL" in database_text
-        and "PRAGMA table_info" not in database_text
-        and "CREATE TABLE IF NOT EXISTS" not in database_text,
-        "数据库初始化必须是 MySQL-only，不能保留本地文件数据库 fallback 或手写建表分支",
+        "DATABASE_BACKEND" in config_text
+        and "sqlite+aiosqlite" in config_text
+        and "settings.is_sqlite" in database_text
+        and "PRAGMA foreign_keys=ON" in database_text
+        and "Base.metadata.create_all" in database_text
+        and "_ensure_mysql_hot_path_indexes" in database_text,
+        "数据库必须支持受配置保护的 SQLite 本地模式，并保留 MySQL schema maintenance 路径",
     )
     assert_true(
         "ix_task_runs_type_status_id" in database_text
@@ -2200,6 +2205,18 @@ def test_task_runtime_v1_uses_new_tables_and_keeps_old_offline_tasks_compatibili
         and "retry_step" in runtime_scheduler
         and "_runner_lock" in runtime_scheduler,
         "新 runtime 必须使用 DB ready claim、锁/心跳、过期 running 恢复、失败 step 重跑，并保持串行 drain",
+    )
+    assert_true(
+        "_renew_step_lease" in runtime_scheduler
+        and "TaskStep.locked_by == worker_id" in runtime_scheduler
+        and "_stop_step_lease" in runtime_scheduler,
+        "长耗时 worker 必须在持锁期间续租，且只能续租当前 worker 自己持有的 step",
+    )
+    assert_true(
+        "is_transient_task_error" in runtime_scheduler
+        and 'event_type="retry"' in runtime_scheduler
+        and "step.attempt_count < step.max_attempts" in runtime_scheduler,
+        "任务运行时必须仅对可恢复基础设施异常在尝试预算内自动重试",
     )
     assert_true(
         "giga_pull_plan" in giga_workers
@@ -3722,12 +3739,15 @@ from app.product_tasks import actions as product_actions
 from app.models.status import (
     COMPLETED,
     FAILED,
+    PENDING_REVIEW,
     PAUSED,
     WORKFLOW_NODE_CUSTOMER_MINDSET,
     WORKFLOW_NODE_FLOW_DONE,
+    WORKFLOW_NODE_GENERATE_APLUS,
     WORKFLOW_NODE_IMAGE_ANALYSIS,
     WORKFLOW_NODE_LISTING_GENERATION,
     WORKFLOW_STATUS_FAILED,
+    WORKFLOW_STATUS_PENDING,
     WORKFLOW_STATUS_SUCCEEDED,
 )
 
@@ -3810,10 +3830,10 @@ async def main():
         done = product()
         product_actions._raise_if_customer_mindset_missing = lambda _product: None
         product_actions._listing_content_ready = lambda _product: True
-        product_actions._project_listing_completed(done)
-        assert done.status == COMPLETED
-        assert done.workflow_node == WORKFLOW_NODE_FLOW_DONE
-        assert done.workflow_status == WORKFLOW_STATUS_SUCCEEDED
+        product_actions._project_listing_ready_for_aplus_review(done)
+        assert done.status == PENDING_REVIEW
+        assert done.workflow_node == WORKFLOW_NODE_GENERATE_APLUS
+        assert done.workflow_status == WORKFLOW_STATUS_PENDING
         assert done.workflow_error is None
     finally:
         product_actions._load_product = original_load_product
@@ -3866,16 +3886,16 @@ def test_image_analysis_listing_e5_contract() -> None:
         )
 
     assert_true(
-        actions_text.count("_project_listing_completed(") == 2
+        actions_text.count("_project_listing_ready_for_aplus_review(") == 2
         and "ProductListingGenerationAction().on_step_success" not in actions_text,
-        "E5 只能由 ProductListingGenerationAction.on_step_success 调用 _project_listing_completed；不能新增其它 completed 投影入口",
+        "Listing success 只能投影到 generate_aplus/pending；completed/export-ready 必须留给人工确认入口",
     )
     assert_true(
         "def _e5_export_ready_protection_reasons" in actions_text
         and "_raise_if_e5_export_ready_protected(product, action_label=\"启动图片分析\")" in image_section
         and "_raise_if_e5_export_ready_protected(product, action_label=\"启动用户心智梳理\")" in mindset_section
         and "_raise_if_e5_export_ready_protected(product, action_label=\"启动 Listing 生成\")" in listing_section
-        and "_raise_if_e5_export_ready_protected(product, action_label=\"完成 Listing 并进入待导出\")" in listing_section,
+        and "_raise_if_e5_export_ready_protected(product, action_label=\"完成 Listing 并进入 A+ 图片生成\")" in listing_section,
         "E5 图片分析/用户心智/Listing reserve/success 必须走专用保护 helper，阻断外部不可逆事实",
     )
     assert_true(
@@ -3901,7 +3921,7 @@ def test_image_analysis_listing_e5_contract() -> None:
         and "_raise_if_customer_mindset_missing(product)" in listing_section
         and 'await db.refresh(product, attribute_names=["data"])' in listing_success_section
         and listing_success_section.index('await db.refresh(product, attribute_names=["data"])')
-        < listing_success_section.index("_project_listing_completed(product)")
+        < listing_success_section.index("_project_listing_ready_for_aplus_review(product)")
         and "_queue_product_post_image_generation" in products_text
         and "_queue_product_customer_mindset" in products_text,
         "API、engine 和 ProductTaskAction 必须共用正式心智校验；Listing success 投影前须刷新独立会话已落库的心智数据",
@@ -3932,9 +3952,9 @@ def test_image_analysis_listing_e5_contract() -> None:
         "13 个固定题 + 2 至 5 个动态题契约及验证入口必须同步写入 product-flow/task-runtime 索引",
     )
     assert_true(
-        "confirmed_at = None" not in listing_section
+        "item.confirmed_at = None" in actions_text
         and "confirmed_at = None" not in retry_section,
-        "E5 Listing reserve/retry 不得清空 CatalogProduct.confirmed_at；预先确认必须由保护门阻断",
+        "Listing success 必须清除 CatalogProduct.confirmed_at，只有人工确认后才能恢复导出资格；retry 仍不能擅自清除已确认事实",
     )
     assert_true(
         '"retry_image_analysis"' in workflow_text
@@ -3976,14 +3996,16 @@ def test_aplus_auto_after_export_ready_a1_a2_contract() -> None:
     service_path = ROOT / "backend" / "app" / "services" / "aplus_auto_trigger.py"
     service_text = service_path.read_text(encoding="utf-8")
     actions_text = (ROOT / "backend" / "app" / "product_tasks" / "actions.py").read_text(encoding="utf-8")
+    products_text = (ROOT / "backend" / "app" / "api" / "products.py").read_text(encoding="utf-8")
     aplus_planner_text = (ROOT / "backend" / "app" / "task_planners" / "aplus_generate.py").read_text(encoding="utf-8")
+    aplus_worker_text = (ROOT / "backend" / "app" / "task_runtime" / "aplus_generate_workers.py").read_text(encoding="utf-8")
     behavior_script = ROOT / "scripts" / "test_aplus_auto_trigger_a1_a2.py"
     behavior_text = behavior_script.read_text(encoding="utf-8")
 
     assert_true(
-        "AUTO_APLUS_AFTER_EXPORT_READY: bool = False" in config_text
-        and "AUTO_APLUS_AFTER_EXPORT_READY=false" in env_text,
-        "A+ 自动触发 A1 必须默认关闭，并在 .env.example 明确 false",
+        "AUTO_APLUS_AFTER_EXPORT_READY: bool = True" in config_text
+        and "AUTO_APLUS_AFTER_EXPORT_READY=true" in env_text,
+        "A+ 自动触发必须默认开启，并在 .env.example 明确 true；未确认前仍不得导出",
     )
     assert_true(
         service_path.is_file()
@@ -3998,9 +4020,8 @@ def test_aplus_auto_after_export_ready_a1_a2_contract() -> None:
     )
     for code in (
         "disabled_by_config",
-        "not_completed",
-        "not_flow_done",
-        "missing_catalog_export_ready",
+        "not_listing_ready",
+        "missing_catalog",
         "missing_listing_content",
         "missing_image_analysis",
         "main_workflow_active",
@@ -4014,16 +4035,14 @@ def test_aplus_auto_after_export_ready_a1_a2_contract() -> None:
     ):
         assert_true(f'"{code}"' in service_text, f"A1 decision code 缺失: {code}")
     assert_true(
-        "Product.status == completed" in service_text
-        or "product.status != COMPLETED" in service_text,
-        "A1 eligibility 必须要求 Product.status completed",
+        "product.status != PENDING_REVIEW" in service_text,
+        "A1 eligibility 必须要求 Listing 已进入 pending_review",
     )
     assert_true(
-        "WORKFLOW_NODE_FLOW_DONE" in service_text
-        and "WORKFLOW_STATUS_SUCCEEDED" in service_text
-        and "catalog.confirmed_at is None" in service_text
-        and "missing_catalog_export_ready" in service_text,
-        "A1 eligibility 必须要求 flow_done/succeeded 和 CatalogProduct.confirmed_at 待导出证据",
+        "WORKFLOW_NODE_GENERATE_APLUS" in service_text
+        and "WORKFLOW_STATUS_PENDING" in service_text
+        and "missing_catalog" in service_text,
+        "A1 eligibility 必须要求 generate_aplus/pending 与 CatalogProduct",
     )
     assert_true(
         "listing_title" in service_text
@@ -4071,12 +4090,12 @@ def test_aplus_auto_after_export_ready_a1_a2_contract() -> None:
 
     listing_section = actions_text.split("class ProductListingGenerationAction", 1)[1].split("async def _existing_active_run", 1)[0]
     assert_true(
-        "_project_listing_completed(product)" in listing_section
+        "_project_listing_ready_for_aplus_review(product)" in listing_section
         and "await db.commit()" in listing_section
         and "try_auto_start_aplus_after_export_ready" in listing_section
-        and listing_section.index("_project_listing_completed(product)") < listing_section.index("await db.commit()")
+        and listing_section.index("_project_listing_ready_for_aplus_review(product)") < listing_section.index("await db.commit()")
         and listing_section.index("await db.commit()") < listing_section.index("try_auto_start_aplus_after_export_ready"),
-        "A2 Listing success hook 必须在 E5 export-ready 投影提交后再 best-effort 触发 A+",
+        "A2 Listing success hook 必须在 generate_aplus/pending 投影提交后再 best-effort 触发 A+",
     )
     assert_true(
         '"aplus_auto_trigger"' in listing_section
@@ -4093,6 +4112,17 @@ def test_aplus_auto_after_export_ready_a1_a2_contract() -> None:
         "A+ planner 仍是独立已有能力，A2 自动单品 run 必须带 dedupe/correlation metadata",
     )
     assert_true(
+        "WORKFLOW_NODE_CONFIRM_IMAGES_APLUS" in aplus_worker_text
+        and 'status in {"done", "regen_done"}' in aplus_worker_text
+        and "node=WORKFLOW_NODE_CONFIRM_IMAGES_APLUS" in aplus_worker_text
+        and "async def confirm_product" in products_text
+        and "WORKFLOW_NODE_CONFIRM_IMAGES_APLUS" in products_text
+        and "def _aplus_images_complete" in products_text
+        and "node=WORKFLOW_NODE_FLOW_DONE" in products_text
+        and "_sync_catalog_item(product, db, confirm=True)" in products_text,
+        "A+ 五图完成必须进入待确认；确认 API 必须验证完整图片后才写 flow_done 与 confirmed_at",
+    )
+    assert_true(
         behavior_script.is_file()
         and 'parser.add_argument("--stage", default="a1", choices=("a1", "a2"))' in behavior_text
         and "run_schema_maintenance()" in behavior_text
@@ -4102,6 +4132,7 @@ def test_aplus_auto_after_export_ready_a1_a2_contract() -> None:
         and "_test_listing_success_enabled_creates_aplus_task" in behavior_text
         and "_test_try_helper_reuses_existing_active_aplus" in behavior_text
         and "_test_listing_success_aplus_failure_does_not_rollback_export_ready" in behavior_text
+        and "_test_aplus_done_requires_user_confirmation_before_export_ready" in behavior_text
         and "before_runs == after_runs" in behavior_text
         and "before_status == after_status" in behavior_text,
         "A+ 必须有 deterministic DB 行为脚本，覆盖 A1 policy 和 A2 no-op/创建/复用/失败隔离",
@@ -6809,7 +6840,7 @@ product.images = ProductImage(product_id=88, main_image_path="/tmp/main.jpg", ma
 plan = build_amazon_competitor_queries(product)
 assert 1 <= len(plan["queries"]) <= 3, plan
 for item in plan["queries"]:
-    assert item["rule_version"] == "amazon_competitor_query_v2", item
+    assert item["rule_version"] == "amazon_competitor_query_v5", item
     assert 3 <= len(item["included_terms"]) <= 7, item
     assert "Modern Modular Sofa with Storage Chaise for Living Room SKU S-123 188cm".lower() != item["query"], item
     assert "replacement part" in item["excluded_terms"], item
@@ -6843,6 +6874,104 @@ bed_plan = build_amazon_competitor_queries(bed)
 assert all("bed frame" in item["query"] for item in bed_plan["queries"]), bed_plan
 assert any("queen" in item["included_terms"] for item in bed_plan["queries"]), bed_plan
 assert all("82 inch" not in item["included_terms"] for item in bed_plan["queries"]), bed_plan
+
+drawer_chest = Product(id=91, gigab2b_url="https://example.test/item/91", status="created", current_step=1)
+drawer_chest.data = ProductData(
+    product_id=91,
+    title="Nordic Style 3-Drawer Storage Cabinet, Modern White Chest of Drawers with Rose Gold Handles",
+    product_type="Cabinets",
+    color="White",
+    material="MDF",
+)
+drawer_chest.images = ProductImage(product_id=91, main_image_path="/tmp/drawer-main.jpg", main_image_source="model_selected")
+drawer_plan = build_amazon_competitor_queries(drawer_chest)
+assert all("chest of drawers" in item["query"] for item in drawer_plan["queries"]), drawer_plan
+
+dresser_chest = Product(id=97, gigab2b_url="https://example.test/item/97", status="created", current_step=1)
+dresser_chest.data = ProductData(
+    product_id=97,
+    title="3 Drawer Dresser Chest, Modern White Storage Cabinet",
+    product_type="Dressers, Chests & Wardrobes",
+    color="White",
+    material="MDF",
+)
+dresser_chest.images = ProductImage(product_id=97, main_image_path="/tmp/dresser-main.jpg", main_image_source="model_selected")
+dresser_chest_plan = build_amazon_competitor_queries(dresser_chest)
+assert all("dresser chest" in item["query"] for item in dresser_chest_plan["queries"]), dresser_chest_plan
+
+pedal_kart = Product(id=92, gigab2b_url="https://example.test/item/92", status="created", current_step=1)
+pedal_kart.data = ProductData(
+    product_id=92,
+    title="12V Electric Kids Pedal Go Kart, Outdoor Ride on Toy with Adjustable Seat",
+    product_type="Kids Bikes & Riding Toys",
+    color="Blue",
+    material="Polypropylene",
+)
+pedal_kart.images = ProductImage(product_id=92, main_image_path="/tmp/kart-main.jpg", main_image_source="model_selected")
+pedal_kart_plan = build_amazon_competitor_queries(pedal_kart)
+assert all("kids pedal go kart" in item["query"] for item in pedal_kart_plan["queries"]), pedal_kart_plan
+
+shoe_cabinet = Product(id=93, gigab2b_url="https://example.test/item/93", status="created", current_step=1)
+shoe_cabinet.data = ProductData(
+    product_id=93,
+    title="Tall Rattan Shoe Cabinet with Doors, 6-Tier Shoe Storage Cabinet with Adjustable Shelves",
+    product_type="Cabinets",
+    color="Walnut",
+    material="MDF,Rattan",
+)
+shoe_cabinet.images = ProductImage(product_id=93, main_image_path="/tmp/shoe-main.jpg", main_image_source="model_selected")
+shoe_cabinet_plan = build_amazon_competitor_queries(shoe_cabinet)
+assert all("shoe cabinet" in item["query"] for item in shoe_cabinet_plan["queries"]), shoe_cabinet_plan
+
+kids_table_set = Product(id=94, gigab2b_url="https://example.test/item/94", status="created", current_step=1)
+kids_table_set.data = ProductData(
+    product_id=94,
+    title="Kids Table and 2 Chair Set with Storage Bins, 3-Piece Toddler Activity Play Table",
+    product_type="Youth, Kids & Baby Furniture",
+    color="White+Natural",
+    material="Solid Wood+MDF",
+)
+kids_table_set.images = ProductImage(product_id=94, main_image_path="/tmp/kids-table-main.jpg", main_image_source="model_selected")
+kids_table_plan = build_amazon_competitor_queries(kids_table_set)
+assert all("kids table and chair set" in item["query"] for item in kids_table_plan["queries"]), kids_table_plan
+
+coffee_end_table_set = Product(id=95, gigab2b_url="https://example.test/item/95", status="created", current_step=1)
+coffee_end_table_set.data = ProductData(
+    product_id=95,
+    title="3-Piece Coffee Table and End Table Sets for Living Room, Round Coffee and End Table Set of 3",
+    product_type="Living Room Furniture",
+    color="Rustic Brown",
+    material="MDF,Metal",
+)
+coffee_end_table_set.images = ProductImage(product_id=95, main_image_path="/tmp/coffee-table-main.jpg", main_image_source="model_selected")
+coffee_end_table_plan = build_amazon_competitor_queries(coffee_end_table_set)
+assert all("coffee table and end table set" in item["query"] for item in coffee_end_table_plan["queries"]), coffee_end_table_plan
+
+cruiser_bike = Product(id=96, gigab2b_url="https://example.test/item/96", status="created", current_step=1)
+cruiser_bike.data = ProductData(
+    product_id=96,
+    title="24 Inch Cruiser Bike for Girls, Single Speed Commuter Bicycle with Wicker Basket and Rear Rack",
+    product_type="Outdoor Bikes",
+    color="Peach",
+    material="Steel",
+)
+cruiser_bike.images = ProductImage(product_id=96, main_image_path="/tmp/cruiser-bike-main.jpg", main_image_source="model_selected")
+cruiser_bike_plan = build_amazon_competitor_queries(cruiser_bike)
+assert all("cruiser bike" in item["query"] for item in cruiser_bike_plan["queries"]), cruiser_bike_plan
+assert all("24 inch" in item["included_terms"] for item in cruiser_bike_plan["queries"]), cruiser_bike_plan
+
+city_bike = Product(id=98, gigab2b_url="https://example.test/item/98", status="created", current_step=1)
+city_bike.data = ProductData(
+    product_id=98,
+    title="26 Inch Folding City Bike with 7 Speeds, Steel Frame and Detachable Basket",
+    product_type="Outdoor Bikes",
+    color="White",
+    material="Steel",
+)
+city_bike.images = ProductImage(product_id=98, main_image_path="/tmp/city-bike-main.jpg", main_image_source="model_selected")
+city_bike_plan = build_amazon_competitor_queries(city_bike)
+assert all("city bike" in item["query"] for item in city_bike_plan["queries"]), city_bike_plan
+assert all("26 inch" in item["included_terms"] for item in city_bike_plan["queries"]), city_bike_plan
 
 html = """
 <html><body>
@@ -6967,17 +7096,36 @@ def test_task_runtime_autostart_runner_lifecycle_behaviour() -> None:
         "task runtime auto_start 行为脚本必须构造 ready step 并触达 claim/worker 路径，不能只 stub drain_ready_steps",
     )
     assert_true(
+        "_require_isolated_r1_database" in runtime_script
+        and "R1_MYSQL_WRAPPER_ACTIVE" in runtime_script,
+        "task runtime auto_start 行为脚本必须拒绝使用业务数据库，避免 probe 被常驻服务消费",
+    )
+    assert_true(
         "wake_task_run(" not in scheduler_text
         and "wake_runtime" not in scheduler_text,
         "runtime auto-start 修复不能通过自动调用 wake 伪装",
     )
-    result = subprocess.run(
-        [str(ROOT / "backend" / ".venv" / "bin" / "python"), str(ROOT / "scripts" / "test_task_runtime_autostart.py")],
+    if os.environ.get("R1_MYSQL_WRAPPER_ACTIVE") == "1":
+        result = subprocess.run(
+            [str(ROOT / "backend" / ".venv" / "bin" / "python"), str(ROOT / "scripts" / "test_task_runtime_autostart.py")],
+            cwd=ROOT / "backend",
+            text=True,
+            capture_output=True,
+        )
+        assert_true(result.returncode == 0, f"task runtime auto_start 行为验证失败: {result.stderr or result.stdout}")
+    else:
+        print("SKIP: task runtime autostart DB probe requires the R1 isolated MySQL wrapper")
+    worker_registry_script = ROOT / "scripts" / "test_task_runtime_worker_registry.py"
+    registry_result = subprocess.run(
+        [str(ROOT / "backend" / ".venv" / "bin" / "python"), str(worker_registry_script)],
         cwd=ROOT / "backend",
         text=True,
         capture_output=True,
     )
-    assert_true(result.returncode == 0, f"task runtime auto_start 行为验证失败: {result.stderr or result.stdout}")
+    assert_true(
+        registry_result.returncode == 0,
+        f"商品任务 worker 注册完整性验证失败: {registry_result.stderr or registry_result.stdout}",
+    )
 
 
 def test_auto_competitor_visual_match_phase_b_contract() -> None:

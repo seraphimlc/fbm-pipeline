@@ -1072,6 +1072,7 @@ export interface WorkbenchOverview {
   capture_detail: number;
   ready_to_generate: number;
   running: number;
+  confirm_images_aplus: number;
   export_ready: number;
   export_ready_unexported?: number;
   export_ready_exported?: number;
@@ -1711,11 +1712,17 @@ export const updateProductListingImages = (id: number, data: {
 export const retryProductAutoImageSelection = (id: number, metadata?: MutationMetadataConfig) =>
   api.post<Product>(`/products/${id}/auto-image-selection/retry`, null, mutationRequestConfig(metadata));
 
+export const retryProductMaterialPrepare = (id: number, metadata?: MutationMetadataConfig) =>
+  api.post<Product>(`/products/${id}/material-prepare/retry`, null, mutationRequestConfig(metadata));
+
 export const retryProductCompetitorSearch = (id: number, metadata?: MutationMetadataConfig) =>
   api.post<Product>(`/products/${id}/competitor-search/retry`, null, mutationRequestConfig(metadata));
 
 export const retryProductCompetitorVisualMatch = (id: number, metadata?: MutationMetadataConfig) =>
   api.post<Product>(`/products/${id}/competitor-visual-match/retry`, null, mutationRequestConfig(metadata));
+
+export const retryProductKeywordResearch = (id: number, metadata?: MutationMetadataConfig) =>
+  api.post<Product>(`/products/${id}/keyword-research/retry`, null, mutationRequestConfig(metadata));
 
 export const confirmProduct = (id: number, metadata?: MutationMetadataConfig) =>
   api.post<Product>(`/products/${id}/confirm`, null, mutationRequestConfig(metadata));

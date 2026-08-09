@@ -2,25 +2,32 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import selectinload
 
 from app.config import settings
+from app.task_runtime.retry_policy import is_transient_task_error
 from app.database import async_session
-from app.models import AmazonCompetitorSearchCandidate, Product
+from app.models import AmazonCompetitorSearchCandidate, Product, ProductData
 from app.services.product_image_vlm import clean_json_content
 
 
 logger = logging.getLogger(__name__)
 
+_RETRYABLE_DATABASE_ERROR_CODES = {1205, 1213, 2006, 2013}
+
 SCHEMA_VERSION = "customer_mindset_v1"
+LOCAL_FILE_REFERENCE_SCHEMA = "customer_mindset_local_file_ref_v1"
 DYNAMIC_QUESTION_MIN = 2
 DYNAMIC_QUESTION_MAX = 5
 DYNAMIC_QUESTION_FOCUSES = (
@@ -321,6 +328,56 @@ def customer_mindset_matches_product(value: Any, product: Product) -> bool:
         return False
     persisted = str(brief.get("input_fingerprint") or "").strip()
     return bool(persisted and persisted == build_mindset_input_fingerprint(product))
+
+
+def _customer_mindset_artifact_path(product: Product) -> Path:
+    material_dir = str(getattr(getattr(product, "data", None), "material_dir", "") or "").strip()
+    if not material_dir:
+        raise RuntimeError("商品缺少 material_dir，不能保存用户心智本地文件")
+    return Path(material_dir).expanduser().resolve() / "image analysis" / "customer_mindset.json"
+
+
+def _local_file_reference(path: Path, serialized_brief: str) -> str:
+    return json.dumps(
+        {
+            "schema_version": LOCAL_FILE_REFERENCE_SCHEMA,
+            "path": str(path),
+            "sha256": hashlib.sha256(serialized_brief.encode("utf-8")).hexdigest(),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _write_customer_mindset_artifact(product: Product, serialized_brief: str) -> str:
+    """Atomically write the complete brief outside MySQL before storing its small reference."""
+    path = _customer_mindset_artifact_path(product)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(f".{path.name}.tmp")
+    temporary_path.write_text(serialized_brief, encoding="utf-8")
+    temporary_path.replace(path)
+    return _local_file_reference(path, serialized_brief)
+
+
+def _load_customer_mindset_local_file(reference: dict[str, Any]) -> dict[str, Any]:
+    path_value = reference.get("path")
+    expected_sha256 = str(reference.get("sha256") or "").strip().lower()
+    if not isinstance(path_value, str) or not path_value.strip() or len(expected_sha256) != 64:
+        raise RuntimeError("用户心智本地文件索引无效")
+    path = Path(path_value).expanduser().resolve()
+    if path.suffix.lower() != ".json" or not path.is_file():
+        raise RuntimeError("用户心智本地文件不存在")
+    serialized_brief = path.read_text(encoding="utf-8")
+    actual_sha256 = hashlib.sha256(serialized_brief.encode("utf-8")).hexdigest()
+    if actual_sha256 != expected_sha256:
+        raise RuntimeError("用户心智本地文件校验失败")
+    try:
+        brief = json.loads(serialized_brief)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"用户心智本地文件 JSON 无法解析: {exc}") from exc
+    if not isinstance(brief, dict):
+        raise RuntimeError("用户心智本地文件结果必须是 JSON 对象")
+    return brief
 
 
 def _as_string_list(value: Any, *, limit: int = 8, item_limit: int = 300) -> list[str]:
@@ -758,6 +815,97 @@ def normalize_dynamic_questions(
             }
         )
     return normalized
+
+
+async def _generate_dynamic_questions(evidence_catalog: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """Regenerate malformed planner output before failing a business task."""
+    attempts = max(1, int(settings.CUSTOMER_MINDSET_DYNAMIC_QUESTION_ATTEMPTS))
+    last_error: RuntimeError | None = None
+    for attempt in range(1, attempts + 1):
+        correction = ""
+        if last_error is not None:
+            correction = (
+                "\n\nYour previous draft was rejected by the strict validator: "
+                f"{_compact_text(str(last_error), 300)}. Return a new JSON object that fixes this exact issue."
+            )
+        try:
+            payload = await _llm_json(
+                system_prompt=QUESTION_PLANNER_SYSTEM_PROMPT,
+                user_prompt=_dynamic_question_prompt(evidence_catalog) + correction,
+                max_tokens=2500,
+                temperature=0.2,
+            )
+            return normalize_dynamic_questions(payload, evidence_catalog=evidence_catalog)
+        except RuntimeError as exc:
+            last_error = exc
+            if attempt < attempts:
+                logger.warning(
+                    "Customer mindset dynamic-question validation retry: attempt=%s/%s error=%s",
+                    attempt,
+                    attempts,
+                    _compact_text(str(exc), 300),
+                )
+    raise RuntimeError(f"动态问题在 {attempts} 次生成后仍不符合结构要求: {last_error}") from last_error
+
+
+def _database_error_code(error: BaseException) -> int | None:
+    current: BaseException | None = error
+    while current is not None:
+        args = getattr(current, "args", ())
+        if args and isinstance(args[0], int):
+            return args[0]
+        current = getattr(current, "orig", None)
+    return None
+
+
+def _is_retryable_database_error(error: BaseException) -> bool:
+    if not isinstance(error, DBAPIError):
+        return False
+    if _database_error_code(error) in _RETRYABLE_DATABASE_ERROR_CODES:
+        return True
+    message = str(error).lower()
+    return "lost connection" in message or "connection reset" in message or "timed out" in message
+
+
+async def _persist_customer_mindset(
+    *,
+    product_id: int,
+    serialized_brief: str,
+    generated_at: datetime,
+) -> None:
+    """Persist a generated brief with fresh sessions after transient DB failures.
+
+    The UPDATE is idempotent: retrying after an ambiguous connection loss writes
+    the exact same brief and timestamp, so an already-committed first attempt is
+    safe to repeat.
+    """
+    attempts = max(1, int(settings.CUSTOMER_MINDSET_PERSIST_RETRY_ATTEMPTS))
+    for attempt in range(1, attempts + 1):
+        try:
+            async with async_session() as persist_db:
+                result = await persist_db.execute(
+                    update(ProductData)
+                    .where(ProductData.product_id == product_id)
+                    .values(
+                        customer_mindset=serialized_brief,
+                        customer_mindset_generated_at=generated_at,
+                    )
+                )
+                if result.rowcount != 1:
+                    raise RuntimeError(f"Product {product_id} has no writable product data")
+                await persist_db.commit()
+            return
+        except DBAPIError as exc:
+            if attempt >= attempts or not _is_retryable_database_error(exc):
+                raise
+            logger.warning(
+                "Customer mindset persistence retry: product_id=%s attempt=%s/%s code=%s",
+                product_id,
+                attempt,
+                attempts,
+                _database_error_code(exc),
+            )
+            await asyncio.sleep(0.5 * attempt)
 
 
 def _normalize_answer(
@@ -1215,6 +1363,8 @@ def load_customer_mindset(value: Any, *, required: bool = True) -> dict[str, Any
             raise RuntimeError(f"用户心智梳理 JSON 无法解析: {exc}") from exc
     else:
         brief = value
+    if isinstance(brief, dict) and brief.get("schema_version") == LOCAL_FILE_REFERENCE_SCHEMA:
+        brief = _load_customer_mindset_local_file(brief)
     if not isinstance(brief, dict):
         raise RuntimeError("用户心智梳理结果必须是 JSON 对象")
     if brief.get("schema_version") != SCHEMA_VERSION:
@@ -1407,23 +1557,42 @@ def format_customer_mindset_context(value: Any, *, surface: str, required: bool 
 
 
 async def _llm_json(*, system_prompt: str, user_prompt: str, max_tokens: int, temperature: float) -> dict[str, Any]:
-    client = settings.get_llm_client()
     timeout_seconds = max(120, int(settings.CUSTOMER_MINDSET_LLM_TIMEOUT_SECONDS))
-    request_client = (
-        client.with_options(timeout=timeout_seconds, max_retries=0)
-        if hasattr(client, "with_options")
-        else client
-    )
-    response = await request_client.chat.completions.create(
-        model=settings.LLM_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=temperature,
-        max_tokens=max_tokens,
-        response_format={"type": "json_object"},
-    )
+    response = None
+    for attempt in range(1, 3):
+        # Build a fresh client for the retry.  Some OpenAI-compatible gateways
+        # close their transport after a long response; reusing that transport
+        # turns a transient disconnect into a deterministic product failure.
+        client = settings.get_llm_client()
+        request_client = (
+            client.with_options(timeout=timeout_seconds, max_retries=0)
+            if hasattr(client, "with_options")
+            else client
+        )
+        try:
+            response = await request_client.chat.completions.create(
+                model=settings.LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=temperature,
+                max_tokens=max_tokens,
+                response_format={"type": "json_object"},
+            )
+            break
+        except Exception as exc:
+            if attempt >= 2 or not is_transient_task_error(exc):
+                raise
+            logger.warning(
+                "Customer mindset LLM transport retry: attempt=%s/2 error=%s: %s",
+                attempt,
+                type(exc).__name__,
+                exc,
+            )
+            await asyncio.sleep(attempt * 3)
+    if response is None:
+        raise RuntimeError("用户心智 LLM 未返回结果")
     content = response.choices[0].message.content
     if not content:
         raise RuntimeError("LLM 返回空用户心智结果")
@@ -1587,16 +1756,32 @@ async def run_customer_mindset(product_id: int) -> dict[str, Any]:
         if not evidence_catalog:
             raise RuntimeError("没有可用于用户心智梳理的商品证据")
 
-        question_payload = await _llm_json(
-            system_prompt=QUESTION_PLANNER_SYSTEM_PROMPT,
-            user_prompt=_dynamic_question_prompt(evidence_catalog),
-            max_tokens=2500,
-            temperature=0.2,
-        )
-        dynamic_questions = normalize_dynamic_questions(
-            question_payload,
-            evidence_catalog=evidence_catalog,
-        )
+        current_fingerprint = build_mindset_input_fingerprint(product)
+        artifact_path = _customer_mindset_artifact_path(product)
+        if artifact_path.is_file():
+            try:
+                cached_serialized = artifact_path.read_text(encoding="utf-8")
+                cached_brief = load_customer_mindset(
+                    _local_file_reference(artifact_path, cached_serialized),
+                    required=True,
+                )
+                if cached_brief and cached_brief.get("input_fingerprint") == current_fingerprint:
+                    await _persist_customer_mindset(
+                        product_id=product_id,
+                        serialized_brief=_local_file_reference(artifact_path, cached_serialized),
+                        generated_at=datetime.fromisoformat(str(cached_brief["generated_at"])),
+                    )
+                    logger.info("Customer mindset restored from local artifact: product_id=%s", product_id)
+                    return cached_brief
+            except (OSError, RuntimeError, ValueError) as exc:
+                logger.warning("Ignoring unusable customer mindset local artifact for product_id=%s: %s", product_id, exc)
+
+        # Do not keep the evidence-read transaction open while the two LLM
+        # calls run. A long provider wait otherwise leaves asyncmy with an
+        # idle connection that can be closed before the brief is persisted.
+        await db.commit()
+
+        dynamic_questions = await _generate_dynamic_questions(evidence_catalog)
         answer_payload = await _llm_json(
             system_prompt=ANSWER_SYSTEM_PROMPT,
             user_prompt=_answer_prompt(evidence_catalog, dynamic_questions),
@@ -1614,7 +1799,7 @@ async def run_customer_mindset(product_id: int) -> dict[str, Any]:
             "schema_version": SCHEMA_VERSION,
             "product_id": product_id,
             "source_fingerprint": "sha256:" + hashlib.sha256(fingerprint_source.encode("utf-8")).hexdigest(),
-            "input_fingerprint": build_mindset_input_fingerprint(product),
+            "input_fingerprint": current_fingerprint,
             "generated_at": generated_at.isoformat(),
             "models": {"question_model": settings.LLM_MODEL, "answer_model": settings.LLM_MODEL},
             "evidence_catalog": evidence_catalog,
@@ -1622,9 +1807,12 @@ async def run_customer_mindset(product_id: int) -> dict[str, Any]:
             "strategy": strategy,
             "quality": quality,
         }
-        product.data.customer_mindset = json.dumps(brief, ensure_ascii=False)
-        product.data.customer_mindset_generated_at = generated_at
-        await db.commit()
+        serialized_brief = json.dumps(brief, ensure_ascii=False)
+        await _persist_customer_mindset(
+            product_id=product_id,
+            serialized_brief=_write_customer_mindset_artifact(product, serialized_brief),
+            generated_at=generated_at,
+        )
         logger.info(
             "Customer mindset completed: product_id=%s fixed=%s dynamic=%s review=%s",
             product_id,

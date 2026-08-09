@@ -200,8 +200,6 @@ class TaskRun(Base):
         back_populates="task_run",
         cascade="all, delete-orphan",
     )
-
-
 class TaskGroup(Base):
     __tablename__ = "task_groups"
     __table_args__ = (UniqueConstraint("task_run_id", "group_key", name="uq_task_groups_run_key"),)

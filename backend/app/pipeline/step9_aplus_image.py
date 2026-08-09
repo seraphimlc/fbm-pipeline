@@ -49,10 +49,70 @@ from app.services.amazon_image_compliance import (
     verify_oss_round_trip,
 )
 from app.services.oss_uploader import oss_configured, upload_private_image
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import selectinload
 
 logger = logging.getLogger(__name__)
+
+_RETRYABLE_DATABASE_ERROR_CODES = {1205, 1213, 2006, 2013}
+
+
+def _database_error_code(error: BaseException) -> int | None:
+    current: BaseException | None = error
+    while current is not None:
+        args = getattr(current, "args", ())
+        if args and isinstance(args[0], int):
+            return args[0]
+        current = getattr(current, "orig", None)
+    return None
+
+
+def _is_retryable_database_error(error: BaseException) -> bool:
+    if not isinstance(error, DBAPIError):
+        return False
+    if _database_error_code(error) in _RETRYABLE_DATABASE_ERROR_CODES:
+        return True
+    message = str(error).lower()
+    return "lost connection" in message or "connection reset" in message or "timed out" in message
+
+
+async def _persist_aplus_image_results(
+    *,
+    product_id: int,
+    image_results: list[dict],
+    success_count: int,
+    expected_count: int,
+) -> None:
+    """Persist the short image manifest via a fresh connection after long image API calls."""
+    serialized_results = json.dumps(image_results, ensure_ascii=False)
+    for attempt in range(1, 4):
+        try:
+            async with async_session() as persist_db:
+                result = await persist_db.execute(
+                    update(ProductAplus)
+                    .where(ProductAplus.product_id == product_id)
+                    .values(
+                        aplus_images=serialized_results,
+                        aplus_image_count=success_count,
+                        aplus_status="done" if success_count == expected_count else "partial",
+                        generated_at=datetime.now(),
+                    )
+                )
+                if result.rowcount != 1:
+                    raise RuntimeError(f"Product {product_id} has no writable A+ record")
+                await persist_db.commit()
+            return
+        except DBAPIError as exc:
+            if attempt >= 3 or not _is_retryable_database_error(exc):
+                raise
+            logger.warning(
+                "A+ image manifest persistence retry: product_id=%s attempt=%s/3 code=%s",
+                product_id,
+                attempt,
+                _database_error_code(exc),
+            )
+            await asyncio.sleep(0.5 * attempt)
 
 
 def _aspect_ratio(width: int, height: int) -> str:
@@ -1197,6 +1257,14 @@ async def run_aplus_image(product_id: int) -> dict:
         old_results = _existing_result_map(pa)
         overwrite_existing = _should_overwrite_existing()
 
+        # The actual image requests can run for several minutes.  All inputs
+        # needed below have been eagerly loaded, and persistence uses its own
+        # short-lived session, so never retain this read connection while the
+        # provider is generating images.  Keeping it checked out can exhaust
+        # the pool during serial A+ runs and leave a dead transport to be
+        # garbage-collected after a successful five-image result.
+        await db.commit()
+
         # 并发控制
         semaphore = asyncio.Semaphore(settings.APLUS_CONCURRENCY)
 
@@ -1235,11 +1303,12 @@ async def run_aplus_image(product_id: int) -> dict:
 
             image_results.sort(key=lambda item: (item.get("module_position") or item.get("position") or 0, item.get("slot_order") or 0))
             expected_count = len(enhanced_work_items)
-            pa.aplus_images = json.dumps(image_results, ensure_ascii=False)
-            pa.aplus_image_count = success_count
-            pa.aplus_status = "done" if success_count == expected_count else "partial"
-            pa.generated_at = datetime.now()
-            await db.commit()
+            await _persist_aplus_image_results(
+                product_id=product_id,
+                image_results=image_results,
+                success_count=success_count,
+                expected_count=expected_count,
+            )
 
             logger.info(
                 f"[Step9] Enhanced A+ slot 出图完成: {success_count}/{expected_count} 成功, "
@@ -1303,11 +1372,12 @@ async def run_aplus_image(product_id: int) -> dict:
 
         # 保存到数据库
         image_results.sort(key=lambda item: item.get("position") or 0)
-        pa.aplus_images = json.dumps(image_results, ensure_ascii=False)
-        pa.aplus_image_count = success_count
-        pa.aplus_status = "done" if success_count == 5 else "partial"
-        pa.generated_at = datetime.now()
-        await db.commit()
+        await _persist_aplus_image_results(
+            product_id=product_id,
+            image_results=image_results,
+            success_count=success_count,
+            expected_count=5,
+        )
 
         logger.info(
             f"[Step9] A+出图完成: {success_count}/{len(scripts)} 成功, "

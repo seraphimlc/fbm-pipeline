@@ -2,6 +2,7 @@ import os
 import hmac
 import ipaddress
 import logging
+import asyncio
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -24,7 +25,13 @@ from app.services.aplus_regenerate import cancel_active_regenerate_tasks, recove
 from app.services.giga_image_download_tasks import cancel_active_giga_image_downloads
 from app.services.giga_sync_tasks import cancel_active_giga_sync_tasks
 from app.services.offline_tasks import cancel_active_offline_tasks, recover_offline_tasks
-from app.task_runtime import kick_task_runtime, recover_task_runtime
+from app.task_runtime import (
+    kick_task_runtime,
+    recover_cancel_requested_task_runtime,
+    recover_task_runtime,
+    shutdown_task_runtime,
+)
+from app.task_runtime.auto_wake_monitor import auto_wake_monitor_loop
 from app.task_runtime.aplus_generate_workers import register_aplus_generate_workers
 from app.task_runtime.catalog_export_workers import register_catalog_export_workers
 from app.task_runtime.giga_dynamic_sync_workers import register_giga_dynamic_sync_workers
@@ -32,7 +39,8 @@ from app.task_runtime.giga_pull_workers import register_giga_pull_workers
 from app.task_runtime.lingxing_aplus_publish_workers import register_lingxing_aplus_publish_workers
 from app.task_runtime.lingxing_listing_sync_workers import register_lingxing_listing_sync_workers
 from app.task_runtime.product_bulk_advance_workers import register_product_bulk_advance_workers
-from app.product_tasks.actions import backfill_product_action_task_run_keys, register_product_task_actions
+from app.task_runtime.registry import assert_workers_registered
+from app.product_tasks.actions import PRODUCT_ACTION_TYPES, backfill_product_action_task_run_keys, register_product_task_actions
 
 
 logging.basicConfig(
@@ -113,6 +121,18 @@ async def lifespan(app: FastAPI):
     register_aplus_generate_workers()
     register_lingxing_listing_sync_workers()
     register_lingxing_aplus_publish_workers()
+    # Product actions are persisted as ready steps. Refuse to serve if even one
+    # can be created but has no in-process worker to execute it.
+    assert_workers_registered(PRODUCT_ACTION_TYPES, scope="商品任务运行时")
+    # A brand-new SQLite file has no task tables yet.  Initialize it before
+    # startup recovery queries, while preserving MySQL's explicit-maintenance
+    # behavior for existing shared databases.
+    if settings.is_sqlite:
+        await init_db()
+        logging.info("Initialized local SQLite database: %s", settings.SQLITE_DATABASE_PATH)
+    canceled_recovered = await recover_cancel_requested_task_runtime()
+    if canceled_recovered:
+        logging.info("Recovered %s cancellation-requested task runtime steps on startup.", canceled_recovered)
     if settings.STARTUP_RUN_DB_MAINTENANCE:
         await init_db()
     else:
@@ -135,8 +155,20 @@ async def lifespan(app: FastAPI):
         kick_task_runtime()
     else:
         logging.info("Startup task runtime kick disabled.")
+    auto_wake_task: asyncio.Task | None = None
+    if settings.TASK_RUNTIME_AUTO_WAKE_ENABLED:
+        auto_wake_task = asyncio.create_task(auto_wake_monitor_loop(), name="task-runtime-auto-wake")
+    else:
+        logging.info("Task runtime auto-wake monitor disabled.")
     yield
     # Shutdown
+    if auto_wake_task:
+        auto_wake_task.cancel()
+        try:
+            await auto_wake_task
+        except asyncio.CancelledError:
+            pass
+    await shutdown_task_runtime()
     await cancel_active_offline_tasks()
     await cancel_active_giga_sync_tasks()
     await cancel_active_giga_image_downloads()

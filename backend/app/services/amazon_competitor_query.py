@@ -8,7 +8,7 @@ from typing import Any
 from app.models import Product
 
 
-RULE_VERSION = "amazon_competitor_query_v2"
+RULE_VERSION = "amazon_competitor_query_v5"
 
 STOPWORDS = {
     "and",
@@ -38,6 +38,40 @@ NOISE_PATTERNS = (
 )
 
 CORE_PRODUCT_TERMS = (
+    # Keep specific vehicle and children's-product types ahead of generic
+    # accessories.  A title such as "Electric Tricycle ... Large Basket" must
+    # search for the vehicle, not the basket mentioned as a feature.
+    "electric tricycle",
+    "electric trike",
+    "electric bike",
+    "electric scooter",
+    "mountain bike",
+    "cruiser bike",
+    "city bike",
+    "bicycle",
+    "kids ride on car",
+    "ride on car",
+    "ride on truck",
+    "ride on utv",
+    "kids pedal go kart",
+    "pedal go kart",
+    "go kart",
+    "ride on toy",
+    "baby gate",
+    "kids bookshelf",
+    "toddler bookcase",
+    "kids table and chair set",
+    "coffee table and end table set",
+    "coffee table set",
+    "shoe cabinet",
+    "shoe storage cabinet",
+    "chest of drawers",
+    "drawer chest",
+    "dresser chest",
+    "bathroom floor cabinet",
+    "storage cabinet",
+    "kitchen step stool",
+    "learning tower",
     "platform bed frame",
     "upholstered bed frame",
     "storage bed frame",
@@ -71,6 +105,23 @@ CORE_PRODUCT_TERMS = (
     "fire pit",
     "storage box",
 )
+
+# These phrases describe broad furniture families rather than a buyer-facing
+# product type.  When a title also contains a specific type (for example
+# "3-Drawer Storage Cabinet ... Chest of Drawers"), searching the specific type
+# prevents unrelated pantry, bathroom, or outdoor cabinets from taking over
+# the candidate pool.
+GENERIC_CORE_PRODUCT_TERMS = frozenset({
+    "storage cabinet",
+    "cabinet",
+    "shelf",
+    "rack",
+    "bed",
+    "table",
+    "chair",
+    "organizer",
+    "basket",
+})
 
 STANDARD_SIZE_TERMS = (
     "california king",
@@ -142,7 +193,11 @@ def build_amazon_competitor_queries(product: Product) -> dict[str, Any]:
     facts = _product_facts(product)
     fact_text = " ".join(str(value) for value in facts.values() if value)
     normalized_text = _normalize_text(fact_text)
-    core_terms = _terms_in_text(normalized_text, CORE_PRODUCT_TERMS)
+    # The product title is the canonical type declaration.  Looking through
+    # every fact first lets an incidental feature (for example a storage basket)
+    # override the actual item type mentioned in the title.
+    title_core_terms = _core_terms_in_title(_normalize_text(facts.get("title")))
+    core_terms = title_core_terms or _terms_in_text(normalized_text, CORE_PRODUCT_TERMS)
     attribute_terms = _terms_in_text(normalized_text, ATTRIBUTE_TERMS)
     use_case_terms = _terms_in_text(normalized_text, USE_CASE_TERMS)
     material_terms = _split_terms(facts.get("material"), max_terms=2)
@@ -296,6 +351,48 @@ def _terms_in_text(text: str, terms: tuple[str, ...]) -> list[str]:
     return found
 
 
+def _core_terms_in_title(title: str) -> list[str]:
+    """Rank product types by the title's own wording, not registry order.
+
+    A title can contain both the product type and incidental nouns such as
+    ``basket`` or ``side table``.  A specific product phrase wins over a broad
+    furniture-family term even if the latter occurs earlier; within the same
+    specificity tier, the earliest phrase is the most reliable buyer-facing
+    type signal and longer phrases break ties.
+    """
+    normalized_title = _normalize_text(title)
+    # Supplier titles commonly insert a quantity or pluralize "chair" in the
+    # buyer-facing phrase (for example, "Kids Table and 2 Chair Set").  The
+    # literal registry phrase is deliberately singular and quantity-free, so
+    # normalize those variants before the generic "table" fallback can win.
+    canonical_matches: list[tuple[int, str]] = []
+    kids_table_set = re.search(r"\bkids? table and (?:\d+ )?chairs? set\b", normalized_title)
+    if kids_table_set:
+        canonical_matches.append((kids_table_set.start(), "kids table and chair set"))
+    # Supplier titles often say "3-Piece Coffee Table and End Table Sets".
+    # Preserve that buyer-facing set type instead of falling through to the
+    # generic ``table`` term, which has poor Amazon search precision.
+    coffee_end_table_set = re.search(
+        r"\b(?:\d+[- ]?)?piece coffee table and end table sets?\b",
+        normalized_title,
+    )
+    if coffee_end_table_set:
+        canonical_matches.append((coffee_end_table_set.start(), "coffee table and end table set"))
+
+    padded = f" {normalized_title} "
+    matches: list[tuple[int, int, int, str]] = []
+    for term in CORE_PRODUCT_TERMS:
+        index = padded.find(f" {term.lower()} ")
+        if index >= 0:
+            is_generic = 1 if term in GENERIC_CORE_PRODUCT_TERMS else 0
+            matches.append((is_generic, index, -len(term), term))
+    ranked = [term for _generic, _index, _length, term in sorted(matches)]
+    for _index, term in sorted(canonical_matches):
+        if term not in ranked:
+            ranked.insert(0, term)
+    return ranked
+
+
 def _split_terms(value: Any, *, max_terms: int) -> list[str]:
     text = _normalize_text(value)
     terms: list[str] = []
@@ -328,6 +425,17 @@ def _explicit_size_terms(facts: dict[str, Any]) -> list[str]:
         "product_type": facts.get("product_type"),
         "variants": facts.get("variants"),
     })
+    # A bicycle's wheel size is a purchasable form factor, not a generic
+    # physical dimension.  Without it, a title such as "24 Inch Cruiser Bike"
+    # is reduced to the generic ``bicycle`` query and may retrieve garden racks
+    # or other outdoor steel products.  Restrict this extraction to explicit
+    # bike/bicycle wording so ordinary 24-inch furniture remains unaffected.
+    bicycle_wheel_size = re.search(
+        r"\b(1[2-9]|2[0-9]|3[0-6])[- ]?inch\s+(?:[a-z]+\s+){0,3}(?:bike|bicycle)\b",
+        text,
+    )
+    if bicycle_wheel_size:
+        return [f"{bicycle_wheel_size.group(1)} inch"]
     found = _terms_in_text(text, STANDARD_SIZE_TERMS)
     canonical: list[str] = []
     for term in found:

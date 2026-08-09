@@ -1,5 +1,13 @@
 [
   {
+    "action": "confirm_product",
+    "kind": "api",
+    "client_export": "confirmProduct",
+    "method": "POST",
+    "route": "/api/products/{product_id}/confirm",
+    "default_label": "确认图片与 A+"
+  },
+  {
     "action": "manual_adjust_images",
     "kind": "navigate",
     "target": "/products/image-review?product_id={product_id}",
@@ -54,6 +62,14 @@
     "default_label": "重试"
   },
   {
+    "action": "retry_material_prepare",
+    "kind": "api",
+    "client_export": "retryProductMaterialPrepare",
+    "method": "POST",
+    "route": "/api/products/{product_id}/material-prepare/retry",
+    "default_label": "重试素材准备"
+  },
+  {
     "action": "retry_auto_image_selection",
     "kind": "api",
     "client_export": "retryProductAutoImageSelection",
@@ -76,6 +92,14 @@
     "method": "POST",
     "route": "/api/products/{product_id}/competitor-visual-match/retry",
     "default_label": "重试视觉初筛"
+  },
+  {
+    "action": "retry_keyword_research",
+    "kind": "api",
+    "client_export": "retryProductKeywordResearch",
+    "method": "POST",
+    "route": "/api/products/{product_id}/keyword-research/retry",
+    "default_label": "重试关键词采集"
   },
   {
     "action": "retry_image_analysis",

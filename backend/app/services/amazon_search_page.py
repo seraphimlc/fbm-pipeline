@@ -278,12 +278,25 @@ async def run_amazon_search_queries(
             item_code=item_code,
             query_index=index,
         )
-        candidates = await client.search(
-            query,
-            marketplace=marketplace,
-            limit=per_query_limit,
-            evidence_context=evidence_context,
-        )
+        try:
+            candidates = await client.search(
+                query,
+                marketplace=marketplace,
+                limit=per_query_limit,
+                evidence_context=evidence_context,
+            )
+        except AmazonSearchPageError as exc:
+            # A product query plan deliberately contains a broad core query plus
+            # narrower variants.  Amazon can legitimately have no natural result
+            # for one narrow phrase even when an earlier query already returned
+            # valid, evidenced ASINs.  Preserve the adapter's per-query evidence
+            # and continue in that single safe case; blocks, auth, parsing and
+            # transport errors still fail the whole search rather than masking an
+            # unreliable candidate set.
+            if exc.error_type == "empty_results":
+                logger.info("[AmazonSearchPage] skipping empty query result: index=%s query=%r", index, query)
+                continue
+            raise
         adapter_evidence = getattr(client, "last_search_evidence", None)
         results.append(AmazonSearchPageResult(
             query=query,

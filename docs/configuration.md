@@ -27,6 +27,22 @@ PRODUCT_BASE_DIR=../data/products
 
 These resolve to repository-local directories in a fresh clone.
 
+### Database mode
+
+数据库后端通过 `DATABASE_BACKEND` 选择，并且必须重启服务后才会切换：
+
+```env
+# 默认：使用既有远程或本机 MySQL
+DATABASE_BACKEND=mysql
+DATABASE_URL=mysql+asyncmy://user:password@host:3306/fbm_pipeline?charset=utf8mb4
+
+# 单人本机开发：使用独立 SQLite 文件，不读取或修改 MySQL 数据
+DATABASE_BACKEND=sqlite
+SQLITE_DATABASE_PATH=../data/fbm-pipeline.db
+```
+
+SQLite 首次启动会创建 ORM 定义的表，并启用 foreign keys、WAL 与 30 秒写入等待。SQLite 模式会强制商品流程、A+ 和自动选图并发为 1；它适合单一后端进程和串行任务执行，不应用于多进程生产部署。切换不会复制数据；如需迁移现有 MySQL 数据，必须另行执行可审计的导入流程。
+
 ### Frontend Development
 
 Frontend development configuration is loaded by Vite from:

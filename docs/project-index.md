@@ -32,7 +32,7 @@ Fill or update with stable routes only:
 - Templates/exports: `backend/app/pipeline/template_mappings/`, `backend/app/pipeline/templates/`
 - Lingxing enhanced A+ readiness: `scripts/check_lingxing_enhanced_aplus_qa_readiness.py`
 - Lingxing enhanced A+ sample dry-run: `scripts/prepare_lingxing_enhanced_aplus_qa_sample.py`
-- Data/migrations:
+- Data/migrations: `backend/app/database.py` (`DATABASE_BACKEND=mysql|sqlite`), `scripts/test_sqlite_database_mode.py`
 - Tests:
 - Workflow action contract: `contracts/product_workflow_actions.json`, `scripts/test_stability_repair_r1_workflow_actions.py`, `frontend/scripts/test-product-workflow-actions.mjs`
 - Catalog export outcome/UI: `backend/app/task_runtime/catalog_export_status.py`, `scripts/test_stability_repair_r1_catalog_export.py`, `scripts/test_stability_repair_r1_catalog_frontend.py`
@@ -58,6 +58,7 @@ cd frontend && npm run contracts:check
 cd frontend && npm run mutations:check
 cd frontend && npm run test:workflow-actions:e2e
 cd backend && .venv/bin/python ../scripts/test_customer_mindset.py
+cd backend && .venv/bin/python ../scripts/test_sqlite_database_mode.py
 cd backend && .venv/bin/python ../scripts/test_image_analysis_listing_e5.py
 cd backend && .venv/bin/python ../scripts/test_listing_title_highlights.py
 cd backend && .venv/bin/python ../scripts/test_image_evidence_cards.py

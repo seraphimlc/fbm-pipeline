@@ -736,10 +736,17 @@ async def list_task_runs(
             base_query = base_query.where(TaskRun.title.like(like))
             count_query = count_query.where(TaskRun.title.like(like))
 
-    catalog_projection = await load_catalog_effective_terminal_projection(
-        db,
-        owner_kind=CATALOG_STEP_OWNER_TASK_RUN,
-    )
+    # The ordinary task list need not scan every historical catalog-export step.
+    # Keep that expensive projection for the filters that actually depend on it.
+    if task_type == "catalog_export" or display_status is not None or view != "all":
+        catalog_projection = await load_catalog_effective_terminal_projection(
+            db,
+            owner_kind=CATALOG_STEP_OWNER_TASK_RUN,
+        )
+    else:
+        catalog_projection = CatalogEffectiveTerminalProjection(
+            {}, frozenset(), frozenset(), frozenset(), frozenset(), frozenset()
+        )
     display_condition = _display_status_sql_condition(display_status, catalog_projection)
 
     page_query, base_count_query = _apply_view_filter(
@@ -973,6 +980,11 @@ async def retry_failed_task_run_steps(run_id: int, db: AsyncSession = Depends(ge
         await retry_failed_steps(run_id)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+    # ``retry_failed_steps`` commits through its own session.  End this
+    # request's earlier read transaction before reloading, otherwise MySQL's
+    # repeatable-read snapshot can return the pre-retry failed state even
+    # though the step is already ready and the runner has been kicked.
+    await db.rollback()
     refreshed = await _load_run(db, run_id)
     refreshed_superseded = _superseded_map([refreshed])
     return await _decorate_detail_response_with_catalog_step(
@@ -999,6 +1011,7 @@ async def retry_task_step(step_id: int, db: AsyncSession = Depends(get_db)):
         select(TaskStep)
         .where(TaskStep.id == step_id)
         .options(selectinload(TaskStep.events))
+        .execution_options(populate_existing=True)
     )
     step = result.scalar_one()
     return _step_response(step)

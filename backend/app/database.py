@@ -1,14 +1,37 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from sqlalchemy import Text as SAText, text
+from sqlalchemy import Text as SAText, event, text
 from sqlalchemy.orm import DeclarativeBase
 from app.config import settings
 
+if settings.is_sqlite:
+    # SQLite is for one local user.  A timeout plus WAL avoids immediately
+    # failing a short overlap between an API request and the serial task worker.
+    _connect_args: dict[str, int] = {"timeout": 30}
+else:
+    _connect_args = {
+        "connect_timeout": max(1, int(settings.DATABASE_CONNECT_TIMEOUT_SECONDS)),
+    }
+    if int(settings.DATABASE_READ_TIMEOUT_SECONDS) > 0:
+        _connect_args["read_timeout"] = int(settings.DATABASE_READ_TIMEOUT_SECONDS)
+
 engine = create_async_engine(
-    settings.DATABASE_URL,
+    settings.effective_database_url,
     echo=False,
     pool_pre_ping=True,
     pool_recycle=1800,
+    connect_args=_connect_args,
 )
+
+if settings.is_sqlite:
+    @event.listens_for(engine.sync_engine, "connect")
+    def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute("PRAGMA busy_timeout=30000")
+        finally:
+            cursor.close()
+
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
@@ -25,9 +48,16 @@ async def init_db():
     # Ensure all ORM models are registered on Base.metadata before create_all.
     from app import models as _models  # noqa: F401
 
+    if settings.is_sqlite:
+        settings.SQLITE_DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        async with engine.begin() as conn:
+            await conn.execute(text("PRAGMA journal_mode=WAL"))
+            await conn.run_sync(Base.metadata.create_all)
+        return
+
     async with engine.begin() as conn:
         if conn.dialect.name not in {"mysql", "mariadb"}:
-            raise RuntimeError("fbm-pipeline now requires MySQL. Set DATABASE_URL to a mysql+asyncmy connection string.")
+            raise RuntimeError("unsupported database dialect; configure DATABASE_BACKEND=mysql or sqlite")
         await conn.run_sync(Base.metadata.create_all)
         await _ensure_mysql_registered_tables(conn)
         await _ensure_mysql_product_data_source_columns(conn)

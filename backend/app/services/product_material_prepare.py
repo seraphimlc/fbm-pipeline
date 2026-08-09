@@ -19,10 +19,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import settings
-from app.models import Product, ProductMaterialAsset
+from app.models import GigaProductImage, Product, ProductMaterialAsset
 from app.pipeline.chrome_ctrl import chrome_execute_js, chrome_navigate, chrome_workflow
 from app.pipeline.step1_collect import RAW_ASSETS_DIR, _download_material_zips
 from app.services.product_pipeline_artifacts import register_pipeline_artifact
+from app.services.giga_image_assets import GigaImageCandidate, download_giga_product_images
 from app.services.upc_pool import refresh_upc_binding
 
 
@@ -217,6 +218,21 @@ def _image_dimensions(path: Path) -> tuple[int | None, int | None, str | None]:
             return int(image.width), int(image.height), None
     except Exception as exc:
         return None, None, f"图片无法读取: {type(exc).__name__}: {exc}"
+
+
+def _material_package_warnings(
+    missing_types: list[str],
+    download_results: list[dict[str, Any]],
+    *,
+    has_giga_product_facts: bool,
+) -> list[str]:
+    """Allow a documented, evidence-backed API fallback when only Information is absent."""
+    used_api_fallback = any(item.get("download_method") == "api" for item in download_results)
+    if missing_types == ["information"] and used_api_fallback and has_giga_product_facts:
+        return [
+            "Information 素材包未提供；已使用 GIGA 商品页结构化事实和 To B 素材继续自动流程"
+        ]
+    return []
 
 
 async def resolve_gigab2b_product_page(item_code: str) -> dict[str, str]:
@@ -429,7 +445,49 @@ async def prepare_product_materials(
     if not item_code:
         raise ProductMaterialPrepareError("商品缺少 item_code，不能解析 GIGA 商品页")
 
-    page = await resolve_gigab2b_product_page(item_code)
+    try:
+        page = await resolve_gigab2b_product_page(item_code)
+    except ProductMaterialPrepareError as exc:
+        # A SKU can disappear from the public GIGA search index after it was
+        # synchronised.  Do not substitute a similarly named historic product:
+        # use only the exact SKU's already-synchronised official image rows.
+        rows = (await db.execute(
+            select(GigaProductImage).where(
+                GigaProductImage.sku_code == item_code,
+                GigaProductImage.image_url.is_not(None),
+            ).order_by(GigaProductImage.updated_at.desc())
+        )).scalars().all()
+        latest: dict[str, GigaProductImage] = {}
+        for row in rows:
+            latest.setdefault(str(row.image_url), row)
+        candidates = [
+            GigaImageCandidate(sku_code=item_code, item_code=item_code, image_url=url,
+                image_type=str(row.image_type or "gallery"), sort_order=int(row.sort_order or 0))
+            for url, row in latest.items()
+        ]
+        if not candidates or not product.data.title:
+            raise
+        batch_id = str(candidates and next(iter(latest.values())).batch_id)
+        downloaded = await download_giga_product_images(
+            batch_id=batch_id, site=(product.source_site or "US").upper(), candidates=candidates
+        )
+        paths = {item.image_url: item for item in downloaded if item.download_status == "done" and item.local_path}
+        for row in latest.values():
+            item = paths.get(row.image_url)
+            if item:
+                row.local_path, row.content_hash, row.file_size = item.local_path, item.content_hash, item.file_size
+                row.mime_type, row.download_status, row.error_message = item.mime_type, "done", None
+        if not paths:
+            raise
+        product.pipeline_test_session_key = test_session_key or product.pipeline_test_session_key
+        product.pipeline_origin_task_run_id = source_task_run_id or product.pipeline_origin_task_run_id
+        await db.commit()
+        return {
+            "product_id": product.id, "item_code": item_code, "package_count": 0,
+            "package_types": ["giga_synced_images"], "image_count": len(paths),
+            "warnings": [f"GIGA 前台 SKU 已下架；使用同步时同 SKU 官方图片继续自动流程: {exc}"],
+            "test_session_key": test_session_key,
+        }
     product.gigab2b_product_id = page["product_id"]
     product.gigab2b_url = page["detail_url"]
     product.pipeline_test_session_key = test_session_key or product.pipeline_test_session_key
@@ -454,7 +512,23 @@ async def prepare_product_materials(
     )
     package_types = {str(item.get("type") or "unknown") for item in download_results}
     missing_types = [key for key in ("to_b", "information") if key not in package_types]
-    if missing_types:
+    has_giga_product_facts = bool(
+        product.data.title
+        and (
+            product.data.features
+            or product.data.material
+            or product.data.product_type
+            or product.data.dimension_length
+            or product.data.dimension_width
+            or product.data.dimension_height
+        )
+    )
+    material_warnings = _material_package_warnings(
+        missing_types,
+        download_results,
+        has_giga_product_facts=has_giga_product_facts,
+    )
+    if missing_types and not material_warnings:
         raise ProductMaterialPrepareError(f"缺少必需素材包: {', '.join(missing_types)}")
     empty_packages = [
         str(item.get("path") or item.get("type") or "unknown")
@@ -551,6 +625,7 @@ async def prepare_product_materials(
         "source_task_run_id": source_task_run_id,
         "test_session_key": test_session_key,
         "package_types": sorted(package_types),
+        "warnings": material_warnings,
         "package_asset_ids": registered_package_ids,
         "image_asset_ids": [asset.id for asset in image_assets],
         "to_b_image_asset_ids": [asset.id for asset in to_b_image_assets],
@@ -583,6 +658,7 @@ async def prepare_product_materials(
         "gigab2b_url": page["detail_url"],
         "package_count": len(download_results),
         "package_types": sorted(package_types),
+        "warnings": material_warnings,
         "image_count": len(image_assets),
         "to_b_image_count": len(to_b_image_assets),
         "material_facts_path": str(material_facts_path),

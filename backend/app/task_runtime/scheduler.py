@@ -1,15 +1,16 @@
 import asyncio
 import logging
+from contextlib import suppress
 from datetime import datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import async_session
-from app.models import TaskGroup, TaskRun, TaskStep
+from app.models import TaskGroup, TaskRun, TaskStep, TaskStepEvent
 from app.task_runtime.actions import action_for
 from app.task_runtime.constants import (
     RETRYABLE_STEP_STATUSES,
@@ -39,13 +40,24 @@ from app.task_runtime.registry import (
     TaskWorkerOutcome,
     worker_for,
 )
+from app.task_runtime.retry_policy import is_transient_task_error
 
 logger = logging.getLogger(__name__)
 
 LOCK_SECONDS = 300
+# Long-running workers (notably multi-page VLM image analysis) may legitimately
+# outlive a single lock window.  Renew well before expiry without changing the
+# scheduler's serial-drain behavior.
+LEASE_HEARTBEAT_SECONDS = 60
+# Startup recovery is a narrow crash-window repair, not a historical task
+# migration. Keep it bounded so an old audit backlog never delays serving.
+INCOMPLETE_PROJECTION_RECOVERY_MAX_AGE_SECONDS = 15 * 60
+INCOMPLETE_PROJECTION_RECOVERY_MAX_STEPS = 32
 _runner_task: asyncio.Task | None = None
 _runner_handle: asyncio.Handle | None = None
 _runner_lock = asyncio.Lock()
+_SERIAL_DRAIN_LOCK_NAME = "fbm_pipeline_task_runtime_serial_drain"
+_STALE_SERIAL_DRAIN_LEASE_SECONDS = LOCK_SECONDS
 
 
 def _registered_action_for_step(step_type: str):
@@ -53,6 +65,46 @@ def _registered_action_for_step(step_type: str):
         return action_for(step_type)
     except RuntimeError:
         return None
+
+
+async def _renew_step_lease(step_id: int, worker_id: str) -> None:
+    """Keep the lease alive only while this exact worker still owns the step."""
+    while True:
+        await asyncio.sleep(max(0.01, float(LEASE_HEARTBEAT_SECONDS)))
+        now = datetime.now()
+        try:
+            async with async_session() as db:
+                renewal = await db.execute(
+                    update(TaskStep)
+                    .where(
+                        TaskStep.id == step_id,
+                        TaskStep.status == STEP_STATUS_RUNNING,
+                        TaskStep.locked_by == worker_id,
+                    )
+                    .values(
+                        heartbeat_at=now,
+                        locked_until=now + timedelta(seconds=LOCK_SECONDS),
+                        updated_at=now,
+                    )
+                )
+                if renewal.rowcount != 1:
+                    await db.rollback()
+                    return
+                await db.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A heartbeat must never replace a worker's own result with a
+            # secondary database error.  Stop renewing; stale recovery will
+            # handle the step conservatively if the database stays unavailable.
+            logger.exception("[TaskRuntime] step lease renewal failed: step_id=%s", step_id)
+            return
+
+
+async def _stop_step_lease(lease_task: asyncio.Task[None]) -> None:
+    lease_task.cancel()
+    with suppress(asyncio.CancelledError):
+        await lease_task
 
 
 def _group_dependencies_satisfied(groups: list[TaskGroup], group: TaskGroup) -> bool:
@@ -82,6 +134,10 @@ async def _claim_next_step(db: AsyncSession, worker_id: str) -> TaskStep | None:
         .join(TaskRun, TaskRun.id == TaskStep.task_run_id)
         .where(TaskStep.status == STEP_STATUS_READY)
         .where(TaskRun.status.in_((RUN_STATUS_PENDING, RUN_STATUS_RUNNING)))
+        # A replacement product action may leave an older ready step in the
+        # audit trail.  It is display-only once superseded and must never spend
+        # another VLM/browser call before the newer run gets its turn.
+        .where(TaskRun.superseded_by_run_id.is_(None))
         .order_by(TaskRun.id.asc(), TaskGroup.sort_order.asc(), TaskStep.sort_order.asc(), TaskStep.id.asc())
         .limit(1)
     )
@@ -345,7 +401,11 @@ async def _execute_step(step_id: int, worker_id: str) -> bool:
         success_projection_error: str | None = None
         try:
             worker = worker_for(step.step_type)
-            result_payload = await worker(TaskContext(db=db, run=run, group=group, step=step))
+            lease_task = asyncio.create_task(_renew_step_lease(step_id, worker_id))
+            try:
+                result_payload = await worker(TaskContext(db=db, run=run, group=group, step=step))
+            finally:
+                await _stop_step_lease(lease_task)
             await db.refresh(run)
             if run.cancel_requested_at:
                 raise TaskStepCanceled(run.cancel_reason or "用户取消")
@@ -395,6 +455,35 @@ async def _execute_step(step_id: int, worker_id: str) -> bool:
                 await action.on_step_interrupted(db, step, step.error_message)
             await emit_event(db, step=step, event_type="status", message=step.error_message)
             await db.commit()
+        except asyncio.CancelledError:
+            # Service shutdown and runner cancellation must not leave a live lease
+            # behind.  Reload after rollback because a worker may have an open
+            # transaction when it receives cancellation.
+            await db.rollback()
+            result = await db.execute(
+                select(TaskStep)
+                .where(TaskStep.id == step_id)
+                .options(selectinload(TaskStep.task_run), selectinload(TaskStep.task_group))
+            )
+            step = result.scalar_one_or_none()
+            if step is not None:
+                run = step.task_run
+                group = step.task_group
+                now = datetime.now()
+                step.status = STEP_STATUS_INTERRUPTED
+                step.error_message = "任务执行器已取消，step 已中断，可单独重跑"
+                step.locked_by = None
+                step.locked_until = None
+                step.heartbeat_at = now
+                step.finished_at = now
+                step.updated_at = now
+                action = _registered_action_for_step(step.step_type)
+                if action:
+                    await action.on_step_interrupted(db, step, step.error_message)
+                await emit_event(db, step=step, event_type="status", message=step.error_message)
+                await db.commit()
+                await _refresh_group_and_run(db, run_id)
+            raise
         except Exception as exc:
             logger.exception("[TaskRuntime] step failed: step_id=%s type=%s", step_id, step_type)
             await db.rollback()
@@ -410,15 +499,47 @@ async def _execute_step(step_id: int, worker_id: str) -> bool:
             run = step.task_run
             group = step.task_group
             now = datetime.now()
-            step.status = STEP_STATUS_FAILED
-            step.error_message = f"{type(exc).__name__}: {exc}"
+            error_message = f"{type(exc).__name__}: {exc}"
+            retryable = is_transient_task_error(exc) and step.attempt_count < step.max_attempts
             step.locked_by = None
             step.locked_until = None
-            step.heartbeat_at = now
-            step.finished_at = now
             step.updated_at = now
-            await emit_event(db, step=step, event_type="error", message=step.error_message)
-            await db.commit()
+            if retryable:
+                step.status = STEP_STATUS_READY
+                step.error_message = None
+                step.heartbeat_at = None
+                step.finished_at = None
+                await emit_event(
+                    db,
+                    step=step,
+                    event_type="retry",
+                    message=(
+                        f"检测到可恢复的基础设施异常，自动重试 "
+                        f"{step.attempt_count + 1}/{step.max_attempts}: {error_message}"
+                    ),
+                )
+                await db.commit()
+            else:
+                step.status = STEP_STATUS_FAILED
+                step.error_message = error_message
+                step.heartbeat_at = now
+                step.finished_at = now
+                await emit_event(db, step=step, event_type="error", message=step.error_message)
+                await db.commit()
+                # A retryable failure above deliberately keeps its product workflow
+                # in processing so the same step can resume.  Every terminal
+                # failure, however, must project the business failure regardless
+                # of whether its cause was infrastructure or domain validation;
+                # otherwise the task center says "failed" while the product stays
+                # stuck in processing and cannot follow its ordinary retry path.
+                action = _registered_action_for_step(step_type)
+                if action:
+                    try:
+                        await action.on_step_failure(db, step, exc)
+                        await db.commit()
+                    except Exception:
+                        await db.rollback()
+                        logger.exception("[TaskRuntime] terminal failure projection failed: step_id=%s", step_id)
         if success_payload is not None:
             action = _registered_action_for_step(step_type)
             if action:
@@ -497,12 +618,125 @@ async def drain_ready_steps() -> None:
         await _execute_step(step.id, worker_id)
 
 
+async def _drain_ready_steps_with_global_lease() -> None:
+    """Run one serial drain across all local processes, not just this loop.
+
+    A process-local asyncio lock is enough for one ordinary runner, but a
+    shutdown/restart can briefly overlap scheduled callbacks from different
+    processes.  MySQL's named lock is connection-scoped, so holding it for the
+    full drain prevents those callbacks from claiming different ready steps at
+    the same time.  Isolated SQLite tests retain the existing in-process lock.
+    """
+    async with async_session() as lock_db:
+        bind = lock_db.get_bind()
+        if bind.dialect.name != "mysql":
+            await drain_ready_steps()
+            return
+        acquired = await lock_db.scalar(
+            text("SELECT GET_LOCK(:lock_name, 0)"),
+            {"lock_name": _SERIAL_DRAIN_LOCK_NAME},
+        )
+        if int(acquired or 0) != 1 and await _reclaim_stale_serial_drain_lease(lock_db):
+            acquired = await lock_db.scalar(
+                text("SELECT GET_LOCK(:lock_name, 0)"),
+                {"lock_name": _SERIAL_DRAIN_LOCK_NAME},
+            )
+        if int(acquired or 0) != 1:
+            logger.info("[TaskRuntime] serial drain lease already held; skipping duplicate runner")
+            return
+        try:
+            await drain_ready_steps()
+        finally:
+            try:
+                await lock_db.execute(
+                    text("SELECT RELEASE_LOCK(:lock_name)"),
+                    {"lock_name": _SERIAL_DRAIN_LOCK_NAME},
+                )
+                await lock_db.commit()
+            except Exception:
+                # Closing the connection also releases MySQL named locks.  Do
+                # not turn successful task completion into a runner crash just
+                # because cleanup encountered a broken shutdown connection.
+                await lock_db.rollback()
+                logger.exception("[TaskRuntime] failed to release serial drain lease")
+
+
+async def _reclaim_stale_serial_drain_lease(lock_db: AsyncSession) -> bool:
+    """Release only a provably idle cross-process serial-drain holder.
+
+    MySQL named locks are connection-scoped. A remote process can therefore
+    die or abandon a drain connection while leaving every business step ready.
+    Never touch an active worker: reclaim requires this exact lock, no running
+    steps anywhere, and a sleeping holder older than the ordinary step lease.
+    """
+    try:
+        holder_id = await lock_db.scalar(
+            text("SELECT IS_USED_LOCK(:lock_name)"),
+            {"lock_name": _SERIAL_DRAIN_LOCK_NAME},
+        )
+        if not holder_id:
+            return False
+        active_step_id = await lock_db.scalar(
+            select(TaskStep.id).where(TaskStep.status == STEP_STATUS_RUNNING).limit(1)
+        )
+        if active_step_id:
+            return False
+        holder = (
+            await lock_db.execute(
+                text(
+                    "SELECT ID, COMMAND, TIME FROM information_schema.PROCESSLIST "
+                    "WHERE ID = :holder_id"
+                ),
+                {"holder_id": int(holder_id)},
+            )
+        ).mappings().first()
+        if not holder:
+            return False
+        is_idle = str(holder.get("COMMAND") or "").lower() == "sleep"
+        idle_seconds = int(holder.get("TIME") or 0)
+        if not is_idle or idle_seconds < _STALE_SERIAL_DRAIN_LEASE_SECONDS:
+            return False
+        await lock_db.execute(text(f"KILL {int(holder_id)}"))
+        await lock_db.commit()
+        logger.warning(
+            "[TaskRuntime] reclaimed stale serial drain lease: connection_id=%s idle_seconds=%s",
+            holder_id,
+            idle_seconds,
+        )
+        return True
+    except Exception:
+        await lock_db.rollback()
+        logger.exception("[TaskRuntime] failed to inspect stale serial drain lease")
+        return False
+
+
 def _clear_stale_runner_state() -> None:
     global _runner_task, _runner_handle
     if _runner_task and _runner_task.done():
         _runner_task = None
     if _runner_handle and _runner_handle.cancelled():
         _runner_handle = None
+
+
+async def _kick_if_ready_steps_remain() -> None:
+    """Resume a drain only when unfinished ready work is actually present."""
+    try:
+        async with async_session() as db:
+            ready_step_id = await db.scalar(
+                select(TaskStep.id)
+                .join(TaskRun, TaskRun.id == TaskStep.task_run_id)
+                .where(TaskStep.status == STEP_STATUS_READY)
+                .where(TaskRun.status.in_((RUN_STATUS_PENDING, RUN_STATUS_RUNNING)))
+                .where(TaskRun.superseded_by_run_id.is_(None))
+                .limit(1)
+            )
+        if ready_step_id:
+            kick_task_runtime()
+    except Exception:
+        # A completion callback must never turn a completed worker outcome into
+        # a runner crash. The 30-minute monitor remains the conservative
+        # fallback if the database is temporarily unavailable here.
+        logger.exception("[TaskRuntime] unable to check ready work after runner completion")
 
 
 def _on_runner_done(task: asyncio.Task) -> None:
@@ -517,6 +751,9 @@ def _on_runner_done(task: asyncio.Task) -> None:
         if _runner_task is task:
             _runner_task = None
         logger.info("[TaskRuntime] runner task finished")
+        if not task.cancelled():
+            with suppress(RuntimeError):
+                asyncio.create_task(_kick_if_ready_steps_remain())
 
 
 def kick_task_runtime() -> None:
@@ -531,7 +768,7 @@ def kick_task_runtime() -> None:
 
     async def runner() -> None:
         async with _runner_lock:
-            await drain_ready_steps()
+            await _drain_ready_steps_with_global_lease()
 
     def start_runner() -> None:
         global _runner_task, _runner_handle
@@ -547,6 +784,139 @@ def kick_task_runtime() -> None:
     loop = asyncio.get_running_loop()
     logger.info("[TaskRuntime] scheduling runner task")
     _runner_handle = loop.call_later(0.05, start_runner)
+
+
+async def shutdown_task_runtime() -> None:
+    """Stop the in-process runner cleanly before the service exits.
+
+    Letting the event loop tear down a live worker implicitly can leave its
+    database lease in ``running`` until the five-minute timeout.  Cancelling
+    the runner here routes the worker through ``_execute_step``'s cancellation
+    projection, which releases the lock and leaves an individually retryable
+    interrupted step instead.
+    """
+    global _runner_handle, _runner_task
+    if _runner_handle and not _runner_handle.cancelled():
+        _runner_handle.cancel()
+    _runner_handle = None
+    runner_task = _runner_task
+    if runner_task and not runner_task.done():
+        runner_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await runner_task
+    _clear_stale_runner_state()
+
+
+async def recover_cancel_requested_task_runtime() -> int:
+    """Close cancellation requests that outlived the process that owned them.
+
+    A normal in-process worker observes ``cancel_requested_at`` after its call
+    returns.  Once that process has exited, however, there is no worker left
+    to observe it; waiting for the old lease to expire only creates a fake
+    running task.  Startup is a safe boundary to finish exactly those explicit
+    cancellation requests without touching ordinary running work.
+    """
+    now = datetime.now()
+    recovered = 0
+    async with async_session() as db:
+        result = await db.execute(
+            select(TaskStep)
+            .join(TaskRun, TaskRun.id == TaskStep.task_run_id)
+            .where(TaskStep.status == STEP_STATUS_RUNNING)
+            .where(TaskRun.cancel_requested_at.is_not(None))
+        )
+        steps = result.scalars().all()
+        for step in steps:
+            step.status = STEP_STATUS_CANCELED
+            step.error_message = step.error_message or "服务重启后已收口取消请求"
+            step.locked_by = None
+            step.locked_until = None
+            step.heartbeat_at = now
+            step.finished_at = now
+            step.updated_at = now
+            await emit_event(db, step=step, event_type="status", message=step.error_message)
+            recovered += 1
+        await db.commit()
+        for run_id in sorted({step.task_run_id for step in steps}):
+            await _refresh_group_and_run(db, run_id)
+    return recovered
+
+
+async def recover_incomplete_product_success_projections() -> int:
+    """Resume idempotent product success hooks interrupted by a service exit.
+
+    Scheduler-owned structural success is committed before a product action
+    creates its downstream run.  If the process exits in that narrow window,
+    the expensive worker result is already durable but the next action is
+    absent.  Only steps with the explicit ``step 执行成功`` event and no
+    ``step 成功投影完成`` event qualify; action hooks create or reuse the
+    downstream run, never rerun the completed external worker.
+    """
+    recovery_cutoff = datetime.now() - timedelta(seconds=INCOMPLETE_PROJECTION_RECOVERY_MAX_AGE_SECONDS)
+    projection_completed = (
+        select(TaskStepEvent.id)
+        .where(TaskStepEvent.task_step_id == TaskStep.id)
+        .where(TaskStepEvent.event_type == "status")
+        .where(TaskStepEvent.message == "step 成功投影完成")
+        .exists()
+    )
+    worker_succeeded = (
+        select(TaskStepEvent.id)
+        .where(TaskStepEvent.task_step_id == TaskStep.id)
+        .where(TaskStepEvent.event_type == "status")
+        .where(TaskStepEvent.message == "step 执行成功")
+        .exists()
+    )
+    async with async_session() as db:
+        step_ids = (
+            await db.execute(
+                select(TaskStep.id)
+                .where(TaskStep.status == STEP_STATUS_SUCCEEDED)
+                .where(TaskStep.result_json.is_not(None))
+                .where(TaskStep.updated_at >= recovery_cutoff)
+                .where(worker_succeeded)
+                .where(~projection_completed)
+                .order_by(TaskStep.id.asc())
+                .limit(INCOMPLETE_PROJECTION_RECOVERY_MAX_STEPS)
+            )
+        ).scalars().all()
+
+    recovered = 0
+    for step_id in step_ids:
+        async with async_session() as db:
+            result = await db.execute(
+                select(TaskStep)
+                .where(TaskStep.id == step_id)
+                .options(selectinload(TaskStep.task_run), selectinload(TaskStep.task_group))
+            )
+            step = result.scalar_one_or_none()
+            if step is None:
+                continue
+            action = _registered_action_for_step(step.step_type)
+            payload = json_loads(step.result_json, {})
+            if action is None or not isinstance(payload, dict):
+                continue
+            try:
+                await action.on_step_success(db, step, payload)
+                result = await db.execute(
+                    select(TaskStep)
+                    .where(TaskStep.id == step_id)
+                    .options(selectinload(TaskStep.task_run), selectinload(TaskStep.task_group))
+                    .execution_options(populate_existing=True)
+                )
+                step = result.scalar_one()
+                await emit_event(db, step=step, event_type="status", message="step 成功投影完成")
+                await db.commit()
+                await _refresh_group_and_run(db, step.task_run_id)
+                recovered += 1
+            except Exception:
+                await db.rollback()
+                logger.exception(
+                    "[TaskRuntime] incomplete success projection recovery failed: step_id=%s type=%s",
+                    step_id,
+                    step.step_type,
+                )
+    return recovered
 
 
 async def recover_task_runtime() -> int:

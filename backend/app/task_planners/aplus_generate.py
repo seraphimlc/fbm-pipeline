@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models import CatalogProduct, Product, ProductAplus, TaskGroup, TaskRun, TaskStep
+from app.models.status import COMPLETED, PENDING_REVIEW
 from app.pipeline.engine import is_running
 from app.task_runtime.constants import STEP_STATUS_PENDING, STEP_STATUS_READY
 from app.task_runtime.json_utils import json_dumps, json_loads
@@ -16,8 +17,10 @@ APLUS_GENERATE_ACTIVE_STATUSES = {"queued", "planning", "scripting", "imaging"}
 def _aplus_ready_error(product: Product | None, catalog: CatalogProduct | None) -> str | None:
     if not product:
         return "缺少关联商品，不能生成 A+"
-    if not catalog or catalog.confirmed_at is None:
-        return "未加入待导出，不能生成 A+"
+    if not catalog:
+        return "缺少商品导出记录，不能生成 A+"
+    if product.status not in {PENDING_REVIEW, COMPLETED}:
+        return "Listing 尚未完成，不能生成 A+"
     if is_running(product.id):
         return "商品主流程仍在运行，不能生成 A+"
     if not product.data or not product.data.listing_title or not product.data.listing_bullets:
@@ -88,8 +91,14 @@ async def create_aplus_generate_runs(
             db.add(product.aplus)
             await db.flush()
         if product.aplus.aplus_status in APLUS_GENERATE_ACTIVE_STATUSES:
-            errors.append(f"商品 {product.id} A+ 已在生成中")
-            continue
+            # Status alone is not authority for an active A+ job.  A process
+            # can be interrupted after setting ``planning``/``imaging`` but
+            # before its task run is durable (or an operational cleanup can
+            # remove the run).  ``_active_aplus_product_ids`` is the runtime
+            # source of truth above; when it contains no matching live step,
+            # reclaim the orphaned display status and create one trackable
+            # replacement instead of leaving the product permanently stuck.
+            product.aplus.aplus_status = "queued"
         if product.aplus.aplus_status == "done" and not force:
             errors.append(f"商品 {product.id} A+ 已生成，如需重跑请使用强制重跑")
             continue

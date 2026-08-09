@@ -13,6 +13,8 @@ export interface MutationCallsite {
 
 export type MutationCallsiteId =
   | "cancelTaskRun|frontend/src/pages/TaskRunCenter.tsx|cancelRun"
+  | "confirmProduct|frontend/src/pages/ProductDetail.tsx|runWorkflowAction"
+  | "confirmProduct|frontend/src/pages/ProductList.tsx|runProductWorkflowAction"
   | "createAplusGenerateBatch|frontend/src/pages/AplusManagement.tsx|submitGenerate"
   | "createCatalogExportTaskRuns|frontend/src/pages/CatalogList.tsx|createExportTasksByIds"
   | "createGigaInventorySyncTaskRuns|frontend/src/pages/InventorySyncList.tsx|handleSync"
@@ -53,6 +55,10 @@ export type MutationCallsiteId =
   | "retryProductCompetitorSearch|frontend/src/pages/ProductList.tsx|runProductWorkflowAction"
   | "retryProductCompetitorVisualMatch|frontend/src/pages/ProductDetail.tsx|runWorkflowAction"
   | "retryProductCompetitorVisualMatch|frontend/src/pages/ProductList.tsx|runProductWorkflowAction"
+  | "retryProductKeywordResearch|frontend/src/pages/ProductDetail.tsx|runWorkflowAction"
+  | "retryProductKeywordResearch|frontend/src/pages/ProductList.tsx|runProductWorkflowAction"
+  | "retryProductMaterialPrepare|frontend/src/pages/ProductDetail.tsx|runWorkflowAction"
+  | "retryProductMaterialPrepare|frontend/src/pages/ProductList.tsx|runProductWorkflowAction"
   | "retryStep|frontend/src/pages/ProductDetail.tsx|ProductDetail"
   | "retryStep|frontend/src/pages/ProductDetail.tsx|runWorkflowAction"
   | "retryStep|frontend/src/pages/ProductList.tsx|renderPrimaryRowAction|1"
@@ -82,6 +88,24 @@ export const mutationInventory = [
     "source": "frontend/src/pages/TaskRunCenter.tsx",
     "handler": "cancelRun",
     "via": "direct"
+  },
+  {
+    "id": "confirmProduct|frontend/src/pages/ProductDetail.tsx|runWorkflowAction",
+    "client": "confirmProduct",
+    "endpoint": "`/products/${id}/confirm`",
+    "method": "post",
+    "source": "frontend/src/pages/ProductDetail.tsx",
+    "handler": "runWorkflowAction",
+    "via": "workflow_registry"
+  },
+  {
+    "id": "confirmProduct|frontend/src/pages/ProductList.tsx|runProductWorkflowAction",
+    "client": "confirmProduct",
+    "endpoint": "`/products/${id}/confirm`",
+    "method": "post",
+    "source": "frontend/src/pages/ProductList.tsx",
+    "handler": "runProductWorkflowAction",
+    "via": "workflow_registry"
   },
   {
     "id": "createAplusGenerateBatch|frontend/src/pages/AplusManagement.tsx|submitGenerate",
@@ -444,6 +468,42 @@ export const mutationInventory = [
     "via": "workflow_registry"
   },
   {
+    "id": "retryProductKeywordResearch|frontend/src/pages/ProductDetail.tsx|runWorkflowAction",
+    "client": "retryProductKeywordResearch",
+    "endpoint": "`/products/${id}/keyword-research/retry`",
+    "method": "post",
+    "source": "frontend/src/pages/ProductDetail.tsx",
+    "handler": "runWorkflowAction",
+    "via": "workflow_registry"
+  },
+  {
+    "id": "retryProductKeywordResearch|frontend/src/pages/ProductList.tsx|runProductWorkflowAction",
+    "client": "retryProductKeywordResearch",
+    "endpoint": "`/products/${id}/keyword-research/retry`",
+    "method": "post",
+    "source": "frontend/src/pages/ProductList.tsx",
+    "handler": "runProductWorkflowAction",
+    "via": "workflow_registry"
+  },
+  {
+    "id": "retryProductMaterialPrepare|frontend/src/pages/ProductDetail.tsx|runWorkflowAction",
+    "client": "retryProductMaterialPrepare",
+    "endpoint": "`/products/${id}/material-prepare/retry`",
+    "method": "post",
+    "source": "frontend/src/pages/ProductDetail.tsx",
+    "handler": "runWorkflowAction",
+    "via": "workflow_registry"
+  },
+  {
+    "id": "retryProductMaterialPrepare|frontend/src/pages/ProductList.tsx|runProductWorkflowAction",
+    "client": "retryProductMaterialPrepare",
+    "endpoint": "`/products/${id}/material-prepare/retry`",
+    "method": "post",
+    "source": "frontend/src/pages/ProductList.tsx",
+    "handler": "runProductWorkflowAction",
+    "via": "workflow_registry"
+  },
+  {
     "id": "retryStep|frontend/src/pages/ProductDetail.tsx|ProductDetail",
     "client": "retryStep",
     "endpoint": "`/products/${id}/retry`",
@@ -631,11 +691,6 @@ export const mutationExportExceptions = [
     "client": "clearCatalogAsin",
     "classification": "unused",
     "reason": "Catalog ASIN deletion is not currently exposed by a pages/components/hooks owner."
-  },
-  {
-    "client": "confirmProduct",
-    "classification": "unused",
-    "reason": "The legacy product confirmation client has no current pages/components/hooks owner."
   },
   {
     "client": "createAplusUploadBatch",

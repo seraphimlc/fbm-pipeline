@@ -16,11 +16,24 @@ if str(BACKEND) not in sys.path:
 
 from app.database import async_session, run_schema_maintenance  # noqa: E402
 from app.models import CatalogProduct, Product, ProductAplus, ProductData, ProductFile, ProductImage, TaskGroup, TaskRun, TaskStep, TaskStepEvent  # noqa: E402
-from app.models.status import COMPLETED, STEP5_LISTING, WORKFLOW_NODE_FLOW_DONE, WORKFLOW_NODE_LISTING_GENERATION, WORKFLOW_STATUS_PENDING, WORKFLOW_STATUS_PROCESSING, WORKFLOW_STATUS_SUCCEEDED  # noqa: E402
+from app.api import products as product_api  # noqa: E402
+from app.models.status import (  # noqa: E402
+    COMPLETED,
+    PENDING_REVIEW,
+    STEP5_LISTING,
+    WORKFLOW_NODE_CONFIRM_IMAGES_APLUS,
+    WORKFLOW_NODE_FLOW_DONE,
+    WORKFLOW_NODE_GENERATE_APLUS,
+    WORKFLOW_NODE_LISTING_GENERATION,
+    WORKFLOW_STATUS_PENDING,
+    WORKFLOW_STATUS_PROCESSING,
+    WORKFLOW_STATUS_SUCCEEDED,
+)
 from app.product_tasks import actions as product_actions  # noqa: E402
 from app.services import aplus_auto_trigger as aplus_service  # noqa: E402
 from app.services.aplus_auto_trigger import should_auto_start_aplus, try_auto_start_aplus_after_export_ready  # noqa: E402
 from app.task_planners import aplus_generate as aplus_planner  # noqa: E402
+from app.task_runtime.aplus_generate_workers import _set_aplus_status  # noqa: E402
 from app.task_runtime.constants import RUN_STATUS_RUNNING, STEP_STATUS_RUNNING  # noqa: E402
 from app.task_runtime.json_utils import json_dumps, json_loads  # noqa: E402
 
@@ -61,10 +74,10 @@ async def _make_product(
     session,
     marker: str,
     *,
-    status: str = COMPLETED,
-    workflow_node: str | None = WORKFLOW_NODE_FLOW_DONE,
-    workflow_status: str | None = WORKFLOW_STATUS_SUCCEEDED,
-    confirmed_at: datetime | None | object = ...,
+    status: str = PENDING_REVIEW,
+    workflow_node: str | None = WORKFLOW_NODE_GENERATE_APLUS,
+    workflow_status: str | None = WORKFLOW_STATUS_PENDING,
+    confirmed_at: datetime | None | object = None,
     listing_title: str | None = "A+ ready listing title",
     listing_bullets: str | None = None,
     image_analysis: str | None = None,
@@ -77,10 +90,9 @@ async def _make_product(
     catalog_exported: bool = False,
     template_output: bool = False,
     template_file: bool = False,
+    catalog: bool = True,
 ) -> Product:
     now = datetime.now()
-    if confirmed_at is ...:
-        confirmed_at = now
     product = Product(
         gigab2b_url=f"https://aplus-a1.example/{marker}",
         gigab2b_product_id=f"{TEST_PREFIX}{marker}",
@@ -88,7 +100,7 @@ async def _make_product(
         aplus_upload_status=product_aplus_upload_status,
         aplus_uploaded_at=now if aplus_uploaded else None,
         status=status,
-        current_step=6 if status == COMPLETED else 5,
+        current_step=6 if status in {COMPLETED, PENDING_REVIEW} else 5,
         workflow_node=workflow_node,
         workflow_status=workflow_status,
         created_at=now,
@@ -109,20 +121,21 @@ async def _make_product(
         image_analysis=image_analysis if image_analysis is not None else json_dumps({"done": True}),
         analyzed_at=now,
     )
-    product.catalog_item = CatalogProduct(
-        gigab2b_url=product.gigab2b_url,
-        gigab2b_product_id=product.gigab2b_product_id,
-        amazon_asin=catalog_amazon_asin,
-        item_code=f"{TEST_PREFIX}{marker}",
-        title=f"A1 fixture {marker}",
-        status=status,
-        confirmed_at=confirmed_at,
-        exported_at=now if catalog_exported else None,
-        export_task_id=99101 if catalog_exported else None,
-        export_file_path="/tmp/aplus-a1-export.xlsx" if catalog_exported else None,
-        aplus_upload_status=catalog_aplus_upload_status,
-        aplus_uploaded_at=now if aplus_uploaded else None,
-    )
+    if catalog:
+        product.catalog_item = CatalogProduct(
+            gigab2b_url=product.gigab2b_url,
+            gigab2b_product_id=product.gigab2b_product_id,
+            amazon_asin=catalog_amazon_asin,
+            item_code=f"{TEST_PREFIX}{marker}",
+            title=f"A1 fixture {marker}",
+            status=status,
+            confirmed_at=confirmed_at,
+            exported_at=now if catalog_exported else None,
+            export_task_id=99101 if catalog_exported else None,
+            export_file_path="/tmp/aplus-a1-export.xlsx" if catalog_exported else None,
+            aplus_upload_status=catalog_aplus_upload_status,
+            aplus_uploaded_at=now if aplus_uploaded else None,
+        )
     if aplus_status is not None:
         product.aplus = ProductAplus(aplus_status=aplus_status)
     if template_file:
@@ -253,7 +266,15 @@ async def _listing_success(
     )
     await session.commit()
     result = {"product_id": product.id, "item_code": f"{TEST_PREFIX}{marker}", "listing": {"fixture": True}}
-    await product_actions.ProductListingGenerationAction().on_step_success(session, listing_step, result)
+    original_customer_mindset_ready = product_actions._customer_mindset_ready
+    original_listing_content_ready = product_actions._listing_content_ready
+    product_actions._customer_mindset_ready = lambda _product: True
+    product_actions._listing_content_ready = lambda _product: True
+    try:
+        await product_actions.ProductListingGenerationAction().on_step_success(session, listing_step, result)
+    finally:
+        product_actions._customer_mindset_ready = original_customer_mindset_ready
+        product_actions._listing_content_ready = original_listing_content_ready
     return listing_run, listing_step, result
 
 
@@ -283,12 +304,12 @@ async def _run_a1() -> None:
             code = await _decision_code(session, product, enabled=False)
             assert code == "disabled_by_config", code
 
-        await _case("MISSING_CATALOG_CONFIRMED", "missing_catalog_export_ready", confirmed_at=None)
+        await _case("MISSING_CATALOG", "missing_catalog", catalog=False)
         await _case("MISSING_LISTING_TITLE", "missing_listing_content", listing_title="")
         await _case("MISSING_LISTING_BULLETS", "missing_listing_content", listing_bullets="[]")
         await _case("MISSING_IMAGE_ANALYSIS", "missing_image_analysis", image_analysis="")
-        await _case("NOT_COMPLETED", "not_completed", status="created")
-        await _case("NOT_FLOW_DONE", "not_flow_done", workflow_node=WORKFLOW_NODE_LISTING_GENERATION, workflow_status=WORKFLOW_STATUS_PENDING)
+        await _case("NOT_LISTING_READY", "not_listing_ready", status="created")
+        await _case("NOT_GENERATE_APLUS", "not_listing_ready", workflow_node=WORKFLOW_NODE_LISTING_GENERATION, workflow_status=WORKFLOW_STATUS_PENDING)
 
         async with async_session() as session:
             product = await _make_product(session, "ACTIVE_MAIN_TASK")
@@ -298,11 +319,59 @@ async def _run_a1() -> None:
             assert code == "main_workflow_active", code
 
         async with async_session() as session:
+            product = await _make_product(session, "SUPERSEDED_MAIN_TASK")
+            stale_run, _stale_step = await _make_active_task(
+                session,
+                product.id,
+                task_type="product_competitor_visual_match",
+                step_type="product_competitor_visual_match",
+                suffix="superseded_visual_match",
+            )
+            replacement_run, _replacement_step = await _make_active_task(
+                session,
+                product.id,
+                task_type="product_listing_generation",
+                step_type="product_listing_generation",
+                suffix="replacement_listing",
+            )
+            stale_run.superseded_by_run_id = replacement_run.id
+            stale_run.superseded_at = datetime.now()
+            replacement_run.status = "succeeded"
+            _replacement_step.status = "succeeded"
+            await session.commit()
+            code = await _decision_code(session, product, enabled=True)
+            assert code == "eligible", code
+
+        async with async_session() as session:
             product = await _make_product(session, "ACTIVE_APLUS_TASK")
             await _make_active_task(session, product.id, task_type="aplus_generate", step_type="aplus_generate_product", suffix="aplus_generate")
             await session.commit()
             code = await _decision_code(session, product, enabled=True)
             assert code == "active_aplus_task", code
+
+        async with async_session() as session:
+            product = await _make_product(session, "SUPERSEDED_APLUS_TASK")
+            stale_run, _stale_step = await _make_active_task(
+                session,
+                product.id,
+                task_type="aplus_generate",
+                step_type="aplus_generate_product",
+                suffix="superseded_aplus",
+            )
+            replacement_run, replacement_step = await _make_active_task(
+                session,
+                product.id,
+                task_type="aplus_generate",
+                step_type="aplus_generate_product",
+                suffix="replacement_aplus",
+            )
+            stale_run.superseded_by_run_id = replacement_run.id
+            stale_run.superseded_at = datetime.now()
+            replacement_run.status = "succeeded"
+            replacement_step.status = "succeeded"
+            await session.commit()
+            code = await _decision_code(session, product, enabled=True)
+            assert code == "eligible", code
 
         await _case("APLUS_DONE", "aplus_done", aplus_status="done")
         await _case("APLUS_REGEN_DONE", "aplus_done", aplus_status="regen_done")
@@ -339,10 +408,10 @@ async def _test_listing_success_default_off_noops() -> None:
             refreshed = await _product_state(session, product.id)
             summary = json_loads(listing_run.summary_json, {})
             aplus_rows = await _aplus_steps_for_product(session, product.id)
-            assert refreshed.status == COMPLETED, refreshed.status
-            assert refreshed.workflow_node == WORKFLOW_NODE_FLOW_DONE, refreshed.workflow_node
-            assert refreshed.workflow_status == WORKFLOW_STATUS_SUCCEEDED, refreshed.workflow_status
-            assert refreshed.catalog_item.confirmed_at is not None, refreshed.catalog_item.confirmed_at
+            assert refreshed.status == PENDING_REVIEW, refreshed.status
+            assert refreshed.workflow_node == WORKFLOW_NODE_GENERATE_APLUS, refreshed.workflow_node
+            assert refreshed.workflow_status == WORKFLOW_STATUS_PENDING, refreshed.workflow_status
+            assert refreshed.catalog_item.confirmed_at is None, refreshed.catalog_item.confirmed_at
             assert refreshed.aplus is None, refreshed.aplus
             assert aplus_rows == [], [(run.id, step.id) for run, step in aplus_rows]
             assert summary["status"] == "listing_done", summary
@@ -371,10 +440,10 @@ async def _test_listing_success_enabled_creates_aplus_task() -> tuple[int, int, 
             refreshed = await _product_state(session, product.id)
             summary = json_loads(listing_run.summary_json, {})
             aplus_rows = await _aplus_steps_for_product(session, product.id)
-            assert refreshed.status == COMPLETED, refreshed.status
-            assert refreshed.workflow_node == WORKFLOW_NODE_FLOW_DONE, refreshed.workflow_node
-            assert refreshed.workflow_status == WORKFLOW_STATUS_SUCCEEDED, refreshed.workflow_status
-            assert refreshed.catalog_item.confirmed_at is not None, refreshed.catalog_item.confirmed_at
+            assert refreshed.status == PENDING_REVIEW, refreshed.status
+            assert refreshed.workflow_node == WORKFLOW_NODE_GENERATE_APLUS, refreshed.workflow_node
+            assert refreshed.workflow_status == WORKFLOW_STATUS_PENDING, refreshed.workflow_status
+            assert refreshed.catalog_item.confirmed_at is None, refreshed.catalog_item.confirmed_at
             assert refreshed.aplus and refreshed.aplus.aplus_status == "queued", refreshed.aplus
             assert len(aplus_rows) == 1, [(run.id, step.id) for run, step in aplus_rows]
             aplus_run, aplus_step = aplus_rows[0]
@@ -439,11 +508,11 @@ async def _test_listing_success_aplus_failure_does_not_rollback_export_ready() -
             refreshed = await _product_state(session, product_id)
             summary = await _run_summary(session, listing_run_id)
             aplus_rows = await _aplus_steps_for_product(session, product_id)
-            assert refreshed.status == COMPLETED, refreshed.status
-            assert refreshed.workflow_node == WORKFLOW_NODE_FLOW_DONE, refreshed.workflow_node
-            assert refreshed.workflow_status == WORKFLOW_STATUS_SUCCEEDED, refreshed.workflow_status
+            assert refreshed.status == PENDING_REVIEW, refreshed.status
+            assert refreshed.workflow_node == WORKFLOW_NODE_GENERATE_APLUS, refreshed.workflow_node
+            assert refreshed.workflow_status == WORKFLOW_STATUS_PENDING, refreshed.workflow_status
             assert not refreshed.workflow_error, refreshed.workflow_error
-            assert refreshed.catalog_item.confirmed_at is not None, refreshed.catalog_item.confirmed_at
+            assert refreshed.catalog_item.confirmed_at is None, refreshed.catalog_item.confirmed_at
             assert refreshed.aplus is None, refreshed.aplus
             assert aplus_rows == [], [(run.id, step.id) for run, step in aplus_rows]
             assert summary["aplus_auto_trigger"]["status"] == "failed", summary
@@ -455,6 +524,56 @@ async def _test_listing_success_aplus_failure_does_not_rollback_export_ready() -
         _set_auto_enabled(previous)
 
 
+async def _test_aplus_done_requires_user_confirmation_before_export_ready() -> None:
+    """The worker projection and confirmation endpoint form the export gate."""
+    async with async_session() as session:
+        product = await _make_product(session, "CONFIRM_GATE")
+        product_id = product.id
+        await session.commit()
+
+    async with async_session() as session:
+        product = await _product_state(session, product_id)
+        product.aplus = ProductAplus(
+            product_id=product.id,
+            aplus_status="imaging",
+            aplus_image_count=5,
+            aplus_images=json_dumps([
+                {"position": position, "status": "done", "path": f"/tmp/a1-confirm-{position}.png"}
+                for position in range(1, 6)
+            ]),
+        )
+        session.add(product.aplus)
+        await session.commit()
+
+    await _set_aplus_status(product_id, "done")
+
+    async with async_session() as session:
+        pending = await _product_state(session, product_id)
+        assert pending.status == PENDING_REVIEW, pending.status
+        assert pending.workflow_node == WORKFLOW_NODE_CONFIRM_IMAGES_APLUS, pending.workflow_node
+        assert pending.workflow_status == WORKFLOW_STATUS_PENDING, pending.workflow_status
+        assert pending.catalog_item.confirmed_at is None, pending.catalog_item.confirmed_at
+
+        original_running = product_api.is_running
+        original_customer_mindset_ready = product_api._customer_mindset_ready
+        original_listing_content_ready = product_api._listing_content_ready
+        product_api.is_running = lambda _product_id: False
+        product_api._customer_mindset_ready = lambda _product: True
+        product_api._listing_content_ready = lambda _product: True
+        try:
+            await product_api.confirm_product(product_id, db=session)
+        finally:
+            product_api.is_running = original_running
+            product_api._customer_mindset_ready = original_customer_mindset_ready
+            product_api._listing_content_ready = original_listing_content_ready
+
+        confirmed = await _product_state(session, product_id)
+        assert confirmed.status == COMPLETED, confirmed.status
+        assert confirmed.workflow_node == WORKFLOW_NODE_FLOW_DONE, confirmed.workflow_node
+        assert confirmed.workflow_status == WORKFLOW_STATUS_SUCCEEDED, confirmed.workflow_status
+        assert confirmed.catalog_item.confirmed_at is not None, confirmed.catalog_item.confirmed_at
+
+
 async def _run_a2() -> None:
     await run_schema_maintenance()
     await _cleanup_markers()
@@ -463,6 +582,7 @@ async def _run_a2() -> None:
         product_id, aplus_run_id, listing_run_id = await _test_listing_success_enabled_creates_aplus_task()
         await _test_try_helper_reuses_existing_active_aplus(product_id, aplus_run_id, listing_run_id)
         await _test_listing_success_aplus_failure_does_not_rollback_export_ready()
+        await _test_aplus_done_requires_user_confirmation_before_export_ready()
     finally:
         await _cleanup_markers()
 

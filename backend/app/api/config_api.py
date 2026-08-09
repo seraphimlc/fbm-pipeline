@@ -394,6 +394,8 @@ async def get_config():
     return {
         "project_name": settings.PROJECT_NAME,
         "version": settings.VERSION,
+        "database_backend": settings.DATABASE_BACKEND,
+        "sqlite_database_path": str(settings.SQLITE_DATABASE_PATH) if settings.is_sqlite else None,
         "backend_port": settings.BACKEND_PORT,
         "frontend_port": settings.FRONTEND_PORT,
         "default_brand": settings.DEFAULT_BRAND,

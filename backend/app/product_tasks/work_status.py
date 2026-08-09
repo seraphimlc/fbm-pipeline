@@ -18,6 +18,7 @@ PRODUCT_WORK_STATUS_SELECT_COMPETITOR = "select_competitor"
 PRODUCT_WORK_STATUS_CAPTURE_DETAIL = "capture_detail"
 PRODUCT_WORK_STATUS_READY_TO_GENERATE = "ready_to_generate"
 PRODUCT_WORK_STATUS_RUNNING = "running"
+PRODUCT_WORK_STATUS_CONFIRM_IMAGES_APLUS = "confirm_images_aplus"
 PRODUCT_WORK_STATUS_EXPORT_READY = "export_ready"
 PRODUCT_WORK_STATUS_EXPORTED = "exported"
 PRODUCT_WORK_STATUS_FAILED = "failed"
@@ -154,6 +155,20 @@ PRODUCT_WORK_STATUS_DEFINITIONS: tuple[ProductWorkStatusDefinition, ...] = (
         db_filter_name="running",
         fact_source="processing workflow nodes owned by product task actions",
         producer_note="Task execution details stay in task center; this bucket only says the business workflow is running.",
+    ),
+    ProductWorkStatusDefinition(
+        key=PRODUCT_WORK_STATUS_CONFIRM_IMAGES_APLUS,
+        label="待确认图片与 A+",
+        short_label="确认图片与 A+",
+        color="cyan",
+        overview_bucket=PRODUCT_WORK_STATUS_CONFIRM_IMAGES_APLUS,
+        is_list_filterable=True,
+        is_workbench_bucket=True,
+        frontend_visible=True,
+        primary_metric=True,
+        db_filter_name="confirm_images_aplus",
+        fact_source="products.workflow_node/status = confirm_images_aplus/pending after five A+ images complete",
+        producer_note="Only the user confirmation action may advance this review state into export_ready.",
     ),
     ProductWorkStatusDefinition(
         key=PRODUCT_WORK_STATUS_EXPORT_READY,

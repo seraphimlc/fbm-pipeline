@@ -71,7 +71,33 @@ def test_auto_selection_story_order() -> None:
     assert sum(item["role"] == "alternate_angle" for item in result["selected_gallery"]) == 1
 
 
+def test_low_confidence_auxiliary_batch_is_rejected_not_blocking() -> None:
+    high_review = {**_review("#01", "alternate_angle", 9.5), "candidate": {"path": "/tmp/01.jpg"}}
+    low_review = {**_review("#02", "lifestyle", 7.0), "candidate": {"path": "/tmp/02.jpg"}}
+    result = _merge_batch_results(
+        [
+            {
+                "selected_main": {"image_id": "#01", "path": "/tmp/01.jpg", "score": 0.99, "risk_flags": [], "main_image_valid": True},
+                "selected_gallery": [], "rejected": [], "confidence": "high", "warnings": [], "image_reviews": [high_review],
+            },
+            {
+                "selected_main": {"image_id": "#02", "path": "/tmp/02.jpg", "score": 0.9, "risk_flags": [], "main_image_valid": True},
+                "selected_gallery": [], "rejected": [], "confidence": "low", "warnings": [], "image_reviews": [low_review],
+            },
+        ],
+        [
+            {"sheet_page": 1, "sheet_path": "/tmp/high.jpg", "image_ids": ["#01"]},
+            {"sheet_page": 2, "sheet_path": "/tmp/low.jpg", "image_ids": ["#02"]},
+        ],
+        [], "fixture",
+    )
+    assert result["selected_main"]["image_id"] == "#01"
+    assert result["confidence"] == "medium"
+    assert result["rejected"][0]["reason"] == "low_confidence_not_selected"
+
+
 if __name__ == "__main__":
     test_step6_story_order()
     test_auto_selection_story_order()
+    test_low_confidence_auxiliary_batch_is_rejected_not_blocking()
     print("image gallery story: PASS")

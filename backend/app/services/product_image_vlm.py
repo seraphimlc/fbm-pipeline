@@ -326,7 +326,15 @@ async def analyze_contact_sheet(
         len(batch_records),
         sheet_path.stat().st_size,
     )
-    request_client = client.with_options(timeout=45, max_retries=0) if hasattr(client, "with_options") else client
+    # 自动选图的 Contact Sheet 与 Step 6 直传图片一样属于真实多模态推理。
+    # 不能固定为 45 秒，否则一张包含多图、并要求完整 JSON 审核的 Sheet 会在
+    # 系统已配置 150 秒视觉超时的情况下仍被过早取消。
+    timeout_seconds = max(30, int(settings.STEP6_VLM_TIMEOUT_SECONDS))
+    request_client = (
+        client.with_options(timeout=timeout_seconds, max_retries=0)
+        if hasattr(client, "with_options")
+        else client
+    )
     max_attempts = 2 if len(batch_records) > 1 else 3
     response = None
     for attempt in range(1, max_attempts + 1):
@@ -347,7 +355,7 @@ async def analyze_contact_sheet(
                     max_tokens=4000,
                     temperature=0.2,
                 ),
-                timeout=60,
+                timeout=timeout_seconds + 15,
             )
             break
         except Exception as exc:

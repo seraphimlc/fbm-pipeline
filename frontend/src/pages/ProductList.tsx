@@ -46,10 +46,13 @@ const RUNNING_STATUSES = [
 ];
 
 const PRODUCT_LIST_WORKFLOW_CALLSITE_IDS = {
+  confirmProduct: 'confirmProduct|frontend/src/pages/ProductList.tsx|runProductWorkflowAction',
   resumePipeline: 'resumePipeline|frontend/src/pages/ProductList.tsx|runProductWorkflowAction',
+  retryProductMaterialPrepare: 'retryProductMaterialPrepare|frontend/src/pages/ProductList.tsx|runProductWorkflowAction',
   retryProductAutoImageSelection: 'retryProductAutoImageSelection|frontend/src/pages/ProductList.tsx|runProductWorkflowAction',
   retryProductCompetitorSearch: 'retryProductCompetitorSearch|frontend/src/pages/ProductList.tsx|runProductWorkflowAction',
   retryProductCompetitorVisualMatch: 'retryProductCompetitorVisualMatch|frontend/src/pages/ProductList.tsx|runProductWorkflowAction',
+  retryProductKeywordResearch: 'retryProductKeywordResearch|frontend/src/pages/ProductList.tsx|runProductWorkflowAction',
   retryStep: 'retryStep|frontend/src/pages/ProductList.tsx|runProductWorkflowAction',
 } satisfies Record<ProductWorkflowApiClientExport, MutationCallsiteId>;
 
@@ -62,6 +65,7 @@ type WorkStatus =
   | 'capture_detail'
   | 'ready_to_generate'
   | 'running'
+  | 'confirm_images_aplus'
   | 'interrupted'
   | 'suspended'
   | 'manual_review'
@@ -89,6 +93,7 @@ const WORK_STATUS_META: Record<WorkStatus, { label: string; shortLabel: string; 
   capture_detail: { label: '抓取竞品详情中', shortLabel: '抓详情', color: 'processing', action: '等待抓取' },
   ready_to_generate: { label: '待自动生成 Listing', shortLabel: '待自动生成', color: 'warning', action: '自动入队' },
   running: { label: '生成中', shortLabel: '生成中', color: 'processing', action: '等待完成' },
+  confirm_images_aplus: { label: '待确认图片与 A+', shortLabel: '确认图片与 A+', color: 'cyan', action: '去确认' },
   interrupted: { label: '已中断', shortLabel: '已中断', color: 'warning', action: '重试' },
   suspended: { label: '已挂起', shortLabel: '已挂起', color: 'default', action: '继续' },
   manual_review: { label: '待人工处理', shortLabel: '人工处理', color: 'warning', action: '继续' },
@@ -107,6 +112,7 @@ const WORK_STATUS_FILTERS: Array<'all' | WorkStatus> = [
   'capture_detail',
   'ready_to_generate',
   'running',
+  'confirm_images_aplus',
   'export_ready',
   'exported',
   'failed',
@@ -148,6 +154,7 @@ const PRIMARY_WORK_STATUS: WorkStatus[] = [
   'select_competitor',
   'ready_to_generate',
   'running',
+  'confirm_images_aplus',
   'export_ready',
   'failed',
 ];
@@ -909,6 +916,9 @@ const ProductList: React.FC = () => {
     }
     if (row.workStatus === 'ready_to_generate') {
       return <Button size="small" onClick={() => navigate('/task-runs')}>任务中心</Button>;
+    }
+    if (row.workStatus === 'confirm_images_aplus') {
+      return <Button size="small" type="primary" onClick={() => openProductDetail(product.id)}>确认图片与 A+</Button>;
     }
     if (row.workStatus === 'interrupted') {
       return (

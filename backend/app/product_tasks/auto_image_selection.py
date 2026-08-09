@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -295,8 +296,18 @@ def _normalize_batch_result(raw: dict[str, Any], batch_records: list[dict[str, A
 
 
 def _merge_batch_results(batch_results: list[dict[str, Any]], image_batches: list[dict[str, Any]], warnings: list[str], model: str) -> dict[str, Any]:
-    main_candidates = [item["selected_main"] for item in batch_results if item.get("selected_main")]
+    low_confidence_results = [
+        result for result in batch_results
+        if str(result.get("confidence") or "medium").lower() == "low"
+    ]
+    confident_results = [
+        result for result in batch_results
+        if str(result.get("confidence") or "medium").lower() != "low"
+    ]
+    main_candidates = [item["selected_main"] for item in confident_results if item.get("selected_main")]
     if not main_candidates:
+        if low_confidence_results:
+            raise AutoImageSelectionError("所有候选图片批次均为低置信度，需人工纠偏")
         raise AutoImageSelectionError("VLM 未返回可用主图")
     selected_main = max(main_candidates, key=lambda item: _score(item.get("score")))
     if selected_main.get("main_image_valid") is False:
@@ -315,7 +326,7 @@ def _merge_batch_results(batch_results: list[dict[str, Any]], image_batches: lis
     }
 
     gallery_candidates: list[dict[str, Any]] = []
-    for result in batch_results:
+    for result in confident_results:
         gallery_candidates.extend(result.get("selected_gallery") or [])
     for item in main_candidates:
         if item.get("image_id") == selected_main.get("image_id"):
@@ -383,6 +394,29 @@ def _merge_batch_results(batch_results: list[dict[str, Any]], image_batches: lis
             if image_id:
                 rejected_by_id[image_id] = item
 
+    # A low-confidence auxiliary batch must never supply a main or gallery
+    # image.  It is still fully reviewed and represented in the audit trail,
+    # so conservatively reject those images instead of blocking an otherwise
+    # evidence-complete product for manual sorting.
+    low_confidence_image_ids = {
+        str(review.get("image_id") or "").strip()
+        for result in low_confidence_results
+        for review in (result.get("image_reviews") or [])
+        if isinstance(review, dict) and str(review.get("image_id") or "").strip()
+    }
+    for image_id in low_confidence_image_ids:
+        review = review_by_id.get(image_id, {})
+        candidate = review.get("candidate") if isinstance(review, dict) else {}
+        candidate = candidate if isinstance(candidate, dict) else {}
+        rejected_by_id[image_id] = {
+            "path": candidate.get("path") or review.get("path"),
+            "image_url": candidate.get("image_url") or review.get("image_url"),
+            "image_id": image_id,
+            "reason": "low_confidence_not_selected",
+            "material_asset_id": candidate.get("material_asset_id"),
+            "content_hash": candidate.get("content_hash"),
+        }
+
     selected_ids = {selected_main["image_id"], *[item["image_id"] for item in gallery]}
     for item in gallery_candidates:
         image_id = str(item.get("image_id") or "").strip()
@@ -417,17 +451,19 @@ def _merge_batch_results(batch_results: list[dict[str, Any]], image_batches: lis
         )
     rejected = [rejected_by_id[image_id] for image_id in sorted(rejected_by_id)]
 
-    confidences = [str(result.get("confidence") or "medium").lower() for result in batch_results]
-    confidence = "low" if "low" in confidences else ("medium" if "medium" in confidences else "high")
-    if confidence == "low":
-        raise AutoImageSelectionError("VLM 自动选图低置信度，需人工纠偏")
+    confidences = [str(result.get("confidence") or "medium").lower() for result in confident_results]
+    confidence = "medium" if "medium" in confidences or low_confidence_results else "high"
 
     return {
         "selected_main": {key: value for key, value in selected_main.items() if key not in {"candidate", "main_image_valid"}},
         "selected_gallery": [{key: value for key, value in item.items() if key != "candidate"} for item in gallery],
         "rejected": rejected,
         "confidence": confidence,
-        "warnings": [*warnings, *[warning for result in batch_results for warning in result.get("warnings") or []]],
+        "warnings": [
+            *warnings,
+            *[warning for result in batch_results for warning in result.get("warnings") or []],
+            *([f"已保守排除 {len(low_confidence_image_ids)} 张低置信度图片"] if low_confidence_image_ids else []),
+        ],
         "image_batches": image_batches,
         "image_reviews": image_reviews,
         "decision_coverage": {
@@ -545,40 +581,66 @@ async def _run_with_db(db: AsyncSession, product_id: int) -> dict[str, Any]:
         raise AutoImageSelectionError("候选图片均不可访问")
 
     data = product.data
+    item_code = str(data.item_code if data and data.item_code else product.id)
+    title = data.title if data else product.gigab2b_product_id
+    brand = product.brand
+    category = (data.leaf_category or data.product_type) if data else ""
+    facts = _product_facts(product)
+    material_dir_value = data.material_dir if data and data.material_dir else None
+    source_site = product.source_site or "US"
+
+    # The contact-sheet/VLM phase can take several minutes for a large
+    # supplier gallery.  Everything it needs from MySQL has been eagerly
+    # loaded above, so do not keep this read transaction (and its TCP
+    # connection) open while waiting on the external model.  A read-only
+    # commit releases the connection without expiring the eagerly loaded ORM
+    # objects (as rollback would), so the scheduler can safely write its
+    # success projection once the model call returns.
+    await db.commit()
+
     model = settings.VLM_MODEL
     client = settings.get_image_analysis_client()
     image_batches: list[dict[str, Any]] = []
     batch_results: list[dict[str, Any]] = []
     try:
-        material_dir = Path(data.material_dir).expanduser().resolve() if data and data.material_dir else (
-            settings.PRODUCT_BASE_DIR / "GIGA" / (product.source_site or "US") / str(data.item_code if data else product.id)
+        material_dir = Path(material_dir_value).expanduser().resolve() if material_dir_value else (
+            settings.PRODUCT_BASE_DIR / "GIGA" / source_site / item_code
         )
         analysis_dir = material_dir / "image analysis" / "contact_sheets" / datetime.now().strftime("auto_selection_%Y%m%d_%H%M%S")
         local_records = await download_image_records(records, analysis_dir / "source_cache")
         if len(local_records) != len(records):
             raise AutoImageSelectionError(f"候选图片本地化不完整: {len(local_records)}/{len(records)}")
-        batches = build_contact_sheets(local_records, analysis_dir, str(data.item_code if data and data.item_code else product.id))
+        batches = build_contact_sheets(local_records, analysis_dir, item_code)
         image_batches = list(batches)
-        for batch in batches:
+        batch_results_by_index: dict[int, dict[str, Any]] = {}
+        semaphore = asyncio.Semaphore(max(1, settings.AUTO_IMAGE_SELECTION_VLM_CONCURRENCY))
+
+        async def analyze_batch(index: int, batch: dict[str, Any]) -> None:
             batch_records = [record for record in local_records if record["image_id"] in set(batch["image_ids"])]
             batch_prompt = AUTO_IMAGE_SELECTION_PROMPT.format(
-                title=data.title if data else product.gigab2b_product_id,
-                brand=product.brand,
-                category=data.leaf_category or data.product_type if data else "",
-                facts=_product_facts(product),
+                title=title,
+                brand=brand,
+                category=category,
+                facts=facts,
                 candidates=_candidate_prompt_lines(batch_records),
             )
-            raw, reviews = await analyze_contact_sheet(
-                client,
-                model,
-                batch,
-                batch_records,
-                batch_prompt,
-                system_prompt=AUTO_IMAGE_SELECTION_SYSTEM_PROMPT,
-                log_prefix="AutoImageSelection",
-            )
+            async with semaphore:
+                raw, reviews = await analyze_contact_sheet(
+                    client,
+                    model,
+                    batch,
+                    batch_records,
+                    batch_prompt,
+                    system_prompt=AUTO_IMAGE_SELECTION_SYSTEM_PROMPT,
+                    log_prefix="AutoImageSelection",
+                )
             require_complete_batch_reviews(reviews, batch_records, batch_label=f"contact_sheet={batch['sheet_page']}")
-            batch_results.append(_normalize_batch_result(raw, batch_records, reviews))
+            batch_results_by_index[index] = _normalize_batch_result(raw, batch_records, reviews)
+
+        async with asyncio.TaskGroup() as task_group:
+            for index, batch in enumerate(batches):
+                task_group.create_task(analyze_batch(index, batch))
+        batch_results = [batch_results_by_index[index] for index in range(len(batches))]
     except Exception as exc:
         logger.warning("自动选图 Contact Sheet VLM 失败: product_id=%s error=%s", product_id, exc)
         raise AutoImageSelectionError(f"自动选图 Contact Sheet VLM 失败: {type(exc).__name__}: {exc}") from exc

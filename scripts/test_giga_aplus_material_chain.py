@@ -32,7 +32,7 @@ from app.pipeline.step9_aplus_image import (  # noqa: E402
 )
 from app.product_tasks.auto_image_selection import _merge_batch_results  # noqa: E402
 from app.services import product_material_prepare  # noqa: E402
-from app.services.product_material_prepare import write_information_material_facts  # noqa: E402
+from app.services.product_material_prepare import _material_package_warnings, write_information_material_facts  # noqa: E402
 from app.services.product_pipeline_artifacts import (  # noqa: E402
     write_aplus_plan_artifacts,
     write_aplus_script_artifacts,
@@ -118,6 +118,108 @@ def test_external_gpt_image_config_normalizes_v1_base() -> None:
             "api_key": "fixture-key",
             "model": "gpt-image-2",
         }
+
+
+async def test_material_api_fallback_refreshes_missing_seller_id() -> None:
+    """SKU-to-page material runs must be able to use the API fallback safely."""
+    original_mode = step1_collect.settings.STEP1_MATERIAL_DOWNLOAD_MODE
+    original_browser = step1_collect._download_material_zips_via_chrome
+    original_collect = step1_collect._collect_product_data_via_api
+    original_api_download = step1_collect._download_material_zips_via_api
+    calls: list[tuple[str, object]] = []
+
+    async def failing_browser(*_args, **_kwargs):
+        raise RuntimeError("fixture browser download failure")
+
+    async def collect_api(product_id: str, product_url: str):
+        calls.append(("collect", (product_id, product_url)))
+        return {
+            "itemCode": "W3662P448314",
+            "_gigab2bProductId": product_id,
+            "_gigab2bSellerId": "85331",
+            "_gigab2bRetailReady": False,
+        }, "fixture-cookie"
+
+    async def download_api(_save_dir, data, cookie):
+        calls.append(("download", (data, cookie)))
+        return [{"type": "to_b", "path": "/tmp/fixture.zip", "extracted_count": 1}]
+
+    try:
+        step1_collect.settings.STEP1_MATERIAL_DOWNLOAD_MODE = "browser"
+        step1_collect._download_material_zips_via_chrome = failing_browser
+        step1_collect._collect_product_data_via_api = collect_api
+        step1_collect._download_material_zips_via_api = download_api
+        result = await step1_collect._download_material_zips(
+            Path("/tmp"),
+            {"itemCode": "W3662P448314", "_gigab2bProductId": "123456"},
+            None,
+            "https://www.gigab2b.com/index.php?route=product/product&product_id=123456",
+            required_options={"To B素材包", "Information"},
+            download_all=True,
+        )
+        assert result[0]["type"] == "to_b"
+        assert calls[0] == ("collect", ("123456", "https://www.gigab2b.com/index.php?route=product/product&product_id=123456"))
+        download_data, download_cookie = calls[1][1]
+        assert download_data["_gigab2bSellerId"] == "85331"
+        assert download_cookie == "fixture-cookie"
+    finally:
+        step1_collect.settings.STEP1_MATERIAL_DOWNLOAD_MODE = original_mode
+        step1_collect._download_material_zips_via_chrome = original_browser
+        step1_collect._collect_product_data_via_api = original_collect
+        step1_collect._download_material_zips_via_api = original_api_download
+
+
+async def test_browser_download_start_timeout_allows_api_fallback() -> None:
+    original_timeout = step1_collect.settings.STEP1_DOWNLOAD_TIMEOUT_SECONDS
+    original_start_timeout = step1_collect.settings.STEP1_BROWSER_DOWNLOAD_START_TIMEOUT_SECONDS
+    original_active = step1_collect._active_chrome_downloads
+    original_new = step1_collect._new_download_zips
+    original_monotonic = step1_collect.time.monotonic
+    original_sleep = step1_collect.asyncio.sleep
+    ticks = iter((0.0, 2.0, 2.0, 2.0))
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    try:
+        step1_collect.settings.STEP1_DOWNLOAD_TIMEOUT_SECONDS = 300
+        step1_collect.settings.STEP1_BROWSER_DOWNLOAD_START_TIMEOUT_SECONDS = 1
+        step1_collect._active_chrome_downloads = lambda: []
+        step1_collect._new_download_zips = lambda *_args: []
+        step1_collect.time.monotonic = lambda: next(ticks)
+        step1_collect.asyncio.sleep = no_sleep
+        try:
+            await step1_collect._wait_for_browser_zips(set(), "SKU", 0.0)
+        except RuntimeError as exc:
+            assert "未在 1s 内开始" in str(exc)
+        else:
+            raise AssertionError("missing browser download must reach the API fallback promptly")
+    finally:
+        step1_collect.settings.STEP1_DOWNLOAD_TIMEOUT_SECONDS = original_timeout
+        step1_collect.settings.STEP1_BROWSER_DOWNLOAD_START_TIMEOUT_SECONDS = original_start_timeout
+        step1_collect._active_chrome_downloads = original_active
+        step1_collect._new_download_zips = original_new
+        step1_collect.time.monotonic = original_monotonic
+        step1_collect.asyncio.sleep = original_sleep
+
+
+def test_api_fallback_can_continue_with_evidence_when_information_is_absent() -> None:
+    warnings = _material_package_warnings(
+        ["information"],
+        [{"type": "to_b", "download_method": "api"}],
+        has_giga_product_facts=True,
+    )
+    assert warnings and "GIGA 商品页结构化事实" in warnings[0]
+    assert not _material_package_warnings(
+        ["information"],
+        [{"type": "to_b", "download_method": "api"}],
+        has_giga_product_facts=False,
+    )
+    assert not _material_package_warnings(
+        ["to_b", "information"],
+        [{"type": "to_b", "download_method": "api"}],
+        has_giga_product_facts=True,
+    )
 
 
 def _selection(image_id: str, score: float) -> dict:
@@ -505,6 +607,9 @@ async def main() -> None:
     test_twelve_images_make_two_contact_sheets()
     test_step6_direct_image_batches_are_bounded()
     test_external_gpt_image_config_normalizes_v1_base()
+    await test_material_api_fallback_refreshes_missing_seller_id()
+    await test_browser_download_start_timeout_allows_api_fallback()
+    test_api_fallback_can_continue_with_evidence_when_information_is_absent()
     test_multi_sheet_merge_has_one_decision_per_image()
     await test_pipeline_artifacts_use_persisted_dimensions()
     test_aplus_image_count_size_and_sidecar_contract()

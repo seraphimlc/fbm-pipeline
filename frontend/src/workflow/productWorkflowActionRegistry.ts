@@ -1,8 +1,11 @@
 import {
+  confirmProduct,
   resumePipeline,
   retryProductAutoImageSelection,
+  retryProductMaterialPrepare,
   retryProductCompetitorSearch,
   retryProductCompetitorVisualMatch,
+  retryProductKeywordResearch,
   retryStep,
 } from '../api/index.ts';
 import type { MutationMetadataConfig } from '../api/index.ts';
@@ -39,6 +42,16 @@ export type ProductWorkflowDispatchResult = {
 };
 
 export const PRODUCT_WORKFLOW_API_CLIENT_BINDINGS = {
+  confirmProduct: {
+    execute: confirmProduct,
+    method: 'POST',
+    route: '/api/products/{product_id}/confirm',
+  },
+  retryProductMaterialPrepare: {
+    execute: retryProductMaterialPrepare,
+    method: 'POST',
+    route: '/api/products/{product_id}/material-prepare/retry',
+  },
   retryProductAutoImageSelection: {
     execute: retryProductAutoImageSelection,
     method: 'POST',
@@ -54,6 +67,11 @@ export const PRODUCT_WORKFLOW_API_CLIENT_BINDINGS = {
     method: 'POST',
     route: '/api/products/{product_id}/competitor-visual-match/retry',
   },
+  retryProductKeywordResearch: {
+    execute: retryProductKeywordResearch,
+    method: 'POST',
+    route: '/api/products/{product_id}/keyword-research/retry',
+  },
   retryStep: {
     execute: retryStep,
     method: 'POST',
@@ -67,12 +85,15 @@ export const PRODUCT_WORKFLOW_API_CLIENT_BINDINGS = {
 } satisfies Record<ProductWorkflowApiClientExport, ProductWorkflowApiClientBinding>;
 
 export const EXPECTED_PRODUCT_WORKFLOW_API_CLIENTS = {
+  confirm_product: 'confirmProduct',
   restart_competitor_search: 'retryProductCompetitorSearch',
   resume: 'resumePipeline',
   retry: 'retryStep',
+  retry_material_prepare: 'retryProductMaterialPrepare',
   retry_auto_image_selection: 'retryProductAutoImageSelection',
   retry_competitor_search: 'retryProductCompetitorSearch',
   retry_competitor_visual_match: 'retryProductCompetitorVisualMatch',
+  retry_keyword_research: 'retryProductKeywordResearch',
   retry_image_analysis: 'retryStep',
   retry_listing_generation: 'retryStep',
   start_competitor_search: 'retryProductCompetitorSearch',

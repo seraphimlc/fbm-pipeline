@@ -119,24 +119,12 @@ async def _load_price_inventory(
     if not sku_codes:
         return {}, {}
 
-    from app.models import GigaSyncBatch
-
-    price_batch_result = await db.execute(
-        select(GigaSyncBatch.batch_id)
-        .where(GigaSyncBatch.site == site, GigaSyncBatch.status == "done", GigaSyncBatch.price_count > 0)
-        .where(GigaSyncBatch.data_source_id == data_source_id if data_source_id else True)
-        .order_by(GigaSyncBatch.finished_at.is_(None).asc(), GigaSyncBatch.finished_at.desc(), GigaSyncBatch.created_at.desc())
-        .limit(1)
-    )
-    price_batch_id = price_batch_result.scalar_one_or_none() or fallback_batch_id
-    inventory_batch_result = await db.execute(
-        select(GigaSyncBatch.batch_id)
-        .where(GigaSyncBatch.site == site, GigaSyncBatch.status == "done", GigaSyncBatch.inventory_count > 0)
-        .where(GigaSyncBatch.data_source_id == data_source_id if data_source_id else True)
-        .order_by(GigaSyncBatch.finished_at.is_(None).asc(), GigaSyncBatch.finished_at.desc(), GigaSyncBatch.created_at.desc())
-        .limit(1)
-    )
-    inventory_batch_id = inventory_batch_result.scalar_one_or_none() or fallback_batch_id
+    # Materialization runs before its own batch transitions to ``done``.  The
+    # previous behavior therefore selected an older completed batch and found
+    # no matching SKU prices, even though this batch's price steps had already
+    # succeeded.  The caller's batch is the authoritative, SKU-aligned source.
+    price_batch_id = fallback_batch_id
+    inventory_batch_id = fallback_batch_id
 
     price_query = select(GigaPrice).where(GigaPrice.batch_id == price_batch_id, GigaPrice.site == site, GigaPrice.sku_code.in_(sku_codes))
     if data_source_id:
@@ -221,6 +209,74 @@ def _pricing_values(skus: list[GigaSku], prices_by_sku: dict[str, GigaPrice]) ->
         min(shipping_min_candidates) if shipping_min_candidates else None,
         max(shipping_max_candidates) if shipping_max_candidates else None,
     )
+
+
+async def restore_product_pricing_from_source_batch(
+    db: AsyncSession,
+    product: Product,
+) -> dict[str, Any] | None:
+    """Restore missing pricing only from the product's own GIGA pull batch.
+
+    This repairs products created by the former materialization ordering bug.
+    It is deliberately narrow: no product identity, images, workflow, or
+    supplier facts are changed, and no price from a different batch is used.
+    """
+    if not product.data or not product.source_batch_id or not product.source_site:
+        return None
+    item_code = _text(product.data.item_code)
+    if not item_code:
+        return None
+    item_query = (
+        select(GigaItem)
+        .where(GigaItem.batch_id == product.source_batch_id)
+        .where(GigaItem.site == product.source_site)
+        .where(GigaItem.item_code == item_code)
+    )
+    if product.source_data_source_id:
+        item_query = item_query.where(GigaItem.data_source_id == product.source_data_source_id)
+    giga_item = (await db.execute(item_query)).scalar_one_or_none()
+    if giga_item is None:
+        return None
+    sku_query = (
+        select(GigaSku)
+        .where(GigaSku.batch_id == product.source_batch_id)
+        .where(GigaSku.site == product.source_site)
+        .where(GigaSku.item_code == item_code)
+    )
+    if product.source_data_source_id:
+        sku_query = sku_query.where(GigaSku.data_source_id == product.source_data_source_id)
+    skus = (await db.execute(sku_query)).scalars().all()
+    if not skus:
+        return None
+    sku_codes = [sku.sku_code for sku in skus]
+    price_query = (
+        select(GigaPrice)
+        .where(GigaPrice.batch_id == product.source_batch_id)
+        .where(GigaPrice.site == product.source_site)
+        .where(GigaPrice.sku_code.in_(sku_codes))
+    )
+    if product.source_data_source_id:
+        price_query = price_query.where(GigaPrice.data_source_id == product.source_data_source_id)
+    prices_by_sku = {row.sku_code: row for row in (await db.execute(price_query)).scalars().all()}
+    value_total, estimated_total, shipping_cost, shipping_min, shipping_max = _pricing_values(skus, prices_by_sku)
+    if value_total is None or estimated_total is None:
+        return None
+    data = product.data
+    data.value_total = value_total
+    data.estimated_total = estimated_total
+    data.shipping_cost = shipping_cost
+    data.shipping_cost_min = shipping_min
+    data.shipping_cost_max = shipping_max
+    _prefill_pricing(data)
+    return {
+        "source_batch_id": product.source_batch_id,
+        "item_code": item_code,
+        "sku_count": len(skus),
+        "priced_sku_count": len(prices_by_sku),
+        "value_total": value_total,
+        "estimated_total": estimated_total,
+        "shipping_cost": shipping_cost,
+    }
 
 
 def _package_entries_from_detail(detail: dict[str, Any], sku_code: str | None = None) -> list[dict[str, Any]]:
