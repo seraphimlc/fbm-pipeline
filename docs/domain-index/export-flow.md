@@ -28,6 +28,7 @@
 - Amazon 导出规则层：`backend/app/pipeline/amazon_export/`
 - 模板映射：`backend/app/pipeline/template_mappings/*.json`
 - 模板文件：`backend/app/pipeline/templates/*.xlsm`
+- 床架专用导出：`vindhvisk_bed_frame.json` -> `BED_FRAME.xlsm` -> `amazon_export/strategies/bed_frame.py`。该路径仅填有证据的普通床架字段；关键事实缺失会以逐字段原因失败，不能以通用家具默认值生成表面成功的导出。
 - UPC：`frontend/src/pages/UpcPoolPage.tsx`, `backend/app/services/upc_pool.py`
 - 表：`catalog_products`, `task_runs`, `task_steps`, `task_step_events`, `products`, `product_data`
 

@@ -3776,7 +3776,7 @@ const ProductDetail: React.FC = () => {
         onChange={(key) => {
           userTouchedTabRef.current = true;
           setActiveTabKey(key);
-          if (key === 'files' || key === 'aplus') void loadFullDetail();
+          if (key === 'files' || key === 'mindset' || key === 'aplus') void loadFullDetail();
         }}
       />
     </div>

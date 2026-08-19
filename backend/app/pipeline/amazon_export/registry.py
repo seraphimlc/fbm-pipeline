@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from app.pipeline.amazon_export.context import AmazonExportContext
+from app.pipeline.amazon_export.strategies.bed_frame import apply_bed_frame_strategy
 from app.pipeline.amazon_export.strategies.bicycle import apply_bicycle_strategy
 from app.pipeline.amazon_export.strategies.ride_on_toy import apply_ride_on_toy_strategy
 from app.pipeline.amazon_export.strategies.sofa_chair import apply_sofa_chair_strategy
@@ -11,6 +12,7 @@ from app.pipeline.amazon_export.strategies.storage_furniture import apply_storag
 Strategy = Callable[[AmazonExportContext], None]
 
 STRATEGIES: dict[str, Strategy] = {
+    "bed_frame": apply_bed_frame_strategy,
     "sofa_chair": apply_sofa_chair_strategy,
     "bicycle": apply_bicycle_strategy,
     "ride_on_toy": apply_ride_on_toy_strategy,
@@ -29,4 +31,3 @@ def get_strategy(mapping: dict) -> Strategy:
         return STRATEGIES[key]
     except KeyError as exc:
         raise ValueError(f"未注册 Amazon 导出模板策略: {key}") from exc
-

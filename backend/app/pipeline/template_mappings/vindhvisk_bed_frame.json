@@ -1,0 +1,146 @@
+{
+  "brand": "Vindhvisk",
+  "category": "Bed Frames",
+  "category_type": "bed_frame",
+  "strategy_family": "bed_frame",
+  "template_path": "templates/BED_FRAME.xlsm",
+  "output_filename": "{item_code}_amazon_bed_frame_import.xlsm",
+  "data_row": 7,
+  "shipping_template_by_brand": {
+    "Vindhvisk": "Migrated Template FreeShipping",
+    "Andy店-US": "Migrated Template FreeShipping"
+  },
+  "fixed_values": {
+    "product_type#1.value": "BED_FRAME",
+    "::record_action": "Create or Replace (Full Update)",
+    "item_type_keyword[marketplace_id=ATVPDKIKX0DER]#1.value": "家居、厨具、家装 > 家具 > 卧室家具 > 整体床及组件 > 床架 (bed-frames)",
+    "package_level[marketplace_id=ATVPDKIKX0DER]#1.value": "Unit",
+    "number_of_items[marketplace_id=ATVPDKIKX0DER]#1.value": 1,
+    "item_package_quantity[marketplace_id=ATVPDKIKX0DER]#1.value": 1,
+    "condition_type[marketplace_id=ATVPDKIKX0DER]#1.value": "New",
+    "batteries_required[marketplace_id=ATVPDKIKX0DER]#1.value": "No",
+    "batteries_included[marketplace_id=ATVPDKIKX0DER]#1.value": "No",
+    "supplier_declared_dg_hz_regulation[marketplace_id=ATVPDKIKX0DER]#1.value": "Not Applicable",
+    "has_multiple_battery_powered_components[marketplace_id=ATVPDKIKX0DER]#1.value": "No"
+  },
+  "dynamic_fields": {
+    "sku": "contribution_sku#1.value",
+    "title": "item_name[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "brand": "brand[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "product_id_type": "amzn1.volt.ca.product_id_type",
+    "product_id_value": "amzn1.volt.ca.product_id_value",
+    "model_number": "model_number[marketplace_id=ATVPDKIKX0DER]#1.value",
+    "model_name": "model_name[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "manufacturer": "manufacturer[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "description": "product_description[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "search_terms": "generic_keyword[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "special_features": [
+      "special_feature[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+      "special_feature[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#2.value",
+      "special_feature[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#3.value",
+      "special_feature[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#4.value",
+      "special_feature[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#5.value"
+    ],
+    "style": "style[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "materials": [
+      "material[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+      "material[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#2.value",
+      "material[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#3.value",
+      "material[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#4.value",
+      "material[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#5.value"
+    ],
+    "color": "color[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "size": "size[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "frame_material": "frame[marketplace_id=ATVPDKIKX0DER]#1.material[language_tag=en_US]#1.value",
+    "assembly_required": "is_assembly_required[marketplace_id=ATVPDKIKX0DER]#1.value",
+    "form_factor": "form_factor[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "included_components": [
+      "included_components[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+      "included_components[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#2.value",
+      "included_components[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#3.value",
+      "included_components[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#4.value",
+      "included_components[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#5.value"
+    ],
+    "base_material": "base[marketplace_id=ATVPDKIKX0DER]#1.material[language_tag=en_US]#1.value",
+    "mattress_sizes": [
+      "compatible_with_mattress_size[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+      "compatible_with_mattress_size[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#2.value",
+      "compatible_with_mattress_size[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#3.value",
+      "compatible_with_mattress_size[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#4.value",
+      "compatible_with_mattress_size[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#5.value"
+    ],
+    "maximum_weight": "maximum_weight_recommendation[marketplace_id=ATVPDKIKX0DER]#1.value",
+    "maximum_weight_unit": "maximum_weight_recommendation[marketplace_id=ATVPDKIKX0DER]#1.unit",
+    "item_height": "item_length_width_height[marketplace_id=ATVPDKIKX0DER]#1.height.value",
+    "item_height_unit": "item_length_width_height[marketplace_id=ATVPDKIKX0DER]#1.height.unit",
+    "item_length": "item_length_width_height[marketplace_id=ATVPDKIKX0DER]#1.length.value",
+    "item_length_unit": "item_length_width_height[marketplace_id=ATVPDKIKX0DER]#1.length.unit",
+    "item_width": "item_length_width_height[marketplace_id=ATVPDKIKX0DER]#1.width.value",
+    "item_width_unit": "item_length_width_height[marketplace_id=ATVPDKIKX0DER]#1.width.unit",
+    "headboard_material": "headboard[marketplace_id=ATVPDKIKX0DER]#1.material[language_tag=en_US]#1.value",
+    "item_weight": "item_weight[marketplace_id=ATVPDKIKX0DER]#1.value",
+    "item_weight_unit": "item_weight[marketplace_id=ATVPDKIKX0DER]#1.unit",
+    "list_price": "list_price[marketplace_id=ATVPDKIKX0DER]#1.value",
+    "fulfillment_channel": "fulfillment_availability#1.fulfillment_channel_code",
+    "quantity": "fulfillment_availability#1.quantity",
+    "inventory_available": "fulfillment_availability#1.is_inventory_available",
+    "handling_time": "fulfillment_availability#1.lead_time_to_ship_max_days",
+    "price": "purchasable_offer[marketplace_id=ATVPDKIKX0DER][audience=ALL]#1.our_price#1.schedule#1.value_with_tax",
+    "country_of_origin": "country_of_origin[marketplace_id=ATVPDKIKX0DER]#1.value",
+    "shipping_template": "merchant_shipping_group[marketplace_id=ATVPDKIKX0DER]#1.value"
+  },
+  "bullet_fields": [
+    "bullet_point[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "bullet_point[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#2.value",
+    "bullet_point[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#3.value",
+    "bullet_point[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#4.value",
+    "bullet_point[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#5.value"
+  ],
+  "image_fields": {
+    "main": "main_product_image_locator[marketplace_id=ATVPDKIKX0DER]#1.media_location",
+    "others": [
+      "other_product_image_locator_1[marketplace_id=ATVPDKIKX0DER]#1.media_location",
+      "other_product_image_locator_2[marketplace_id=ATVPDKIKX0DER]#1.media_location",
+      "other_product_image_locator_3[marketplace_id=ATVPDKIKX0DER]#1.media_location",
+      "other_product_image_locator_4[marketplace_id=ATVPDKIKX0DER]#1.media_location",
+      "other_product_image_locator_5[marketplace_id=ATVPDKIKX0DER]#1.media_location",
+      "other_product_image_locator_6[marketplace_id=ATVPDKIKX0DER]#1.media_location",
+      "other_product_image_locator_7[marketplace_id=ATVPDKIKX0DER]#1.media_location",
+      "other_product_image_locator_8[marketplace_id=ATVPDKIKX0DER]#1.media_location"
+    ]
+  },
+  "package_fields": {
+    "length_value": "item_package_dimensions[marketplace_id=ATVPDKIKX0DER]#1.length.value",
+    "length_unit": "item_package_dimensions[marketplace_id=ATVPDKIKX0DER]#1.length.unit",
+    "width_value": "item_package_dimensions[marketplace_id=ATVPDKIKX0DER]#1.width.value",
+    "width_unit": "item_package_dimensions[marketplace_id=ATVPDKIKX0DER]#1.width.unit",
+    "height_value": "item_package_dimensions[marketplace_id=ATVPDKIKX0DER]#1.height.value",
+    "height_unit": "item_package_dimensions[marketplace_id=ATVPDKIKX0DER]#1.height.unit",
+    "weight_value": "item_package_weight[marketplace_id=ATVPDKIKX0DER]#1.value",
+    "weight_unit": "item_package_weight[marketplace_id=ATVPDKIKX0DER]#1.unit"
+  },
+  "browse_category_options": [
+    {
+      "product_type": "BED_FRAME",
+      "node": "bed-frames",
+      "path": "Home & Kitchen > Furniture > Bedroom Furniture > Beds, Frames & Bases > Bed Frames",
+      "markers": ["bed frames", "bed frame", "platform bed"]
+    }
+  ],
+  "required_fields": [
+    "amzn1.volt.ca.product_id_value",
+    "size[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "form_factor[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "compatible_with_mattress_size[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "maximum_weight_recommendation[marketplace_id=ATVPDKIKX0DER]#1.value",
+    "item_length_width_height[marketplace_id=ATVPDKIKX0DER]#1.length.value",
+    "item_length_width_height[marketplace_id=ATVPDKIKX0DER]#1.width.value",
+    "item_length_width_height[marketplace_id=ATVPDKIKX0DER]#1.height.value",
+    "item_weight[marketplace_id=ATVPDKIKX0DER]#1.value",
+    "item_package_dimensions[marketplace_id=ATVPDKIKX0DER]#1.length.value",
+    "item_package_dimensions[marketplace_id=ATVPDKIKX0DER]#1.width.value",
+    "item_package_dimensions[marketplace_id=ATVPDKIKX0DER]#1.height.value",
+    "item_package_weight[marketplace_id=ATVPDKIKX0DER]#1.value",
+    "country_of_origin[marketplace_id=ATVPDKIKX0DER]#1.value"
+  ]
+}

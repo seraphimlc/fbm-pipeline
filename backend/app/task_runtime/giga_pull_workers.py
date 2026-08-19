@@ -16,6 +16,7 @@ from app.models import (
     Product,
     ProductData,
     TaskGroup,
+    TaskRun,
     TaskStep,
 )
 from app.services.giga_image_assets import build_pending_giga_product_image_rows, extract_giga_image_candidates
@@ -65,6 +66,24 @@ def _sku_codes_without_materialized_products(
         for sku in listed_skus
         if not (str(item_code_by_sku.get(sku) or "").strip() in materialized_item_codes)
     ]
+
+
+def _raise_if_product_draft_materialization_failed(draft_result: Any) -> None:
+    """Expose a business failure instead of a later ORM-expiration symptom.
+
+    The draft service intentionally collects per-item errors so a batch can be
+    partially successful.  When none of its requested items produced a draft,
+    however, the task must fail with that original, actionable error.
+    """
+    if (
+        not draft_result.requested_items
+        or draft_result.product_ids
+        or not draft_result.errors
+    ):
+        return
+    if all(": UpcPoolEmptyError: " in error for error in draft_result.errors):
+        raise RuntimeError("UPC池子可用UPC不足，请先到 UPC池子 添加UPC")
+    raise RuntimeError(f"生成商品草稿失败：{draft_result.errors[0]}")
 
 
 async def _sku_codes_needing_product_drafts(
@@ -695,30 +714,39 @@ async def giga_pull_aggregate_items(ctx: TaskContext) -> dict[str, Any]:
 async def giga_pull_materialize_products(ctx: TaskContext) -> dict[str, Any]:
     payload = _payload(ctx.step)
     context = await _context_from_payload(ctx, payload)
+    # A per-item draft error rolls back the session.  Keep the values needed
+    # after that call as primitives, rather than touching expired ORM objects.
+    run_id = int(ctx.run.id)
+    site = str(context.site)
+    data_source_id = int(context.id or 0)
+    data_source_name = str(context.name)
     batch_id = str(payload["batch_id"])
     draft_result = await upsert_product_drafts_from_giga_batch(
         ctx.db,
         batch_id=batch_id,
-        site=context.site,
-        data_source_id=context.id,
+        site=site,
+        data_source_id=data_source_id,
         pipeline_target=str(payload.get("pipeline_target") or "export_ready"),
         test_session_key=str(payload.get("test_session_key") or "").strip() or None,
-        origin_task_run_id=int(payload.get("origin_task_run_id") or ctx.run.id),
+        origin_task_run_id=int(payload.get("origin_task_run_id") or run_id),
     )
-    batch = await _batch(ctx, batch_id, context.site, int(context.id or 0))
-    price_count = await ctx.db.scalar(select(func.count(GigaPrice.id)).where(GigaPrice.batch_id == batch_id, GigaPrice.site == context.site, GigaPrice.data_source_id == context.id))
-    inventory_count = await ctx.db.scalar(select(func.count(GigaInventory.id)).where(GigaInventory.batch_id == batch_id, GigaInventory.site == context.site, GigaInventory.data_source_id == context.id))
+    _raise_if_product_draft_materialization_failed(draft_result)
+    batch = await _batch(ctx, batch_id, site, data_source_id)
+    price_count = await ctx.db.scalar(select(func.count(GigaPrice.id)).where(GigaPrice.batch_id == batch_id, GigaPrice.site == site, GigaPrice.data_source_id == data_source_id))
+    inventory_count = await ctx.db.scalar(select(func.count(GigaInventory.id)).where(GigaInventory.batch_id == batch_id, GigaInventory.site == site, GigaInventory.data_source_id == data_source_id))
     batch.price_count = int(price_count or 0)
     batch.inventory_count = int(inventory_count or 0)
     batch.status = "done"
     batch.error_message = None
     batch.finished_at = datetime.now()
     batch.updated_at = datetime.now()
-    ctx.run.summary_json = json_dumps({
+    run_result = await ctx.db.execute(select(TaskRun).where(TaskRun.id == run_id))
+    run = run_result.scalar_one()
+    run.summary_json = json_dumps({
         "batch_id": batch_id,
-        "site": context.site,
-        "data_source_id": context.id,
-        "data_source_name": context.name,
+        "site": site,
+        "data_source_id": data_source_id,
+        "data_source_name": data_source_name,
         "raw_sku_count": batch.raw_sku_count,
         "sku_count": batch.sku_count,
         "item_count": batch.item_count,
@@ -732,7 +760,7 @@ async def giga_pull_materialize_products(ctx: TaskContext) -> dict[str, Any]:
         "product_ids": draft_result.product_ids,
     })
     await ctx.db.commit()
-    return json_loads(ctx.run.summary_json, {})
+    return json_loads(run.summary_json, {})
 
 
 def register_giga_pull_workers() -> None:

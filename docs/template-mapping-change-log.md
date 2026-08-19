@@ -9,6 +9,38 @@
 - 每条记录至少包含：日期、改动文件、涉及类目/模板、变更原因、验证命令和结果、后续注意事项。
 - 不要覆盖历史记录；只追加新条目。
 
+## 2026-08-19
+
+### Vindhvisk 普通床架美国站导入模板
+
+- 改动文件：
+  - `backend/app/pipeline/templates/BED_FRAME.xlsm`
+  - `backend/app/pipeline/template_mappings/vindhvisk_bed_frame.json`
+  - `backend/app/pipeline/amazon_export/strategies/bed_frame.py`
+  - `backend/app/pipeline/amazon_export/registry.py`
+  - `backend/app/pipeline/step10_amazon_template.py`
+  - `backend/app/pipeline/template_category_fallback.py`
+  - `scripts/test_bed_frame_template.py`
+  - `docs/template-mapping-spec.md`
+  - `docs/domain-index/export-flow.md`
+- 涉及类目/模板：
+  - `Vindhvisk / Bed Frames`；美国站 `BED_FRAME.xlsm`，字段行 5，数据行 7。
+- 变更原因：
+  - 任务 64 因没有 Bed Frames 映射而失败。新模板需要单独的床架策略，不能复用 sofa 或收纳家具的承重、材质、尺寸和产地默认逻辑。
+- 主要行为：
+  - 固定普通 `bed-frames` 节点，排除儿童床架、沙发床架和可调床底；不会因可调床头把普通 Platform Bed 归为 `adjustable-bed-bases`。
+  - 策略按结构化商品资料、变体、GIGA snapshot 和供应商 Product Information 标签表读取事实。Size 不按尺寸反推；Origin 缺失时移除公共 Offer 的默认值并以明确字段失败。
+  - 仅写有证据的材料、组件和功能。商品/包装规格、最大承重、库存、售价、UPC、床型、床架类型和 Origin 为核心事实，缺失或负库存会在该商品行报告具体原因。
+- 验证：
+  - `make validate-template-mappings`：通过，6 个 mapping、97 个类目选项、0 warning。
+  - `backend/.venv/bin/python scripts/test_bed_frame_template.py`：通过，校验 Template 第 5 行 331 个字段、数据行 7、下拉值、缺失核心事实和合并后的第 7 行输出。
+  - `backend/.venv/bin/python scripts/test_step4_template_category_fallback.py`：通过，普通床架可命中，儿童床架、可调床底和沙发床架不会落到 `bed-frames`。
+  - `backend/.venv/bin/python -m compileall -q backend/app`、`git diff --check`：通过。
+  - `make test-project-rules`：未通过，停在既有 `frontend/src/pages/ProductDetail.tsx` 文本锚点的 `IndexError`；该文件是本轮开始前已有改动，未为通过测试改动其行为。
+  - 本地导出任务 66：通过，商品 4 / UPC `787471049980` 返回 `1 success / 0 failed`；解压后核对 `BED_FRAME_Bed_Frames_1.xlsm` 第 7 行写入 SKU、UPC、Queen、Platform Bed、1000 lb、库存 111、售价 230.45、China，且第 8 行为空。
+- 后续注意：
+  - 未修改或重试历史任务 64，未上传 Amazon。实际生产导出仍需新建任务后人工打开 Excel 复核。
+
 ## 2026-08-01
 
 ### Product Highlights 的真实模板字段兼容

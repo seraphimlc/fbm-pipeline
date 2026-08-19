@@ -29,6 +29,13 @@ def main() -> None:
     bookshelf = _category_for(product_type="Furniture", title="Kids Bookshelf with Storage")
     assert bookshelf["leafCategory"].endswith("(childrens-bookcases)"), bookshelf
 
+    bed = _category_for(product_type="Furniture", title="Queen Upholstered Platform Bed Frame")
+    assert bed["leafCategory"].endswith("(bed-frames)"), bed
+
+    assert select_template_category_fallback(ProductData(product_type="Furniture", title="Kids Bed Frame")) is None
+    assert select_template_category_fallback(ProductData(product_type="Furniture", title="Adjustable Bed Base")) is None
+    sofa_bed = select_template_category_fallback(ProductData(product_type="Furniture", title="Sofa Bed Frame"))
+    assert sofa_bed is None or not sofa_bed["leafCategory"].endswith("(bed-frames)"), sofa_bed
     assert select_template_category_fallback(ProductData(product_type="Misc", title="Generic item")) is None
 
 

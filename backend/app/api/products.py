@@ -128,6 +128,7 @@ from app.pipeline.customer_mindset import (
     customer_mindset_matches_product,
     image_analysis_ready,
     keyword_research_ready,
+    load_customer_mindset,
 )
 from app.pipeline.ride_on_category import RIDE_ON_CATEGORY_OPTIONS
 from app.pipeline.step10_amazon_template import (
@@ -2089,11 +2090,19 @@ def _copy_row_format(ws, source_row: int, target_row: int) -> None:
             target.protection = copy(source.protection)
 
 
-def _clear_template_data_rows(ws, row_count: int) -> None:
-    max_row = max(ws.max_row, DATA_ROW + row_count + 2)
-    for row in range(DATA_ROW, max_row + 1):
-        if row > DATA_ROW:
-            _copy_row_format(ws, DATA_ROW, row)
+def _mapping_data_row(mapping: dict | None) -> int:
+    try:
+        data_row = int((mapping or {}).get("data_row") or DATA_ROW)
+    except (TypeError, ValueError):
+        return DATA_ROW
+    return data_row if data_row > 0 else DATA_ROW
+
+
+def _clear_template_data_rows(ws, row_count: int, *, data_row: int = DATA_ROW) -> None:
+    max_row = max(ws.max_row, data_row + row_count + 2)
+    for row in range(data_row, max_row + 1):
+        if row > data_row:
+            _copy_row_format(ws, data_row, row)
         for col in range(1, ws.max_column + 1):
             ws.cell(row, col).value = None
 
@@ -2106,18 +2115,18 @@ def _template_attribute_columns(ws) -> dict[str, int]:
     }
 
 
-def _copy_import_data_row(source_path: Path, target_ws, target_row: int) -> None:
+def _copy_import_data_row(source_path: Path, target_ws, target_row: int, *, data_row: int = DATA_ROW) -> None:
     source_wb = load_workbook(source_path, keep_vba=True, data_only=False)
     if "Template" not in source_wb.sheetnames:
         raise ValueError(f"导入表格缺少 Template 工作表: {source_path}")
     source_ws = source_wb["Template"]
-    _copy_row_format(target_ws, DATA_ROW, target_row)
+    _copy_row_format(target_ws, data_row, target_row)
     source_columns = _template_attribute_columns(source_ws)
     target_columns = _template_attribute_columns(target_ws)
     for attr, source_col in source_columns.items():
         target_col = target_columns.get(attr)
         if target_col:
-            target_ws.cell(target_row, target_col).value = source_ws.cell(DATA_ROW, source_col).value
+            target_ws.cell(target_row, target_col).value = source_ws.cell(data_row, source_col).value
 
 
 PRODUCT_ID_TYPE_ATTR = "amzn1.volt.ca.product_id_type"
@@ -4553,7 +4562,8 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                         })
                     continue
                 ws = wb["Template"]
-                _clear_template_data_rows(ws, len(chunk))
+                data_row = _mapping_data_row(chunk[0]["mapping"] if chunk else None)
+                _clear_template_data_rows(ws, len(chunk), data_row=data_row)
                 part = chunk_index // 500 + 1
                 export_name = f"{template_stem}_{safe_scope}_{part}.xlsm"
                 exported_in_workbook = 0
@@ -4564,7 +4574,7 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                     mapping = entry["mapping"]
                     pd = product.data
                     catalog = catalog_by_source_id.get(product.id)
-                    row_number = DATA_ROW + offset
+                    row_number = data_row + offset
                     seller_sku = amazon_seller_sku_for_export(product, pd) if pd else None
                     report_base = {
                         "商品资料ID": catalog.id if catalog else None,
@@ -4616,7 +4626,7 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                             if not source_path.is_file():
                                 raise CatalogExportRowBusinessError(f"已生成导入表格不存在: {source_path}")
                             try:
-                                _copy_import_data_row(source_path, ws, row_number)
+                                _copy_import_data_row(source_path, ws, row_number, data_row=data_row)
                                 _apply_catalog_export_row_overrides(ws, row_number, product, pd, mapping)
                             except ValueError as exc:
                                 raise CatalogExportRowBusinessError(str(exc)) from exc
@@ -5281,6 +5291,20 @@ def _compact_product_detail(detail: ProductDetail) -> ProductDetail:
     return detail
 
 
+def _hydrate_product_detail_customer_mindset(detail: ProductDetail) -> None:
+    """Expand a verified local brief only for the full detail response.
+
+    Large customer-mindset briefs are persisted as a local-file reference in
+    the database.  That compact reference is correct for downstream workers,
+    but the browser cannot read the server-side file itself.
+    """
+    if not detail.data or not detail.data.customer_mindset:
+        return
+    brief = load_customer_mindset(detail.data.customer_mindset, required=True)
+    if brief is not None:
+        detail.data.customer_mindset = json.dumps(brief, ensure_ascii=False)
+
+
 @router.get("/{product_id}", response_model=ProductDetail)
 async def get_product(
     product_id: int,
@@ -5312,6 +5336,7 @@ async def get_product(
         detail.current_task_status = detail.workflow["action_reason"]
         return _compact_product_detail(detail)
 
+    _hydrate_product_detail_customer_mindset(detail)
     detail.current_task_status = detail.workflow["action_reason"]
     detail.amazon_export_preview = _build_amazon_export_preview(product)
     if product.data and product.data.material_dir:

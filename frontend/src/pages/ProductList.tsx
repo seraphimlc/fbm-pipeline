@@ -93,7 +93,7 @@ const WORK_STATUS_META: Record<WorkStatus, { label: string; shortLabel: string; 
   capture_detail: { label: '抓取竞品详情中', shortLabel: '抓详情', color: 'processing', action: '等待抓取' },
   ready_to_generate: { label: '待自动生成 Listing', shortLabel: '待自动生成', color: 'warning', action: '自动入队' },
   running: { label: '生成中', shortLabel: '生成中', color: 'processing', action: '等待完成' },
-  confirm_images_aplus: { label: '待确认图片与 A+', shortLabel: '确认图片与 A+', color: 'cyan', action: '去确认' },
+  confirm_images_aplus: { label: '待确认图片与 A+', shortLabel: '确认图片与 A+', color: 'cyan', action: '查看详情' },
   interrupted: { label: '已中断', shortLabel: '已中断', color: 'warning', action: '重试' },
   suspended: { label: '已挂起', shortLabel: '已挂起', color: 'default', action: '继续' },
   manual_review: { label: '待人工处理', shortLabel: '人工处理', color: 'warning', action: '继续' },
@@ -736,6 +736,10 @@ const ProductList: React.FC = () => {
   const runProductWorkflowAction = async (product: Product, action: string) => {
     const definition = getProductWorkflowAction(action);
     const isApiAction = definition?.kind === 'api';
+    if (isApiAction && definition.client_export === 'confirmProduct') {
+      openProductDetail(product.id);
+      return;
+    }
     if (isApiAction) setRerunningId(product.id);
     const dispatchContext = {
         productId: product.id,
@@ -878,6 +882,9 @@ const ProductList: React.FC = () => {
     const workflowAction = product.workflow?.primary_action;
     const workflowActionLabel = product.workflow?.primary_action_label;
     if (workflowAction) {
+      if (workflowAction === 'confirm_product') {
+        return <Button size="small" onClick={() => openProductDetail(product.id)}>查看详情</Button>;
+      }
       const definition = getProductWorkflowAction(workflowAction);
       if (!definition) {
         reportUnknownProductWorkflowAction(workflowAction);
@@ -918,7 +925,7 @@ const ProductList: React.FC = () => {
       return <Button size="small" onClick={() => navigate('/task-runs')}>任务中心</Button>;
     }
     if (row.workStatus === 'confirm_images_aplus') {
-      return <Button size="small" type="primary" onClick={() => openProductDetail(product.id)}>确认图片与 A+</Button>;
+      return <Button size="small" onClick={() => openProductDetail(product.id)}>查看详情</Button>;
     }
     if (row.workStatus === 'interrupted') {
       return (

@@ -18,7 +18,7 @@ BACKEND = ROOT / "backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
 
-from app.api.products import _require_generation_prerequisites  # noqa: E402
+from app.api.products import _hydrate_product_detail_customer_mindset, _require_generation_prerequisites  # noqa: E402
 from app.pipeline.customer_mindset import (  # noqa: E402
     ALLOWED_CONTENT_USES,
     DYNAMIC_QUESTION_MAX,
@@ -506,6 +506,9 @@ def test_large_mindset_uses_a_verified_local_file_reference() -> None:
         restored = load_customer_mindset(reference)
         assert restored == brief
         assert customer_mindset_matches_product(reference, product)
+        detail = SimpleNamespace(data=SimpleNamespace(customer_mindset=reference))
+        _hydrate_product_detail_customer_mindset(detail)
+        assert json.loads(detail.data.customer_mindset) == brief
         artifact = Path(temporary_dir) / "image analysis" / "customer_mindset.json"
         artifact.write_text("{}", encoding="utf-8")
         _assert_raises("tampered artifact must fail closed", lambda: load_customer_mindset(reference))

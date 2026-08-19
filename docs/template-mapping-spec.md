@@ -87,5 +87,6 @@ Amazon 首次导入表用于新建 listing。已有真实 Amazon ASIN 的商品�
 
 ## 当前特殊类目
 
+- `vindhvisk_bed_frame.json` 使用 `BED_FRAME.xlsm`，只覆盖 `Vindhvisk / Bed Frames` 和带有明确 `bed frame` 或 `platform bed` 事实的普通床架。儿童床架、沙发床架和 `adjustable-bed-bases` 不使用此映射。床架 Size、Form Factor、承重、商品/包装规格和 Origin 必须有商品或供应商证据；证据不足时 Step 10 以逐字段原因失败，不使用家具默认值或尺寸反推。`Country of Origin` 不接受公共 Offer 层的 `China` 兜底。
 - `vindhvisk_bicycle.json` 使用 `BICYCLE_CYCLING.xlsm`，覆盖 Kids/Folding/Road/Cruiser/Mountain/Electric/Cycling 等自行车任务。Step10 会先按来源叶子类目匹配细分 browse node，再用标题中的 electric/folding/mountain/cruiser/BMX 等关键词兜底。
 - 电动自行车会自动补电压、瓦数、锂电池包装等可从标题识别的字段；电池重量、UL/认证编号、FCC/SDoC 仍需要发布前人工复核。

@@ -48,6 +48,7 @@ SOFA_MAPPING = MAPPING_DIR / "vindhvisk_sofa.json"
 BICYCLE_MAPPING = MAPPING_DIR / "vindhvisk_bicycle.json"
 ANDY_STORAGE_MAPPING = MAPPING_DIR / "andy_storage_furniture.json"
 ANDY_SHELF_TABLE_MAPPING = MAPPING_DIR / "andy_shelf_table_cabinet_gate.json"
+VINDHVISK_BED_FRAME_MAPPING = MAPPING_DIR / "vindhvisk_bed_frame.json"
 BICYCLE_LEAF_CATEGORIES = (
     "Kids' Bikes",
     "Cycling",
@@ -58,6 +59,7 @@ BICYCLE_LEAF_CATEGORIES = (
     "Road Bikes",
 )
 BRAND_TEMPLATE_MAPPINGS = {
+    ("Vindhvisk", "Bed Frames"): VINDHVISK_BED_FRAME_MAPPING,
     ("Vindhvisk", "Sofas & Couches"): SOFA_MAPPING,
     **{("Vindhvisk", category): BICYCLE_MAPPING for category in BICYCLE_LEAF_CATEGORIES},
 }
@@ -131,6 +133,25 @@ def _mapping_has_category_marker(mapping_path: Path, category_text: str) -> bool
     return False
 
 
+def _is_standard_bed_frame_category(category_text: str) -> bool:
+    """Keep the BED_FRAME template away from adjacent Amazon bed categories."""
+    excluded_markers = (
+        "adjustable-bed-base",
+        "adjustable bed base",
+        "adjustable bed bases",
+        "childrens-bed-frame",
+        "children's bed frame",
+        "children bed frame",
+        "kids bed frame",
+        "sofa bed",
+        "futon",
+    )
+    return (
+        not any(marker in category_text for marker in excluded_markers)
+        and _mapping_has_category_marker(VINDHVISK_BED_FRAME_MAPPING, category_text)
+    )
+
+
 def _load_template_mapping(product: Product, pd: ProductData) -> dict:
     key = (product.brand or "", pd.leaf_category or "")
     mapping_path = BRAND_TEMPLATE_MAPPINGS.get(key)
@@ -148,7 +169,9 @@ def _load_template_mapping(product: Product, pd: ProductData) -> dict:
     if not mapping_path and any(marker in category_text for marker in RIDE_ON_TOY_CATEGORY_MARKERS):
         mapping_path = RIDE_ON_TOY_MAPPING
     if not mapping_path and (product.brand or "") == "Vindhvisk":
-        if _mapping_has_category_marker(SOFA_MAPPING, category_text):
+        if _is_standard_bed_frame_category(category_text):
+            mapping_path = VINDHVISK_BED_FRAME_MAPPING
+        if not mapping_path and _mapping_has_category_marker(SOFA_MAPPING, category_text):
             mapping_path = SOFA_MAPPING
     if not mapping_path and pd.leaf_category in SHELF_TABLE_LEAF_CATEGORIES:
         mapping_path = ANDY_SHELF_TABLE_MAPPING

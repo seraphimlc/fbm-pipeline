@@ -16,6 +16,7 @@ from app.models import ProductData
 
 MAPPING_DIR = Path(__file__).resolve().parent / "template_mappings"
 _FALLBACK_MAPPINGS = (
+    MAPPING_DIR / "vindhvisk_bed_frame.json",
     MAPPING_DIR / "vindhvisk_bicycle.json",
     MAPPING_DIR / "andy_shelf_table_cabinet_gate.json",
     MAPPING_DIR / "andy_storage_furniture.json",
@@ -52,6 +53,20 @@ def _score_option(option: dict[str, Any], text: str) -> int:
     return score
 
 
+def _is_excluded_bed_frame_text(text: str) -> bool:
+    return any(marker in text for marker in (
+        "adjustable-bed-base",
+        "adjustable bed base",
+        "adjustable bed bases",
+        "childrens-bed-frame",
+        "children's bed frame",
+        "children bed frame",
+        "kids bed frame",
+        "sofa bed",
+        "futon",
+    ))
+
+
 def select_template_category_fallback(pd: ProductData | None) -> dict[str, Any] | None:
     """Return a registered category only when a specific marker is present."""
     if pd is None:
@@ -62,6 +77,8 @@ def select_template_category_fallback(pd: ProductData | None) -> dict[str, Any] 
         try:
             mapping = json.loads(mapping_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
+            continue
+        if mapping.get("category_type") == "bed_frame" and _is_excluded_bed_frame_text(text):
             continue
         for option in mapping.get("browse_category_options") or []:
             if not isinstance(option, dict):
