@@ -628,11 +628,16 @@ const ProductDetail: React.FC = () => {
     length != null && width != null && height != null ? `${length} × ${width} × ${height} ${unit}` : '-'
   );
   const imageAnalysisPayload = parseJson(images?.image_analysis, null);
+  // Full candidate reviews are retained separately from the selected Listing-image evidence.
+  const imageSelectionPayload = parseJson(images?.image_selection_analysis, null);
   const imageComplianceManifest = parseJson(images?.image_compliance_manifest, {});
   const imageComplianceAssets = Array.isArray(imageComplianceManifest?.assets) ? imageComplianceManifest.assets : [];
   const imageReviews = Array.isArray(imageAnalysisPayload)
     ? imageAnalysisPayload
     : (imageAnalysisPayload?.images || []);
+  const fullImageReviews = Array.isArray(imageSelectionPayload?.image_reviews)
+    ? imageSelectionPayload.image_reviews
+    : imageReviews;
   const imageSelectionDiagnostics = imageAnalysisPayload?.selection_diagnostics || {};
   const imageHealth = imageSelectionDiagnostics?.image_health || {};
   const imageGalleryRoles = imageSelectionDiagnostics?.gallery_roles || [];
@@ -648,7 +653,12 @@ const ProductDetail: React.FC = () => {
   const legacyContactSheets = imageAnalysisPayload?.contact_sheets || (
     images?.contact_sheet_path ? [{ sheet_page: 1, sheet_path: images.contact_sheet_path, image_ids: imageReviews.map((item) => item.image_id || `#${item.index}`) }] : []
   );
-  const imageAnalysisBatches = imageAnalysisPayload?.image_batches || legacyContactSheets;
+  const fullImageBatches = Array.isArray(imageSelectionPayload?.image_batches)
+    ? imageSelectionPayload.image_batches
+    : [];
+  const imageAnalysisBatches = fullImageBatches.length
+    ? fullImageBatches
+    : (imageAnalysisPayload?.image_batches || legacyContactSheets);
   const isVirtualImageBatch = (batch: any) => String(batch?.sheet_path || '').startsWith('url_batch:');
   const analysisBatchDisplayUrl = (batch: any) => (
     isVirtualImageBatch(batch)
@@ -662,7 +672,7 @@ const ProductDetail: React.FC = () => {
   );
   const reviewsByImageBatch = imageAnalysisBatches.map((batch) => ({
     ...batch,
-    reviews: imageReviews.filter((review) => review?.contact_sheet_evidence?.sheet_path === batch.sheet_path || batch.image_ids?.includes(review.image_id)),
+    reviews: fullImageReviews.filter((review) => review?.contact_sheet_evidence?.sheet_path === batch.sheet_path || batch.image_ids?.includes(review.image_id)),
   }));
   const galleryImagePaths = parseJson(images?.gallery_images, []);
   const galleryOrderPaths = parseJson((images as any)?.gallery_order, []);
