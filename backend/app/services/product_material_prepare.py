@@ -25,6 +25,7 @@ from app.pipeline.step1_collect import RAW_ASSETS_DIR, _download_material_zips
 from app.services.product_pipeline_artifacts import register_pipeline_artifact
 from app.services.giga_image_assets import GigaImageCandidate, download_giga_product_images
 from app.services.upc_pool import refresh_upc_binding
+from app.services.product_payloads import hydrate_product_sections, persist_source_sections_from_projection
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tif", ".tiff"}
@@ -441,6 +442,7 @@ async def prepare_product_materials(
     product = result.scalar_one_or_none()
     if not product or not product.data:
         raise ProductMaterialPrepareError(f"商品或商品资料不存在: {product_id}")
+    await hydrate_product_sections(db, product, ("source", "source_snapshot"))
     item_code = str(product.data.item_code or "").strip()
     if not item_code:
         raise ProductMaterialPrepareError("商品缺少 item_code，不能解析 GIGA 商品页")
@@ -633,6 +635,7 @@ async def prepare_product_materials(
     }
     snapshot["material_facts"] = material_facts
     product.data.gigab2b_raw_snapshot = _json_dumps(snapshot)
+    await persist_source_sections_from_projection(db, product.data)
     await refresh_upc_binding(db, product)
     manifest_path = await write_material_manifest(db, product.id, material_dir)
     await register_pipeline_artifact(

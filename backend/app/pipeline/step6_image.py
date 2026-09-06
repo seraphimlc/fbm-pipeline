@@ -24,6 +24,11 @@ from app.services.product_image_vlm import (
     build_image_url_batches as _build_image_url_batches,
     is_remote_url as _is_remote_url,
 )
+from app.services.product_payloads import (
+    large_field_storage_enabled,
+    persist_image_sections_from_projection,
+    write_section,
+)
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -1731,6 +1736,7 @@ async def reselect_image_gallery_from_cache(product_id: int) -> dict:
             strategy,
             material_dir,
         )
+        await persist_image_sections_from_projection(db, product.images, ("image_analysis",))
         await db.commit()
         return result_payload
 
@@ -1781,6 +1787,7 @@ async def run_image_analysis(product_id: int) -> dict:
                 material_dir,
                 source_fingerprint=source_fingerprint,
             )
+            await persist_image_sections_from_projection(db, pi, ("image_analysis",))
             await db.commit()
             logger.info(
                 f"[Step6] 命中图片分析缓存: product={product_id}, images={len(image_records)}, "
@@ -1890,8 +1897,9 @@ async def run_image_analysis(product_id: int) -> dict:
             source_images=source_fingerprint,
         )
 
-        # 保存到数据库
-        pi.image_analysis = json.dumps({
+        # Persist analysis separately after cutover; image identity/selection
+        # fields above remain on ProductImage as hot data.
+        analysis_payload = {
             "image_batches": analysis_image_batches,
             "sheet_payloads": sheet_payloads,
             "images": all_reviews,
@@ -1899,8 +1907,17 @@ async def run_image_analysis(product_id: int) -> dict:
             "selection_diagnostics": selection_diagnostics,
             "gallery_strategy": strategy.get("name"),
             "source_images": source_fingerprint,
-        }, ensure_ascii=False)
-        pi.image_selling_points = json.dumps(selling_points, ensure_ascii=False)
+        }
+        if await large_field_storage_enabled(db):
+            await write_section(
+                db, product_id=product.id, section="image_analysis",
+                payload={"image_analysis": analysis_payload, "image_selling_points": selling_points},
+                generated_at=datetime.now(),
+                extras={"analysis_count": len(all_reviews), "model_name": image_analysis_model},
+            )
+        else:
+            pi.image_analysis = json.dumps(analysis_payload, ensure_ascii=False)
+            pi.image_selling_points = json.dumps(selling_points, ensure_ascii=False)
         pi.category_style = f"multi_sheet:{strategy.get('name')}"
         pi.main_image_summary = (
             f"分析 {len(all_reviews)}/{len(image_records)} 张图片，"

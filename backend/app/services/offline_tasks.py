@@ -26,6 +26,7 @@ from app.services.giga_image_download_tasks import download_giga_batch_images
 from app.services.giga_openapi import GigaSyncOptions, resolve_giga_data_source_context, sync_giga_products
 from app.services.giga_price_sync import GigaPriceSyncOptions, sync_giga_price_snapshot
 from app.services.oss_uploader import upload_private_file
+from app.services.product_payloads import hydrate_product_sections, invalidate_sections, large_field_storage_enabled
 from app.services.giga_product_drafts import upsert_product_drafts_from_giga_batch
 from app.task_planners.product_image_analysis import create_product_image_analysis_runs
 from app.task_planners.product_customer_mindset import create_product_customer_mindset_runs
@@ -720,15 +721,18 @@ async def _set_aplus_status(
             session.add(product.aplus)
             await session.flush()
         if clear_outputs:
-            product.aplus.aplus_plan = None
             product.aplus.aplus_plan_summary = None
-            product.aplus.aplus_scripts = None
             product.aplus.aplus_scripts_summary = None
-            product.aplus.aplus_images = None
             product.aplus.aplus_image_count = None
             product.aplus.planned_at = None
             product.aplus.scripted_at = None
             product.aplus.generated_at = None
+            if await large_field_storage_enabled(session):
+                await invalidate_sections(session, product.id, ("aplus_plan", "aplus_script", "aplus_assets"))
+            else:
+                product.aplus.aplus_plan = None
+                product.aplus.aplus_scripts = None
+                product.aplus.aplus_images = None
         product.aplus.aplus_status = status
         if error:
             product.error_message = error
@@ -900,6 +904,11 @@ async def _run_product_bulk_advance_step(db: AsyncSession, step: OfflineTaskStep
                 if not product:
                     await _set_step_status(db, step, "failed", error=f"商品 {product_id} 不存在")
                     return
+                await hydrate_product_sections(
+                    session,
+                    product,
+                    ("source", "source_snapshot", "mindset", "listing", "image_analysis"),
+                )
                 if _customer_mindset_ready(product):
                     generation_target = "listing_generation"
                     latest_status = get_step_status(6)

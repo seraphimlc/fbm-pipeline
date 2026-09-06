@@ -7,6 +7,7 @@ from sqlalchemy.orm import selectinload
 from app.models import CatalogProduct, Product, ProductAplus, TaskGroup, TaskRun, TaskStep
 from app.models.status import COMPLETED, PENDING_REVIEW
 from app.pipeline.engine import is_running
+from app.services.product_payloads import hydrate_product_sections
 from app.task_runtime.constants import STEP_STATUS_PENDING, STEP_STATUS_READY
 from app.task_runtime.json_utils import json_dumps, json_loads
 from app.task_runtime.scheduler import kick_task_runtime
@@ -67,6 +68,13 @@ async def create_aplus_generate_runs(
         )
     )
     catalog_items = result.scalars().all()
+    for catalog in catalog_items:
+        if catalog.source_product:
+            await hydrate_product_sections(
+                db,
+                catalog.source_product,
+                ("listing", "image_analysis", "aplus_assets"),
+            )
     catalog_by_id = {item.id: item for item in catalog_items}
     active_product_ids = await _active_aplus_product_ids(db)
     errors: list[str] = []

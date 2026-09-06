@@ -7,6 +7,12 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from testing.r1_sqlite_bootstrap import ensure_sqlite_test_process
+
+if __name__ == "__main__":
+    ensure_sqlite_test_process(__file__)
+
 sys.path.insert(0, str(ROOT / "backend"))
 
 from sqlalchemy.engine import make_url
@@ -15,17 +21,10 @@ from sqlalchemy import delete, select
 
 def _require_isolated_r1_database() -> None:
     """Never let a probe task race with a developer's running backend."""
-    database_url = str(os.environ.get("DATABASE_URL") or "").strip()
-    database_name = str(os.environ.get("R1_MYSQL_WRAPPER_DATABASE") or "").strip()
-    if os.environ.get("R1_MYSQL_WRAPPER_ACTIVE") != "1":
-        raise RuntimeError(
-            "task runtime autostart 测试只能在 R1 隔离 MySQL 中运行；"
-            "请使用 scripts/testing/run_with_r1_mysql.py -- make test-project-rules"
-        )
-    if not database_url or not database_name.startswith("fbm_pipeline_r1_"):
-        raise RuntimeError("task runtime autostart 测试缺少受控的 R1 隔离数据库")
-    if make_url(database_url).database != database_name:
-        raise RuntimeError("task runtime autostart 测试 DATABASE_URL 未指向当前 R1 隔离数据库")
+    sys.path.insert(0, str(ROOT / "scripts"))
+    from testing.r1_sqlite import require_isolated_sqlite
+
+    require_isolated_sqlite()
 
 
 _require_isolated_r1_database()

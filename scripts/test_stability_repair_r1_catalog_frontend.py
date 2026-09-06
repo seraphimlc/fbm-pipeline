@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""R1 Batch 2b catalog-export real API browser checks on isolated MySQL."""
+"""R1 Batch 2b catalog-export real API browser checks on isolated SQLite."""
 
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ FRONTEND = ROOT / "frontend"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.testing.r1_mysql import R1MysqlNotConfigured, isolated_r1_mysql
+from scripts.testing.r1_sqlite import isolated_r1_sqlite
 
 
 def _free_loopback_port() -> int:
@@ -417,7 +417,7 @@ async def _seed_catalog_frontend_fixtures(environment) -> dict[str, object]:
 
 
 async def run() -> None:
-    async with isolated_r1_mysql(ROOT) as environment:
+    async with isolated_r1_sqlite(ROOT) as environment:
         backend_port = _free_loopback_port()
         frontend_port = _free_loopback_port()
         backend_url = f"http://127.0.0.1:{backend_port}"
@@ -517,11 +517,7 @@ async def run() -> None:
 
 
 def main() -> int:
-    try:
-        asyncio.run(run())
-    except R1MysqlNotConfigured as exc:
-        print(f"R1 catalog frontend checks skipped: {exc}")
-        return 2
+    asyncio.run(run())
     return 0
 
 

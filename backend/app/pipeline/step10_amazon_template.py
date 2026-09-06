@@ -19,6 +19,13 @@ from openpyxl import load_workbook
 from openpyxl.utils import range_boundaries
 
 from app.config import settings
+from app.services.product_payloads import (
+    hydrate_product_sections,
+    large_field_storage_enabled,
+    persist_image_sections_from_projection,
+    persist_listing_section_from_projection,
+    write_section,
+)
 from app.database import async_session
 from app.models import Product, ProductData, ProductFile
 from app.pipeline.ride_on_category import RIDE_ON_CATEGORY_MARKERS, select_ride_on_category
@@ -235,6 +242,8 @@ SEMANTIC_DROPDOWN_FIELD_KEYS = (
     "style",
     "target_gender",
     "theme",
+    "special_features",
+    "shelf_type",
 )
 
 
@@ -1349,8 +1358,14 @@ def _template_product_type_for_semantic_fields(mapping: dict, pd: ProductData) -
 
 def _semantic_dropdown_options(mapping: dict, template_path: Path, product_type: str | None) -> dict[str, list[str]]:
     fields = mapping.get("dynamic_fields") if isinstance(mapping.get("dynamic_fields"), dict) else {}
+    configured_keys = mapping.get("semantic_fields")
+    semantic_keys = (
+        [str(key) for key in configured_keys if str(key).strip()]
+        if isinstance(configured_keys, list) and configured_keys
+        else list(SEMANTIC_DROPDOWN_FIELD_KEYS)
+    )
     options: dict[str, list[str]] = {}
-    for key in SEMANTIC_DROPDOWN_FIELD_KEYS:
+    for key in semantic_keys:
         attrs = _flatten_mapping_values(fields.get(key))
         if key == "target_audience":
             for field_key, field_value in fields.items():
@@ -1370,15 +1385,71 @@ def _semantic_dropdown_options(mapping: dict, template_path: Path, product_type:
     return options
 
 
+def _semantic_product_facts(product: Product, pd: ProductData) -> dict[str, Any]:
+    """Build the compact, evidence-first input used by semantic analysis.
+
+    GIGA facts are authoritative for this decision.  Listing title/bullets are
+    retained only as a small fallback because they can contain generated copy;
+    unrelated pricing, stock, logistics and image data are intentionally
+    excluded from the model input.
+    """
+    features = _json_loads(pd.features, [])
+    features = features if isinstance(features, list) else []
+    variants = _json_loads(pd.variants, [])
+    variants = variants if isinstance(variants, list) else []
+    snapshot = _json_loads(pd.gigab2b_raw_snapshot, {})
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    raw = {
+        key: snapshot.get(key)
+        for key in (
+            "item_code", "product_type", "main_material", "main_color",
+            "assembled_length", "assembled_width", "assembled_height",
+            "product_weight", "packages", "place_of_origin",
+        )
+        if snapshot.get(key) not in (None, "", [], {})
+    }
+    listing_bullets = _json_loads(pd.listing_bullets, [])
+    listing_bullets = listing_bullets if isinstance(listing_bullets, list) else []
+    return {
+        "item_code": pd.item_code,
+        "supplier_title": _compact_template_text(pd.title, 500),
+        "supplier_category": _compact_template_text(pd.leaf_category, 200),
+        "supplier_product_type": _compact_template_text(pd.product_type, 200),
+        "material": _compact_template_text(pd.material, 200),
+        "color": _compact_template_text(pd.color, 120),
+        "dimensions": {
+            "length": pd.dimension_length,
+            "width": pd.dimension_width,
+            "height": pd.dimension_height,
+            "weight": pd.weight,
+        },
+        "features": [_compact_template_text(item, 500) for item in features[:8]],
+        "variants": [
+            {
+                key: value for key, value in item.items()
+                if key in {"attributes", "color", "material", "title"}
+            }
+            for item in variants[:10] if isinstance(item, dict)
+        ],
+        "raw_snapshot": raw,
+        "listing_summary": {
+            "title": _compact_template_text(pd.listing_title, 500),
+            "bullets": [
+                _compact_template_text(item, 350)
+                for item in listing_bullets[:5]
+            ],
+        },
+        "brand": product.brand,
+    }
+
+
 def _semantic_dropdown_prompt(product: Product, pd: ProductData, options: dict[str, list[str]]) -> str:
-    bullets = _json_loads(pd.listing_bullets, [])
-    bullets = bullets if isinstance(bullets, list) else []
-    categories = _json_loads(pd.categories, pd.categories)
     return f"""Analyze Amazon import template semantic dropdown fields for this product.
 
 Rules:
 - For each field, choose only from that field's allowed_values list.
-- Return [] for a field when none of its allowed values is explicitly supported by the product facts or listing.
+- Return [] for a field when none of its allowed values is explicitly supported by the supplier facts.
+- Treat listing_summary as secondary evidence only; it must not override conflicting supplier facts.
 - Do not infer generic audience, use, room, shape, component, mounting, style, theme, gender, or age range details unless the selected value is directly supported.
 - Do not invent a value outside the allowed list. Values must be exact string matches.
 - Output valid JSON only in this shape:
@@ -1391,18 +1462,8 @@ Rules:
 Allowed values by field:
 {json.dumps(options, ensure_ascii=False, indent=2)}
 
-Product facts:
-- Brand: {product.brand}
-- Supplier title: {_compact_template_text(pd.title, 500)}
-- Listing title: {_compact_template_text(pd.listing_title, 500)}
-- Listing bullets: {json.dumps([_compact_template_text(item, 350) for item in bullets[:5]], ensure_ascii=False)}
-- Listing description: {_compact_template_text(pd.listing_description, 900)}
-- Supplier description: {_compact_template_text(pd.description, 900)}
-- Product type: {_compact_template_text(pd.product_type, 200)}
-- Category: {_compact_template_text(categories, 500)}
-- Leaf category: {_compact_template_text(pd.leaf_category, 200)}
-- Features: {_compact_template_text(pd.features, 700)}
-- Variants: {_compact_template_text(pd.variants, 700)}
+Compact product facts (supplier/GIGA first; do not use unstated assumptions):
+{json.dumps(_semantic_product_facts(product, pd), ensure_ascii=False, indent=2)}
 """
 
 
@@ -2297,41 +2358,64 @@ async def run_amazon_template_in_session(db: AsyncSession, product: Product) -> 
 
     await ensure_amazon_template_semantic_fields(product, pd, mapping, template_path)
     await _ensure_listing_person_detections(product, mapping)
-    if not product.upc:
-        from app.services.upc_pool import UpcPoolEmptyError, ensure_product_upc
+    if await large_field_storage_enabled(db):
+        await persist_listing_section_from_projection(db, pd)
+        if product.images:
+            await persist_image_sections_from_projection(db, product.images, ("image_analysis",))
+    # Keep all potentially slow image/OSS/workbook work before the first flush.
+    # no_autoflush is required because UPC lookup uses SELECT and semantic/image
+    # evidence above may already have changed mapped objects.
+    with db.no_autoflush:
+        if not product.upc:
+            from app.services.upc_pool import UpcPoolEmptyError, ensure_product_upc
 
+            try:
+                await ensure_product_upc(db, product)
+            except UpcPoolEmptyError as exc:
+                raise AmazonTemplateBusinessError(str(exc)) from exc
+        if product.catalog_item:
+            product.catalog_item.upc = product.upc
+
+        product_snapshot = _snapshot_model(product)
+        product_snapshot.data = _snapshot_model(product.data)
+        product_snapshot.images = _snapshot_model(product.images)
+        product_snapshot.aplus = _snapshot_model(product.aplus)
         try:
-            await ensure_product_upc(db, product)
-        except UpcPoolEmptyError as exc:
+            template_result = await asyncio.to_thread(
+                _build_amazon_template_file,
+                product_snapshot,
+                product_snapshot.data,
+                mapping,
+            )
+        except ValueError as exc:
             raise AmazonTemplateBusinessError(str(exc)) from exc
-    if product.catalog_item:
-        product.catalog_item.upc = product.upc
-    await db.flush()
-
-    product_snapshot = _snapshot_model(product)
-    product_snapshot.data = _snapshot_model(product.data)
-    product_snapshot.images = _snapshot_model(product.images)
-    product_snapshot.aplus = _snapshot_model(product.aplus)
-    try:
-        template_result = await asyncio.to_thread(
-            _build_amazon_template_file,
-            product_snapshot,
-            product_snapshot.data,
-            mapping,
-        )
-    except ValueError as exc:
-        raise AmazonTemplateBusinessError(str(exc)) from exc
 
     output_path = Path(template_result["path"])
-    pd.amazon_template_path = template_result["path"]
-    pd.amazon_template_warnings = json.dumps(template_result["warnings"], ensure_ascii=False)
-    pd.amazon_template_fill_summary = json.dumps(template_result["fill_summary"], ensure_ascii=False)
+    if await large_field_storage_enabled(db):
+        await write_section(
+            db, product_id=product.id, section="export_artifact",
+            payload={
+                "amazon_template_path": template_result["path"],
+                "amazon_template_warnings": template_result["warnings"],
+                "amazon_template_fill_summary": template_result["fill_summary"],
+            },
+            generated_at=datetime.now(),
+            extras={
+                "artifact_path": template_result["path"],
+                "warning_count": len(template_result["warnings"]),
+            },
+        )
+    else:
+        pd.amazon_template_path = template_result["path"]
+        pd.amazon_template_warnings = json.dumps(template_result["warnings"], ensure_ascii=False)
+        pd.amazon_template_fill_summary = json.dumps(template_result["fill_summary"], ensure_ascii=False)
     pd.amazon_template_generated_at = datetime.now()
     if product.images:
-        product.images.image_compliance_manifest = json.dumps({
-            "updated_at": datetime.now().isoformat(),
-            "assets": template_result.get("uploaded_images", []),
-        }, ensure_ascii=False)
+        compliance = {"updated_at": datetime.now().isoformat(), "assets": template_result.get("uploaded_images", [])}
+        if await large_field_storage_enabled(db):
+            await write_section(db, product_id=product.id, section="image_compliance", payload=compliance)
+        else:
+            product.images.image_compliance_manifest = json.dumps(compliance, ensure_ascii=False)
     file_result = await db.execute(
         select(ProductFile).where(
             ProductFile.product_id == product.id,
@@ -2383,6 +2467,7 @@ async def run_amazon_template(product_id: int) -> dict:
         product = result.scalar_one_or_none()
         if not product:
             raise AmazonTemplateBusinessError(f"Product {product_id} not found or no data")
+        await hydrate_product_sections(db, product)
         template_result = await run_amazon_template_in_session(db, product)
         await db.commit()
     logger.info("[Step10] Amazon导入模板已生成: %s", template_result["path"])

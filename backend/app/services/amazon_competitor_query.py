@@ -8,7 +8,7 @@ from typing import Any
 from app.models import Product
 
 
-RULE_VERSION = "amazon_competitor_query_v5"
+RULE_VERSION = "amazon_competitor_query_v6"
 
 STOPWORDS = {
     "and",
@@ -63,6 +63,8 @@ CORE_PRODUCT_TERMS = (
     "kids table and chair set",
     "coffee table and end table set",
     "coffee table set",
+    "over the toilet storage cabinet",
+    "over toilet storage cabinet",
     "shoe cabinet",
     "shoe storage cabinet",
     "chest of drawers",

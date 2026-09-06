@@ -37,6 +37,7 @@ from app.task_planners.product_material_prepare import create_product_material_p
 from app.product_tasks.workflow import set_product_workflow
 from app.services.product_duplicates import find_duplicate_by_item_code
 from app.services.upc_pool import ensure_product_upc
+from app.services.product_payloads import hydrate_product_sections, persist_source_sections_from_projection
 
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".tiff"}
@@ -514,6 +515,7 @@ async def create_product_draft_from_giga_item(
             .where(Product.id == duplicate.product.id)
         )
         product = product_result.scalar_one()
+        await hydrate_product_sections(db, product, ("source", "source_snapshot"))
         had_data = product.data is not None
         had_images = product.images is not None
         had_aplus = product.aplus is not None
@@ -625,6 +627,10 @@ async def create_product_draft_from_giga_item(
     pi.gallery_order = _json_dumps(image_paths)
     pi.vlm_model = settings.VLM_MODEL
     product.images = pi
+    # Clear guarded legacy source columns and stage canonical child rows before
+    # ensure_product_upc() performs database queries that can autoflush the new
+    # ProductData row.
+    await persist_source_sections_from_projection(db, pd)
     await ensure_product_upc(db, product)
 
     if not had_data:

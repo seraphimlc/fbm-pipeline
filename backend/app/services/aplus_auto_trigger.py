@@ -13,6 +13,7 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.models import CatalogProduct, Product, ProductFile, TaskRun, TaskStep
 from app.models.status import PENDING_REVIEW, WORKFLOW_NODE_GENERATE_APLUS, WORKFLOW_STATUS_PENDING
+from app.services.product_payloads import hydrate_product_sections
 from app.task_planners.aplus_generate import create_aplus_generate_runs
 from app.task_runtime.constants import RUN_STATUS_PENDING, RUN_STATUS_RUNNING, STEP_STATUS_PENDING, STEP_STATUS_READY, STEP_STATUS_RUNNING
 from app.task_runtime.json_utils import json_loads
@@ -131,7 +132,10 @@ async def _load_product(db: AsyncSession, product: Product) -> Product | None:
             selectinload(Product.files),
         )
     )
-    return result.scalar_one_or_none()
+    loaded = result.scalar_one_or_none()
+    if loaded:
+        await hydrate_product_sections(db, loaded)
+    return loaded
 
 
 async def _has_active_main_workflow_task(db: AsyncSession, product_id: int, *, exclude_task_run_id: int | None) -> tuple[bool, dict[str, Any]]:

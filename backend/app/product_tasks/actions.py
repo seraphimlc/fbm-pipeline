@@ -82,6 +82,13 @@ from app.services.product_protection import (
     product_external_result_protection_reasons,
     raise_if_auto_image_selection_protected,
 )
+from app.services.product_payloads import (
+    hydrate_product_sections,
+    invalidate_sections,
+    large_field_storage_enabled,
+    persist_source_sections_from_projection,
+    write_section,
+)
 from app.services.aplus_auto_trigger import try_auto_start_aplus_after_export_ready
 from app.task_runtime.actions import TaskAction, TaskGroupPlan, TaskRunPlan, TaskStepPlan, action_for, register_action
 from app.task_runtime.constants import (
@@ -237,6 +244,7 @@ async def _load_product(db: AsyncSession, product_id: int) -> Product:
     product = result.scalar_one_or_none()
     if not product:
         raise RuntimeError(f"商品不存在: {product_id}")
+    await hydrate_product_sections(db, product)
     return product
 
 
@@ -638,11 +646,27 @@ def _score_auto_competitor_candidates(product: Product, rows: list[AmazonCompeti
     }
 
 
-def _clear_auto_image_downstream_outputs(product: Product) -> None:
+async def _clear_auto_image_downstream_outputs(db: AsyncSession, product: Product) -> None:
+    if await large_field_storage_enabled(db):
+        await invalidate_sections(db, product.id, ("mindset", "listing", "aplus_plan", "aplus_script", "aplus_assets"))
+        if product.aplus:
+            product.aplus.aplus_plan_summary = None
+            product.aplus.aplus_scripts_summary = None
+            product.aplus.aplus_image_count = None
+            product.aplus.aplus_status = None
+            product.aplus.planned_at = None
+            product.aplus.scripted_at = None
+            product.aplus.generated_at = None
+        product.aplus_upload_status = "not_uploaded"
+        product.aplus_uploaded_at = None
+        product.aplus_upload_error = None
+        if product.catalog_item:
+            product.catalog_item.aplus_upload_status = "not_uploaded"
+            product.catalog_item.aplus_uploaded_at = None
+            product.catalog_item.aplus_upload_error = None
+        return
     if product.data:
         for field in (
-            "categories",
-            "leaf_category",
             "customer_mindset",
             "customer_mindset_generated_at",
             "listing_title",
@@ -675,13 +699,10 @@ def _clear_auto_image_downstream_outputs(product: Product) -> None:
                 setattr(product.aplus, column.name, settings.LLM_MODEL)
             else:
                 setattr(product.aplus, column.name, None)
-    product.competitor_asin = None
     product.aplus_upload_status = "not_uploaded"
     product.aplus_uploaded_at = None
     product.aplus_upload_error = None
     if product.catalog_item:
-        product.catalog_item.competitor_asin = None
-        product.catalog_item.confirmed_at = None
         product.catalog_item.aplus_upload_status = "not_uploaded"
         product.catalog_item.aplus_uploaded_at = None
         product.catalog_item.aplus_upload_error = None
@@ -1353,7 +1374,7 @@ class ProductAutoImageSelectionAction:
             product.images = ProductImage(product_id=product.id)
             db.add(product.images)
 
-        _clear_auto_image_downstream_outputs(product)
+        await _clear_auto_image_downstream_outputs(db, product)
 
         gallery_paths: list[str] = []
         for item in selected_gallery[:8]:
@@ -1371,10 +1392,21 @@ class ProductAutoImageSelectionAction:
         product.images.main_image_source = "model_selected"
         product.images.gallery_images = json_dumps(gallery_paths)
         product.images.gallery_order = json_dumps(gallery_order)
-        product.images.image_selection_analysis = json_dumps(selection)
-        # task-runtime 的 JSON helper 已固定使用 UTF-8 JSON；不要传 stdlib json.dumps
-        # 才支持的参数，否则会在选图成功后的下游投影阶段中断。
-        product.images.image_analysis = json_dumps(selection_to_image_analysis(selection))
+        analysis = selection_to_image_analysis(selection)
+        if await large_field_storage_enabled(db):
+            await write_section(
+                db, product_id=product.id, section="image_selection", payload=selection,
+                generated_at=now, extras={"selected_count": 1 + len(selected_gallery[:8])},
+            )
+            await write_section(
+                db, product_id=product.id, section="image_analysis",
+                payload={"image_analysis": analysis, "image_selling_points": analysis.get("selling_points", []) if isinstance(analysis, dict) else []},
+                generated_at=now,
+                extras={"analysis_count": len(selection.get("image_reviews") or []), "model_name": str(selection.get("model") or settings.VLM_MODEL)},
+            )
+        else:
+            product.images.image_selection_analysis = json_dumps(selection)
+            product.images.image_analysis = json_dumps(analysis)
         product.images.analyzed_at = now
         image_batches = selection.get("image_batches") if isinstance(selection.get("image_batches"), list) else []
         product.images.contact_sheet_path = str(image_batches[0].get("sheet_path")) if image_batches else None
@@ -2386,6 +2418,7 @@ async def clear_current_auto_competitor_selection(
                 snapshot.pop("selected_competitor", None)
                 snapshot.pop("auto_competitor_selection", None)
                 product.data.gigab2b_raw_snapshot = json_dumps(snapshot)
+                await persist_source_sections_from_projection(db, product.data)
     return len(rows)
 
 
@@ -3115,6 +3148,7 @@ class ProductAutoCompetitorSelectionAction:
                 "risks": selected["risks"],
             }
             product.data.gigab2b_raw_snapshot = json_dumps(snapshot)
+            await persist_source_sections_from_projection(db, product.data)
         _sync_catalog_item(product)
         step.task_run.summary_json = json_dumps({
             "product_id": product_id,
@@ -3751,6 +3785,10 @@ class ProductCustomerMindsetAction:
             return
 
         await db.refresh(product, attribute_names=["data"])
+        # Refreshing ProductData restores guarded legacy blob columns to NULL
+        # after cutover. Re-project every canonical ProductData input used by
+        # the fingerprint before validating the newly persisted mindset.
+        await hydrate_product_sections(db, product, ("source", "source_snapshot", "mindset"))
         if not result.get("customer_mindset_persisted") or not _customer_mindset_ready(product):
             message = "用户心智梳理任务完成但未落库有效结果，不能创建 Listing 任务"
             await _project_customer_mindset_failed(db, product_id=product_id, message=message)
@@ -3951,8 +3989,14 @@ class ProductListingGenerationAction:
         product = await _load_product(db, product_id)
         # run_listing() 使用独立数据库会话落库。当前 task-runtime 会话可能刚连续执行完
         # customer_mindset -> listing，identity map 里的 ProductData 仍是心智落库前旧值；
-        # success hook 必须显式刷新 data，不能把已存在的 durable 心智误判为缺失。
+        # success hook 必须显式刷新 data，再恢复 canonical 输入和 Listing 输出，
+        # 不能把已存在的 durable 正文误判为缺失。
         await db.refresh(product, attribute_names=["data"])
+        await hydrate_product_sections(
+            db,
+            product,
+            ("source", "source_snapshot", "mindset", "listing"),
+        )
         _raise_if_e5_export_ready_protected(product, action_label="完成 Listing 并进入 A+ 图片生成")
         _project_listing_ready_for_aplus_review(product)
         summary = {

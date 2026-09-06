@@ -264,6 +264,22 @@ export interface ProductDetail extends Product {
   amazon_export_preview: Record<string, any> | null;
   material_assets: ProductMaterialAsset[];
   material_summary: ProductMaterialSummary;
+  sections?: Record<string, ProductSectionSummary>;
+}
+
+export interface ProductSectionSummary {
+  loaded: boolean;
+  state: 'absent' | 'processing' | 'ready' | 'failed' | 'unresolved';
+  has_content: boolean;
+  revision: number | null;
+  updated_at: string | null;
+  content_bytes?: number | null;
+  error_code?: string | null;
+  stale?: boolean;
+}
+
+export interface ProductSectionResponse extends ProductSectionSummary {
+  data: any | null;
 }
 
 export interface ProductImageReviewQueueItem {
@@ -1674,6 +1690,15 @@ export const getAplusUploadBatch = (id: number) =>
 
 export const getProduct = (id: number, params?: { compact?: boolean }) =>
   api.get<ProductDetail>(`/products/${id}`, { params });
+
+export const getProductSection = (id: number, section: string) =>
+  api.get<ProductSectionResponse>(`/products/${id}/sections/${section}`);
+
+export const getProductImageSection = (id: number, part: 'analysis' | 'selection' | 'compliance') =>
+  api.get<ProductSectionResponse>(`/products/${id}/sections/images`, { params: { part } });
+
+export const getProductAplusSection = (id: number, part: 'plan' | 'script' | 'assets') =>
+  api.get<ProductSectionResponse>(`/products/${id}/sections/aplus`, { params: { part } });
 
 export const listProductMaterialAssets = (id: number) =>
   api.get<ProductMaterialAsset[]>(`/products/${id}/materials`);

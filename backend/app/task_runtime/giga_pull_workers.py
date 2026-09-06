@@ -231,11 +231,13 @@ async def giga_pull_plan(ctx: TaskContext) -> dict[str, Any]:
     if skip_existing:
         sku_codes = await _sku_codes_needing_product_drafts(
             ctx,
-            listed_skus=listed_skus,
+            listed_skus=sku_codes,
             site=site,
             data_source_id=data_source_id,
         )
-        skipped_existing_count = len(listed_skus) - len(sku_codes)
+        skipped_existing_count = (
+            len(requested_sku_codes or listed_skus) - len(sku_codes)
+        )
     available_new_sku_count = len(sku_codes)
     if new_sku_limit is not None:
         sku_codes = sku_codes[:new_sku_limit]

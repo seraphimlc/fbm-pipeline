@@ -938,6 +938,19 @@ class ProductDetail(ProductResponse):
     video_folder: ProductFolderEntry | None = None
     aplus_folder: ProductFolderEntry | None = None
     amazon_export_preview: dict[str, Any] | None = None
+    # Summary metadata for independently lazy-loaded large content sections.
+    sections: dict[str, dict[str, Any]] = Field(default_factory=dict)
+
+
+class ProductSectionResponse(BaseModel):
+    loaded: bool
+    state: Literal["absent", "processing", "ready", "failed", "unresolved"]
+    has_content: bool
+    revision: int | None = None
+    updated_at: datetime | None = None
+    content_bytes: int | None = None
+    error_code: str | None = None
+    data: Any | None = None
 
 
 # ─── ProductData ───

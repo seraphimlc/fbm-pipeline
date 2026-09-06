@@ -47,6 +47,17 @@ class Product(Base):
     data: Mapped["ProductData | None"] = relationship("ProductData", back_populates="product", uselist=False, cascade="all, delete-orphan")
     images: Mapped["ProductImage | None"] = relationship("ProductImage", back_populates="product", uselist=False, cascade="all, delete-orphan")
     aplus: Mapped["ProductAplus | None"] = relationship("ProductAplus", back_populates="product", uselist=False, cascade="all, delete-orphan")
+    source_payload: Mapped["ProductSourcePayload | None"] = relationship("ProductSourcePayload", back_populates="product", uselist=False, cascade="all, delete-orphan", lazy="raise")
+    source_snapshot: Mapped["ProductSourceSnapshot | None"] = relationship("ProductSourceSnapshot", back_populates="product", uselist=False, cascade="all, delete-orphan", lazy="raise")
+    customer_mindset_payload: Mapped["ProductCustomerMindset | None"] = relationship("ProductCustomerMindset", back_populates="product", uselist=False, cascade="all, delete-orphan", lazy="raise")
+    listing_content: Mapped["ProductListingContent | None"] = relationship("ProductListingContent", back_populates="product", uselist=False, cascade="all, delete-orphan", lazy="raise")
+    image_analysis_payload: Mapped["ProductImageAnalysisPayload | None"] = relationship("ProductImageAnalysisPayload", back_populates="product", uselist=False, cascade="all, delete-orphan", lazy="raise")
+    image_selection_payload: Mapped["ProductImageSelectionPayload | None"] = relationship("ProductImageSelectionPayload", back_populates="product", uselist=False, cascade="all, delete-orphan", lazy="raise")
+    image_compliance_payload: Mapped["ProductImageCompliancePayload | None"] = relationship("ProductImageCompliancePayload", back_populates="product", uselist=False, cascade="all, delete-orphan", lazy="raise")
+    aplus_plan_payload: Mapped["ProductAplusPlanPayload | None"] = relationship("ProductAplusPlanPayload", back_populates="product", uselist=False, cascade="all, delete-orphan", lazy="raise")
+    aplus_script_payload: Mapped["ProductAplusScriptPayload | None"] = relationship("ProductAplusScriptPayload", back_populates="product", uselist=False, cascade="all, delete-orphan", lazy="raise")
+    aplus_assets_payload: Mapped["ProductAplusAssetsPayload | None"] = relationship("ProductAplusAssetsPayload", back_populates="product", uselist=False, cascade="all, delete-orphan", lazy="raise")
+    export_artifact: Mapped["ProductExportArtifact | None"] = relationship("ProductExportArtifact", back_populates="product", uselist=False, cascade="all, delete-orphan", lazy="raise")
     files: Mapped[list["ProductFile"]] = relationship("ProductFile", back_populates="product", cascade="all, delete-orphan")
     material_assets: Mapped[list["ProductMaterialAsset"]] = relationship(
         "ProductMaterialAsset",
@@ -597,6 +608,96 @@ class ProductAplus(Base):
     llm_model: Mapped[str] = mapped_column(String(50), default="gpt-5.5")
 
     product: Mapped["Product"] = relationship("Product", back_populates="aplus")
+
+
+class ProductPayloadMixin:
+    """Shared metadata for a current, versioned product content section."""
+
+    __abstract__ = True
+
+    product_id: Mapped[int] = mapped_column(Integer, ForeignKey("products.id", ondelete="CASCADE"), primary_key=True)
+    payload_json: Mapped[str | None] = mapped_column(Text)
+    schema_version: Mapped[str] = mapped_column(String(80), default="v1")
+    content_revision: Mapped[int] = mapped_column(Integer, default=1)
+    input_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    content_sha256: Mapped[str | None] = mapped_column(String(64))
+    content_bytes: Mapped[int | None] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(30), default="ready")
+    source_task_run_id: Mapped[int | None] = mapped_column(Integer)
+    error_code: Mapped[str | None] = mapped_column(String(100))
+    generated_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
+
+
+class ProductSourcePayload(ProductPayloadMixin, Base):
+    __tablename__ = "product_source_payload"
+    product: Mapped["Product"] = relationship("Product", back_populates="source_payload")
+
+
+class ProductSourceSnapshot(ProductPayloadMixin, Base):
+    __tablename__ = "product_source_snapshot"
+    product: Mapped["Product"] = relationship("Product", back_populates="source_snapshot")
+
+
+class ProductCustomerMindset(ProductPayloadMixin, Base):
+    __tablename__ = "product_customer_mindset"
+    question_count: Mapped[int | None] = mapped_column(Integer)
+    fixed_question_count: Mapped[int | None] = mapped_column(Integer)
+    dynamic_question_count: Mapped[int | None] = mapped_column(Integer)
+    requires_review: Mapped[int | None] = mapped_column(Integer)
+    artifact_path: Mapped[str | None] = mapped_column(Text)
+    product: Mapped["Product"] = relationship("Product", back_populates="customer_mindset_payload")
+
+
+class ProductListingContent(ProductPayloadMixin, Base):
+    __tablename__ = "product_listing_content"
+    product: Mapped["Product"] = relationship("Product", back_populates="listing_content")
+
+
+class ProductImageAnalysisPayload(ProductPayloadMixin, Base):
+    __tablename__ = "product_image_analysis"
+    analysis_count: Mapped[int | None] = mapped_column(Integer)
+    model_name: Mapped[str | None] = mapped_column(String(100))
+    product: Mapped["Product"] = relationship("Product", back_populates="image_analysis_payload")
+
+
+class ProductImageSelectionPayload(ProductPayloadMixin, Base):
+    __tablename__ = "product_image_selection"
+    selected_count: Mapped[int | None] = mapped_column(Integer)
+    product: Mapped["Product"] = relationship("Product", back_populates="image_selection_payload")
+
+
+class ProductImageCompliancePayload(ProductPayloadMixin, Base):
+    __tablename__ = "product_image_compliance"
+    product: Mapped["Product"] = relationship("Product", back_populates="image_compliance_payload")
+
+
+class ProductAplusPlanPayload(ProductPayloadMixin, Base):
+    __tablename__ = "product_aplus_plan"
+    summary: Mapped[str | None] = mapped_column(Text)
+    product: Mapped["Product"] = relationship("Product", back_populates="aplus_plan_payload")
+
+
+class ProductAplusScriptPayload(ProductPayloadMixin, Base):
+    __tablename__ = "product_aplus_script"
+    summary: Mapped[str | None] = mapped_column(Text)
+    product: Mapped["Product"] = relationship("Product", back_populates="aplus_script_payload")
+
+
+class ProductAplusAssetsPayload(ProductPayloadMixin, Base):
+    __tablename__ = "product_aplus_assets"
+    asset_count: Mapped[int | None] = mapped_column(Integer)
+    product: Mapped["Product"] = relationship("Product", back_populates="aplus_assets_payload")
+
+
+class ProductExportArtifact(ProductPayloadMixin, Base):
+    __tablename__ = "product_export_artifact"
+    artifact_path: Mapped[str | None] = mapped_column(Text)
+    template_key: Mapped[str | None] = mapped_column(String(200))
+    risk_level: Mapped[str | None] = mapped_column(String(30), index=True)
+    warning_count: Mapped[int | None] = mapped_column(Integer)
+    product: Mapped["Product"] = relationship("Product", back_populates="export_artifact")
 
 
 class AplusRegenerateTask(Base):

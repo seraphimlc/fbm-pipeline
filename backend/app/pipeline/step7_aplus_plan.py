@@ -43,6 +43,7 @@ from app.pipeline.customer_mindset import (
     image_analysis_ready,
 )
 from app.services.product_pipeline_artifacts import write_aplus_plan_artifacts
+from app.services.product_payloads import hydrate_product_sections, large_field_storage_enabled, write_section
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -1333,6 +1334,11 @@ async def run_aplus_plan(product_id: int) -> dict:
         product = result.scalar_one_or_none()
         if not product or not product.data:
             raise ValueError(f"Product {product_id} not found or no data")
+        await hydrate_product_sections(
+            db,
+            product,
+            ("source", "source_snapshot", "mindset", "listing", "image_analysis", "image_selection"),
+        )
 
         pd = product.data
         pi = product.images
@@ -1468,7 +1474,13 @@ async def run_aplus_plan(product_id: int) -> dict:
             pa = ProductAplus(product_id=product.id)
             db.add(pa)
 
-        pa.aplus_plan = json.dumps(plan, ensure_ascii=False)
+        if await large_field_storage_enabled(db):
+            await write_section(
+                db, product_id=product.id, section="aplus_plan", payload=plan,
+                generated_at=datetime.now(), extras={"summary": plan.get("plan_summary")},
+            )
+        else:
+            pa.aplus_plan = json.dumps(plan, ensure_ascii=False)
         pa.aplus_plan_summary = plan.get("plan_summary")
         pa.planned_at = datetime.now()
         pa.llm_model = settings.LLM_MODEL

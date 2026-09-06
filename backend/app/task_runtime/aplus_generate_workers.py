@@ -19,6 +19,7 @@ from app.product_tasks.workflow import set_product_workflow
 from app.pipeline.step7_aplus_plan import run_aplus_plan
 from app.pipeline.step8_aplus_script import run_aplus_script
 from app.pipeline.step9_aplus_image import run_aplus_image
+from app.services.product_payloads import invalidate_sections, large_field_storage_enabled, load_section, parse_payload
 from app.task_runtime.events import update_step_progress
 from app.task_runtime.json_utils import json_dumps, json_loads
 from app.task_runtime.registry import TaskContext, register_worker
@@ -50,15 +51,18 @@ async def _set_aplus_status(
             session.add(product.aplus)
             await session.flush()
         if clear_outputs:
-            product.aplus.aplus_plan = None
             product.aplus.aplus_plan_summary = None
-            product.aplus.aplus_scripts = None
             product.aplus.aplus_scripts_summary = None
-            product.aplus.aplus_images = None
             product.aplus.aplus_image_count = None
             product.aplus.planned_at = None
             product.aplus.scripted_at = None
             product.aplus.generated_at = None
+            if await large_field_storage_enabled(session):
+                await invalidate_sections(session, product.id, ("aplus_plan", "aplus_script", "aplus_assets"))
+            else:
+                product.aplus.aplus_plan = None
+                product.aplus.aplus_scripts = None
+                product.aplus.aplus_images = None
         product.aplus.aplus_status = status
         # Auto A+ is the final generated asset gate before export.  Preserve
         # already confirmed/exported products when a user manually regenerates
@@ -105,7 +109,11 @@ async def _has_verified_complete_aplus_images(product_id: int) -> bool:
         aplus = await session.scalar(select(ProductAplus).where(ProductAplus.product_id == product_id))
         if not aplus or int(aplus.aplus_image_count or 0) != 5:
             return False
-        images = json_loads(aplus.aplus_images, [])
+        if await large_field_storage_enabled(session):
+            record = await load_section(session, product_id, "aplus_assets")
+            images = parse_payload(record.payload_json) if record and record.payload_json else []
+        else:
+            images = json_loads(aplus.aplus_images, [])
         if not isinstance(images, list) or len(images) != 5:
             return False
         positions: set[int] = set()
@@ -130,8 +138,13 @@ async def _load_verified_aplus_phase(product_id: int, field_name: str, item_key:
     """
     async with async_session() as session:
         aplus = await session.scalar(select(ProductAplus).where(ProductAplus.product_id == product_id))
-        raw_value = getattr(aplus, field_name, None) if aplus else None
-        value = json_loads(raw_value, {})
+        if await large_field_storage_enabled(session):
+            section = "aplus_plan" if field_name == "aplus_plan" else "aplus_script"
+            record = await load_section(session, product_id, section)
+            value = parse_payload(record.payload_json) if record and record.payload_json else {}
+        else:
+            raw_value = getattr(aplus, field_name, None) if aplus else None
+            value = json_loads(raw_value, {})
         items = value.get(item_key) if isinstance(value, dict) else None
         if not isinstance(items, list) or len(items) != 5:
             return None

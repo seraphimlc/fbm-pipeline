@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused R1 workflow action checks; optional DB behavior uses isolated MySQL only."""
+"""Focused R1 workflow action checks; DB behavior runs on isolated SQLite by default."""
 
 from __future__ import annotations
 
@@ -381,11 +381,11 @@ def _family_runtime_spec(route: str) -> dict[str, Any]:
             "needs_generation_facts": True,
         },
     }
-    assert route in specs, f"missing isolated MySQL family fixture for manifest route: {route}"
+    assert route in specs, f"missing isolated SQLite family fixture for manifest route: {route}"
     return specs[route]
 
 
-async def test_isolated_mysql_route_and_correlation_behavior(environment) -> None:
+async def test_isolated_sqlite_route_and_correlation_behavior(environment) -> None:
     import httpx
     from sqlalchemy import func, select
 
@@ -609,36 +609,25 @@ def run_non_db_checks(*, backend_only: bool) -> None:
         print("R1 workflow backend projection and failure-injection checks passed")
 
 
-async def run_mysql_checks() -> None:
-    from testing.r1_mysql import isolated_r1_mysql
+async def run_sqlite_checks() -> None:
+    from testing.r1_sqlite import isolated_r1_sqlite
 
-    async with isolated_r1_mysql(ROOT) as environment:
+    async with isolated_r1_sqlite(ROOT) as environment:
         test_failed_navigation_and_messages()
         await test_downstream_creation_failure_injection()
         test_manifest_closure_and_routes()
-        await test_isolated_mysql_route_and_correlation_behavior(environment)
-        print(f"R1 isolated MySQL workflow checks passed: {environment.database_name}")
+        await test_isolated_sqlite_route_and_correlation_behavior(environment)
+        print(f"R1 isolated SQLite workflow checks passed: {environment.database_name}")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend-only", action="store_true")
-    parser.add_argument("--with-mysql", action="store_true")
     args = parser.parse_args()
-    if args.with_mysql:
-        if not str(os.environ.get("R1_TEST_MYSQL_ADMIN_URL") or "").strip():
-            print(
-                "BLOCKED: R1_TEST_MYSQL_ADMIN_URL is required; isolated DB checks were not run "
-                "and the application DATABASE_URL was not used",
-                file=sys.stderr,
-            )
-            return 2
-        asyncio.run(run_mysql_checks())
-        return 0
-
-    run_non_db_checks(backend_only=args.backend_only)
-    if not args.backend_only:
-        print("DB_SEGMENT_NOT_RUN: rerun with --with-mysql and explicit R1_TEST_MYSQL_ADMIN_URL")
+    if args.backend_only:
+        run_non_db_checks(backend_only=True)
+    else:
+        asyncio.run(run_sqlite_checks())
     return 0
 
 

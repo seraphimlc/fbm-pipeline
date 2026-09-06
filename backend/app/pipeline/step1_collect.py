@@ -36,6 +36,7 @@ from app.services.product_duplicates import (
     find_duplicate_by_item_code,
 )
 from app.services.upc_pool import refresh_upc_binding
+from app.services.product_payloads import persist_source_sections_from_projection
 
 logger = logging.getLogger(__name__)
 
@@ -1401,6 +1402,7 @@ async def _collect_product_locked(product_id: int) -> dict:
         pd.image_count = _parse_int(data.get("imageCount"))
         pd.material_dir = str(material_dir)
         pd.collected_at = datetime.now()
+        await persist_source_sections_from_projection(db, pd)
         await refresh_upc_binding(db, product)
 
         unavailable_reason = _unavailable_reason(data, pd.stock)

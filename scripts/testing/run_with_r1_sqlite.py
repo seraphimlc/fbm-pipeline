@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one command tree inside a fail-closed isolated R1 MySQL environment."""
+"""Run one command tree inside a fail-closed isolated R1 SQLite environment."""
 
 from __future__ import annotations
 
@@ -13,20 +13,22 @@ import signal
 import sys
 
 ROOT = Path(__file__).resolve().parents[2]
-BOOTSTRAP_ENV = "R1_MYSQL_WRAPPER_BOOTSTRAPPED"
+BOOTSTRAP_ENV = "R1_SQLITE_WRAPPER_BOOTSTRAPPED"
 PROJECT_RULES_MARKER_ENV = "R1_PROJECT_RULES_DB_MARKER"
 PROJECT_RULES_MARKER_NONCE_ENV = "R1_PROJECT_RULES_DB_MARKER_NONCE"
 PROJECT_RULES_COMMAND_ENV = "R1_PROJECT_RULES_COMMAND_ID"
 PROJECT_RULES_COMMAND_ID = "make:test-project-rules:v1"
-WRAPPER_ACTIVE_ENV = "R1_MYSQL_WRAPPER_ACTIVE"
-WRAPPER_DATABASE_ENV = "R1_MYSQL_WRAPPER_DATABASE"
+WRAPPER_ACTIVE_ENV = "R1_SQLITE_WRAPPER_ACTIVE"
+WRAPPER_DATABASE_ENV = "R1_SQLITE_WRAPPER_DATABASE"
 TRUSTED_MAKE_CANDIDATES = (Path("/usr/bin/make"), Path("/bin/make"))
 
 
 def _ensure_runtime_dependencies() -> None:
-    if importlib.util.find_spec("sqlalchemy") is not None:
-        return
     backend_python = ROOT / "backend" / ".venv" / "bin" / "python"
+    if Path(sys.executable).absolute() == backend_python.absolute():
+        return
+    if os.environ.get(BOOTSTRAP_ENV) == "1" and importlib.util.find_spec("sqlalchemy") is not None:
+        return
     if os.environ.get(BOOTSTRAP_ENV) == "1" or not backend_python.is_file():
         print(
             "BLOCKED: SQLAlchemy is unavailable and backend/.venv/bin/python cannot bootstrap the wrapper",
@@ -44,15 +46,15 @@ def _ensure_runtime_dependencies() -> None:
 
 _ensure_runtime_dependencies()
 
-from r1_mysql import R1MysqlNotConfigured, _validated_admin_url, isolated_r1_mysql  # noqa: E402
+from r1_sqlite import isolated_r1_sqlite  # noqa: E402
 
 
 def _command_from_argv(argv: list[str]) -> list[str]:
     if not argv or argv[0] != "--":
-        raise ValueError("usage: run_with_r1_mysql.py -- <command...>")
+        raise ValueError("usage: run_with_r1_sqlite.py -- <command...>")
     command = argv[1:]
     if not command:
-        raise ValueError("run_with_r1_mysql.py requires a command after --")
+        raise ValueError("run_with_r1_sqlite.py requires a command after --")
     return command
 
 
@@ -124,7 +126,7 @@ def _verified_project_rules_marker(
 
 
 async def _run(command: list[str]) -> int:
-    async with isolated_r1_mysql(ROOT) as environment:
+    async with isolated_r1_sqlite(ROOT) as environment:
         project_rules_command_id = _project_rules_command_id(command)
         trusted_project_rules = project_rules_command_id is not None
         marker_nonce = secrets.token_hex(32) if trusted_project_rules else None
@@ -151,6 +153,7 @@ async def _run(command: list[str]) -> int:
             "PATH": f"{backend_venv_bin}{os.pathsep}{child_env.get('PATH', '')}",
             "PYTHONUNBUFFERED": "1",
             "VIRTUAL_ENV": str(backend_venv),
+            "PYTHONPATH": f"{ROOT / 'backend'}{os.pathsep}{ROOT}{os.pathsep}{child_env.get('PYTHONPATH', '')}",
         })
         if trusted_project_rules:
             assert marker_path is not None and marker_nonce is not None and project_rules_command_id is not None
@@ -159,8 +162,8 @@ async def _run(command: list[str]) -> int:
                 PROJECT_RULES_MARKER_NONCE_ENV: marker_nonce,
                 PROJECT_RULES_COMMAND_ENV: project_rules_command_id,
             })
-        print(f"R1_MYSQL_WRAPPER_DATABASE={environment.database_name}", flush=True)
-        print(f"R1_MYSQL_WRAPPER_DATA_DIR={environment.data_dir}", flush=True)
+        print(f"R1_SQLITE_WRAPPER_DATABASE={environment.database_name}", flush=True)
+        print(f"R1_SQLITE_WRAPPER_DATA_DIR={environment.data_dir}", flush=True)
 
         try:
             process = await asyncio.create_subprocess_exec(
@@ -226,20 +229,19 @@ async def _run(command: list[str]) -> int:
                 command_id=project_rules_command_id,
             ):
                 print(
-                    "BLOCKED: project rules exited 0 without the isolated MySQL DB marker",
+                    "BLOCKED: project rules exited 0 without the isolated SQLite DB marker",
                     file=sys.stderr,
                 )
                 return 3
-            print("R1_MYSQL_PROJECT_RULES_DB_MARKER_VERIFIED", flush=True)
+            print("R1_SQLITE_PROJECT_RULES_DB_MARKER_VERIFIED", flush=True)
         return 0
 
 
 def main() -> int:
     try:
         command = _command_from_argv(sys.argv[1:])
-        _validated_admin_url()
         return asyncio.run(_run(command))
-    except (R1MysqlNotConfigured, RuntimeError, ValueError) as exc:
+    except (RuntimeError, ValueError) as exc:
         print(f"BLOCKED: {exc}", file=sys.stderr)
         return 2
 

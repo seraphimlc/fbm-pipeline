@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""R1 TikTok real FastAPI/Vite/Chromium checks on isolated MySQL."""
+"""R1 TikTok real FastAPI/Vite/Chromium checks on isolated SQLite."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from scripts.test_stability_repair_r1_tiktok import _seed_fixtures
-from scripts.testing.r1_mysql import R1MysqlNotConfigured, isolated_r1_mysql
+from scripts.testing.r1_sqlite import isolated_r1_sqlite
 
 
 def _free_loopback_port() -> int:
@@ -74,7 +74,7 @@ def _stop_process(process: subprocess.Popen | None, *, process_group: bool = Fal
 
 
 async def run() -> None:
-    async with isolated_r1_mysql(ROOT) as environment:
+    async with isolated_r1_sqlite(ROOT) as environment:
         fixture_state = await _seed_fixtures(environment)
         backend_port = _free_loopback_port()
         frontend_port = _free_loopback_port()
@@ -179,11 +179,7 @@ async def run() -> None:
 
 
 def main() -> int:
-    try:
-        asyncio.run(run())
-    except R1MysqlNotConfigured as exc:
-        print(f"BLOCKED: {exc}", file=sys.stderr)
-        return 2
+    asyncio.run(run())
     return 0
 
 

@@ -11,6 +11,7 @@
     "mutations:check": "node scripts/generate-mutation-inventory.mjs --check && node scripts/test-mutation-inventory.mjs && node --experimental-strip-types scripts/test-mutation-foundation.mjs",
     "test:dev-api-write-guard": "node --experimental-strip-types scripts/test-dev-api-write-guard.mjs",
     "test:workflow-actions:e2e": "playwright test --config=playwright.r1.config.ts",
+    "test:product-sections:e2e": "playwright test --config=playwright.product-sections.r1.config.ts",
     "build": "npm run contracts:check && tsc -b && vite build",
     "preview": "vite preview --port 3190"
   },

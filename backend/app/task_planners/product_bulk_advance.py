@@ -9,6 +9,7 @@ from app.models import Product, TaskGroup, TaskRun, TaskStep
 from app.models.status import COMPLETED
 from app.pipeline.customer_mindset import load_customer_mindset
 from app.pipeline.engine import _assert_step_prerequisites, is_running
+from app.services.product_payloads import hydrate_product_sections
 from app.task_runtime.constants import STEP_STATUS_READY
 from app.task_runtime.json_utils import json_dumps
 from app.task_runtime.scheduler import kick_task_runtime
@@ -79,6 +80,12 @@ async def create_product_bulk_advance_run(
         .where(Product.id.in_(requested_ids))
     )
     products = {product.id: product for product in result.scalars().all()}
+    for product in products.values():
+        await hydrate_product_sections(
+            db,
+            product,
+            ("source", "source_snapshot", "mindset", "image_analysis"),
+        )
 
     rows: list[dict] = []
     startable: list[dict] = []

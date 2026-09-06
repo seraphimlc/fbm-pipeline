@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload
 from app.config import settings
 from app.database import async_session
 from app.models import AplusRegenerateTask, Product, ProductAplus
+from app.services.product_payloads import hydrate_product_sections, large_field_storage_enabled, write_section
 from app.pipeline.step8_aplus_script import diagnose_aplus_regeneration_feedback, regenerate_aplus_module_script
 from app.pipeline.step9_aplus_image import regenerate_aplus_module_image
 
@@ -41,6 +42,62 @@ def _regen_aplus_status(task_status: str) -> str:
     }.get(task_status, "regen_done")
 
 
+def _module_regen_status(task_status: str) -> str:
+    return {
+        "queued": "queued",
+        "script_running": "running",
+        "image_running": "running",
+        "done": "done",
+        "failed": "failed",
+        "interrupted": "interrupted",
+    }.get(task_status, task_status)
+
+
+async def _set_module_regen_metadata(
+    product_id: int,
+    module_position: int,
+    status: str,
+    *,
+    requested_at: datetime | None = None,
+    finished_at: datetime | None = None,
+) -> None:
+    """Persist per-module regeneration state alongside the image result JSON."""
+    async with async_session() as db:
+        result = await db.execute(
+            select(ProductAplus).where(ProductAplus.product_id == product_id)
+        )
+        aplus = result.scalar_one_or_none()
+        if not aplus:
+            return
+        product = await db.get(Product, product_id, options=[selectinload(Product.aplus)])
+        if product:
+            await hydrate_product_sections(db, product, ("aplus_assets",))
+            aplus = product.aplus
+        try:
+            images = json.loads(aplus.aplus_images or "[]")
+        except json.JSONDecodeError:
+            images = []
+        if not isinstance(images, list):
+            images = []
+        found = False
+        for image in images:
+            if not isinstance(image, dict) or int(image.get("position") or 0) != module_position:
+                continue
+            image["regeneration_status"] = _module_regen_status(status)
+            if requested_at is not None:
+                image["regeneration_requested_at"] = requested_at.isoformat(timespec="seconds")
+            if finished_at is not None:
+                image["regeneration_completed_at"] = finished_at.isoformat(timespec="seconds")
+            found = True
+            break
+        if found:
+            if await large_field_storage_enabled(db):
+                await write_section(db, product_id=product_id, section="aplus_assets", payload=images, generated_at=finished_at or requested_at or datetime.now(), extras={"asset_count": sum(1 for item in images if isinstance(item, dict) and item.get("status") == "done")})
+            else:
+                aplus.aplus_images = json.dumps(images, ensure_ascii=False)
+            await db.commit()
+
+
 async def _set_product_regen_status(product_id: int, status: str) -> None:
     async with async_session() as db:
         result = await db.execute(
@@ -52,7 +109,8 @@ async def _set_product_regen_status(product_id: int, status: str) -> None:
         if product and product.aplus:
             now = datetime.now()
             product.aplus.aplus_status = _regen_aplus_status(status)
-            product.aplus.generated_at = now
+            if status in FINAL_STATUSES:
+                product.aplus.generated_at = now
             product.updated_at = now
             await db.commit()
 
@@ -82,7 +140,15 @@ async def _update_task(
         if result is not None:
             task.result_json = json.dumps(result, ensure_ascii=False)
         product_id = task.product_id
+        module_position = task.module_position
         await db.commit()
+    await _set_module_regen_metadata(
+        product_id,
+        module_position,
+        status,
+        requested_at=task.created_at if status == "queued" else None,
+        finished_at=now if status in FINAL_STATUSES else None,
+    )
     await _set_product_regen_status(product_id, status)
 
 
@@ -175,6 +241,7 @@ async def create_regenerate_task(product_id: int, module_position: int, reason: 
             task_id = task.id
         await db.commit()
     await _set_product_regen_status(product_id, "queued")
+    await _set_module_regen_metadata(product_id, module_position, "queued", requested_at=now)
     _schedule_task(task_id)
     return task
 

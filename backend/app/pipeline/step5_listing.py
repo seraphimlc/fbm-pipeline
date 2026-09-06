@@ -17,6 +17,7 @@ from app.models import Product, ProductData
 from app.pipeline.customer_mindset import customer_mindset_context, customer_mindset_matches_product
 from app.pipeline.step6_image import refresh_listing_image_alignment
 from app.pipeline.search_terms import SEARCH_TERMS_MAX_KEYWORDS, normalize_search_terms
+from app.services.product_payloads import hydrate_product_sections, large_field_storage_enabled, write_section
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -792,6 +793,7 @@ async def run_listing(product_id: int) -> dict:
         product = result.scalar_one_or_none()
         if not product or not product.data:
             raise ValueError(f"Product {product_id} not found or no data")
+        await hydrate_product_sections(db, product, ("source", "source_snapshot", "mindset", "image_analysis", "image_selection"))
 
         pd = product.data
         if not pd.title and not pd.product_type:
@@ -834,30 +836,44 @@ async def run_listing(product_id: int) -> dict:
         )
         listing = _normalize_listing(listing, pd.color, mindset_context, product.brand)
 
-        # 保存到数据库
-        pd.listing_title = listing.get("title")
-        pd.listing_product_highlights = json.dumps(
-            listing.get("product_highlights", []),
-            ensure_ascii=False,
-        )
-        pd.listing_bullets = json.dumps(listing.get("bullets", []), ensure_ascii=False)
-        pd.listing_description = listing.get("description")
-        pd.listing_search_terms = listing.get("search_terms")
-        pd.listing_title_zh = listing.get("title_zh")
-        pd.listing_product_highlights_zh = json.dumps(
-            listing.get("product_highlights_zh", []),
-            ensure_ascii=False,
-        )
-        pd.listing_bullets_zh = json.dumps(listing.get("bullets_zh", []), ensure_ascii=False)
-        pd.listing_description_zh = listing.get("description_zh")
-        pd.listing_search_terms_zh = listing.get("search_terms_zh")
-        pd.listing_check = json.dumps(listing.get("compliance_check", {}), ensure_ascii=False)
-        pd.listing_primary_keyword = listing.get("primary_keyword")
-        pd.listing_removed_keywords = json.dumps(listing.get("removed_keywords", []), ensure_ascii=False)
-        # Step 6 has no final copy yet.  Recheck image coverage only after the
-        # exact shopper-facing Listing fields above have been persisted.
-        if product.images:
-            refresh_listing_image_alignment(pd, product.images)
+        if await large_field_storage_enabled(db):
+            await write_section(
+                db,
+                product_id=product.id,
+                section="listing",
+                payload={
+                    "listing_title": listing.get("title"),
+                    "listing_product_highlights": listing.get("product_highlights", []),
+                    "listing_bullets": listing.get("bullets", []),
+                    "listing_description": listing.get("description"),
+                    "listing_search_terms": listing.get("search_terms"),
+                    "listing_title_zh": listing.get("title_zh"),
+                    "listing_product_highlights_zh": listing.get("product_highlights_zh", []),
+                    "listing_bullets_zh": listing.get("bullets_zh", []),
+                    "listing_description_zh": listing.get("description_zh"),
+                    "listing_search_terms_zh": listing.get("search_terms_zh"),
+                    "listing_check": listing.get("compliance_check", {}),
+                    "listing_primary_keyword": listing.get("primary_keyword"),
+                    "listing_removed_keywords": listing.get("removed_keywords", []),
+                },
+            )
+        else:
+            # Legacy database path stays available until the cutover marker is written.
+            pd.listing_title = listing.get("title")
+            pd.listing_product_highlights = json.dumps(listing.get("product_highlights", []), ensure_ascii=False)
+            pd.listing_bullets = json.dumps(listing.get("bullets", []), ensure_ascii=False)
+            pd.listing_description = listing.get("description")
+            pd.listing_search_terms = listing.get("search_terms")
+            pd.listing_title_zh = listing.get("title_zh")
+            pd.listing_product_highlights_zh = json.dumps(listing.get("product_highlights_zh", []), ensure_ascii=False)
+            pd.listing_bullets_zh = json.dumps(listing.get("bullets_zh", []), ensure_ascii=False)
+            pd.listing_description_zh = listing.get("description_zh")
+            pd.listing_search_terms_zh = listing.get("search_terms_zh")
+            pd.listing_check = json.dumps(listing.get("compliance_check", {}), ensure_ascii=False)
+            pd.listing_primary_keyword = listing.get("primary_keyword")
+            pd.listing_removed_keywords = json.dumps(listing.get("removed_keywords", []), ensure_ascii=False)
+            if product.images:
+                refresh_listing_image_alignment(pd, product.images)
         await db.commit()
 
         logger.info(

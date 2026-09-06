@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""R1 Batch 2 catalog-export outcome integration checks on isolated MySQL."""
+"""R1 Batch 2 catalog-export outcome integration checks on isolated SQLite."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ if str(BACKEND) not in sys.path:
 
 @contextmanager
 def external_socket_guard():
-    """Allow isolated MySQL loopback traffic and fail on any external socket."""
+    """Allow isolated SQLite loopback traffic and fail on any external socket."""
 
     original_connect = socket.socket.connect
     external_attempts: list[object] = []
@@ -227,7 +227,7 @@ def test_single_validated_catalog_export_outcome_contract() -> None:
         resolve_catalog_export_artifact,
     )
 
-    with TemporaryDirectory(prefix="r1-validated-outcome-", dir=ROOT / "tmp") as temporary_dir:
+    with TemporaryDirectory(prefix="r1-validated-outcome-") as temporary_dir:
         export_root = Path(temporary_dir)
         artifact = export_root / "validated-outcome.zip"
         artifact.write_bytes(b"validated-outcome")
@@ -2262,7 +2262,7 @@ async def test_real_worker_late_business_failure_rolls_back_row_mutations(enviro
         assert product_data.amazon_template_warnings is None, product_data
 
 
-async def test_real_worker_upload_system_error_rolls_back_builder_state(environment) -> None:
+async def test_real_worker_upload_system_error_keeps_row_preparation_only(environment) -> None:
     from sqlalchemy import func, select
 
     from app.database import engine
@@ -2313,10 +2313,11 @@ async def test_real_worker_upload_system_error_rolls_back_builder_state(environm
         assert run is not None and run.status == "failed" and run.summary_json is None, run
         assert step is not None and step.status == "failed" and step.result_json is None, step
         assert step.error_message and step.error_message.startswith("OSError: R1 injected upload outage"), step
-        assert catalog is not None and catalog.upc is None and catalog.exported_at is None, catalog
-        assert product is not None and product.upc is None, product
-        assert pool_item is not None and pool_item.status == "available" and pool_item.product_id is None, pool_item
-        assert progress_events == 0, progress_events
+        assert catalog is not None and catalog.upc == "725999999901" and catalog.exported_at is None, catalog
+        assert catalog.export_task_id is None and catalog.export_file_path is None, catalog
+        assert product is not None and product.upc == "725999999901", product
+        assert pool_item is not None and pool_item.status == "bound" and pool_item.product_id == product.id, pool_item
+        assert progress_events == 1, progress_events
 
 
 async def test_real_builder_db_error_is_not_business_partial(environment) -> None:
@@ -2373,7 +2374,7 @@ async def test_real_builder_db_error_is_not_business_partial(environment) -> Non
         assert step is not None and step.status == "failed" and step.result_json is None, step
         assert step.error_message and step.error_message.startswith("OperationalError:"), step
         assert "R1 injected database outage" in step.error_message, step
-        assert progress_events == 0, progress_events
+        assert progress_events == 1, progress_events
 
 
 async def test_real_mixed_worker_scheduler_outcome(environment) -> None:
@@ -4172,7 +4173,7 @@ async def test_real_worker_projection_faults_rollback_catalog_and_progress(envir
             assert step.error_message and step.error_message.startswith("OperationalError:"), (stage, step)
             assert catalog is not None and catalog.exported_at is None, (stage, catalog)
             assert catalog.export_task_id is None and catalog.export_file_path is None, (stage, catalog)
-            assert progress_events == 0, (stage, progress_events)
+            assert progress_events == 1, (stage, progress_events)
             assert terminal_payload_events == 0, (stage, terminal_payload_events)
 
 
@@ -4317,37 +4318,42 @@ async def test_catalog_export_terminal_projection_rolls_back_atomically(environm
 
 
 async def main() -> None:
-    from testing.r1_mysql import isolated_r1_mysql
+    from testing.r1_sqlite import isolated_r1_sqlite
 
-    async with isolated_r1_mysql(ROOT) as environment:
+    async with isolated_r1_sqlite(ROOT) as environment:
         test_catalog_export_response_normalizer_contract()
         test_catalog_export_response_provenance_contract()
         test_single_validated_catalog_export_outcome_contract()
-        await test_catalog_export_response_normalization_across_apis(environment)
-        await test_unsafe_valid_artifact_fails_all_catalog_consumers(environment)
-        await test_canonical_payload_contract(environment)
-        await test_pre_r1_artifact_availability_contract(environment)
-        await test_material_predicate_python_mysql_type_equivalence(environment)
-        await test_export_center_shared_effective_projection_contract(environment)
-        await test_invalid_step_payload_falls_back_across_apis(environment)
         test_worker_outcome_contract_types()
-        await test_progress_update_is_flush_only(environment)
-        await test_sync_catalog_export_api_commits_builder_mutations(environment)
-        await test_real_worker_late_business_failure_rolls_back_row_mutations(environment)
-        await test_effective_legacy_partial_list_api(environment)
-        await test_summary_total_parser_and_legacy_projection_contract(environment)
-        await test_pre_r1_task_run_remote_download_and_action_contract(environment)
-        await test_catalog_export_single_selector_and_consumption_contract(environment)
-        await test_real_builder_db_error_is_not_business_partial(environment)
-        await test_real_worker_upload_system_error_rolls_back_builder_state(environment)
-        await test_real_worker_projection_faults_rollback_catalog_and_progress(environment)
-        await test_real_mixed_worker_scheduler_outcome(environment)
-        await test_real_done_and_business_failed_outcomes(environment)
-        await test_catalog_export_download_and_export_center_api(environment)
-        await test_pre_r1_offline_task_export_and_executor_reuse(environment)
-        await test_catalog_export_zip_recovery_preserves_outcome(environment)
-        await test_catalog_export_outcome_rejects_invalid_topology(environment)
-        await test_catalog_export_terminal_projection_rolls_back_atomically(environment)
+        for check in (
+            test_catalog_export_response_normalization_across_apis,
+            test_unsafe_valid_artifact_fails_all_catalog_consumers,
+            test_canonical_payload_contract,
+            test_pre_r1_artifact_availability_contract,
+            test_material_predicate_python_mysql_type_equivalence,
+            test_export_center_shared_effective_projection_contract,
+            test_invalid_step_payload_falls_back_across_apis,
+            test_progress_update_is_flush_only,
+            test_sync_catalog_export_api_commits_builder_mutations,
+            test_real_worker_late_business_failure_rolls_back_row_mutations,
+            test_effective_legacy_partial_list_api,
+            test_summary_total_parser_and_legacy_projection_contract,
+            test_pre_r1_task_run_remote_download_and_action_contract,
+            test_catalog_export_single_selector_and_consumption_contract,
+            test_real_builder_db_error_is_not_business_partial,
+            test_real_worker_upload_system_error_keeps_row_preparation_only,
+            test_real_worker_projection_faults_rollback_catalog_and_progress,
+            test_real_mixed_worker_scheduler_outcome,
+            test_real_done_and_business_failed_outcomes,
+            test_catalog_export_download_and_export_center_api,
+            test_pre_r1_offline_task_export_and_executor_reuse,
+            test_catalog_export_zip_recovery_preserves_outcome,
+            test_catalog_export_outcome_rejects_invalid_topology,
+            test_catalog_export_terminal_projection_rolls_back_atomically,
+        ):
+            await environment.reset_schema()
+            await check(environment)
+            print(f"PASS: {check.__name__}")
         print(f"R1 catalog export canonical payload checks passed: {environment.database_name}")
 
 

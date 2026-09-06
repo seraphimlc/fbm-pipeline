@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import GigaInventory, GigaInventoryAlert, GigaSku, GigaSyncBatch
@@ -15,6 +15,11 @@ from app.services.giga_openapi import (
     GigaOpenApiError,
     SOURCE_PLATFORM,
     resolve_giga_data_source_context,
+)
+from app.services.giga_snapshot_queries import (
+    completed_product_sku_codes,
+    latest_completed_inventory_by_sku,
+    latest_completed_product_metadata_by_sku,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,38 +117,14 @@ def _stock_status(stock_qty: int | None) -> str:
 
 
 async def _latest_product_skus(db: AsyncSession, site: str, data_source_id: int | None) -> list[str]:
-    batch_query = (
-        select(GigaSyncBatch)
-        .where(
-            GigaSyncBatch.site == site,
-            GigaSyncBatch.status == "done",
-            GigaSyncBatch.sku_count > 0,
-            or_(
-                GigaSyncBatch.current_category.is_(None),
-                GigaSyncBatch.current_category.notin_(GIGA_DYNAMIC_SNAPSHOT_CATEGORIES),
-            ),
-        )
-        .order_by(GigaSyncBatch.created_at.desc())
-        .limit(1)
+    sku_codes = await completed_product_sku_codes(
+        db,
+        site=site,
+        data_source_id=data_source_id,
     )
-    if data_source_id:
-        batch_query = batch_query.where(GigaSyncBatch.data_source_id == data_source_id)
-    batch_result = await db.execute(batch_query)
-    batch = batch_result.scalar_one_or_none()
-    if not batch:
-        source_part = f", data_source_id={data_source_id}" if data_source_id else ""
-        raise GigaOpenApiError(f"site={site}{source_part} 没有可用于库存同步的 GIGA SKU 商品池，请先执行商品同步")
-    sku_query = (
-        select(GigaSku.sku_code)
-        .where(GigaSku.batch_id == batch.batch_id, GigaSku.site == site)
-        .order_by(GigaSku.sku_code.asc())
-    )
-    if data_source_id:
-        sku_query = sku_query.where(GigaSku.data_source_id == data_source_id)
-    sku_result = await db.execute(sku_query)
-    sku_codes = _normalize_sku_codes([row[0] for row in sku_result.fetchall()])
     if not sku_codes:
-        raise GigaOpenApiError(f"site={site} 最新商品池 batch={batch.batch_id} 没有 SKU")
+        source_part = f", data_source_id={data_source_id}" if data_source_id is not None else ""
+        raise GigaOpenApiError(f"site={site}{source_part} 没有可用于库存同步的 GIGA SKU 商品池，请先执行商品同步")
     return sku_codes
 
 
@@ -232,59 +213,28 @@ async def _previous_inventory_batch_id(
 
 
 async def _sku_metadata(db: AsyncSession, site: str, sku_codes: list[str], data_source_id: int | None) -> dict[str, GigaSku]:
-    batch_query = (
-        select(GigaSyncBatch.batch_id)
-        .where(
-            GigaSyncBatch.site == site,
-            GigaSyncBatch.status == "done",
-            GigaSyncBatch.sku_count > 0,
-            or_(
-                GigaSyncBatch.current_category.is_(None),
-                GigaSyncBatch.current_category.notin_(GIGA_DYNAMIC_SNAPSHOT_CATEGORIES),
-            ),
-        )
-        .order_by(GigaSyncBatch.created_at.desc())
-        .limit(1)
+    return await latest_completed_product_metadata_by_sku(
+        db,
+        site=site,
+        data_source_id=data_source_id,
+        sku_codes=sku_codes,
     )
-    if data_source_id:
-        batch_query = batch_query.where(GigaSyncBatch.data_source_id == data_source_id)
-    batch_result = await db.execute(batch_query)
-    product_batch_id = batch_result.scalar_one_or_none()
-    if not product_batch_id:
-        return {}
-    sku_query = (
-        select(GigaSku).where(
-            GigaSku.batch_id == product_batch_id,
-            GigaSku.site == site,
-            GigaSku.sku_code.in_(sku_codes),
-        )
-    )
-    if data_source_id:
-        sku_query = sku_query.where(GigaSku.data_source_id == data_source_id)
-    result = await db.execute(sku_query)
-    return {sku.sku_code: sku for sku in result.scalars().all()}
 
 
 async def _previous_inventory_by_sku(
     db: AsyncSession,
-    previous_batch_id: str | None,
+    current_batch_id: str,
     site: str,
     sku_codes: list[str],
     data_source_id: int | None,
 ) -> dict[str, GigaInventory]:
-    if not previous_batch_id or not sku_codes:
-        return {}
-    query = (
-        select(GigaInventory).where(
-            GigaInventory.batch_id == previous_batch_id,
-            GigaInventory.site == site,
-            GigaInventory.sku_code.in_(sku_codes),
-        )
+    return await latest_completed_inventory_by_sku(
+        db,
+        site=site,
+        data_source_id=data_source_id,
+        sku_codes=sku_codes,
+        exclude_batch_id=current_batch_id,
     )
-    if data_source_id:
-        query = query.where(GigaInventory.data_source_id == data_source_id)
-    result = await db.execute(query)
-    return {row.sku_code: row for row in result.scalars().all()}
 
 
 def _alert_for_change(
@@ -400,7 +350,7 @@ async def sync_giga_inventory_snapshot(
     previous_batch_id = await _previous_inventory_batch_id(db, options.batch_id, options.site, options.data_source_id)
     previous_by_sku = await _previous_inventory_by_sku(
         db,
-        previous_batch_id,
+        options.batch_id,
         options.site,
         success_skus,
         options.data_source_id,

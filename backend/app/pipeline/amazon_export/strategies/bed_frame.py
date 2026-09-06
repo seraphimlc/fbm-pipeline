@@ -39,6 +39,22 @@ def _snapshot(pd: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _part_number_from_evidence(pd: Any) -> str | None:
+    """Prefer supplier MPN/part number, then fall back to our stable SKU."""
+    snapshot = _snapshot(pd)
+    candidates: list[Any] = [snapshot.get("mpn"), snapshot.get("part_number")]
+    response = snapshot.get("_response")
+    if isinstance(response, dict):
+        rows = response.get("data")
+        if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+            candidates.extend([rows[0].get("mpn"), rows[0].get("partNumber")])
+    for value in candidates:
+        text = _clean_text(value)
+        if text:
+            return text
+    return _clean_text(getattr(pd, "item_code", None)) or None
+
+
 def _property_values(pd: Any) -> dict[str, str]:
     snapshot = _snapshot(pd)
     specification = snapshot.get("specification") if isinstance(snapshot.get("specification"), dict) else {}
@@ -139,6 +155,8 @@ def _write_many(fill: dict[str, Any], fields: dict[str, Any], key: str, values: 
 
 def apply_bed_frame_strategy(ctx: AmazonExportContext) -> None:
     """Fill BED_FRAME only from own-product facts, never furniture defaults."""
+    from app.pipeline import step10_amazon_template as legacy
+
     pd, product, fields = ctx.product_data, ctx.product, ctx.fields
     properties = _property_values(pd)
     information = _product_information_values(pd)
@@ -180,6 +198,19 @@ def apply_bed_frame_strategy(ctx: AmazonExportContext) -> None:
     if missing:
         ctx.fill.pop(fields["country_of_origin"], None)
         raise ValueError(f"床架导出缺少可验证字段: {', '.join(missing)}")
+
+    # These fields are template-specific semantic decisions.  The dedicated
+    # pre-export analysis stores only values allowed by the real workbook;
+    # never invent a value here when analysis returned no supported choice.
+    _field = lambda key: (legacy._semantic_values_from_listing_check(pd, key) or [None])[0]
+    if fields.get("part_number"):
+        ctx.fill[fields["part_number"]] = _part_number_from_evidence(pd)
+    if fields.get("item_shape"):
+        ctx.fill[fields["item_shape"]] = _field("item_shape")
+    if fields.get("finish_type"):
+        ctx.fill[fields["finish_type"]] = _field("finish_type")
+    if fields.get("is_fragile"):
+        ctx.fill[fields["is_fragile"]] = _field("is_fragile")
 
     material_evidence = _value_for(facts, "material") or ""
     normalized_materials: list[str] = []

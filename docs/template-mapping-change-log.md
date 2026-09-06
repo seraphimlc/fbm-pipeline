@@ -1,5 +1,49 @@
 # 类目导出文件映射修改记录
 
+## 2026-09-06
+
+### Shelf/Table/Cabinet/Gate 模板按类目补齐语义字段
+
+- 改动文件：
+  - `backend/app/pipeline/template_mappings/andy_shelf_table_cabinet_gate.json`
+  - `backend/app/pipeline/amazon_export/strategies/storage_furniture.py`
+  - `backend/app/api/products.py`
+  - `backend/app/pipeline/step10_amazon_template.py`
+- 涉及类目/模板：
+  - `SHELF_TABLE_CABINET_ANIMAL_CAGE_TEMPORARY_GATE.xlsm`；书架/货架与临时门栏等模板分支。
+- 变更原因：
+  - Amazon 处理摘要中 `W808P439644` 缺少 Item Shape、Mounting Type、Special Features、Included Components、Shelf Type；这些属于模板下拉语义字段，旧 mapping 未声明完整分析/写入路径。
+- 主要行为：
+  - mapping 声明 `semantic_fields`，新增 `special_features` 与 `shelf_type` 的真实模板字段映射。
+  - 导出策略消费已保存的类目语义分析结果，不使用跨类目默认值。
+- 验证：
+  - `make validate-template-mappings`：通过，6 个 mapping、0 warning。
+  - `python3 -m json.tool backend/app/pipeline/template_mappings/andy_shelf_table_cabinet_gate.json`：通过。
+  - `cd backend && .venv/bin/python -m compileall -q app`：通过。
+- 后续注意事项：
+  - `Product Compliance Certificate` 已按用户决策在 `TEMPORARY_GATE` 分支固定填 `Not Applicable`；若后续遇到实际受管制商品，需要改为显式证书事实。
+
+### 按类目分析 Amazon 模板语义字段
+
+- 改动文件：
+  - `backend/app/pipeline/template_mappings/vindhvisk_bed_frame.json`
+  - `backend/app/pipeline/step10_amazon_template.py`
+  - `backend/app/pipeline/amazon_export/strategies/bed_frame.py`
+- 涉及类目/模板：
+  - `Vindhvisk / Bed Frames`；美国站 `BED_FRAME.xlsm`。
+- 变更原因：
+  - Amazon 处理报告显示 `Item Shape`、`Finish Type`、`Is Fragile?` 和 `Part Number` 未写入。不同类目模板的下拉字段不应共用一套分析字段。
+- 主要行为：
+  - mapping 可用 `semantic_fields` 声明该类目需要模型判断的下拉字段；Step 10 只读取对应模板允许值。
+  - 床架声明 `item_shape`、`finish_type`、`is_fragile`；`part_number` 保持规则填充。
+  - 语义结果仍保存到 `listing_check.amazon_template_fields`，导出策略消费已保存结果；不支持的值保持空并交人工确认。
+- 验证：
+  - `make validate-template-mappings`：通过，6 个 mapping、0 warning。
+  - `cd backend && .venv/bin/python ../scripts/test_bed_frame_template.py`：通过。
+  - `python3 -m json.tool backend/app/pipeline/template_mappings/vindhvisk_bed_frame.json`：通过。
+- 后续注意事项：
+  - 重新导出前需要重新运行模板语义分析；该 SKU 的 Finish Type 仍需人工确认，不能凭 Linen/Beige 自动猜测。
+
 本文件专门记录 Amazon 类目导出文件映射相关变更，方便后续回看和回滚判断。
 
 ## 记录规则

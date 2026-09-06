@@ -29,6 +29,7 @@ from app.services.lingxing_aplus_publish_policy import (
     collect_aplus_publish_assets,
     evaluate_aplus_publish_prerequisites,
 )
+from app.services.product_payloads import hydrate_product_sections
 from app.task_runtime.events import emit_event, update_step_progress
 from app.task_runtime.json_utils import json_dumps, json_loads
 from app.task_runtime.registry import TaskContext, register_worker
@@ -60,6 +61,12 @@ async def _load_catalog(ctx: TaskContext, catalog_product_id: int) -> CatalogPro
     catalog = result.scalar_one_or_none()
     if not catalog:
         raise ValueError(f"CatalogProduct not found: {catalog_product_id}")
+    if catalog.source_product:
+        await hydrate_product_sections(
+            ctx.db,
+            catalog.source_product,
+            ("listing", "aplus_plan", "aplus_script", "aplus_assets"),
+        )
     return catalog
 
 

@@ -9,6 +9,12 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import selectinload
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from testing.r1_sqlite_bootstrap import ensure_sqlite_test_process
+
+if __name__ == "__main__":
+    ensure_sqlite_test_process(__file__)
+
 BACKEND = ROOT / "backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))

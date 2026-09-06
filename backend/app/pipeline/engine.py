@@ -28,6 +28,7 @@ from app.pipeline.customer_mindset import (
     image_analysis_ready,
     keyword_research_ready,
 )
+from app.services.product_payloads import hydrate_product_sections
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,7 @@ async def _assert_step_prerequisites(
         product = result.scalar_one_or_none()
         if not product:
             raise RuntimeError(f"Product {product_id} not found")
+        await hydrate_product_sections(db, product)
         if step >= 5:
             if not product.images or not product.images.main_image_path:
                 raise RuntimeError("前置节点未完成：请先确认商品主图和 Listing 图片")
@@ -251,6 +253,7 @@ async def _mark_completed_for_export(product_id: int) -> None:
         product = result.scalar_one_or_none()
         if not product:
             return
+        await hydrate_product_sections(db, product, ("source", "source_snapshot", "mindset", "listing"))
         if not _customer_mindset_ready(product):
             raise RuntimeError("用户心智梳理未完成，不能进入待导出")
         if not product.data or not product.data.listing_title or not product.data.listing_bullets:

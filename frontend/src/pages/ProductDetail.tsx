@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React, { useEffect, useState, useRef } from 'react';
 import { useLocation, useParams, useNavigate } from 'react-router-dom';
-import { Alert, Card, Descriptions, Tag, Steps, Tabs, Button, Space, Typography, Spin, message, Popconfirm, Image, Table, List, Modal, Input, Select, Empty } from 'antd';
+import { Alert, Card, Descriptions, Tag, Steps, Tabs, Button, Space, Typography, Spin, message, Popconfirm, Image, Table, List, Modal, Input, Select, Empty, Tooltip } from 'antd';
 import {
   ArrowLeftOutlined, PlayCircleOutlined, RedoOutlined,
   PauseOutlined, ReloadOutlined, DeleteOutlined,
@@ -10,8 +10,8 @@ import {
   PictureOutlined, EyeOutlined, VideoCameraOutlined,
   FilePdfOutlined, FileTextOutlined,
 } from '@ant-design/icons';
-import { getProduct, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, generateProductAplus, runProductFromStep, runPipelineStep, updateProduct, updateProductListingImages, listCategoryOptions, getProductMaterialSpreadsheetPreview, productMaterialPreviewUrl } from '../api';
-import type { CategoryOption, ProductDetail, ProductMaterialAsset, ProductMaterialSpreadsheetPreview } from '../api';
+import { getProduct, getProductSection, getProductImageSection, getProductAplusSection, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, generateProductAplus, runProductFromStep, runPipelineStep, updateProduct, updateProductListingImages, listCategoryOptions, getProductMaterialSpreadsheetPreview, productMaterialPreviewUrl } from '../api';
+import type { CategoryOption, ProductDetail, ProductMaterialAsset, ProductMaterialSpreadsheetPreview, ProductSectionResponse } from '../api';
 import type { MutationCallsiteId } from '../api/mutationInventory.generated.ts';
 import { runMutationWithUX } from '../api/mutationRunner.ts';
 import {
@@ -97,6 +97,25 @@ const APLUS_STATUS_LABELS: Record<string, { color: string; text: string }> = {
   regen_done: { color: 'success', text: '重新生图完成' },
   regen_failed: { color: 'error', text: '重新生图失败' },
   regen_interrupted: { color: 'warning', text: '重新生图被中断' },
+};
+const moduleRegenerationStatus = (generated: any) => {
+  const regenerationStatus = String(generated?.regeneration_status || '').trim();
+  if (regenerationStatus === 'queued') return { color: 'processing', text: '重新生成排队中' };
+  if (regenerationStatus === 'running') return { color: 'processing', text: '正在重新生成' };
+  if (regenerationStatus === 'done') return { color: 'success', text: '重新生成完成' };
+  if (regenerationStatus === 'failed') return { color: 'error', text: '重新生成失败' };
+  if (regenerationStatus === 'interrupted') return { color: 'warning', text: '重新生成中断' };
+  if (generated?.status === 'done') return { color: 'success', text: '已生成' };
+  if (generated?.status === 'failed') return { color: 'error', text: '生成失败' };
+  return { color: 'default', text: '未生成' };
+};
+const moduleGenerationTime = (generated: any, fallback?: any) => (
+  generated?.generated_at || generated?.regeneration_completed_at || generated?.created_at || fallback || null
+);
+const formatModuleGenerationTime = (value: any) => {
+  if (!value) return '';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN');
 };
 
 /** 将本地文件路径转为后端图片代理URL */
@@ -321,13 +340,20 @@ const defaultProductDetailTab = (detail: ProductDetail | null | undefined) => {
   const selectedAsin = detail.competitor_asin;
   const step = Number(detail.current_step || 0);
   const hasMainImage = Boolean(detail.images?.main_image_path);
+  const sectionReady = (key: string) => Boolean(detail.sections?.[key]?.has_content);
   const hasListingContent = Boolean(
+    sectionReady('listing')
+    ||
     detail.data?.listing_title
     || detail.data?.listing_bullets
     || detail.data?.listing_description
     || detail.data?.listing_search_terms
   );
   const hasAplusOutput = Boolean(
+    sectionReady('aplus_plan')
+    || sectionReady('aplus_script')
+    || sectionReady('aplus_assets')
+    ||
     detail.aplus?.aplus_plan
     || detail.aplus?.aplus_scripts
     || detail.aplus?.aplus_images
@@ -344,7 +370,7 @@ const defaultProductDetailTab = (detail: ProductDetail | null | undefined) => {
   ) {
     return 'competitor';
   }
-  if (detail.data?.customer_mindset && !hasListingContent) return 'mindset';
+  if ((sectionReady('mindset') || detail.data?.customer_mindset) && !hasListingContent) return 'mindset';
   if (
     step === 5
     || detail.status === 'step6_curating'
@@ -363,6 +389,10 @@ const ProductDetail: React.FC = () => {
   const location = useLocation();
   const backTarget = (location.state as any)?.from || window.localStorage.getItem(PRODUCT_LIST_RETURN_KEY) || '/products';
   const [product, setProduct] = useState<ProductDetail | null>(null);
+  // Bodies are independent of the summary polling response.  In particular,
+  // a compact refresh can never erase an already opened mindset brief.
+  const [sectionCache, setSectionCache] = useState<Record<string, ProductSectionResponse>>({});
+  const sectionCacheRef = useRef<Record<string, ProductSectionResponse>>({});
   const [loading, setLoading] = useState(true);
   const [regenTarget, setRegenTarget] = useState<any | null>(null);
   const [regenReason, setRegenReason] = useState('');
@@ -414,6 +444,22 @@ const ProductDetail: React.FC = () => {
       if (full) setFullDetailLoading(true);
       const { data } = await getProduct(Number(id), { compact: !full });
       setProduct(data);
+      if (!full && data.sections) {
+        const staleSections = Object.entries(sectionCacheRef.current)
+          .filter(([key, cached]) => cached.loaded && data.sections?.[key]?.revision !== cached.revision)
+          .map(([key]) => key);
+        if (staleSections.length) {
+          setSectionCache((previous) => {
+            const next = { ...previous };
+            staleSections.forEach((section) => {
+              if (previous[section]) next[section] = { ...previous[section], stale: true };
+            });
+            sectionCacheRef.current = next;
+            return next;
+          });
+        }
+        for (const section of staleSections) void loadSection(section, true);
+      }
       if (full) setFullDetailProductId(data.id);
       const nextDefaultTab = defaultProductDetailTab(data);
       const isNewProduct = autoTabProductIdRef.current !== data.id;
@@ -439,31 +485,79 @@ const ProductDetail: React.FC = () => {
     await fetchDetail(true);
   };
 
-  // The compact detail response deliberately omits the large A+ plan/script/image
-  // payloads.  An A+ task can therefore finish while the polling response still
-  // leaves this tab looking empty.  Load the complete record as soon as the user
-  // opens A+, then keep using it for the active-tab polling below.
-  useEffect(() => {
-    if (activeTabKey === 'aplus') {
-      void loadFullDetail();
+  const requestSection = async (section: string) => {
+    if (section.startsWith('image_')) return getProductImageSection(Number(id), section.slice(6) as any);
+    if (section.startsWith('aplus_')) return getProductAplusSection(Number(id), section.slice(6) as any);
+    return getProductSection(Number(id), section === 'export_artifact' ? 'export-artifact' : section);
+  };
+
+  const loadSection = async (section: string, force = false) => {
+    if (!id || (!force && sectionCacheRef.current[section]?.loaded)) return;
+    setSectionCache((previous) => {
+      const next = {
+        ...previous,
+        [section]: { loaded: false, state: 'processing' as const, has_content: false, revision: previous[section]?.revision ?? null, updated_at: previous[section]?.updated_at ?? null, data: previous[section]?.data ?? null, stale: force },
+      };
+      sectionCacheRef.current = next;
+      return next;
+    });
+    try {
+      const { data } = await requestSection(section);
+      setSectionCache((previous) => {
+        const next = { ...previous, [section]: { ...data, stale: false } };
+        sectionCacheRef.current = next;
+        return next;
+      });
+    } catch (error: any) {
+      // Pre-cutover databases retain the legacy full-detail path.  This is a
+      // read fallback only; it does not invoke a workflow mutation.
+      if (error?.response?.status === 409) await loadFullDetail();
+      else {
+        setSectionCache((previous) => {
+          const prior = previous[section];
+          const next = {
+            ...previous,
+            [section]: {
+              loaded: true,
+              state: 'failed' as const,
+              has_content: Boolean(prior?.data),
+              revision: prior?.revision ?? null,
+              updated_at: prior?.updated_at ?? null,
+              data: prior?.data ?? null,
+              error_code: error?.response?.data?.detail || 'section_request_failed',
+              stale: false,
+            },
+          };
+          sectionCacheRef.current = next;
+          return next;
+        });
+        message.error('加载内容失败');
+      }
     }
-  }, [activeTabKey, id, fullDetailProductId, fullDetailLoading]);
+  };
+
+  useEffect(() => {
+    const sectionsByTab: Record<string, string[]> = {
+      basic: ['source'],
+      mindset: ['mindset'],
+      listing: ['listing'],
+      images: ['image_analysis', 'image_selection', 'image_compliance'],
+      aplus: ['aplus_plan', 'aplus_script', 'aplus_assets'],
+      files: ['export_artifact'],
+    };
+    for (const section of sectionsByTab[activeTabKey] || []) void loadSection(section);
+    // Section bodies are keyed by product id and section key.  The cache is
+    // intentionally not a dependency: adding it must not re-fetch content.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTabKey, id]);
 
   useEffect(() => {
     setFullDetailProductId(null);
+    sectionCacheRef.current = {};
+    setSectionCache({});
     fetchDetail();
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [id]);
-
-  // A+ plan/scripts/images are deliberately omitted from the compact first
-  // response.  Load the full record as soon as this tab becomes active so a
-  // completed A+ run never looks like it has no generated images.
-  useEffect(() => {
-    if (activeTabKey === 'aplus') void loadFullDetail();
-    // loadFullDetail is intentionally left out: its identity changes on each
-    // render, while id/tab are the actual loading boundary.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTabKey, id]);
 
   // 自动轮询：任务运行中时每3秒刷新
   useEffect(() => {
@@ -474,7 +568,7 @@ const ProductDetail: React.FC = () => {
     const isRunning = (product.workflow ? workflowIsRunning : legacyProductIsRunning)
       || APLUS_REGEN_ACTIVE_STATUSES.includes(product.aplus?.aplus_status || '');
     if (isRunning) {
-      pollRef.current = setInterval(() => fetchDetail(activeTabKey === 'files' || activeTabKey === 'aplus'), 3000);
+      pollRef.current = setInterval(() => fetchDetail(false), 3000);
     } else {
       if (pollRef.current) clearInterval(pollRef.current);
     }
@@ -501,9 +595,50 @@ const ProductDetail: React.FC = () => {
   if (loading) return <Spin size="large" style={{ display: 'block', margin: '100px auto' }} />;
   if (!product) return <div>商品不存在</div>;
 
-  const data = product.data;
-  const images = product.images;
-  const aplus = product.aplus;
+  const jsonField = (value: any) => value == null || typeof value === 'string' ? value : JSON.stringify(value);
+  const sectionStatus = (keys: string[]) => {
+    const entries = keys.map((key) => sectionCache[key]).filter(Boolean);
+    if (entries.some((entry) => entry.stale)) {
+      return <Alert type="info" showIcon style={{ marginBottom: 12 }} message="内容已更新，正在刷新" />;
+    }
+    if (entries.some((entry) => entry.state === 'processing')) {
+      return <Alert type="info" showIcon style={{ marginBottom: 12 }} message="正在加载内容" />;
+    }
+    const unresolved = entries.find((entry) => entry.state === 'unresolved');
+    if (unresolved) {
+      return <Alert type="warning" showIcon style={{ marginBottom: 12 }} message="历史内容无法解析" description={unresolved.error_code || '请重新生成该部分内容'} />;
+    }
+    const failed = entries.find((entry) => entry.state === 'failed');
+    if (failed) {
+      return <Alert type="error" showIcon style={{ marginBottom: 12 }} message="内容加载失败" description={failed.error_code || '请使用对应的重试操作'} />;
+    }
+    if (entries.length && entries.every((entry) => entry.loaded && (entry.state === 'absent' || !entry.has_content))) {
+      return <Alert type="info" showIcon style={{ marginBottom: 12 }} message="暂无内容" />;
+    }
+    return null;
+  };
+  const sourceBody = sectionCache.source?.data || {};
+  const listingBody = sectionCache.listing?.data || {};
+  const imageAnalysisBody = sectionCache.image_analysis?.data || {};
+  const data = product.data ? {
+    ...product.data,
+    ...Object.fromEntries(Object.entries(sourceBody).map(([key, value]) => [key, key === 'description' ? value : jsonField(value)])),
+    ...Object.fromEntries(Object.entries(listingBody).map(([key, value]) => [key, ['listing_title', 'listing_search_terms', 'listing_title_zh', 'listing_description', 'listing_description_zh', 'listing_search_terms_zh', 'listing_primary_keyword'].includes(key) ? value : jsonField(value)])),
+    customer_mindset: sectionCache.mindset?.data ? jsonField(sectionCache.mindset.data) : product.data.customer_mindset,
+  } : product.data;
+  const images = product.images ? {
+    ...product.images,
+    image_analysis: jsonField(imageAnalysisBody.image_analysis ?? imageAnalysisBody),
+    image_selling_points: jsonField(imageAnalysisBody.image_selling_points),
+    image_selection_analysis: sectionCache.image_selection?.data ? jsonField(sectionCache.image_selection.data) : product.images.image_selection_analysis,
+    image_compliance_manifest: sectionCache.image_compliance?.data ? jsonField(sectionCache.image_compliance.data) : product.images.image_compliance_manifest,
+  } : product.images;
+  const aplus = product.aplus ? {
+    ...product.aplus,
+    aplus_plan: sectionCache.aplus_plan?.data ? jsonField(sectionCache.aplus_plan.data) : product.aplus.aplus_plan,
+    aplus_scripts: sectionCache.aplus_script?.data ? jsonField(sectionCache.aplus_script.data) : product.aplus.aplus_scripts,
+    aplus_images: sectionCache.aplus_assets?.data ? jsonField(sectionCache.aplus_assets.data) : product.aplus.aplus_images,
+  } : product.aplus;
   const aplusStatus = aplus?.aplus_status ? APLUS_STATUS_LABELS[aplus.aplus_status] : null;
   const isAplusRegenerating = APLUS_REGEN_ACTIVE_STATUSES.includes(aplus?.aplus_status || '');
   const canRetryAplusRegeneration = APLUS_REGEN_RETRYABLE_STATUSES.includes(aplus?.aplus_status || '');
@@ -577,7 +712,8 @@ const ProductDetail: React.FC = () => {
   const categoryPath = Array.isArray(categories) ? categories.join(' > ') : (data?.categories || '');
   const listingProductHighlights = productHighlightValues(data?.listing_product_highlights);
   const listingProductHighlightsZh = productHighlightValues(data?.listing_product_highlights_zh);
-  const customerMindset = parseJson(data?.customer_mindset, null);
+  const mindsetSection = sectionCache.mindset;
+  const customerMindset = mindsetSection?.data || parseJson(data?.customer_mindset, null);
   const customerMindsetQuestions = Array.isArray(customerMindset?.questions) ? customerMindset.questions : [];
   const customerMindsetFixedQuestionCount = customerMindsetQuestions.filter(
     (item: any) => item?.question_type === 'fixed',
@@ -725,6 +861,21 @@ const ProductDetail: React.FC = () => {
         });
       });
     }
+    // The supplier package is an independent source of usable image candidates.
+    // Its extracted images may not appear in the GIGA page gallery or a prior
+    // image-analysis result, but a user should still be able to promote one to
+    // the Listing main or gallery image from this review surface.
+    materialAssets
+      .filter((asset) => asset.asset_kind === 'image' && asset.processing_status !== 'stale')
+      .forEach((asset) => addItem({
+        path: asset.path,
+        filename: asset.original_filename,
+        image_type: 'file',
+        visible_selling_point: `素材包解压图片（${asset.package_type === 'to_b' ? 'To B' : asset.package_type || '未分类'}）`,
+        reason: '供应商素材包',
+      }, {
+        image_id: `素材 #${asset.id}`,
+      }));
     selectedListingImages.forEach((item: any) => addItem(item, { image_type: item.label, reason: item.meta }));
     return items;
   })();
@@ -1444,13 +1595,24 @@ const ProductDetail: React.FC = () => {
     retail_ready: 'Retail Ready',
   }[String(kind || '')] || String(kind || '未分类'));
 
-  const materialStatusMeta = (status?: string | null) => ({
-    ready: { color: 'processing', label: '待分析' },
-    analyzed: { color: 'cyan', label: '已分析' },
-    selected: { color: 'success', label: '已选用' },
-    rejected: { color: 'error', label: '已拒绝' },
-    stale: { color: 'default', label: '历史素材' },
-  }[String(status || '')] || { color: 'default', label: String(status || '未知') });
+  const materialStatusMeta = (status?: string | null, assetKind?: string | null) => {
+    const normalizedStatus = String(status || '');
+    // `ready` is the persisted ingestion state, not a universal analysis state:
+    // ZIPs have already been extracted, while images await visual analysis and
+    // supporting documents are merely registered for fact extraction/preview.
+    if (normalizedStatus === 'ready') {
+      if (assetKind === 'zip') return { color: 'success', label: '已解压' };
+      if (assetKind === 'image') return { color: 'processing', label: '待分析' };
+      return { color: 'processing', label: '已登记' };
+    }
+    return ({
+      analyzed: { color: 'cyan', label: '已分析' },
+      selected: { color: 'success', label: '已选用' },
+      rejected: { color: 'error', label: '已拒绝' },
+      stale: { color: 'default', label: '历史素材' },
+    } as Record<string, { color: string; label: string }>)[normalizedStatus]
+      || { color: 'default', label: normalizedStatus || '未知' };
+  };
 
   const materialUsageLabels: Record<string, string> = {
     source_archive: '来源压缩包',
@@ -1539,7 +1701,7 @@ const ProductDetail: React.FC = () => {
       key: 'status',
       width: 250,
       render: (_: unknown, record: ProductMaterialAsset) => {
-        const status = materialStatusMeta(record.processing_status);
+        const status = materialStatusMeta(record.processing_status, record.asset_kind);
         const usages = parseJson(record.downstream_usage_json, []);
         return (
           <Space direction="vertical" size={4}>
@@ -1910,12 +2072,181 @@ const ProductDetail: React.FC = () => {
     && hasRestartableDownstreamState;
 
   // 安全解析JSON
+  const renderListingImageConfirmation = () => (
+    <Card
+      title="商品图片确认"
+      size="small"
+      style={{ marginBottom: 12 }}
+      extra={imageResourceItems.length ? (
+        <Space>
+          {listingImageDirty && <Tag color="warning">未保存</Tag>}
+          <Button
+            size="small"
+            icon={<ReloadOutlined />}
+            disabled={!listingImageDirty || imageOrderSaving}
+            onClick={resetListingImageDraft}
+          >
+            取消
+          </Button>
+          <Button
+            size="small"
+            type="primary"
+            icon={<CheckOutlined />}
+            loading={imageOrderSaving}
+            disabled={!listingImageDirty || !selectedListingImages.length}
+            onClick={saveListingImagePaths}
+          >
+            保存
+          </Button>
+        </Space>
+      ) : null}
+    >
+      <Spin spinning={imageOrderSaving}>
+        <Space direction="vertical" size={16} style={{ width: '100%' }}>
+          <div>
+            <Space style={{ justifyContent: 'space-between', width: '100%', marginBottom: 8 }}>
+              <Text strong>已使用图片</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>最多 9 张，第一张为主图，其余为已确认展示图</Text>
+            </Space>
+            <div
+              onDragOver={(event) => {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = 'move';
+              }}
+              onDrop={dropListingImageToSelected}
+              style={{
+                minHeight: selectedListingImages.length ? 0 : 132,
+                border: selectedListingImages.length ? 'none' : '1px dashed #91caff',
+                borderRadius: 8,
+                padding: selectedListingImages.length ? 0 : 16,
+                background: selectedListingImages.length ? 'transparent' : '#f6fbff',
+              }}
+            >
+              {selectedListingImages.length ? (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 12 }}>
+                  {selectedListingImages.map((item, index) => {
+                    const isMain = index === 0;
+                    const isDropTarget = imageDragPayload?.source && imageDragPayload?.path !== item.path;
+                    return (
+                      <div
+                        key={`aplus-confirm-selected-${item.path}-${index}`}
+                        draggable={!imageOrderSaving}
+                        onDragStart={(event) => startListingImageDrag(event, { source: 'selected', index, path: item.path })}
+                        onDragOver={(event) => {
+                          event.preventDefault();
+                          event.dataTransfer.dropEffect = 'move';
+                        }}
+                        onDrop={(event) => replaceListingImageSlot(event, index)}
+                        onDragEnd={() => setImageDragPayload(null)}
+                        onDoubleClickCapture={(event) => handleListingImageDoubleClick(event, item.path, removeListingImageFromSelected)}
+                        onDoubleClick={(event) => handleListingImageDoubleClick(event, item.path, removeListingImageFromSelected)}
+                        style={{
+                          cursor: imageOrderSaving ? 'default' : 'grab',
+                          border: isMain ? '2px solid #1677ff' : '1px solid #d9d9d9',
+                          borderRadius: 8,
+                          padding: 8,
+                          background: imageDragPayload?.source === 'selected' && imageDragPayload?.index === index ? '#f0f7ff' : '#fff',
+                          boxShadow: isDropTarget ? '0 0 0 2px rgba(22, 119, 255, 0.12)' : 'none',
+                        }}
+                      >
+                        <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                          <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+                            <Tag color={isMain ? 'blue' : 'default'}>{isMain ? '主图' : `副图 ${index}`}</Tag>
+                            <DragOutlined style={{ color: '#999' }} />
+                          </Space>
+                          <Image
+                            src={imgUrl(item.path)}
+                            width="100%"
+                            alt={isMain ? '主图' : `副图${index}`}
+                            preview={false}
+                            onDoubleClick={(event) => handleListingImageDoubleClick(event, item.path, removeListingImageFromSelected)}
+                            style={{ aspectRatio: '1 / 1', objectFit: 'cover', background: '#f5f5f5' }}
+                          />
+                          {item.meta && <Typography.Paragraph type="secondary" ellipsis={{ rows: 1 }} style={{ fontSize: 12, marginBottom: 0 }}>{item.meta}</Typography.Paragraph>}
+                        </Space>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <Space direction="vertical" size={4} style={{ width: '100%', alignItems: 'center', justifyContent: 'center', minHeight: 96 }}>
+                  <Text type="secondary">把备用/未选素材拖到这里，或双击素材加入已使用图片</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>至少保留一张主图后才能保存</Text>
+                </Space>
+              )}
+            </div>
+          </div>
+          <div>
+            <Space style={{ justifyContent: 'space-between', width: '100%', marginBottom: 8 }}>
+              <Text strong>其他图片 / 备用/未选素材</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>包含商品页候选、素材包解压图片和品牌图</Text>
+            </Space>
+            <div
+              onDragOver={(event) => {
+                event.preventDefault();
+                event.dataTransfer.dropEffect = 'move';
+              }}
+              onDrop={dropListingImageToUnusedPool}
+              style={{
+                minHeight: 132,
+                border: unusedImageResourceItems.length ? 'none' : '1px dashed #d9d9d9',
+                borderRadius: 8,
+                padding: unusedImageResourceItems.length ? 0 : 16,
+                background: unusedImageResourceItems.length ? 'transparent' : '#fafafa',
+              }}
+            >
+              {unusedImageResourceItems.length ? (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(132px, 1fr))', gap: 10, maxHeight: 460, overflow: 'auto', paddingRight: 4 }}>
+                  {unusedImageResourceItems.map((item, index) => (
+                    <div
+                      key={`aplus-confirm-pool-${item.path}-${index}`}
+                      draggable={!imageOrderSaving}
+                      onDragStart={(event) => startListingImageDrag(event, { source: 'pool', path: item.path })}
+                      onDragEnd={() => setImageDragPayload(null)}
+                      onDoubleClickCapture={(event) => handleListingImageDoubleClick(event, item.path, addListingImageFromPool)}
+                      onDoubleClick={(event) => handleListingImageDoubleClick(event, item.path, addListingImageFromPool)}
+                      style={{ cursor: imageOrderSaving ? 'default' : 'grab', border: '1px solid #eee', borderRadius: 8, padding: 8, background: '#fff' }}
+                    >
+                      <Space direction="vertical" size={6} style={{ width: '100%' }}>
+                        <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+                          <Text strong style={{ fontSize: 12 }}>{item.image_id || `#${index + 1}`}</Text>
+                          <DragOutlined style={{ color: '#bbb' }} />
+                        </Space>
+                        <Image
+                          src={imgUrl(item.path)}
+                          width="100%"
+                          alt={item.filename || `图片${index + 1}`}
+                          preview={false}
+                          onDoubleClick={(event) => handleListingImageDoubleClick(event, item.path, addListingImageFromPool)}
+                          style={{ aspectRatio: '1 / 1', objectFit: 'cover', background: '#f5f5f5' }}
+                        />
+                        <Typography.Paragraph type="secondary" ellipsis={{ rows: 2 }} style={{ fontSize: 12, marginBottom: 0 }}>
+                          {item.visible_selling_point || item.image_type || item.filename}
+                        </Typography.Paragraph>
+                      </Space>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <Space direction="vertical" size={4} style={{ width: '100%', alignItems: 'center', justifyContent: 'center', minHeight: 96 }}>
+                    <Text type="secondary">暂无其他图片 / 备用未选素材</Text>
+                  <Text type="secondary" style={{ fontSize: 12 }}>把上方图片拖到这里，或双击已使用图片即可移出使用区</Text>
+                </Space>
+              )}
+            </div>
+          </div>
+        </Space>
+      </Spin>
+    </Card>
+  );
+
   const tabItems = [
     {
       key: 'basic',
       label: '📋 基本信息',
       children: (
         <div>
+          {sectionStatus(['source'])}
           <Card title="商品摘要" size="small" style={{ marginBottom: 16 }}>
             <Space direction="vertical" style={{ width: '100%' }} size={12}>
               <div>
@@ -2231,6 +2562,7 @@ const ProductDetail: React.FC = () => {
       label: '用户心智',
       children: hasCustomerMindset ? (
         <div>
+          {sectionStatus(['mindset'])}
           <Alert
             type={customerMindsetQuality.requires_review ? 'warning' : 'success'}
             showIcon
@@ -2481,7 +2813,9 @@ const ProductDetail: React.FC = () => {
           </Card>
         </div>
       ) : (
-        <Empty
+        <>
+          {sectionStatus(['mindset'])}
+          <Empty
           description={isCustomerMindsetFailed ? '用户心智梳理失败，可重新提交任务' : '等待图片分析完成后自动梳理'}
         >
           <Space direction="vertical" align="center">
@@ -2497,7 +2831,8 @@ const ProductDetail: React.FC = () => {
             {!hasImageAnalysis && <Text type="secondary">请先完成图片分析，才能生成用户心智。</Text>}
             {isPipelineRunning && <Text type="secondary">当前流程正在运行，请等待当前任务结束。</Text>}
           </Space>
-        </Empty>
+          </Empty>
+        </>
       ),
     },
     {
@@ -2505,6 +2840,7 @@ const ProductDetail: React.FC = () => {
       label: '📝 Listing文案',
       children: (
         <div>
+          {sectionStatus(['listing'])}
           <Card
             title="标题"
             size="small"
@@ -2701,6 +3037,7 @@ const ProductDetail: React.FC = () => {
       label: '🖼️ 图片素材',
       children: (
         <div>
+          {sectionStatus(['image_analysis', 'image_selection', 'image_compliance'])}
           {imageSelectionDiagnostics?.main_image_status === 'fallback_substitute' && (
             <Alert
               type="warning"
@@ -2955,8 +3292,8 @@ const ProductDetail: React.FC = () => {
 
                 <div>
                   <Space style={{ justifyContent: 'space-between', width: '100%', marginBottom: 8 }}>
-                    <Text strong>备用/未选素材</Text>
-                    <Text type="secondary" style={{ fontSize: 12 }}>备用文件和品牌图默认停留在这里</Text>
+                    <Text strong>其他图片 / 备用/未选素材</Text>
+                    <Text type="secondary" style={{ fontSize: 12 }}>包含商品页候选、素材包解压图片和品牌图</Text>
                   </Space>
                   <div
                     onDragOver={(event) => {
@@ -3016,7 +3353,7 @@ const ProductDetail: React.FC = () => {
                       </div>
                     ) : (
                       <Space direction="vertical" size={4} style={{ width: '100%', alignItems: 'center', justifyContent: 'center', minHeight: 96 }}>
-                        <Text type="secondary">暂无备用/未选素材</Text>
+                        <Text type="secondary">暂无其他图片 / 备用未选素材</Text>
                         <Text type="secondary" style={{ fontSize: 12 }}>把上方图片拖到这里，或双击已使用图片即可移出使用区</Text>
                       </Space>
                     )}
@@ -3110,6 +3447,7 @@ const ProductDetail: React.FC = () => {
       label: '🎨 A+内容',
       children: (
         <div>
+          {sectionStatus(['aplus_plan', 'aplus_script', 'aplus_assets'])}
           <Card
             title="A+生成"
             size="small"
@@ -3151,6 +3489,7 @@ const ProductDetail: React.FC = () => {
               </Space>
             </Space>
           </Card>
+          {renderListingImageConfirmation()}
           <Card
             title="A+规划"
             size="small"
@@ -3230,6 +3569,8 @@ const ProductDetail: React.FC = () => {
             {aplusModules.length ? (
               <Space direction="vertical" style={{ width: '100%' }} size={16}>
                 {aplusModules.map(({ script, generated, references, plan, hasScript }) => {
+                  const moduleStatus = moduleRegenerationStatus(generated);
+                  const generationTime = moduleGenerationTime(generated, aplus?.generated_at);
                   const conversionGoal = script.conversion_goal || plan.conversion_goal;
                   const buyerObjection = script.buyer_objection || plan.buyer_objection;
                   const evidenceSource = script.evidence_source || plan.evidence_source;
@@ -3258,6 +3599,14 @@ const ProductDetail: React.FC = () => {
                         >
                           重新生成
                         </Button>
+                        <Tag color={moduleStatus.color}>
+                          {moduleStatus.text}
+                        </Tag>
+                        {generationTime && (
+                          <Text type="secondary" style={{ fontSize: 12 }}>
+                            生成时间：{formatModuleGenerationTime(generationTime)}
+                          </Text>
+                        )}
                       </Space>
                     )}
                   >
@@ -3353,6 +3702,13 @@ const ProductDetail: React.FC = () => {
 	                                {generated.skipped && <Tag color="processing">已复用</Tag>}
 	                                {generated.size && <Text type="secondary">{fileSize(generated.size)}</Text>}
 	                              </Space>
+	                              {(generated.regeneration_requested_at || generated.regeneration_completed_at) && (
+	                                <Text type="secondary" style={{ fontSize: 12 }}>
+	                                  {generated.regeneration_requested_at ? `发起：${new Date(generated.regeneration_requested_at).toLocaleString('zh-CN')}` : ''}
+	                                  {generated.regeneration_requested_at && generated.regeneration_completed_at ? ' · ' : ''}
+	                                  {generated.regeneration_completed_at ? `完成：${new Date(generated.regeneration_completed_at).toLocaleString('zh-CN')}` : ''}
+	                                </Text>
+	                              )}
 	                              <Image
                                   src={imgUrl(generated.display_url || generated.oss_url || generated.provider_url || generated.path)}
                                   width={780}
@@ -3431,6 +3787,7 @@ const ProductDetail: React.FC = () => {
       label: '📁 文件信息',
       children: (
         <div>
+          {sectionStatus(['export_artifact'])}
           <Card
             title="素材包与附件"
             size="small"
@@ -3786,7 +4143,7 @@ const ProductDetail: React.FC = () => {
         onChange={(key) => {
           userTouchedTabRef.current = true;
           setActiveTabKey(key);
-          if (key === 'files' || key === 'mindset' || key === 'aplus') void loadFullDetail();
+          if (key === 'files') void loadFullDetail();
         }}
       />
     </div>

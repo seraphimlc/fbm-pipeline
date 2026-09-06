@@ -36,6 +36,7 @@ from app.database import async_session
 from app.models import Product, ProductData, ProductImage, ProductAplus, ProductMaterialAsset
 from app.services.product_material_prepare import write_material_manifest
 from app.services.product_pipeline_artifacts import write_aplus_script_artifacts
+from app.services.product_payloads import hydrate_product_sections, large_field_storage_enabled, write_section
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
@@ -1579,6 +1580,7 @@ async def run_aplus_script(product_id: int) -> dict:
         product = result.scalar_one_or_none()
         if not product or not product.data:
             raise ValueError(f"Product {product_id} not found or no data")
+        await hydrate_product_sections(db, product, ("source", "listing", "image_analysis", "image_selection", "aplus_plan"))
 
         pd = product.data
         pa = product.aplus
@@ -1681,7 +1683,13 @@ async def run_aplus_script(product_id: int) -> dict:
         scripts_data = _sanitize_scripts(scripts_data, brand)
 
         # 保存
-        pa.aplus_scripts = json.dumps(scripts_data, ensure_ascii=False)
+        if await large_field_storage_enabled(db):
+            await write_section(
+                db, product_id=product.id, section="aplus_script", payload=scripts_data,
+                generated_at=datetime.now(), extras={"summary": scripts_data.get("summary")},
+            )
+        else:
+            pa.aplus_scripts = json.dumps(scripts_data, ensure_ascii=False)
         pa.aplus_scripts_summary = scripts_data.get("summary")
         pa.scripted_at = datetime.now()
         await _mark_aplus_reference_assets(db, product, scripts_data)
@@ -1926,7 +1934,13 @@ async def regenerate_aplus_module_script(product_id: int, module_position: int, 
         scripts_data["last_regenerate_reason"] = reason.strip()
         scripts_data["last_regeneration_diagnosis"] = diagnosis
 
-        pa.aplus_scripts = json.dumps(scripts_data, ensure_ascii=False)
+        if await large_field_storage_enabled(db):
+            await write_section(
+                db, product_id=product.id, section="aplus_script", payload=scripts_data,
+                generated_at=datetime.now(), extras={"summary": scripts_data.get("summary")},
+            )
+        else:
+            pa.aplus_scripts = json.dumps(scripts_data, ensure_ascii=False)
         pa.aplus_scripts_summary = scripts_data.get("summary")
         pa.scripted_at = datetime.now()
         await _mark_aplus_reference_assets(db, product, scripts_data)

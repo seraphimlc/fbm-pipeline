@@ -86,7 +86,7 @@ from app.models.status import (
     WORKFLOW_STATUS_SUCCEEDED,
 )
 from app.api.schemas import (
-    ProductCreate, ProductUpdate, ProductListingImagesUpdate, ProductGigaRefreshRequest, ProductResponse, ProductDetail, ProductImageResponse,
+    ProductCreate, ProductUpdate, ProductListingImagesUpdate, ProductGigaRefreshRequest, ProductResponse, ProductDetail, ProductDataResponse, ProductImageResponse, ProductAplusResponse,
     PaginatedResponse, ProductFileEntry, AplusRegenerateRequest, ProductMaterialAssetResponse,
     ProductImageReviewDetailResponse, ProductImageReviewQueueResponse,
     AsinSyncBatchDetail, AsinSyncBatchResponse, AsinSyncCreateRequest,
@@ -100,6 +100,19 @@ from app.api.schemas import (
     InventorySyncBatchDetail, InventorySyncBatchResponse, InventorySyncCreateRequest,
     PaginatedInventorySyncBatches, PaginatedUpcPoolItems, UpcPoolImportRequest,
     UpcPoolImportResponse, UpcPoolSummary,
+    ProductSectionResponse,
+)
+from app.services.product_payloads import (
+    hydrate_product_sections,
+    invalidate_sections,
+    large_field_storage_enabled,
+    load_section,
+    load_section_summaries,
+    parse_payload,
+    persist_image_sections_from_projection,
+    persist_listing_section_from_projection,
+    section_response,
+    write_section,
 )
 from app.pipeline.engine import start_pipeline as enqueue_pipeline, cancel_pipeline, get_step_status, is_running
 from app.product_tasks.workflow import build_product_workflow, set_product_workflow
@@ -139,6 +152,7 @@ from app.pipeline.step10_amazon_template import (
     _load_template_mapping,
     _offer_quantity,
     _representative_package,
+    _select_general_category_option,
     AmazonTemplateBusinessError,
     ensure_amazon_template_semantic_fields,
     run_amazon_template,
@@ -172,6 +186,7 @@ from app.services.upc_pool import (
     available_upc_count,
     ensure_product_upc,
 )
+from app.services.giga_snapshot_queries import latest_completed_inventory_by_sku
 from app.services.giga_openapi import GigaOpenApiError, GigaSyncOptions, sync_giga_products
 from app.services.product_protection import raise_if_auto_image_selection_protected, raise_if_image_selection_reset_protected
 from app.services.giga_product_drafts import upsert_product_drafts_from_giga_batch
@@ -439,6 +454,11 @@ async def _require_generation_prerequisites(
     require_customer_mindset: bool = True,
 ) -> None:
     """Block a node from starting unless all previous business nodes are complete."""
+    await hydrate_product_sections(
+        db,
+        product,
+        ("source", "source_snapshot", "image_analysis", "mindset", "listing"),
+    )
     if start_step >= 5:
         if not product.images or not product.images.main_image_path:
             raise HTTPException(400, "不能进入图片分析：请先在详情页确认商品主图和 Listing 图片")
@@ -1270,6 +1290,7 @@ async def _ensure_contact_sheet_oss_urls(product: Product, db: AsyncSession) -> 
             images.contact_sheet_path = first_sheet.get("display_url") or first_sheet.get("oss_url") or first_sheet.get("sheet_path")
         images.analyzed_at = images.analyzed_at or datetime.now()
         product.updated_at = datetime.now()
+        await persist_image_sections_from_projection(db, images, ("image_analysis",))
         await db.commit()
         await db.refresh(product)
 
@@ -1326,6 +1347,7 @@ async def _queue_product_post_image_generation(
     *,
     created_by: str,
 ) -> tuple[str, list[int]]:
+    await hydrate_product_sections(db, product, ("source", "source_snapshot", "mindset", "listing"))
     if not _customer_mindset_ready(product):
         return WORKFLOW_NODE_CUSTOMER_MINDSET, await _queue_product_customer_mindset(
             db,
@@ -2225,6 +2247,14 @@ def _apply_catalog_export_row_overrides(ws, row_number: int, product: Product, p
         for column, value in zip(columns_for_key, _catalog_export_semantic_values(pd, key)):
             ws.cell(row_number, column).value = value
 
+    # Keep the user-approved gate compliance declaration consistent even when
+    # catalog export reuses an older per-product workbook.
+    option = _select_general_category_option(mapping, pd)
+    compliance_attr = (dynamic_fields.get("required_product_compliance_certificate")
+                       if isinstance(dynamic_fields, dict) else None)
+    if option and option.get("product_type") == "TEMPORARY_GATE" and compliance_attr in columns:
+        ws.cell(row_number, columns[compliance_attr]).value = "Not Applicable"
+
     fabric_attrs = _flatten_template_field_values(dynamic_fields.get("fabric_type"))
     fabric_attrs.extend(attr for attr in columns if str(attr).startswith("fabric_type["))
     fabric_columns = [columns[attr] for attr in fabric_attrs if attr in columns]
@@ -2319,8 +2349,10 @@ def _catalog_store_context(catalog: CatalogProduct) -> tuple[str, int | None]:
     snapshot = _json_loads(product_data.gigab2b_raw_snapshot, {}) if product_data else {}
     if not isinstance(snapshot, dict):
         snapshot = {}
-    site = str(snapshot.get("site") or "US").strip().upper()
-    data_source_id = snapshot.get("data_source_id")
+    site = str((product.source_site if product else None) or snapshot.get("site") or "US").strip().upper()
+    data_source_id = (product.source_data_source_id if product else None)
+    if data_source_id is None:
+        data_source_id = snapshot.get("data_source_id")
     try:
         parsed_data_source_id = int(data_source_id) if data_source_id else None
     except (TypeError, ValueError):
@@ -2344,31 +2376,12 @@ async def _latest_giga_inventory_by_catalog_id(
         sku_codes = list(dict.fromkeys(_catalog_price_quantity_sku(item) for item in items if _catalog_price_quantity_sku(item)))
         if not sku_codes:
             continue
-        batch_query = (
-            select(GigaSyncBatch)
-            .where(
-                GigaSyncBatch.status == "done",
-                GigaSyncBatch.inventory_count > 0,
-                GigaSyncBatch.site == site,
-            )
-            .order_by(GigaSyncBatch.finished_at.is_(None).asc(), GigaSyncBatch.finished_at.desc(), GigaSyncBatch.created_at.desc())
-            .limit(1)
+        inventory_by_sku = await latest_completed_inventory_by_sku(
+            db,
+            site=site,
+            data_source_id=data_source_id,
+            sku_codes=sku_codes,
         )
-        if data_source_id:
-            batch_query = batch_query.where(GigaSyncBatch.data_source_id == data_source_id)
-        batch_result = await db.execute(batch_query)
-        latest_batch = batch_result.scalar_one_or_none()
-        if not latest_batch:
-            continue
-        inventory_query = select(GigaInventory).where(
-            GigaInventory.batch_id == latest_batch.batch_id,
-            GigaInventory.site == latest_batch.site,
-            GigaInventory.sku_code.in_(sku_codes),
-        )
-        if data_source_id:
-            inventory_query = inventory_query.where(GigaInventory.data_source_id == data_source_id)
-        inventory_result = await db.execute(inventory_query)
-        inventory_by_sku = {row.sku_code: row for row in inventory_result.scalars().all()}
         for item in items:
             sku = _catalog_price_quantity_sku(item)
             inventory = inventory_by_sku.get(sku)
@@ -2479,28 +2492,46 @@ async def _reset_product_after_image_selection(
         product.images = ProductImage(product_id=product.id)
         db.add(product.images)
 
-    _reset_product_data_after_image_selection(product.data)
-
-    _reset_product_images(product.images)
+    storage_enabled = await large_field_storage_enabled(db)
+    if storage_enabled:
+        await invalidate_sections(db, product.id, ("mindset", "listing", "aplus_plan", "aplus_script", "aplus_assets"))
+        product.images.contact_sheet_path = None
+        product.images.category_style = None
+        product.images.main_image_summary = None
+        product.images.analyzed_at = None
+    else:
+        _reset_product_data_after_image_selection(product.data)
+        _reset_product_images(product.images)
     product.images.main_image_path = main_image_path
     product.images.main_image_source = "manual_selected"
     product.images.gallery_images = json.dumps(gallery_paths, ensure_ascii=False)
-    product.images.image_selection_analysis = None
+    if not storage_enabled:
+        product.images.image_selection_analysis = None
     product.images.image_selected_at = None
 
     if product.aplus:
-        _reset_product_aplus(product.aplus)
+        if storage_enabled:
+            product.aplus.aplus_plan_summary = None
+            product.aplus.aplus_scripts_summary = None
+            product.aplus.aplus_image_count = None
+            product.aplus.aplus_status = None
+            product.aplus.planned_at = None
+            product.aplus.scripted_at = None
+            product.aplus.generated_at = None
+        else:
+            _reset_product_aplus(product.aplus)
 
-    product.competitor_asin = None
+    if not storage_enabled:
+        product.competitor_asin = None
     product.status = "created"
-    product.current_step = 1
+    product.current_step = 5 if storage_enabled else 1
     product.error_message = None
     product.aplus_upload_status = "not_uploaded"
     product.aplus_uploaded_at = None
     product.aplus_upload_error = None
     set_product_workflow(
         product,
-        node=WORKFLOW_NODE_SEARCH_COMPETITOR,
+        node=WORKFLOW_NODE_IMAGE_ANALYSIS if storage_enabled else WORKFLOW_NODE_SEARCH_COMPETITOR,
         status=WORKFLOW_STATUS_PENDING,
         error=None,
         now=now,
@@ -2509,11 +2540,13 @@ async def _reset_product_after_image_selection(
 
     if product.catalog_item:
         product.catalog_item.status = product.status
-        product.catalog_item.competitor_asin = None
+        if not storage_enabled:
+            product.catalog_item.competitor_asin = None
         product.catalog_item.aplus_upload_status = product.aplus_upload_status
         product.catalog_item.aplus_uploaded_at = None
         product.catalog_item.aplus_upload_error = None
-        product.catalog_item.confirmed_at = None
+        if not storage_enabled:
+            product.catalog_item.confirmed_at = None
         product.catalog_item.updated_at = now
 
 
@@ -4445,6 +4478,8 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
         .where(Product.id.in_(source_ids))
     )
     products_by_id = {product.id: product for product in product_result.scalars().all()}
+    for product in products_by_id.values():
+        await hydrate_product_sections(db, product)
     catalog_by_source_id = {item.source_product_id: item for item in catalog_items}
     latest_inventory_by_catalog_id = await _latest_giga_inventory_by_catalog_id(db, catalog_items)
 
@@ -4606,6 +4641,7 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                             except ValueError as exc:
                                 raise CatalogExportRowBusinessError(str(exc)) from exc
                             await ensure_amazon_template_semantic_fields(product, pd, mapping, template_path)
+                            await persist_listing_section_from_projection(db, pd)
                             source_path = _amazon_template_cache_path(pd)
                             template_result = None
                             if not source_path:
@@ -4645,7 +4681,13 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                             await db.refresh(product)
                         if pd is not None:
                             await db.refresh(pd)
+                        await db.commit()
                     else:
+                        # Keep SQLite's writer lock scoped to this row's short
+                        # persistence phase. The next row may perform slow model,
+                        # image, and workbook work while the lease heartbeat writes
+                        # through another connection.
+                        await db.commit()
                         exported_in_workbook += 1
                         report_rows.append({
                             **report_base,
@@ -5222,6 +5264,20 @@ async def confirm_product(product_id: int, db: AsyncSession = Depends(get_db)):
     product = result.scalar_one_or_none()
     if not product:
         raise HTTPException(404, "Product not found")
+    await hydrate_product_sections(
+        db,
+        product,
+        (
+            "source",
+            "source_snapshot",
+            "mindset",
+            "listing",
+            "image_analysis",
+            "aplus_plan",
+            "aplus_script",
+            "aplus_assets",
+        ),
+    )
     if is_running(product.id):
         raise HTTPException(400, "任务还在运行中，完成后再确认")
     if product.workflow_node != WORKFLOW_NODE_CONFIRM_IMAGES_APLUS or product.workflow_status != WORKFLOW_STATUS_PENDING:
@@ -5305,6 +5361,58 @@ def _hydrate_product_detail_customer_mindset(detail: ProductDetail) -> None:
         detail.data.customer_mindset = json.dumps(brief, ensure_ascii=False)
 
 
+async def _section_or_legacy_error(db: AsyncSession, product_id: int, section: str) -> dict[str, Any]:
+    product = await db.get(Product, product_id)
+    if not product:
+        raise HTTPException(404, "Product not found")
+    if not await large_field_storage_enabled(db):
+        raise HTTPException(409, "product large-field migration has not completed")
+    return section_response(await load_section(db, product_id, section))
+
+
+@router.get("/{product_id}/sections/source", response_model=ProductSectionResponse)
+async def get_product_source_section(product_id: int, db: AsyncSession = Depends(get_db)):
+    response = await _section_or_legacy_error(db, product_id, "source")
+    snapshot = await load_section(db, product_id, "source_snapshot")
+    if snapshot and snapshot.status == "ready" and snapshot.payload_json:
+        body = response.get("data") if isinstance(response.get("data"), dict) else {}
+        response["data"] = {**body, "gigab2b_raw_snapshot": json.loads(snapshot.payload_json)}
+        response["revision"] = max(int(response.get("revision") or 0), int(snapshot.content_revision or 0))
+        response["updated_at"] = max(filter(None, (response.get("updated_at"), snapshot.updated_at)), default=None)
+        response["state"] = "ready"
+        response["has_content"] = True
+    elif snapshot and snapshot.status in {"failed", "unresolved"}:
+        response["state"] = snapshot.status
+        response["error_code"] = snapshot.error_code
+    return response
+
+
+@router.get("/{product_id}/sections/mindset", response_model=ProductSectionResponse)
+async def get_product_mindset_section(product_id: int, db: AsyncSession = Depends(get_db)):
+    """Read-only mindset endpoint.  It never enqueues Step 6 or Listing work."""
+    return await _section_or_legacy_error(db, product_id, "mindset")
+
+
+@router.get("/{product_id}/sections/listing", response_model=ProductSectionResponse)
+async def get_product_listing_section(product_id: int, db: AsyncSession = Depends(get_db)):
+    return await _section_or_legacy_error(db, product_id, "listing")
+
+
+@router.get("/{product_id}/sections/images", response_model=ProductSectionResponse)
+async def get_product_images_section(product_id: int, part: str = Query(..., pattern="^(analysis|selection|compliance)$"), db: AsyncSession = Depends(get_db)):
+    return await _section_or_legacy_error(db, product_id, f"image_{part}")
+
+
+@router.get("/{product_id}/sections/aplus", response_model=ProductSectionResponse)
+async def get_product_aplus_section(product_id: int, part: str = Query(..., pattern="^(plan|script|assets)$"), db: AsyncSession = Depends(get_db)):
+    return await _section_or_legacy_error(db, product_id, f"aplus_{part}")
+
+
+@router.get("/{product_id}/sections/export-artifact", response_model=ProductSectionResponse)
+async def get_product_export_artifact_section(product_id: int, db: AsyncSession = Depends(get_db)):
+    return await _section_or_legacy_error(db, product_id, "export_artifact")
+
+
 @router.get("/{product_id}", response_model=ProductDetail)
 async def get_product(
     product_id: int,
@@ -5312,26 +5420,85 @@ async def get_product(
     db: AsyncSession = Depends(get_db),
 ):
     """商品详情（含子表数据）"""
-    result = await db.execute(
-        select(Product)
-        .options(
-            selectinload(Product.data),
-            selectinload(Product.images),
-            selectinload(Product.aplus),
-            selectinload(Product.files),
-            selectinload(Product.material_assets),
+    storage_enabled = await large_field_storage_enabled(db)
+    query = select(Product).where(Product.id == product_id)
+    if storage_enabled:
+        data_blob_fields = {
+            "packages", "features", "description", "variants", "gigab2b_raw_snapshot", "customer_mindset",
+            "listing_title", "listing_bullets", "listing_product_highlights", "listing_search_terms", "listing_title_zh",
+            "listing_bullets_zh", "listing_product_highlights_zh", "listing_description", "listing_description_zh",
+            "listing_search_terms_zh", "listing_check", "listing_primary_keyword", "listing_removed_keywords",
+            "amazon_template_path", "amazon_template_warnings", "amazon_template_fill_summary",
+        }
+        image_blob_fields = {"image_analysis", "image_selling_points", "image_selection_analysis", "image_compliance_manifest"}
+        aplus_blob_fields = {"aplus_plan", "aplus_scripts", "aplus_images"}
+        query = query.options(
+            selectinload(Product.data).load_only(*[getattr(ProductData, column.name) for column in ProductData.__table__.columns if column.name not in data_blob_fields]),
+            selectinload(Product.images).load_only(*[getattr(ProductImage, column.name) for column in ProductImage.__table__.columns if column.name not in image_blob_fields]),
+            selectinload(Product.aplus).load_only(*[getattr(ProductAplus, column.name) for column in ProductAplus.__table__.columns if column.name not in aplus_blob_fields]),
             selectinload(Product.catalog_item),
         )
-        .where(Product.id == product_id)
-    )
+    else:
+        query = query.options(
+            selectinload(Product.data), selectinload(Product.images), selectinload(Product.aplus),
+            selectinload(Product.files), selectinload(Product.material_assets), selectinload(Product.catalog_item),
+        )
+    result = await db.execute(query)
     product = result.scalar_one_or_none()
     if not product:
         raise HTTPException(404, "Product not found")
 
-    detail = ProductDetail.model_validate(product)
-    await _ensure_product_detail_gallery_order(db, product, detail)
+    if storage_enabled:
+        def projected(record: Any, schema: Any, excluded: set[str]) -> dict[str, Any] | None:
+            if record is None:
+                return None
+            return {name: None if name in excluded else getattr(record, name, None) for name in schema.model_fields}
+
+        data_source = await db.get(ProductDataSource, product.source_data_source_id) if product.source_data_source_id else None
+        detail_values = _build_list_item(
+            product,
+            sales_channel=data_source.sales_channel if data_source else "amazon",
+        )
+        detail_values.update({
+            "source_url": product.source_url,
+            "source_item_id": product.source_item_id,
+            "data": projected(product.data, ProductDataResponse, data_blob_fields),
+            "images": projected(product.images, ProductImageResponse, image_blob_fields),
+            "aplus": projected(product.aplus, ProductAplusResponse, aplus_blob_fields),
+        })
+        detail = ProductDetail.model_validate(detail_values)
+    else:
+        detail = ProductDetail.model_validate(product)
+    if not storage_enabled:
+        await _ensure_product_detail_gallery_order(db, product, detail)
     catalog_exported = bool(product.catalog_item and (product.catalog_item.exported_at or product.catalog_item.export_task_id))
     detail.workflow = _workflow_state(product, catalog_exported=catalog_exported)
+    if storage_enabled:
+        # The compact product response is deliberately only a hot-field summary.
+        # Clients fetch each content body through the explicit section endpoints.
+        detail.sections = await load_section_summaries(db, product_id)
+        if detail.data:
+            for field in (
+                "packages", "features", "description", "variants", "gigab2b_raw_snapshot",
+                "customer_mindset", "listing_title", "listing_bullets", "listing_product_highlights",
+                "listing_search_terms", "listing_title_zh", "listing_bullets_zh",
+                "listing_product_highlights_zh", "listing_description", "listing_description_zh",
+                "listing_search_terms_zh", "listing_check", "listing_primary_keyword",
+                "listing_removed_keywords", "amazon_template_path", "amazon_template_warnings",
+                "amazon_template_fill_summary",
+            ):
+                setattr(detail.data, field, None)
+        if detail.images:
+            detail.images.image_analysis = None
+            detail.images.image_selling_points = None
+            detail.images.image_selection_analysis = None
+            detail.images.image_compliance_manifest = None
+        if detail.aplus:
+            detail.aplus.aplus_plan = None
+            detail.aplus.aplus_scripts = None
+            detail.aplus.aplus_images = None
+        detail.current_task_status = detail.workflow["action_reason"]
+        return _compact_product_detail(detail)
     if compact:
         detail.current_task_status = detail.workflow["action_reason"]
         return _compact_product_detail(detail)
@@ -5581,6 +5748,7 @@ async def update_product(
     }
     for key, value in update_data.items():
         setattr(product, key, value)
+    storage_enabled = await large_field_storage_enabled(db)
     if categories_value is not None or leaf_category_value is not None or product_data_updates:
         if not product.data:
             product.data = ProductData(product_id=product.id)
@@ -5602,21 +5770,47 @@ async def update_product(
                 product.data.leaf_category = categories[-1]
         if leaf_category_value is not None:
             product.data.leaf_category = leaf_category_value.strip() or None
+        normalized_listing_updates: dict[str, Any] = {}
         for key, value in product_data_updates.items():
             if key == "listing_title":
-                product.data.listing_title = _normalize_listing_title(value, brand=product.brand)
+                normalized_listing_updates[key] = _normalize_listing_title(value, brand=product.brand)
             elif key in {"listing_product_highlights", "listing_product_highlights_zh"}:
                 label = "商品亮点" if key == "listing_product_highlights" else "中文商品亮点"
                 normalized = _normalize_product_highlights(value, label=label)
-                setattr(product.data, key, json.dumps(normalized, ensure_ascii=False) if normalized else None)
+                normalized_listing_updates[key] = normalized or None
             elif key in {"listing_bullets", "listing_bullets_zh"}:
                 if isinstance(value, list):
                     normalized = [" ".join(str(item).split()).strip() for item in value if str(item).strip()]
                 else:
                     normalized = [" ".join(line.split()).strip() for line in str(value or "").splitlines() if line.strip()]
-                setattr(product.data, key, json.dumps(normalized, ensure_ascii=False))
+                normalized_listing_updates[key] = normalized
             else:
-                setattr(product.data, key, str(value).strip() if value is not None else None)
+                normalized_listing_updates[key] = str(value).strip() if value is not None else None
+        if normalized_listing_updates:
+            if storage_enabled:
+                current = await load_section(db, product.id, "listing")
+                payload = parse_payload(current.payload_json) if current and current.payload_json else {}
+                if not isinstance(payload, dict):
+                    payload = {}
+                await write_section(
+                    db,
+                    product_id=product.id,
+                    section="listing",
+                    payload={**payload, **normalized_listing_updates},
+                    expected_revision=current.content_revision if current else None,
+                )
+            else:
+                scalar_fields = {
+                    "listing_title", "listing_search_terms", "listing_title_zh",
+                    "listing_description", "listing_description_zh", "listing_search_terms_zh",
+                    "listing_primary_keyword",
+                }
+                for key, value in normalized_listing_updates.items():
+                    setattr(
+                        product.data,
+                        key,
+                        value if key in scalar_fields or value is None else json.dumps(value, ensure_ascii=False),
+                    )
     if main_image_path_value is not None or gallery_images_value is not None:
         if not product.images:
             product.images = ProductImage(product_id=product.id)
@@ -6308,6 +6502,11 @@ async def resume_pipeline(product_id: int, db: AsyncSession = Depends(get_db)):
     product = result.scalar_one_or_none()
     if not product:
         raise HTTPException(404, "Product not found")
+    await hydrate_product_sections(
+        db,
+        product,
+        ("source", "source_snapshot", "mindset", "listing", "image_analysis"),
+    )
     if product.status not in {"paused", PENDING_REVIEW}:
         raise HTTPException(400, f"只能继续已挂起或待人工处理的任务，当前状态: {product.status}")
     if is_running(product.id):

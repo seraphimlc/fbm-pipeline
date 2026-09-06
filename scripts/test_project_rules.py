@@ -17,6 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "backend"))
 
+from testing.r1_sqlite_bootstrap import ensure_sqlite_test_process
+
+if __name__ == "__main__":
+    ensure_sqlite_test_process(__file__)
+
 from validate_template_mappings import merge_category_options  # noqa: E402
 from app.pipeline.search_terms import SEARCH_TERMS_MAX_KEYWORDS, normalize_search_terms  # noqa: E402
 
@@ -26,20 +31,16 @@ def assert_true(condition: bool, message: str) -> None:
         raise AssertionError(message)
 
 
-def test_r1_mysql_wrapper_contract() -> None:
-    wrapper = ROOT / "scripts" / "testing" / "run_with_r1_mysql.py"
-    focused_test = ROOT / "scripts" / "testing" / "test_run_with_r1_mysql.py"
+def test_r1_sqlite_wrapper_contract() -> None:
+    wrapper = ROOT / "scripts" / "testing" / "run_with_r1_sqlite.py"
+    focused_test = ROOT / "scripts" / "testing" / "test_run_with_r1_sqlite.py"
     project_index = (ROOT / "docs" / "project-index.md").read_text(encoding="utf-8")
-    technical_plan = (
-        ROOT / "docs" / "superpowers" / "specs" / "2026-07-22-stability-repair-r1-technical-plan.md"
-    ).read_text(encoding="utf-8")
-    assert_true(wrapper.is_file(), "R1 必须提供完整子进程树 MySQL 隔离 wrapper")
-    assert_true(focused_test.is_file(), "R1 MySQL wrapper 必须有 fail-closed focused test")
+    assert_true(wrapper.is_file(), "R1 必须提供完整子进程树 SQLite 隔离 wrapper")
+    assert_true(focused_test.is_file(), "R1 SQLite wrapper 必须有 fail-closed focused test")
     wrapper_text = wrapper.read_text(encoding="utf-8")
     focused_text = focused_test.read_text(encoding="utf-8")
     assert_true(
-        "isolated_r1_mysql(ROOT)" in wrapper_text
-        and "_validated_admin_url()" in wrapper_text
+        "isolated_r1_sqlite(ROOT)" in wrapper_text
         and "os.execve(" in wrapper_text
         and '"PATH": f"{backend_venv_bin}' in wrapper_text
         and '"VIRTUAL_ENV": str(backend_venv)' in wrapper_text
@@ -64,7 +65,7 @@ def test_r1_mysql_wrapper_contract() -> None:
         and 'marker.get("command_id") == command_id' in wrapper_text
         and "except FileNotFoundError:" in wrapper_text
         and "return 127" in wrapper_text
-        and "R1_MYSQL_PROJECT_RULES_DB_MARKER_VERIFIED" in wrapper_text,
+        and "R1_SQLITE_PROJECT_RULES_DB_MARKER_VERIFIED" in wrapper_text,
         "R1 wrapper 必须先隔离数据库/临时目录，再用 exact canonical argv + nonce/DB/command marker 验证 project-rules，并只终止自身子进程树",
     )
     for proof in (
@@ -72,14 +73,14 @@ def test_r1_mysql_wrapper_contract() -> None:
         "missing_command_result",
         "child_failure.returncode == 7",
         "unrelated_script_argv.returncode == 0",
-        '"R1_MYSQL_PROJECT_RULES_DB_MARKER_VERIFIED" not in unrelated_script_argv.stdout',
+        '"R1_SQLITE_PROJECT_RULES_DB_MARKER_VERIFIED" not in unrelated_script_argv.stdout',
         'for invalid_mode in ("wrong_nonce", "wrong_database", "wrong_command")',
         "absolute_fake.returncode == 0",
-        '"R1_MYSQL_PROJECT_RULES_DB_MARKER_VERIFIED" not in absolute_fake.stdout',
+        '"R1_SQLITE_PROJECT_RULES_DB_MARKER_VERIFIED" not in absolute_fake.stdout',
         "absolute_marker_env",
         'path_env["PATH"]',
         'trusted_literal_make = _run_wrapper(["--", "make", "test-project-rules"]',
-        '"R1_MYSQL_PROJECT_RULES_DB_MARKER_VERIFIED" in trusted_literal_make.stdout',
+        '"R1_SQLITE_PROJECT_RULES_DB_MARKER_VERIFIED" in trusted_literal_make.stdout',
         "assert not path_sentinel.exists()",
         "nonexistent.returncode == 127",
         "R1_WRAPPER_CHILD_DB_OK",
@@ -87,10 +88,10 @@ def test_r1_mysql_wrapper_contract() -> None:
     ):
         assert_true(proof in focused_text, f"R1 wrapper focused test 缺少证明: {proof}")
     assert_true(
-        "test_stability_repair_r1_workflow_actions.py --with-mysql" in project_index
-        and "run_with_r1_mysql.py -- make test-project-rules" in project_index
-        and "test_stability_repair_r1_workflow_actions.py --with-mysql" in technical_plan,
-        "项目索引/技术计划中的 workflow/project-rules DB 命令必须显式进入隔离 MySQL 段",
+        "test_stability_repair_r1_workflow_actions.py" in project_index
+        and "run_with_r1_sqlite.py -- make test-project-rules" in project_index
+        and "r1_sqlite" in project_index,
+        "项目索引中的 workflow/project-rules DB 命令必须进入隔离 SQLite 段",
     )
 
     marker_value = str(os.environ.get("R1_PROJECT_RULES_DB_MARKER") or "").strip()
@@ -100,12 +101,13 @@ def test_r1_mysql_wrapper_contract() -> None:
     from sqlalchemy.engine import make_url
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    assert_true(os.environ.get("R1_MYSQL_WRAPPER_ACTIVE") == "1", "DB marker 只能由 R1 wrapper 激活")
+    assert_true(os.environ.get("R1_SQLITE_WRAPPER_ACTIVE") == "1", "DB marker 只能由 R1 wrapper 激活")
     database_url = str(os.environ.get("DATABASE_URL") or "").strip()
-    database_name = str(os.environ.get("R1_MYSQL_WRAPPER_DATABASE") or "").strip()
+    database_name = str(os.environ.get("R1_SQLITE_WRAPPER_DATABASE") or "").strip()
     marker_nonce = str(os.environ.get("R1_PROJECT_RULES_DB_MARKER_NONCE") or "").strip()
     command_id = str(os.environ.get("R1_PROJECT_RULES_COMMAND_ID") or "").strip()
-    assert_true(database_name.startswith("fbm_pipeline_r1_"), "wrapper database 必须使用安全 R1 前缀")
+    from testing.r1_sqlite import require_isolated_sqlite
+    assert_true(str(require_isolated_sqlite()) == database_name, "wrapper database 必须指向临时 SQLite")
     assert_true(len(marker_nonce) == 64, "project-rules marker 必须绑定 wrapper 一次性 nonce")
     assert_true(command_id == "make:test-project-rules:v1", "project-rules marker 必须绑定规范命令身份")
     assert_true(make_url(database_url).database == database_name, "child DATABASE_URL 必须指向 wrapper database")
@@ -114,7 +116,7 @@ def test_r1_mysql_wrapper_contract() -> None:
         engine = create_async_engine(database_url, pool_pre_ping=True)
         try:
             async with engine.connect() as connection:
-                return await connection.scalar(text("SELECT DATABASE()"))
+                return (await connection.execute(text("PRAGMA database_list"))).one()[2]
         finally:
             await engine.dispose()
 
@@ -135,7 +137,7 @@ def test_r1_mysql_wrapper_contract() -> None:
         }, sort_keys=True),
         encoding="utf-8",
     )
-    print(f"R1_MYSQL_PROJECT_RULES_DB_SEGMENT_OK: {database_name}")
+    print(f"R1_SQLITE_PROJECT_RULES_DB_SEGMENT_OK: {database_name}")
 
 
 def test_category_conflict_only_overrides_conflict() -> None:
@@ -830,7 +832,7 @@ def test_product_detail_uses_workflow_as_primary_display_source() -> None:
     run_action_section = product_detail_text.split("const runWorkflowAction", 1)[1].split("const renderWorkflowActionButton", 1)[0]
     render_action_section = product_detail_text.split("const renderWorkflowActionButton", 1)[1].split("const workflowSecondaryActions", 1)[0]
     top_action_section = product_detail_text.split(
-        "<Button icon={<ReloadOutlined />} onClick={() => fetchDetail(activeTabKey === 'files')}>刷新</Button>",
+        "<Button icon={<ReloadOutlined />} onClick={() => fetchDetail(activeTabKey === 'files' || activeTabKey === 'aplus')}>刷新</Button>",
         1,
     )[1].split('<Popconfirm\n            title="确定删除此商品？"', 1)[0]
 
@@ -1983,9 +1985,9 @@ def test_amazon_export_binds_upc_after_prechecks_and_keeps_caller_transaction() 
     assert_true(
         "await run_amazon_template_in_session(db, product)" in catalog_builder_section
         and "await run_amazon_template(product.id)" not in catalog_builder_section
-        and "await db.commit()" not in catalog_builder_section
+        and "await db.commit()" in catalog_builder_section
         and "await db.rollback()" not in catalog_builder_section,
-        "catalog export builder 必须复用调用方 session，不得内部 commit/rollback 或另开 Step10 事务",
+        "catalog export builder 必须复用调用方 session，并按行提交短事务，不得另开 Step10 事务或整体 rollback",
     )
     assert_true(
         catalog_builder_section.count("async with db.begin_nested():") == 1
@@ -1993,8 +1995,18 @@ def test_amazon_export_binds_upc_after_prechecks_and_keeps_caller_transaction() 
         and "await db.refresh(catalog)" in catalog_builder_section
         and "await db.refresh(product)" in catalog_builder_section
         and "await db.refresh(pd)" in catalog_builder_section
+        and catalog_builder_section.count("await db.commit()") == 2
         and "except Exception" not in catalog_builder_section,
-        "catalog export 每行 DB 变更必须由 savepoint 隔离；业务失败只回滚当前行并在 async 上下文 refresh expired ORM，未知异常必须逃逸",
+        "catalog export 每行 DB 变更必须由 savepoint 隔离并及时提交；业务失败只回滚当前行并 refresh，未知异常必须逃逸",
+    )
+    worker_text = (ROOT / "backend" / "app" / "task_runtime" / "catalog_export_workers.py").read_text(encoding="utf-8")
+    worker_build_section = worker_text.split('message="开始生成 Amazon 导入表 zip"', 1)[1].split(
+        "result = await ctx.db.execute", 1
+    )[0]
+    assert_true(
+        "await update_step_progress(" in worker_text
+        and "await update_step_progress_in_session(" not in worker_build_section,
+        "catalog export worker 必须在慢 builder 前提交进度事务，不能让 SQLite 写锁阻塞租约心跳",
     )
     sync_export_section = products_text.split("async def _export_catalog_items", 1)[1].split(
         '@router.post("/catalog/export")', 1
@@ -2899,7 +2911,7 @@ def test_catalog_export_frontend_structured_result_contract() -> None:
         "catalog export acceptance proof 缺失或过宽: " + ", ".join(missing_acceptance_proofs),
     )
     assert_true(
-        "isolated_r1_mysql(ROOT)" in orchestrator
+        "isolated_r1_sqlite(ROOT)" in orchestrator
         and "_catalog_export_result_payload" in orchestrator
         and 'str(BACKEND / ".venv" / "bin" / "uvicorn")' in orchestrator
         and '"app.main:app"' in orchestrator
@@ -5530,6 +5542,7 @@ from app.aplus_publish.module_registry import (
 class FakeExecuteResult:
     def __init__(self, product):
         self.product = product
+        self.rowcount = 1
 
     def scalar_one_or_none(self):
         return self.product
@@ -5547,6 +5560,11 @@ class FakeSession:
         return False
 
     async def execute(self, query):
+        if getattr(query, "is_update", False):
+            values = query.compile().params
+            for key in ("aplus_images", "aplus_image_count", "aplus_status", "generated_at"):
+                if key in values:
+                    setattr(self.product.aplus, key, values[key])
         return FakeExecuteResult(self.product)
 
     async def commit(self):
@@ -5964,7 +5982,8 @@ def test_auto_image_selection_phase_a_contract() -> None:
         "run_auto_image_selection" in service_text
         and "selected_main" in service_text
         and "selected_gallery" in service_text
-        and "confidence == \"low\"" in service_text
+        and 'if str(result.get("confidence") or "medium").lower() == "low"' in service_text
+        and '"reason": "low_confidence_not_selected"' in service_text
         and ".image_analysis =" not in service_text
         and "\"image_analysis\"" not in service_text,
         "自动选图服务必须输出结构化选择结果，低置信度失败，并和后续 image_analysis 语义隔离",
@@ -6000,7 +6019,9 @@ def test_auto_image_selection_phase_a_contract() -> None:
         "Step6 图片分析不得在 URL 直传失败后下载图片或切换 Contact Sheet 兜底，新结果必须写 image_batches 并清空旧 contact_sheet_path",
     )
     assert_true(
-        "const imageAnalysisBatches = imageAnalysisPayload?.image_batches || legacyContactSheets" in product_detail_text
+        "const fullImageBatches = Array.isArray(imageSelectionPayload?.image_batches)" in product_detail_text
+        and "const imageAnalysisBatches = fullImageBatches.length" in product_detail_text
+        and ": (imageAnalysisPayload?.image_batches || legacyContactSheets)" in product_detail_text
         and "isVirtualImageBatch" in product_detail_text
         and "Contact Sheet 与分析" not in product_detail_text
         and "未生成 Contact Sheet 分析" not in product_detail_text,
@@ -6390,11 +6411,13 @@ async def main():
         assert product.images.main_image_source == "model_selected"
         assert product.images.image_selection_analysis
         assert product.images.image_selected_at is not None
-        assert product.images.image_analysis is None
+        projected_analysis = json.loads(product.images.image_analysis)
+        assert projected_analysis["selection_diagnostics"]["analysis_stage"] == "candidate_vision_before_selection", projected_analysis
+        assert projected_analysis["selection_diagnostics"]["selected_image_count"] == 2, projected_analysis
         assert product.workflow_node == WORKFLOW_NODE_SEARCH_COMPETITOR
         assert product.workflow_status == WORKFLOW_STATUS_PENDING
         assert result["competitor_search_task_run_ids"] == [88001]
-        assert product.competitor_asin is None
+        assert product.competitor_asin == "B000"
         assert product.data.listing_title is None
 
         protected = make_product()
@@ -6693,6 +6716,24 @@ reasons = auto_image_selection_protection_reasons(protected_catalog)
 assert any("人工确认" in reason for reason in reasons), reasons
 assert any("导出历史" in reason for reason in reasons), reasons
 
+# 已人工确认的商品不能直接调整图片；需要先由上层将商品重新置为待确认。
+confirmed_only = product()
+confirmed_only.catalog_item.confirmed_at = "2026-06-20"
+for guard in (raise_if_auto_image_selection_protected, raise_if_image_selection_reset_protected):
+    try:
+        guard(confirmed_only)
+    except RuntimeError as exc:
+        assert "人工确认" in str(exc), exc
+    else:
+        raise AssertionError("manual confirmation must block automatic image selection and manual reset")
+
+try:
+    raise_if_image_selection_reset_protected(confirmed_only)
+except RuntimeError as exc:
+    assert "重新设为待确认状态" in str(exc), exc
+else:
+    raise AssertionError("manual reset must explain how to reopen a confirmed product")
+
 protected_template = product()
 protected_template.data.amazon_template_path = "/exports/template.xlsm"
 try:
@@ -6840,7 +6881,7 @@ product.images = ProductImage(product_id=88, main_image_path="/tmp/main.jpg", ma
 plan = build_amazon_competitor_queries(product)
 assert 1 <= len(plan["queries"]) <= 3, plan
 for item in plan["queries"]:
-    assert item["rule_version"] == "amazon_competitor_query_v5", item
+    assert item["rule_version"] == "amazon_competitor_query_v6", item
     assert 3 <= len(item["included_terms"]) <= 7, item
     assert "Modern Modular Sofa with Storage Chaise for Living Room SKU S-123 188cm".lower() != item["query"], item
     assert "replacement part" in item["excluded_terms"], item
@@ -6922,6 +6963,26 @@ shoe_cabinet.data = ProductData(
 shoe_cabinet.images = ProductImage(product_id=93, main_image_path="/tmp/shoe-main.jpg", main_image_source="model_selected")
 shoe_cabinet_plan = build_amazon_competitor_queries(shoe_cabinet)
 assert all("shoe cabinet" in item["query"] for item in shoe_cabinet_plan["queries"]), shoe_cabinet_plan
+
+over_toilet_cabinet = Product(id=99, gigab2b_url="https://example.test/item/99", status="created", current_step=1)
+over_toilet_cabinet.data = ProductData(
+    product_id=99,
+    title="Over The Toilet Storage Cabinet with Adjustable Shelf, Bathroom Space Saver Organizer with Double Doors and Open Shelf, Freestanding Toilet Rack for Small Bathroom - White",
+    product_type="Bathroom Storage",
+    color="White",
+    material="Engineered Wood",
+)
+over_toilet_cabinet.images = ProductImage(
+    product_id=99,
+    main_image_path="/tmp/over-toilet-cabinet-main.jpg",
+    main_image_source="model_selected",
+)
+over_toilet_plan = build_amazon_competitor_queries(over_toilet_cabinet)
+assert all(
+    "over the toilet storage cabinet" in item["query"]
+    for item in over_toilet_plan["queries"]
+), over_toilet_plan
+assert all(item["included_terms"][0] == "over the toilet storage cabinet" for item in over_toilet_plan["queries"]), over_toilet_plan
 
 kids_table_set = Product(id=94, gigab2b_url="https://example.test/item/94", status="created", current_step=1)
 kids_table_set.data = ProductData(
@@ -7097,7 +7158,7 @@ def test_task_runtime_autostart_runner_lifecycle_behaviour() -> None:
     )
     assert_true(
         "_require_isolated_r1_database" in runtime_script
-        and "R1_MYSQL_WRAPPER_ACTIVE" in runtime_script,
+        and "require_isolated_sqlite" in runtime_script,
         "task runtime auto_start 行为脚本必须拒绝使用业务数据库，避免 probe 被常驻服务消费",
     )
     assert_true(
@@ -7105,7 +7166,7 @@ def test_task_runtime_autostart_runner_lifecycle_behaviour() -> None:
         and "wake_runtime" not in scheduler_text,
         "runtime auto-start 修复不能通过自动调用 wake 伪装",
     )
-    if os.environ.get("R1_MYSQL_WRAPPER_ACTIVE") == "1":
+    if os.environ.get("R1_SQLITE_WRAPPER_ACTIVE") == "1":
         result = subprocess.run(
             [str(ROOT / "backend" / ".venv" / "bin" / "python"), str(ROOT / "scripts" / "test_task_runtime_autostart.py")],
             cwd=ROOT / "backend",
@@ -7114,7 +7175,7 @@ def test_task_runtime_autostart_runner_lifecycle_behaviour() -> None:
         )
         assert_true(result.returncode == 0, f"task runtime auto_start 行为验证失败: {result.stderr or result.stdout}")
     else:
-        print("SKIP: task runtime autostart DB probe requires the R1 isolated MySQL wrapper")
+        print("SKIP: task runtime autostart DB probe requires the R1 isolated SQLite wrapper")
     worker_registry_script = ROOT / "scripts" / "test_task_runtime_worker_registry.py"
     registry_result = subprocess.run(
         [str(ROOT / "backend" / ".venv" / "bin" / "python"), str(worker_registry_script)],
@@ -7231,7 +7292,7 @@ def test_auto_competitor_visual_match_phase_b_contract() -> None:
         "use_fake_vlm: bool = False",
         "FAKE_VISUAL_MATCH_MODEL = \"fake_competitor_visual_match_v1\"",
         "selected_for_capture",
-        "MIN_SELECTED = 4",
+        "MIN_SELECTED = 1",
         "MAX_SELECTED = 6",
     ):
         assert_true(marker in service_text, f"视觉初筛服务缺少合同标记: {marker}")
@@ -7939,7 +8000,7 @@ def test_subagent_dispatch_identity_lifecycle_contract() -> None:
 
 def main() -> int:
     tests = [
-        test_r1_mysql_wrapper_contract,
+        test_r1_sqlite_wrapper_contract,
         test_category_conflict_only_overrides_conflict,
         test_template_mapping_changes_must_be_logged,
         test_real_asin_export_guard_is_present,

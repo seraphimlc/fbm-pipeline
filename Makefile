@@ -23,7 +23,11 @@ validate-template-mappings:
 	$(PYTHON) scripts/validate_template_mappings.py
 
 test-project-rules:
-	$(PYTHON) scripts/test_project_rules.py
+	@if [ "$$R1_SQLITE_WRAPPER_ACTIVE" = "1" ]; then \
+		$(PYTHON) scripts/test_project_rules.py; \
+	else \
+		$(PYTHON) scripts/testing/run_with_r1_sqlite.py -- make test-project-rules; \
+	fi
 
 backend-compile:
 	cd backend && $(PYTHON) -m compileall -q app

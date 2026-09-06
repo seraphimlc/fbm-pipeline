@@ -49,6 +49,7 @@ from app.services.amazon_image_compliance import (
     verify_oss_round_trip,
 )
 from app.services.oss_uploader import oss_configured, upload_private_image
+from app.services.product_payloads import hydrate_product_sections, large_field_storage_enabled, write_section
 from sqlalchemy import select, update
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import selectinload
@@ -89,18 +90,32 @@ async def _persist_aplus_image_results(
     for attempt in range(1, 4):
         try:
             async with async_session() as persist_db:
-                result = await persist_db.execute(
-                    update(ProductAplus)
-                    .where(ProductAplus.product_id == product_id)
-                    .values(
-                        aplus_images=serialized_results,
-                        aplus_image_count=success_count,
-                        aplus_status="done" if success_count == expected_count else "partial",
-                        generated_at=datetime.now(),
+                if await large_field_storage_enabled(persist_db):
+                    await write_section(
+                        persist_db, product_id=product_id, section="aplus_assets",
+                        payload=image_results, generated_at=datetime.now(),
+                        extras={"asset_count": success_count},
                     )
-                )
-                if result.rowcount != 1:
-                    raise RuntimeError(f"Product {product_id} has no writable A+ record")
+                    await persist_db.execute(
+                        update(ProductAplus).where(ProductAplus.product_id == product_id).values(
+                            aplus_image_count=success_count,
+                            aplus_status="done" if success_count == expected_count else "partial",
+                            generated_at=datetime.now(),
+                        )
+                    )
+                else:
+                    result = await persist_db.execute(
+                        update(ProductAplus)
+                        .where(ProductAplus.product_id == product_id)
+                        .values(
+                            aplus_images=serialized_results,
+                            aplus_image_count=success_count,
+                            aplus_status="done" if success_count == expected_count else "partial",
+                            generated_at=datetime.now(),
+                        )
+                    )
+                    if result.rowcount != 1:
+                        raise RuntimeError(f"Product {product_id} has no writable A+ record")
                 await persist_db.commit()
             return
         except DBAPIError as exc:
@@ -551,11 +566,10 @@ def enhanced_image_slot_work_items(scripts_data: dict) -> list[dict]:
 
 
 def _should_overwrite_existing() -> bool:
-    policy = (settings.APLUS_IMAGE_OVERWRITE_POLICY or "skip_success").strip().lower()
-    if policy not in {"skip_success", "overwrite_all"}:
-        logger.warning(f"[Step9] 未识别的A+覆盖策略 {policy!r}，回退到 skip_success")
-        return False
-    return policy == "overwrite_all"
+    # A+ images are intentionally regenerated from the current script and
+    # references.  Historical images are kept only by the backup step and are
+    # never returned as the active result.
+    return True
 
 
 def _existing_result_map(pa: ProductAplus | None) -> dict[int, dict]:
@@ -1094,6 +1108,7 @@ async def _generate_single_image(
             result_item = {
                 "position": position,
                 "status": "done",
+                "generated_at": datetime.now().isoformat(timespec="seconds"),
                 "path": str(output_path),
                 "url": display_url,
                 "display_url": display_url,
@@ -1233,6 +1248,7 @@ async def run_aplus_image(product_id: int) -> dict:
         product = result.scalar_one_or_none()
         if not product or not product.data:
             raise ValueError(f"Product {product_id} not found or no data")
+        await hydrate_product_sections(db, product, ("aplus_script", "aplus_assets"))
 
         pd = product.data
         pa = product.aplus
@@ -1335,7 +1351,8 @@ async def run_aplus_image(product_id: int) -> dict:
 
         scripts = _validate_standard_scripts(scripts)
         
-        # 默认只生成缺失/失败图片，避免重复消耗生图费用。
+        # 每次都基于当前脚本和参考图重新生成；历史文件只在上面备份，
+        # 不作为本次活动结果复用。
         tasks = []
         image_results = []
         skipped_count = 0
@@ -1456,8 +1473,19 @@ async def regenerate_aplus_module_image(product_id: int, module_position: int) -
             product_key,
             product.brand or settings.DEFAULT_BRAND,
         )
+        # Per-module lifecycle metadata is rendered by the A+ page.  The
+        # regeneration worker updates queued/running states in-place; this
+        # result records the terminal completion time on the replaced image.
+        result_item["regeneration_status"] = "done" if result_item.get("status") == "done" else "failed"
+        result_item["regeneration_completed_at"] = datetime.now().isoformat(timespec="seconds")
 
         old_results = list(_existing_result_map(pa).values())
+        previous_item = next(
+            (item for item in old_results if item.get("position") == module_position),
+            None,
+        )
+        if isinstance(previous_item, dict) and previous_item.get("regeneration_requested_at"):
+            result_item["regeneration_requested_at"] = previous_item["regeneration_requested_at"]
 
         replaced = False
         new_results = []
@@ -1472,7 +1500,13 @@ async def regenerate_aplus_module_image(product_id: int, module_position: int) -
         new_results.sort(key=lambda item: item.get("position") or 0)
 
         success_count = sum(1 for item in new_results if item.get("status") == "done")
-        pa.aplus_images = json.dumps(new_results, ensure_ascii=False)
+        if await large_field_storage_enabled(db):
+            await write_section(
+                db, product_id=product.id, section="aplus_assets", payload=new_results,
+                generated_at=datetime.now(), extras={"asset_count": success_count},
+            )
+        else:
+            pa.aplus_images = json.dumps(new_results, ensure_ascii=False)
         pa.aplus_image_count = success_count
         pa.aplus_status = "done" if success_count == len(scripts) else "partial"
         pa.generated_at = datetime.now()

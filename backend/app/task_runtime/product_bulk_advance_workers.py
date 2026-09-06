@@ -8,6 +8,7 @@ from app.models import Product
 from app.models.status import STEP5_LISTING, STEP6_CURATING, STEP_CUSTOMER_MINDSET
 from app.pipeline.customer_mindset import customer_mindset_matches_product
 from app.pipeline.engine import is_running
+from app.services.product_payloads import hydrate_product_sections
 from app.task_planners.product_customer_mindset import create_product_customer_mindset_runs
 from app.task_planners.product_image_analysis import create_product_image_analysis_runs
 from app.task_planners.product_listing import create_product_listing_runs
@@ -31,7 +32,10 @@ async def _load_product(ctx: TaskContext, product_id: int) -> Product | None:
             selectinload(Product.catalog_item),
         )
     )
-    return result.scalar_one_or_none()
+    product = result.scalar_one_or_none()
+    if product:
+        await hydrate_product_sections(ctx.db, product)
+    return product
 
 
 def _summary_with_row(run_summary: dict[str, Any], row_update: dict[str, Any]) -> dict[str, Any]:

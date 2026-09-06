@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""R1 TikTok channel-status checks on an isolated MySQL database."""
+"""R1 TikTok channel-status checks on an isolated SQLite database."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ BACKEND = ROOT / "backend"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from scripts.testing.r1_mysql import R1MysqlNotConfigured, isolated_r1_mysql
+from scripts.testing.r1_sqlite import isolated_r1_sqlite
 
 
 CHANNEL_STATUSES = ("failed", "draft", "missing_required_info", "unsupported")
@@ -1895,7 +1895,7 @@ async def test_real_asgi_api(environment, state: FixtureState) -> None:
 
 async def run() -> None:
     test_contract_files()
-    async with isolated_r1_mysql(ROOT) as environment:
+    async with isolated_r1_sqlite(ROOT) as environment:
         state = await _seed_fixtures(environment)
         await test_qa_p1_counterexamples(environment, state)
         await test_sku_canonicalization_counterexamples(environment, state)
@@ -1903,15 +1903,11 @@ async def run() -> None:
         await test_mirror_review_counterexamples(environment, state)
         await test_cte_classification(environment, state)
         await test_real_asgi_api(environment, state)
-        print(f"R1 TikTok isolated MySQL/API checks passed: {environment.database_name}")
+        print(f"R1 TikTok isolated SQLite/API checks passed: {environment.database_name}")
 
 
 def main() -> int:
-    try:
-        asyncio.run(run())
-    except R1MysqlNotConfigured as exc:
-        print(f"BLOCKED: {exc}", file=sys.stderr)
-        return 2
+    asyncio.run(run())
     return 0
 
 

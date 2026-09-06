@@ -49,4 +49,8 @@ def raise_if_auto_image_selection_protected(product: Product) -> None:
 def raise_if_image_selection_reset_protected(product: Product) -> None:
     reasons = auto_image_selection_protection_reasons(product)
     if reasons:
+        if reasons == ["Catalog 已人工确认"]:
+            raise RuntimeError(
+                "商品已人工确认，不能直接修改图片。请先将商品重新设为待确认状态，再调整图片并重新确认。"
+            )
         raise RuntimeError("当前商品已有不可逆外部结果，不能静默重置图片下游派生：" + "；".join(reasons))

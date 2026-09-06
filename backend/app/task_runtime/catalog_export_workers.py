@@ -19,7 +19,7 @@ from app.task_runtime.catalog_export_status import (
     normalize_catalog_export_response,
     select_catalog_export_payload,
 )
-from app.task_runtime.events import update_step_progress_in_session
+from app.task_runtime.events import update_step_progress, update_step_progress_in_session
 from app.task_runtime.json_utils import json_loads
 from app.task_runtime.registry import TaskContext, TaskWorkerOutcome, register_worker
 
@@ -118,7 +118,10 @@ async def catalog_export_template(ctx: TaskContext) -> TaskWorkerOutcome:
         )
         return _outcome(recovered_result)
 
-    await update_step_progress_in_session(
+    # Release the progress-event write transaction before template generation.
+    # SQLite lease renewal runs on another connection and must remain writable
+    # while this worker performs slow model/image/workbook operations.
+    await update_step_progress(
         ctx.db,
         ctx.step,
         current=0,

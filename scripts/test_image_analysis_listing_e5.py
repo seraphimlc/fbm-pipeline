@@ -9,6 +9,12 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import selectinload
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+from testing.r1_sqlite_bootstrap import ensure_sqlite_test_process
+
+if __name__ == "__main__":
+    ensure_sqlite_test_process(__file__)
+
 BACKEND = ROOT / "backend"
 if str(BACKEND) not in sys.path:
     sys.path.insert(0, str(BACKEND))
@@ -19,13 +25,16 @@ from app.models.status import (  # noqa: E402
     COMPLETED,
     FAILED,
     PAUSED,
+    PENDING_REVIEW,
     STEP_CUSTOMER_MINDSET,
     STEP5_LISTING,
     WORKFLOW_NODE_FLOW_DONE,
     WORKFLOW_NODE_CUSTOMER_MINDSET,
     WORKFLOW_NODE_IMAGE_ANALYSIS,
+    WORKFLOW_NODE_GENERATE_APLUS,
     WORKFLOW_NODE_LISTING_GENERATION,
     WORKFLOW_STATUS_FAILED,
+    WORKFLOW_STATUS_PENDING,
     WORKFLOW_STATUS_PROCESSING,
     WORKFLOW_STATUS_SUCCEEDED,
 )
@@ -507,7 +516,12 @@ async def _test_customer_mindset_success_creates_listing_processing() -> tuple[i
         await session.commit()
 
         mindset_payload = _customer_mindset_payload_for_product(product)
-        result = {"product_id": product.id, "item_code": "E5_TEST_MINDSET_SUCCESS", "customer_mindset": mindset_payload}
+        result = {
+            "product_id": product.id,
+            "item_code": "E5_TEST_MINDSET_SUCCESS",
+            "customer_mindset_persisted": True,
+            "customer_mindset": mindset_payload,
+        }
         await product_actions.ProductCustomerMindsetAction().on_step_success(session, mindset_step, result)
 
         refreshed = await _get_product(session, product.id)
@@ -545,10 +559,10 @@ async def _test_repeated_customer_mindset_success_reuses_active_listing() -> tup
         await session.commit()
 
         action = product_actions.ProductCustomerMindsetAction()
-        first_result = {"product_id": product.id, "item_code": "E5_TEST_MINDSET_REUSE", "customer_mindset": _customer_mindset_payload_for_product(product)}
+        first_result = {"product_id": product.id, "item_code": "E5_TEST_MINDSET_REUSE", "customer_mindset_persisted": True, "customer_mindset": _customer_mindset_payload_for_product(product)}
         await action.on_step_success(session, first_step, first_result)
         first_listing_id = first_result["listing_task_run_ids"][0]
-        second_result = {"product_id": product.id, "item_code": "E5_TEST_MINDSET_REUSE", "customer_mindset": _customer_mindset_payload_for_product(product)}
+        second_result = {"product_id": product.id, "item_code": "E5_TEST_MINDSET_REUSE", "customer_mindset_persisted": True, "customer_mindset": _customer_mindset_payload_for_product(product)}
         await action.on_step_success(session, second_step, second_result)
 
         listing_runs = await _listing_runs(session, product.id)
@@ -611,7 +625,7 @@ async def _test_downstream_listing_creation_failure_is_visible() -> tuple[int, l
 
         product_actions.create_product_action_runs = _raise_for_listing
         try:
-            result = {"product_id": product.id, "item_code": "E5_TEST_LISTING_CREATE_FAIL", "customer_mindset": _customer_mindset_payload_for_product(product)}
+            result = {"product_id": product.id, "item_code": "E5_TEST_LISTING_CREATE_FAIL", "customer_mindset_persisted": True, "customer_mindset": _customer_mindset_payload_for_product(product)}
             await product_actions.ProductCustomerMindsetAction().on_step_success(session, mindset_step, result)
         finally:
             product_actions.create_product_action_runs = original_create
@@ -667,7 +681,7 @@ async def _test_customer_mindset_failure_cancel_interrupted_do_not_create_listin
         return product_ids, run_ids
 
 
-async def _test_listing_success_reaches_export_ready() -> tuple[int, list[int]]:
+async def _test_listing_success_enters_aplus_review() -> tuple[int, list[int]]:
     async with async_session() as session:
         product = await _make_product(
             session,
@@ -685,13 +699,13 @@ async def _test_listing_success_reaches_export_ready() -> tuple[int, list[int]]:
         await product_actions.ProductListingGenerationAction().on_step_success(session, listing_step, result)
 
         refreshed = await _get_product(session, product.id)
-        assert refreshed.status == COMPLETED, refreshed.status
+        assert refreshed.status == PENDING_REVIEW, refreshed.status
         assert refreshed.current_step == 6, refreshed.current_step
-        assert refreshed.workflow_node == WORKFLOW_NODE_FLOW_DONE, refreshed.workflow_node
-        assert refreshed.workflow_status == WORKFLOW_STATUS_SUCCEEDED, refreshed.workflow_status
-        assert refreshed.catalog_item.confirmed_at is not None, refreshed.catalog_item.confirmed_at
+        assert refreshed.workflow_node == WORKFLOW_NODE_GENERATE_APLUS, refreshed.workflow_node
+        assert refreshed.workflow_status == WORKFLOW_STATUS_PENDING, refreshed.workflow_status
+        assert refreshed.catalog_item.confirmed_at is None, refreshed.catalog_item.confirmed_at
         assert result["status"] == "done", result
-        assert result["next_step"] == "export", result
+        assert result["next_step"] == "generate_aplus", result
         return product.id, [listing_run.id]
 
 
@@ -907,7 +921,7 @@ async def main() -> None:
         ids, runs = await _test_customer_mindset_failure_cancel_interrupted_do_not_create_listing()
         product_ids.extend(ids)
         run_ids.extend(runs)
-        product_id, ids = await _test_listing_success_reaches_export_ready()
+        product_id, ids = await _test_listing_success_enters_aplus_review()
         product_ids.append(product_id)
         run_ids.extend(ids)
         ids, runs = await _test_listing_failure_cancel_interrupted_do_not_complete()

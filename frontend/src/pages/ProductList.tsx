@@ -485,6 +485,20 @@ const ProductList: React.FC = () => {
   useEffect(() => { fetchProducts(); }, [page, pageSize, itemId, competitorAsin, upc, statusFilter, generationStatusFilter, channelStatusFilter, dateRange, selectedDataSourceId, activeDataSource?.id, isTikTokSource]);
   useEffect(() => { fetchDataSources(); }, []);
   useEffect(() => { fetchOverview(); }, [selectedDataSourceId, activeDataSource?.id, isTikTokSource]);
+  // 商品详情页在新标签页中完成确认后，列表标签页仍保留旧快照。
+  // 切回列表（focus/visibilitychange）时重新拉取，确保商品状态及时投影。
+  useEffect(() => {
+    const refreshOnReturn = () => {
+      if (document.visibilityState === 'hidden') return;
+      void refreshWorkbenchRows();
+    };
+    window.addEventListener('focus', refreshOnReturn);
+    document.addEventListener('visibilitychange', refreshOnReturn);
+    return () => {
+      window.removeEventListener('focus', refreshOnReturn);
+      document.removeEventListener('visibilitychange', refreshOnReturn);
+    };
+  }, [page, pageSize, itemId, competitorAsin, upc, statusFilter, generationStatusFilter, channelStatusFilter, dateRange, selectedDataSourceId, activeDataSource?.id, isTikTokSource]);
   useEffect(() => {
     if (!activeDataSource) return;
     if (isTikTokSource) {

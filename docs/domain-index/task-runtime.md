@@ -23,7 +23,7 @@
 - 高频列表接口不允许内存分页、假 total、重复 count 或复杂查询临时拼状态。
 - Catalog export 的业务终态由 validated outcome 驱动：`done/succeeded`、`partial_failed/partial_failed`、`failed/failed`，只覆盖 TaskRun `succeeded|partial_failed|failed` 与 OfflineTask `done|partial_failed|failed`，不覆盖 canceled/interrupted/paused。只有 parse-valid material summary 才阻断更旧 step；invalid JSON、NaN/Infinity、溢出数值、深度/内存解析失败都记录为 malformed nonmaterial，并继续回退更旧的 parse-valid material step，status-only summary 同样可回退。选中的 raw payload 恰好进入一次 `normalize_catalog_export_response()`；invalid-only 不制造 authoritative failed，parse-valid unsafe row 仍 authoritative fail closed。validated outcome 是 TaskRun/OfflineTask 响应、Export Center、download action、categories 和 existing-result 复用的唯一事实源。
 - 列表投影采用“全历史 owner scalar + 一次 step batch”：每个 owner kind 先只读全部 catalog owner 的 `id/status/summary_json|result_json`，再一次批量读取 `owner_id/step.id/result_json` 的 newest parse-valid material step，不加载 groups/events/完整 ORM steps。Python 生成共享 `records_by_id`、authoritative 与 succeeded/done/partial/failed ID 集；TaskRun/OfflineTask 列表及 Export Files/Categories 各自每 owner kind 只加载一次 projection，并让 owner SQL、row builder、下载 gate、类目聚合消费同一 records/ID sets。raw canceled/interrupted/paused 即使带 material done 也不被 outcome 复活，不进入 Export Files/Categories；禁止 legacy partial helper、JSON SQL、step JOIN/`EXISTS`/子查询、N+1 和 row builder 内二次 selector/normalize/project。
-- Catalog export worker 通过 `TaskWorkerOutcome` 交给 scheduler 单事务投影 step/group/run、terminal event 与 CatalogProduct 导出事实；partial 是不可自动重试终态，但保留下载结果。
+- Catalog export worker 在慢操作前提交进度事件，builder 按商品短事务持久化 UPC/模板元数据，避免 SQLite 写锁阻塞独立租约心跳；文件上传成功后仍通过 `TaskWorkerOutcome` 交给 scheduler 单事务投影 step/group/run、terminal event 与 CatalogProduct 最终导出事实。partial 是不可自动重试终态，但保留下载结果。
 - 本轮不启用 run-level projection route；列表接口不得用 projection 存储、step JOIN、`EXISTS`、子查询或内存分页补回 `stale_running/waiting_dependency/planned` 筛选。
 
 ## 关键入口
@@ -56,6 +56,7 @@
 - 启动完整性：后端在开始服务前校验全部 `PRODUCT_ACTION_TYPES` 已注册 worker，缺失时启动失败，不能领取业务 step 后才报“未注册 worker”。自动启动 probe 只允许在 R1 隔离 MySQL 内执行，禁止写入常驻业务服务使用的数据库。
 - 后端常驻自动唤醒巡检默认开启：每 30 分钟扫描没有健康串行 worker 时未被领取的 `ready`、锁/心跳已过期的 `running` step，以及因服务在持久化与排程之间中断而遗留的“首组首 step、从未领取、全组仍 pending”状态；健康串行 worker 后的 ready 队列是正常等待，不记录误导性的唤醒事件。跳过取消、已取代、正常运行和任何依赖组步骤。可恢复步骤会恢复为 `ready` 后交由原 runner 领取；代码、配置、数据库等系统异常以及带未分类错误的卡死步骤会保留给人工处理。每个 `(step, 问题指纹)` 的成功唤醒次数持久化在 `task_step_events`，上限 30 次；达到上限后记录一次停止事件，不再消耗执行资源。配置项为 `TASK_RUNTIME_AUTO_WAKE_ENABLED`、`TASK_RUNTIME_AUTO_WAKE_INTERVAL_SECONDS`、`TASK_RUNTIME_AUTO_WAKE_MAX_ATTEMPTS_PER_ISSUE`。
 - 目标会话追踪：GIGA pull 的 `test_session_key` 传播到 Product、素材资产和下游 payload；真实链路失败后只允许按该 key 精确定位本次记录，禁止清理无关商品或 Downloads 原文件。
+- GIGA 库存/价格同步在未显式指定 SKU 时，以同店铺所有已完成商品导入批次的 SKU 去重集为商品池；导入批次可能是增量，禁止只用最新一个批次代表全店商品。导出库存同样按店铺、站点和 SKU 选择各自最新的已完成库存记录。
 - 取消/重试/恢复：先看 `backend/app/api/task_runs.py` 和 `backend/app/task_runtime/` 当前实现。
 - 旧任务边界：旧 `offline_tasks` 仍由旧页面/API 定位，不进入新任务中心语义。
 
@@ -77,8 +78,8 @@
 - API：`GET /api/task-runs`
 - 任务详情/操作 API：先在 `backend/app/api/task_runs.py` 确认当前路由。
 - 项目规则：`make test-project-rules`
-- Catalog export outcome/MySQL：`cd backend && R1_TEST_MYSQL_ADMIN_URL='mysql+asyncmy://root@127.0.0.1:3306/' .venv/bin/python ../scripts/test_stability_repair_r1_catalog_export.py`
-- 完整项目规则隔离 MySQL：`R1_TEST_MYSQL_ADMIN_URL='mysql+asyncmy://root@127.0.0.1:3306/' python3 scripts/testing/run_with_r1_mysql.py -- make test-project-rules`；只有字面 argv `make test-project-rules` 是 canonical 输入，wrapper 将其改写为经 `resolve(strict=True)`/可执行校验的 `/usr/bin/make`（fallback `/bin/make`）与固定 `-C <repo> -f <repo>/Makefile test-project-rules`，不信任 caller PATH 或绝对/相对 make 路径。marker path/nonce/command id 只注入该 trusted child，generic child 会清除这些环境变量；markerless/wrong nonce/db/command 返回 3，不存在 executable 返回 127，退出/信号路径清理自有进程组、数据库和临时目录。
+- Catalog export outcome/MySQL：`cd backend && .venv/bin/python ../scripts/test_stability_repair_r1_catalog_export.py`
+- 完整项目规则隔离 MySQL：`python3 scripts/testing/run_with_r1_sqlite.py -- make test-project-rules`；只有字面 argv `make test-project-rules` 是 canonical 输入，wrapper 将其改写为经 `resolve(strict=True)`/可执行校验的 `/usr/bin/make`（fallback `/bin/make`）与固定 `-C <repo> -f <repo>/Makefile test-project-rules`，不信任 caller PATH 或绝对/相对 make 路径。marker path/nonce/command id 只注入该 trusted child，generic child 会清除这些环境变量；markerless/wrong nonce/db/command 返回 3，不存在 executable 返回 127，退出/信号路径清理自有进程组、数据库和临时目录。
 
 ## 常见定位
 
@@ -88,6 +89,7 @@
 - 出现“未注册新任务 step worker”：先看服务启动日志和 `scripts/test_task_runtime_worker_registry.py`；这是进程注册异常，不是商品/外部平台业务失败。修复或重启后再重试业务 step。
 - 新 run 需要 wake 才执行：先确认创建路径是否真的传入 `auto_start=True` 且首 step 为 `ready`，再看后端日志中的 `[TaskRuntime] scheduling/starting/claimed/finished` runner 生命周期日志；若服务重启前已存在 queued/stale run，默认不会 startup pickup，需显式配置或人工 wake。若正常服务进程内新 run 无日志且一直 queued，优先查 `kick_task_runtime()` runner state 和异常日志。
 - GIGA 拉品任务：先看 `backend/app/task_planners/giga_pull.py` 和 `backend/app/task_runtime/giga_pull_workers.py`。
+- GIGA 跨增量批次的 SKU 池、逐 SKU 最新库存/价格/商品元数据查询：`backend/app/services/giga_snapshot_queries.py`；动态同步入口：`backend/app/services/giga_inventory_sync.py`、`backend/app/services/giga_price_sync.py`。
 - 商品自动选图任务：先看 `backend/app/task_planners/product_auto_image_selection.py`、`backend/app/product_tasks/actions.py` 的 `ProductAutoImageSelectionAction`，再看 `backend/app/product_tasks/auto_image_selection.py`；商品侧重试入口看 `POST /api/products/{id}/auto-image-selection/retry`。
 - 商品自动竞品搜索任务：先看 `backend/app/task_planners/product_competitor_search.py`、`backend/app/product_tasks/actions.py` 的 `ProductCompetitorSearchAction`，再看 `backend/app/services/amazon_competitor_query.py` 和 `backend/app/services/amazon_search_page.py`；商品侧启动/重试入口看 `POST /api/products/{id}/competitor-search/retry`。
 - 商品竞品视觉初筛任务：先看 `backend/app/task_planners/product_competitor_visual_match.py`、`backend/app/product_tasks/actions.py` 的 `ProductCompetitorVisualMatchAction`，再看 `backend/app/services/amazon_competitor_visual_match.py`；商品侧启动/重试入口看 `POST /api/products/{id}/competitor-visual-match/retry`。

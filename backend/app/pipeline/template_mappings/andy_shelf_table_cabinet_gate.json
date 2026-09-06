@@ -43,10 +43,18 @@
     "unit_count": "unit_count[marketplace_id=ATVPDKIKX0DER]#1.value",
     "unit_count_type": "unit_count[marketplace_id=ATVPDKIKX0DER]#1.type[language_tag=en_US].value",
     "included_components": "included_components[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "special_features": [
+      "special_feature[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+      "special_feature[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#2.value",
+      "special_feature[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#3.value",
+      "special_feature[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#4.value",
+      "special_feature[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#5.value"
+    ],
     "is_assembly_required": "is_assembly_required[marketplace_id=ATVPDKIKX0DER]#1.value",
     "assembly_instructions": "assembly_instructions[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
     "assembly_instructions_description": "assembly_instructions_description[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
     "item_shape": "item_shape[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "shelf_type": "shelf_type[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
     "frame_material": "frame[marketplace_id=ATVPDKIKX0DER]#1.material[language_tag=en_US]#1.value",
     "frame_material_structured": "frame_material[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
     "top_material": "top[marketplace_id=ATVPDKIKX0DER]#1.material[language_tag=en_US]#1.value",
@@ -55,6 +63,7 @@
     "case_material": "case[marketplace_id=ATVPDKIKX0DER]#1.material[language_tag=en_US]#1.value",
     "furniture_finish": "furniture_finish[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
     "finish_type": "finish_type[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "required_product_compliance_certificate": "required_product_compliance_certificate[marketplace_id=ATVPDKIKX0DER]#1.value",
     "mounting_type": "mounting_type[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
     "weight_capacity_maximum": "weight_capacity[marketplace_id=ATVPDKIKX0DER]#1.maximum#1.value",
     "weight_capacity_maximum_unit": "weight_capacity[marketplace_id=ATVPDKIKX0DER]#1.maximum#1.unit",
@@ -157,6 +166,7 @@
     "weight_value": "item_package_weight[marketplace_id=ATVPDKIKX0DER]#1.value",
     "weight_unit": "item_package_weight[marketplace_id=ATVPDKIKX0DER]#1.unit"
   },
+  "semantic_fields": ["item_shape", "mounting_type", "special_features", "included_components", "shelf_type"],
   "browse_category_options": [
     {"product_type": "SHELF", "node": "childrens-bookcases", "path": "家居、厨具、家装 > 家具 > 儿童家具 > 儿童书柜、文件柜和置物架", "markers": ["bookcases, cabinets & shelves", "kids furniture", "kids bookshelf", "kids bookcase", "children's book", "toy organizer", "儿童书柜"]},
     {"product_type": "SHELF", "node": "bookcases", "path": "家居、厨具、家装 > 家具 > 办公家具 > 办公书架", "markers": ["bookcases", "bookcase", "bookshelf", "办公书架"]},

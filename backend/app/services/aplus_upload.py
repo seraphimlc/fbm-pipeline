@@ -18,6 +18,7 @@ from sqlalchemy.orm import selectinload
 from app.database import async_session
 from app.models import AplusUploadBatch, AplusUploadItem, CatalogProduct, Product
 from app.pipeline.chrome_ctrl import chrome_execute_js, chrome_get_cookie_for_domain, chrome_navigate, chrome_workflow
+from app.services.product_payloads import hydrate_product_sections
 
 logger = logging.getLogger(__name__)
 
@@ -196,6 +197,7 @@ async def _run_item(item_id: int, auth: dict, submit: bool) -> None:
             product = await db.get(Product, product_id, options=[selectinload(Product.data), selectinload(Product.aplus)])
             if not product:
                 raise ValueError("商品不存在")
+            await hydrate_product_sections(db, product, ("listing", "aplus_plan", "aplus_assets"))
             image_paths, alt_texts = _collect_aplus_images(product)
             asin = product.amazon_asin
             item_code = product.data.item_code if product.data else None

@@ -11,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.models import GigaInventory, GigaPrice, GigaSku, Product, ProductDataSource
+from app.services.product_payloads import hydrate_product_sections
 from app.services.tiktok_status import (
     ASCII_EDGE_WHITESPACE_REGEX,
     build_tiktok_classification_cte,
@@ -219,6 +220,7 @@ async def get_tiktok_product_detail(product_id: int, db: AsyncSession = Depends(
     product = result.scalar_one_or_none()
     if not product:
         raise HTTPException(404, "Product not found")
+    await hydrate_product_sections(db, product, ("source", "source_snapshot"))
 
     data_source = await _load_data_source(db, product)
     if data_source and (data_source.sales_channel or "amazon").lower() != "tiktok":

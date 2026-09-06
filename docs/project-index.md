@@ -1,7 +1,7 @@
 # Project Runtime Index
 
 Status: route map, not source of truth
-Updated: 2026-07-22
+Updated: 2026-09-06
 
 Use this file to route investigation. Do not treat it as proof. Verify facts in code, commands, APIs, DB read-only evidence, pages, artifacts, or explicit user decisions.
 
@@ -32,8 +32,11 @@ Fill or update with stable routes only:
 - Templates/exports: `backend/app/pipeline/template_mappings/`, `backend/app/pipeline/templates/`
 - Lingxing enhanced A+ readiness: `scripts/check_lingxing_enhanced_aplus_qa_readiness.py`
 - Lingxing enhanced A+ sample dry-run: `scripts/prepare_lingxing_enhanced_aplus_qa_sample.py`
-- Data/migrations: `backend/app/database.py` (`DATABASE_BACKEND=mysql|sqlite`), `scripts/test_sqlite_database_mode.py`
+- Data/migrations: `backend/app/database.py` (`DATABASE_BACKEND=mysql|sqlite`), `backend/app/migrations/product_large_fields.py` (operator-run SQLite large-field cutover), `scripts/test_sqlite_database_mode.py`
+- Product detail large content: `GET /api/products/{id}` returns hot-field summary after cutover; `GET /api/products/{id}/sections/*` lazy-loads source, mindset, Listing, image, A+, and export payload bodies.
 - Tests:
+- Isolated test database: `scripts/testing/r1_sqlite.py`, `scripts/testing/r1_sqlite_bootstrap.py`, `scripts/testing/run_with_r1_sqlite.py`; standalone DB tests and `make test-project-rules` always use temporary SQLite files, never application data. MySQL test wrappers were replaced on 2026-09-05.
+- SQLite test commands and migration verification results: `docs/testing-sqlite.md`. Switching the harness does not imply every business query supports SQLite; remaining failures are recorded there.
 - Workflow action contract: `contracts/product_workflow_actions.json`, `scripts/test_stability_repair_r1_workflow_actions.py`, `frontend/scripts/test-product-workflow-actions.mjs`
 - Catalog export outcome/UI: `backend/app/task_runtime/catalog_export_status.py`, `scripts/test_stability_repair_r1_catalog_export.py`, `scripts/test_stability_repair_r1_catalog_frontend.py`
 - TikTok channel status/UI: `backend/app/services/tiktok_status.py`, `backend/app/api/products.py`, `backend/app/api/tiktok.py`, `scripts/test_stability_repair_r1_tiktok.py`, `scripts/test_stability_repair_r1_tiktok_frontend.py`
@@ -57,6 +60,7 @@ python3 /Users/liuchang/.codex/skills/multi-agent-collaboration/scripts/init_col
 cd frontend && npm run contracts:check
 cd frontend && npm run mutations:check
 cd frontend && npm run test:workflow-actions:e2e
+cd frontend && npm run test:product-sections:e2e
 cd backend && .venv/bin/python ../scripts/test_customer_mindset.py
 cd backend && .venv/bin/python ../scripts/test_sqlite_database_mode.py
 cd backend && .venv/bin/python ../scripts/test_image_analysis_listing_e5.py
@@ -66,15 +70,16 @@ cd backend && .venv/bin/python ../scripts/test_amazon_image_compliance_oss.py
 cd backend && .venv/bin/python ../scripts/test_amazon_image_compliance.py
 cd backend && .venv/bin/python ../scripts/test_aplus_reference_planning.py
 cd backend && .venv/bin/python ../scripts/test_giga_aplus_material_chain.py
-cd backend && R1_TEST_MYSQL_ADMIN_URL='mysql+asyncmy://root@127.0.0.1:3306/' .venv/bin/python ../scripts/test_stability_repair_r1_workflow_actions.py --with-mysql
-cd backend && R1_TEST_MYSQL_ADMIN_URL='mysql+asyncmy://root@127.0.0.1:3306/' .venv/bin/python ../scripts/test_stability_repair_r1_catalog_export.py
-R1_TEST_MYSQL_ADMIN_URL='mysql+asyncmy://root@127.0.0.1:3306/' backend/.venv/bin/python scripts/test_stability_repair_r1_catalog_frontend.py
-R1_TEST_MYSQL_ADMIN_URL='mysql+asyncmy://root@127.0.0.1:3306/' backend/.venv/bin/python scripts/test_stability_repair_r1_tiktok.py
-R1_TEST_MYSQL_ADMIN_URL='mysql+asyncmy://root@127.0.0.1:3306/' backend/.venv/bin/python scripts/test_stability_repair_r1_tiktok_frontend.py
+cd backend && .venv/bin/python ../scripts/test_stability_repair_r1_workflow_actions.py
+cd backend && .venv/bin/python ../scripts/test_stability_repair_r1_catalog_export.py
+backend/.venv/bin/python scripts/test_stability_repair_r1_catalog_frontend.py
+backend/.venv/bin/python scripts/test_stability_repair_r1_tiktok.py
+backend/.venv/bin/python scripts/test_stability_repair_r1_tiktok_frontend.py
 python3 scripts/test_stability_repair_r1_remote_guard.py
 python3 scripts/test_stability_repair_r1_mutation_frontend.py
-R1_TEST_MYSQL_ADMIN_URL='mysql+asyncmy://root@127.0.0.1:3306/' python3 scripts/testing/run_with_r1_mysql.py -- make test-project-rules
-# DB behavior requires explicit R1_TEST_MYSQL_ADMIN_URL and --with-mysql; never reuse application DATABASE_URL.
+python3 scripts/testing/run_with_r1_sqlite.py -- make test-project-rules
+backend/.venv/bin/python scripts/testing/test_run_with_r1_sqlite.py
+# DB behavior uses temporary SQLite databases; never reuse the application database.
 ```
 
 ## Hard Boundaries

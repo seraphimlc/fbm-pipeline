@@ -20,6 +20,7 @@ from app.task_runtime.retry_policy import is_transient_task_error
 from app.database import async_session
 from app.models import AmazonCompetitorSearchCandidate, Product, ProductData
 from app.services.product_image_vlm import clean_json_content
+from app.services.product_payloads import hydrate_product_sections, large_field_storage_enabled, write_section
 
 
 logger = logging.getLogger(__name__)
@@ -883,16 +884,35 @@ async def _persist_customer_mindset(
     for attempt in range(1, attempts + 1):
         try:
             async with async_session() as persist_db:
-                result = await persist_db.execute(
-                    update(ProductData)
-                    .where(ProductData.product_id == product_id)
-                    .values(
-                        customer_mindset=serialized_brief,
-                        customer_mindset_generated_at=generated_at,
+                if await large_field_storage_enabled(persist_db):
+                    brief = load_customer_mindset(serialized_brief, required=True)
+                    questions = brief.get("questions") or []
+                    quality = brief.get("quality") or {}
+                    await write_section(
+                        persist_db,
+                        product_id=product_id,
+                        section="mindset",
+                        payload=brief,
+                        generated_at=generated_at,
+                        input_fingerprint=str(brief.get("input_fingerprint") or "") or None,
+                        extras={
+                            "question_count": len(questions),
+                            "fixed_question_count": sum(1 for item in questions if item.get("question_type") == "fixed"),
+                            "dynamic_question_count": sum(1 for item in questions if item.get("question_type") == "dynamic"),
+                            "requires_review": int(bool(quality.get("requires_review"))),
+                        },
                     )
-                )
-                if result.rowcount != 1:
-                    raise RuntimeError(f"Product {product_id} has no writable product data")
+                else:
+                    result = await persist_db.execute(
+                        update(ProductData)
+                        .where(ProductData.product_id == product_id)
+                        .values(
+                            customer_mindset=serialized_brief,
+                            customer_mindset_generated_at=generated_at,
+                        )
+                    )
+                    if result.rowcount != 1:
+                        raise RuntimeError(f"Product {product_id} has no writable product data")
                 await persist_db.commit()
             return
         except DBAPIError as exc:
@@ -1733,6 +1753,7 @@ async def run_customer_mindset(product_id: int) -> dict[str, Any]:
         ).scalar_one_or_none()
         if not product or not product.data:
             raise ValueError(f"Product {product_id} not found or has no product data")
+        await hydrate_product_sections(db, product, ("source", "source_snapshot", "image_analysis", "image_selection", "mindset"))
         if not product.images or not image_analysis_ready(product.images.image_analysis):
             raise RuntimeError("图片分析尚未完成，不能梳理用户心智")
         competitor = (

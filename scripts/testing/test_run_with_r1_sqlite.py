@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Focused fail-closed checks for run_with_r1_mysql.py."""
+"""Focused fail-closed checks for run_with_r1_sqlite.py."""
 
 from __future__ import annotations
 
 import asyncio
+import argparse
 import importlib.util
 import json
 import os
@@ -18,9 +19,9 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 
 ROOT = Path(__file__).resolve().parents[2]
-WRAPPER = ROOT / "scripts" / "testing" / "run_with_r1_mysql.py"
-DATABASE_PATTERN = re.compile(r"R1_MYSQL_WRAPPER_DATABASE=(fbm_pipeline_r1_[0-9]+_[a-f0-9]{8})")
-DATA_DIR_PATTERN = re.compile(r"R1_MYSQL_WRAPPER_DATA_DIR=(.+)")
+WRAPPER = ROOT / "scripts" / "testing" / "run_with_r1_sqlite.py"
+DATABASE_PATTERN = re.compile(r"R1_SQLITE_WRAPPER_DATABASE=(.+)")
+DATA_DIR_PATTERN = re.compile(r"R1_SQLITE_WRAPPER_DATA_DIR=(.+)")
 MARKER_ENV_NAMES = (
     "R1_PROJECT_RULES_DB_MARKER",
     "R1_PROJECT_RULES_DB_MARKER_NONCE",
@@ -48,21 +49,8 @@ def _created_resources(result: subprocess.CompletedProcess[str]) -> tuple[str, P
     return database_match.group(1), Path(data_dir_match.group(1).strip())
 
 
-async def _database_exists(admin_url: str, database_name: str) -> bool:
-    engine = create_async_engine(admin_url, isolation_level="AUTOCOMMIT", pool_pre_ping=True)
-    try:
-        async with engine.connect() as connection:
-            found = await connection.scalar(
-                text("SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = :name"),
-                {"name": database_name},
-            )
-            return found is not None
-    finally:
-        await engine.dispose()
-
-
-def _assert_resources_cleaned(admin_url: str, database_name: str, data_dir: Path) -> None:
-    assert not asyncio.run(_database_exists(admin_url, database_name)), database_name
+def _assert_resources_cleaned(database_name: str, data_dir: Path) -> None:
+    assert not Path(database_name).exists(), database_name
     assert not data_dir.exists(), data_dir
 
 
@@ -89,7 +77,7 @@ if sentinel:
 if mode != 'markerless' and all(marker_env.values()):
     marker = {{
         'wrapper_active': True,
-        'database_name': os.environ['R1_MYSQL_WRAPPER_DATABASE'],
+        'database_name': os.environ['R1_SQLITE_WRAPPER_DATABASE'],
         'database_check': True,
         'nonce': os.environ['R1_PROJECT_RULES_DB_MARKER_NONCE'],
         'command_id': os.environ['R1_PROJECT_RULES_COMMAND_ID'],
@@ -114,36 +102,37 @@ raise SystemExit(0)
 
 def _load_wrapper_module():
     sys.path.insert(0, str(WRAPPER.parent))
-    spec = importlib.util.spec_from_file_location("r1_mysql_wrapper_focused", WRAPPER)
+    spec = importlib.util.spec_from_file_location("r1_sqlite_wrapper_focused", WRAPPER)
     if spec is None or spec.loader is None:
-        raise AssertionError("failed to load run_with_r1_mysql.py")
+        raise AssertionError("failed to load run_with_r1_sqlite.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
 def main() -> int:
-    admin_url = str(os.environ.get("R1_TEST_MYSQL_ADMIN_URL") or "").strip()
-    if not admin_url:
-        print("BLOCKED: R1_TEST_MYSQL_ADMIN_URL is required", file=sys.stderr)
-        return 2
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--harness-only", action="store_true", help="Run isolation checks without the broad project-rules integration")
+    args = parser.parse_args()
     base_env = os.environ.copy()
-
-    missing_env = base_env.copy()
-    missing_env.pop("R1_TEST_MYSQL_ADMIN_URL", None)
-    missing_env_result = _run_wrapper(["--", sys.executable, "-c", "pass"], missing_env)
-    assert missing_env_result.returncode != 0, missing_env_result
-    assert "R1_TEST_MYSQL_ADMIN_URL is required" in missing_env_result.stderr, missing_env_result.stderr
+    # Hostile inherited settings must never select the application database.
+    base_env.update({
+        "DATABASE_BACKEND": "mysql",
+        "DATABASE_URL": "mysql+asyncmy://unused@127.0.0.1:1/do_not_connect",
+        "SQLITE_DATABASE_PATH": "/do-not-use/business.db",
+    })
+    missing_env_result = _run_wrapper(["--", sys.executable, "-c", "pass"], base_env)
+    assert missing_env_result.returncode == 0, missing_env_result
+    _assert_resources_cleaned(*_created_resources(missing_env_result))
 
     missing_command_result = _run_wrapper([], base_env)
     assert missing_command_result.returncode != 0, missing_command_result
-    assert "usage: run_with_r1_mysql.py -- <command...>" in missing_command_result.stderr, missing_command_result.stderr
+    assert "usage: run_with_r1_sqlite.py -- <command...>" in missing_command_result.stderr, missing_command_result.stderr
 
     child_failure = _run_wrapper(["--", sys.executable, "-c", "raise SystemExit(7)"], base_env)
     assert child_failure.returncode == 7, (child_failure.returncode, child_failure.stdout, child_failure.stderr)
     failed_database, failed_data_dir = _created_resources(child_failure)
-    _assert_resources_cleaned(admin_url, failed_database, failed_data_dir)
+    _assert_resources_cleaned(failed_database, failed_data_dir)
 
     marker_writer = """
 import os
@@ -159,9 +148,9 @@ for name in (
         base_env,
     )
     assert unrelated_script_argv.returncode == 0, unrelated_script_argv
-    assert "R1_MYSQL_PROJECT_RULES_DB_MARKER_VERIFIED" not in unrelated_script_argv.stdout
+    assert "R1_SQLITE_PROJECT_RULES_DB_MARKER_VERIFIED" not in unrelated_script_argv.stdout
     unrelated_database, unrelated_data_dir = _created_resources(unrelated_script_argv)
-    _assert_resources_cleaned(admin_url, unrelated_database, unrelated_data_dir)
+    _assert_resources_cleaned(unrelated_database, unrelated_data_dir)
 
     wrapper_module = _load_wrapper_module()
     with TemporaryDirectory(prefix="r1-wrapper-marker-validation-") as marker_directory:
@@ -205,29 +194,30 @@ for name in (
         absolute_env["R1_FAKE_MAKE_SENTINEL"] = str(absolute_sentinel)
         absolute_fake = _run_wrapper(["--", str(fake_make), "test-project-rules"], absolute_env)
         assert absolute_fake.returncode == 0, absolute_fake
-        assert "R1_MYSQL_PROJECT_RULES_DB_MARKER_VERIFIED" not in absolute_fake.stdout
+        assert "R1_SQLITE_PROJECT_RULES_DB_MARKER_VERIFIED" not in absolute_fake.stdout
         absolute_marker_env = json.loads(absolute_sentinel.read_text(encoding="utf-8"))
         assert all(absolute_marker_env.get(name) is None for name in MARKER_ENV_NAMES), absolute_marker_env
         absolute_database, absolute_data_dir = _created_resources(absolute_fake)
-        _assert_resources_cleaned(admin_url, absolute_database, absolute_data_dir)
+        _assert_resources_cleaned(absolute_database, absolute_data_dir)
 
         path_sentinel = fake_directory_path / "path-sentinel.json"
         path_env = base_env.copy()
         path_env["PATH"] = f"{fake_directory_path}{os.pathsep}{path_env.get('PATH', '')}"
         path_env["R1_FAKE_MARKER_MODE"] = "valid"
         path_env["R1_FAKE_MAKE_SENTINEL"] = str(path_sentinel)
-        trusted_literal_make = _run_wrapper(["--", "make", "test-project-rules"], path_env)
-        assert trusted_literal_make.returncode == 0, trusted_literal_make
-        assert "R1_MYSQL_PROJECT_RULES_DB_MARKER_VERIFIED" in trusted_literal_make.stdout
-        assert not path_sentinel.exists(), path_sentinel
-        trusted_database, trusted_data_dir = _created_resources(trusted_literal_make)
-        _assert_resources_cleaned(admin_url, trusted_database, trusted_data_dir)
+        if not args.harness_only:
+            trusted_literal_make = _run_wrapper(["--", "make", "test-project-rules"], path_env)
+            assert trusted_literal_make.returncode == 0, trusted_literal_make
+            assert "R1_SQLITE_PROJECT_RULES_DB_MARKER_VERIFIED" in trusted_literal_make.stdout
+            assert not path_sentinel.exists(), path_sentinel
+            trusted_database, trusted_data_dir = _created_resources(trusted_literal_make)
+            _assert_resources_cleaned(trusted_database, trusted_data_dir)
 
     nonexistent = _run_wrapper(["--", str(ROOT / "tmp" / "r1-command-does-not-exist")], base_env)
     assert nonexistent.returncode == 127, (nonexistent.returncode, nonexistent.stdout, nonexistent.stderr)
     assert "command executable not found" in nonexistent.stderr
     missing_database, missing_data_dir = _created_resources(nonexistent)
-    _assert_resources_cleaned(admin_url, missing_database, missing_data_dir)
+    _assert_resources_cleaned(missing_database, missing_data_dir)
 
     child_check = """
 import asyncio
@@ -239,15 +229,15 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 async def main():
     database_url = os.environ['DATABASE_URL']
-    expected = os.environ['R1_MYSQL_WRAPPER_DATABASE']
-    assert os.environ['R1_MYSQL_WRAPPER_ACTIVE'] == '1'
+    expected = os.environ['R1_SQLITE_WRAPPER_DATABASE']
+    assert os.environ['R1_SQLITE_WRAPPER_ACTIVE'] == '1'
     assert Path(sys.executable).resolve() == (Path.cwd() / 'backend/.venv/bin/python').resolve()
     assert make_url(database_url).database == expected
     assert Path(os.environ['DATA_DIR']).is_dir()
     engine = create_async_engine(database_url, pool_pre_ping=True)
     try:
         async with engine.connect() as connection:
-            actual = await connection.scalar(text('SELECT DATABASE()'))
+            actual = (await connection.execute(text('PRAGMA database_list'))).one()[2]
         assert actual == expected, (actual, expected)
     finally:
         await engine.dispose()
@@ -259,9 +249,9 @@ asyncio.run(main())
     assert child_success.returncode == 0, (child_success.returncode, child_success.stdout, child_success.stderr)
     success_database, success_data_dir = _created_resources(child_success)
     assert f"R1_WRAPPER_CHILD_DB_OK={success_database}" in child_success.stdout, child_success.stdout
-    _assert_resources_cleaned(admin_url, success_database, success_data_dir)
+    _assert_resources_cleaned(success_database, success_data_dir)
 
-    print("R1 MySQL wrapper fail-closed checks passed")
+    print("R1 SQLite wrapper fail-closed checks passed")
     return 0
 
 

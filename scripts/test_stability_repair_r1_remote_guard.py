@@ -301,7 +301,9 @@ def _running_stack(
     child_env = os.environ.copy()
     child_env.update({
         "API_DEV_TOKEN": api_token,
-        "DATABASE_URL": "mysql+asyncmy://root@127.0.0.1:3306/fbm_pipeline_r1_remote_guard_unused",
+        "DATABASE_BACKEND": "sqlite",
+        "SQLITE_DATABASE_PATH": str(temp_dir / "remote-guard.db"),
+        "DATABASE_URL": f"sqlite+aiosqlite:///{temp_dir / 'remote-guard.db'}",
         "DATA_DIR": str(temp_dir / "data"),
         "DEV_API_WRITE_TOKEN": vite_token,
         "PYTHONUNBUFFERED": "1",
@@ -503,12 +505,15 @@ assert not main._is_local_client(SimpleNamespace(host="2001:db8::7"))
     env = os.environ.copy()
     env.update(
         {
-            "DATABASE_URL": "mysql+asyncmy://root@127.0.0.1:3306/fbm_pipeline_r1_remote_guard_unused",
             "STARTUP_RUN_DB_MAINTENANCE": "false",
         }
     )
     result = subprocess.run(
-        [str(BACKEND / ".venv" / "bin" / "python"), "-c", code],
+        [
+            str(BACKEND / ".venv" / "bin" / "python"),
+            str(ROOT / "scripts/testing/run_with_r1_sqlite.py"), "--",
+            str(BACKEND / ".venv" / "bin" / "python"), "-c", code,
+        ],
         cwd=BACKEND,
         env=env,
         text=True,
