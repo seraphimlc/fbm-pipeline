@@ -106,3 +106,9 @@ Update this index when adding or changing:
 - generated artifact location
 
 Keep entries short and path-oriented.
+
+- A+ durable provider polling: `backend/app/task_runtime/aplus_image_poller.py`, `aplus_image_generation_jobs`, `scripts/test_aplus_async_image_jobs.py`
+- A+ 单模块重生成迁移兼容：`scripts/test_aplus_regenerate_payloads.py`（隔离 SQLite，验证接口、后台输入加载及保留其余图片，无外部生成调用）。
+- A+ 生图尺寸契约：`APLUS_IMAGE_PROVIDER_SCALE=1.6`（默认请求 `3104x1920`，交付 `1940x1200`）；`scripts/test_aplus_provider_dimensions.py` 验证显式 size、目标尺寸、拒绝小图及失败时不上传。
+- 永久商品黑名单：`POST /api/products/{id}/blacklist`、`product_blacklist`、`scripts/test_product_blacklist.py`；普通列表/进度排除，禁止移出及删除，详情显示 `blacklisted_at`。
+cd backend && .venv/bin/python ../scripts/test_aplus_async_image_jobs.py

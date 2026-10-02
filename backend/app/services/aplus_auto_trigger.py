@@ -15,7 +15,7 @@ from app.models import CatalogProduct, Product, ProductFile, TaskRun, TaskStep
 from app.models.status import PENDING_REVIEW, WORKFLOW_NODE_GENERATE_APLUS, WORKFLOW_STATUS_PENDING
 from app.services.product_payloads import hydrate_product_sections
 from app.task_planners.aplus_generate import create_aplus_generate_runs
-from app.task_runtime.constants import RUN_STATUS_PENDING, RUN_STATUS_RUNNING, STEP_STATUS_PENDING, STEP_STATUS_READY, STEP_STATUS_RUNNING
+from app.task_runtime.constants import RUN_STATUS_PENDING, RUN_STATUS_RUNNING, STEP_STATUS_PENDING, STEP_STATUS_READY, STEP_STATUS_RUNNING, STEP_STATUS_WAITING_EXTERNAL
 from app.task_runtime.json_utils import json_loads
 
 
@@ -32,7 +32,7 @@ PRODUCT_MAIN_ACTION_TYPES = (
     "product_listing_generation",
 )
 ACTIVE_RUN_STATUSES = (RUN_STATUS_PENDING, RUN_STATUS_RUNNING)
-ACTIVE_STEP_STATUSES = (STEP_STATUS_PENDING, STEP_STATUS_READY, STEP_STATUS_RUNNING)
+ACTIVE_STEP_STATUSES = (STEP_STATUS_PENDING, STEP_STATUS_READY, STEP_STATUS_RUNNING, STEP_STATUS_WAITING_EXTERNAL)
 APLUS_ACTIVE_STATUSES = {"queued", "planning", "scripting", "imaging"}
 APLUS_DONE_STATUSES = {"done", "regen_done"}
 APLUS_RETRYABLE_STATUSES = {None, "", "failed", "partial"}

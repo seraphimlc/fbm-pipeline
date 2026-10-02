@@ -33,6 +33,7 @@ from app.task_runtime import (
 )
 from app.task_runtime.auto_wake_monitor import auto_wake_monitor_loop
 from app.task_runtime.aplus_generate_workers import register_aplus_generate_workers
+from app.task_runtime.aplus_image_poller import aplus_image_poller_loop, stop_aplus_image_poller
 from app.task_runtime.catalog_export_workers import register_catalog_export_workers
 from app.task_runtime.giga_dynamic_sync_workers import register_giga_dynamic_sync_workers
 from app.task_runtime.giga_pull_workers import register_giga_pull_workers
@@ -156,12 +157,18 @@ async def lifespan(app: FastAPI):
     else:
         logging.info("Startup task runtime kick disabled.")
     auto_wake_task: asyncio.Task | None = None
+    aplus_poller_task: asyncio.Task | None = None
     if settings.TASK_RUNTIME_AUTO_WAKE_ENABLED:
         auto_wake_task = asyncio.create_task(auto_wake_monitor_loop(), name="task-runtime-auto-wake")
     else:
         logging.info("Task runtime auto-wake monitor disabled.")
+    if settings.APLUS_IMAGE_POLL_ENABLED:
+        aplus_poller_task = asyncio.create_task(aplus_image_poller_loop(), name="aplus-image-poller")
+    else:
+        logging.info("A+ image poller disabled.")
     yield
     # Shutdown
+    await stop_aplus_image_poller(aplus_poller_task)
     if auto_wake_task:
         auto_wake_task.cancel()
         try:

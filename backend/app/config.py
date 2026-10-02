@@ -121,12 +121,20 @@ class Settings(BaseSettings):
     APLUS_IMAGE_WIDTH: int = 1940
     APLUS_IMAGE_HEIGHT: int = 1200
     APLUS_IMAGE_ASPECT_RATIO: str = "97:60"
+    # 1940x1200 交付图请求 1.6 倍母图，即 3104x1920；只缩小/裁切，不放大。
+    APLUS_IMAGE_PROVIDER_SCALE: float = 1.6
     APLUS_IMAGE_MAX_BYTES: int = 2_000_000
     APLUS_IMAGE_JPEG_QUALITY: int = 88
     APLUS_IMAGE_MIN_JPEG_QUALITY: int = 55
     # A+ generations 失败后必须停在失败态，交给人工决定是否再次消耗生图额度。
     APLUS_IMAGE_API_RETRIES: int = 1
     APLUS_IMAGE_OVERWRITE_POLICY: str = "skip_success"  # skip_success/overwrite_all
+    APLUS_IMAGE_SUBMIT_TIMEOUT_SECONDS: int = 300
+    APLUS_IMAGE_POLL_ENABLED: bool = True
+    APLUS_IMAGE_POLL_SCAN_INTERVAL_SECONDS: int = 5
+    APLUS_IMAGE_POLL_BATCH_SIZE: int = 20
+    APLUS_IMAGE_POLL_CONCURRENCY: int = 5
+    APLUS_IMAGE_POLL_DEADLINE_SECONDS: int = 20 * 60
     APLUS_PLAN_LLM_TIMEOUT_SECONDS: int = 120
     APLUS_SCRIPT_LLM_TIMEOUT_SECONDS: int = 180
     # 新商品默认在 Listing 完成后继续创建 A+ 派生任务；A+ 失败不会回退商品的待导出状态。

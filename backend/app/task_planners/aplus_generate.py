@@ -8,7 +8,7 @@ from app.models import CatalogProduct, Product, ProductAplus, TaskGroup, TaskRun
 from app.models.status import COMPLETED, PENDING_REVIEW
 from app.pipeline.engine import is_running
 from app.services.product_payloads import hydrate_product_sections
-from app.task_runtime.constants import STEP_STATUS_PENDING, STEP_STATUS_READY
+from app.task_runtime.constants import STEP_STATUS_PENDING, STEP_STATUS_READY, STEP_STATUS_WAITING_EXTERNAL
 from app.task_runtime.json_utils import json_dumps, json_loads
 from app.task_runtime.scheduler import kick_task_runtime
 
@@ -35,7 +35,7 @@ async def _active_aplus_product_ids(db: AsyncSession) -> set[int]:
     result = await db.execute(
         select(TaskStep).where(
             TaskStep.step_type == "aplus_generate_product",
-            TaskStep.status.in_(("pending", "ready", "running")),
+            TaskStep.status.in_(("pending", "ready", "running", STEP_STATUS_WAITING_EXTERNAL)),
         )
     )
     active_ids: set[int] = set()

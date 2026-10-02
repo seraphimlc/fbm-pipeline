@@ -5,6 +5,14 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.database import Base
 
 
+class ProductBlacklist(Base):
+    """Permanent exclusion; deliberately no cascade from Product."""
+    __tablename__ = "product_blacklist"
+
+    product_id: Mapped[int] = mapped_column(Integer, ForeignKey("products.id", ondelete="RESTRICT"), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, nullable=False)
+
+
 class Product(Base):
     __tablename__ = "products"
 
@@ -278,6 +286,43 @@ class TaskStep(Base):
         back_populates="task_step",
         cascade="all, delete-orphan",
     )
+
+
+class AplusImageGenerationJob(Base):
+    __tablename__ = "aplus_image_generation_jobs"
+    __table_args__ = (
+        UniqueConstraint("task_step_id", "asset_slot_key", name="uq_aplus_image_jobs_step_slot"),
+        Index("ix_aplus_image_jobs_due", "status", "next_poll_at", "id"),
+        Index("ix_aplus_image_jobs_step_status", "task_step_id", "status", "id"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    product_id: Mapped[int] = mapped_column(Integer, ForeignKey("products.id", ondelete="CASCADE"), nullable=False)
+    task_run_id: Mapped[int] = mapped_column(Integer, ForeignKey("task_runs.id", ondelete="CASCADE"), nullable=False)
+    task_step_id: Mapped[int] = mapped_column(Integer, ForeignKey("task_steps.id", ondelete="CASCADE"), nullable=False)
+    asset_slot_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    module_position: Mapped[int] = mapped_column(Integer, nullable=False)
+    asset_slot_id: Mapped[str | None] = mapped_column(String(120))
+    status: Mapped[str] = mapped_column(String(30), default="submitting")
+    provider_task_id: Mapped[str | None] = mapped_column(String(200))
+    request_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    script_json: Mapped[str] = mapped_column(Text, nullable=False)
+    output_path: Mapped[str] = mapped_column(Text, nullable=False)
+    product_key: Mapped[str] = mapped_column(String(120), nullable=False)
+    brand: Mapped[str | None] = mapped_column(String(100))
+    provider_result_json: Mapped[str | None] = mapped_column(Text)
+    result_json: Mapped[str | None] = mapped_column(Text)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    poll_count: Mapped[int] = mapped_column(Integer, default=0)
+    next_poll_at: Mapped[datetime | None] = mapped_column(DateTime)
+    deadline_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    locked_by: Mapped[str | None] = mapped_column(String(100))
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
 class TaskStepEvent(Base):

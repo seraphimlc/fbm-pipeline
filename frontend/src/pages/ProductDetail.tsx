@@ -1,7 +1,7 @@
 // @ts-nocheck
 import React, { useEffect, useState, useRef } from 'react';
 import { useLocation, useParams, useNavigate } from 'react-router-dom';
-import { Alert, Card, Descriptions, Tag, Steps, Tabs, Button, Space, Typography, Spin, message, Popconfirm, Image, Table, List, Modal, Input, Select, Empty, Tooltip } from 'antd';
+import { App as AntApp, Alert, Card, Descriptions, Tag, Steps, Tabs, Button, Space, Typography, Spin, message, Popconfirm, Image, Table, List, Modal, Input, Select, Empty, Tooltip, Switch, Progress } from 'antd';
 import {
   ArrowLeftOutlined, PlayCircleOutlined, RedoOutlined,
   PauseOutlined, ReloadOutlined, DeleteOutlined,
@@ -10,7 +10,7 @@ import {
   PictureOutlined, EyeOutlined, VideoCameraOutlined,
   FilePdfOutlined, FileTextOutlined,
 } from '@ant-design/icons';
-import { getProduct, getProductSection, getProductImageSection, getProductAplusSection, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, generateProductAplus, runProductFromStep, runPipelineStep, updateProduct, updateProductListingImages, listCategoryOptions, getProductMaterialSpreadsheetPreview, productMaterialPreviewUrl } from '../api';
+import { blacklistProduct, getWorkbenchOverview, listProducts, getProduct, getProductSection, getProductImageSection, getProductAplusSection, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, generateProductAplus, runProductFromStep, runPipelineStep, updateProduct, updateProductListingImages, listCategoryOptions, getProductMaterialSpreadsheetPreview, productMaterialPreviewUrl } from '../api';
 import type { CategoryOption, ProductDetail, ProductMaterialAsset, ProductMaterialSpreadsheetPreview, ProductSectionResponse } from '../api';
 import type { MutationCallsiteId } from '../api/mutationInventory.generated.ts';
 import { runMutationWithUX } from '../api/mutationRunner.ts';
@@ -24,6 +24,7 @@ import { ProductWorkflowUnknownAction } from '../workflow/ProductWorkflowUnknown
 
 const { Title, Text } = Typography;
 const PRODUCT_LIST_RETURN_KEY = 'fbm.productList.returnPath';
+const AUTO_NEXT_CONFIRMATION_KEY = 'fbm.productDetail.autoNextConfirmation';
 const DEFAULT_LISTING_IMAGE_LIMIT = 9;
 const PRODUCT_DETAIL_WORKFLOW_CALLSITE_IDS = {
   confirmProduct: 'confirmProduct|frontend/src/pages/ProductDetail.tsx|runWorkflowAction',
@@ -316,6 +317,8 @@ const defaultProductDetailTab = (detail: ProductDetail | null | undefined) => {
   if (workflow) {
     const workflowStage = workflow.stage || workflow.node_key;
     const workflowWorkStatus = workflow.work_status;
+    if (workflowStage === 'confirm_images_aplus' || workflowWorkStatus === 'confirm_images_aplus') return 'aplus';
+    if (workflowStage === 'generate_aplus') return 'aplus';
     if (['auto_select_images', 'select_images', 'image_analysis'].includes(workflowStage)) return 'images';
     if (workflowStage === 'customer_mindset') return 'mindset';
     if (['needs_initialization', 'auto_select_images', 'select_images'].includes(workflowWorkStatus)) return 'images';
@@ -384,10 +387,18 @@ const defaultProductDetailTab = (detail: ProductDetail | null | undefined) => {
 };
 
 const ProductDetail: React.FC = () => {
+  const { message } = AntApp.useApp();
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
   const backTarget = (location.state as any)?.from || window.localStorage.getItem(PRODUCT_LIST_RETURN_KEY) || '/products';
+  const [autoNextConfirmation, setAutoNextConfirmation] = useState(
+    () => window.localStorage.getItem(AUTO_NEXT_CONFIRMATION_KEY) === 'true',
+  );
+  const [autoNextNotice, setAutoNextNotice] = useState('');
+  const [confirmationProgress, setConfirmationProgress] = useState<{ confirmed: number; pending: number } | null>(null);
+  const [confirmationProgressError, setConfirmationProgressError] = useState(false);
+  const [nextConfirmationLoading, setNextConfirmationLoading] = useState(false);
   const [product, setProduct] = useState<ProductDetail | null>(null);
   // Bodies are independent of the summary polling response.  In particular,
   // a compact refresh can never erase an already opened mindset brief.
@@ -427,6 +438,7 @@ const ProductDetail: React.FC = () => {
   const [listingPrimaryKeywordInput, setListingPrimaryKeywordInput] = useState('');
   const [listingSaving, setListingSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [blacklisting, setBlacklisting] = useState(false);
   const [fileOpening, setFileOpening] = useState<string | null>(null);
   const [zipExtractingPath, setZipExtractingPath] = useState<string | null>(null);
   const [imageOrderSaving, setImageOrderSaving] = useState(false);
@@ -444,7 +456,7 @@ const ProductDetail: React.FC = () => {
       if (full) setFullDetailLoading(true);
       const { data } = await getProduct(Number(id), { compact: !full });
       setProduct(data);
-      if (!full && data.sections) {
+      if (data.sections) {
         const staleSections = Object.entries(sectionCacheRef.current)
           .filter(([key, cached]) => cached.loaded && data.sections?.[key]?.revision !== cached.revision)
           .map(([key]) => key);
@@ -458,7 +470,15 @@ const ProductDetail: React.FC = () => {
             return next;
           });
         }
-        for (const section of staleSections) void loadSection(section, true);
+        // Module states live in the assets payload, while the page-wide state
+        // lives in the summary. Refresh both during regeneration, including
+        // the final poll that transitions out of an active state.
+        const refreshSections = new Set(staleSections);
+        if (activeTabKey === 'aplus' && (
+          APLUS_REGEN_ACTIVE_STATUSES.includes(data.aplus?.aplus_status || '')
+          || APLUS_REGEN_ACTIVE_STATUSES.includes(product?.aplus?.aplus_status || '')
+        )) refreshSections.add('aplus_assets');
+        await Promise.all([...refreshSections].map((section) => loadSection(section, true)));
       }
       if (full) setFullDetailProductId(data.id);
       const nextDefaultTab = defaultProductDetailTab(data);
@@ -558,6 +578,24 @@ const ProductDetail: React.FC = () => {
     fetchDetail();
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [id]);
+
+  useEffect(() => {
+    if (!product || product.id !== Number(id) || product.sales_channel !== 'amazon') return;
+    let cancelled = false;
+    setConfirmationProgress(null);
+    setConfirmationProgressError(false);
+    getWorkbenchOverview({ data_source_id: product.source_data_source_id || undefined })
+      .then(({ data }) => {
+        if (!cancelled) setConfirmationProgress({
+          confirmed: Number(data.export_ready_unexported ?? data.export_ready ?? 0)
+            + Number(data.export_ready_exported ?? 0),
+          pending: Number(data.confirm_images_aplus ?? 0),
+        });
+      })
+      .catch(() => { if (!cancelled) setConfirmationProgressError(true); });
+    return () => { cancelled = true; };
+  }, [id, product?.id, product?.source_data_source_id, product?.sales_channel,
+    product?.workflow?.stage, product?.workflow?.stage_status, product?.aplus?.aplus_status]);
 
   // 自动轮询：任务运行中时每3秒刷新
   useEffect(() => {
@@ -1101,6 +1139,7 @@ const ProductDetail: React.FC = () => {
         message.success(result?.message || '已提交后台重新生成');
         setRegenTarget(null);
         setRegenReason('');
+        await loadSection('aplus_assets', true);
         await fetchDetail();
       },
       {
@@ -1118,6 +1157,7 @@ const ProductDetail: React.FC = () => {
       async (metadata) => {
         const { data: result } = await retryAplusRegeneration(product.id, metadata);
         message.success(result?.message || '已重新排队 A+ 重新生图任务');
+        await loadSection('aplus_assets', true);
         await fetchDetail();
       },
       {
@@ -1501,8 +1541,66 @@ const ProductDetail: React.FC = () => {
     navigate(`/products/image-review?product_id=${product.id}`);
   };
 
+  const handleBlacklist = async () => {
+    setBlacklisting(true);
+    await runMutationWithUX(
+      'blacklistProduct|frontend/src/pages/ProductDetail.tsx|handleBlacklist',
+      async (metadata) => {
+        await blacklistProduct(product.id, metadata);
+        message.success('已永久加入黑名单');
+        navigate(backTarget);
+      },
+      {
+        errorFallback: '加入黑名单失败',
+        onError: (errorMessage) => message.error(errorMessage),
+        clearLoading: () => setBlacklisting(false),
+      },
+    ).catch(() => undefined);
+  };
+
+  const openNextConfirmation = async (afterConfirmation = false) => {
+    if (nextConfirmationLoading) return;
+    setNextConfirmationLoading(true);
+    setAutoNextNotice('');
+    try {
+      let next: { id: number } | undefined;
+      const pageSize = 2;
+      for (let page = 1; ; page++) {
+        const { data: pending } = await listProducts({
+          page,
+          page_size: pageSize,
+          work_status: 'confirm_images_aplus',
+        });
+        const candidate = pending.items.find((item) => (
+          item.id !== product.id
+          && !APLUS_REGEN_ACTIVE_STATUSES.includes(item.aplus_status || '')
+          && item.aplus_status !== 'regenerating'
+        ));
+        if (candidate) {
+          next = candidate;
+          break;
+        }
+        if (pending.items.length < pageSize || page * pageSize >= pending.total) break;
+      }
+      if (next) {
+        // Reload so no previous product's section cache or edits carry over.
+        window.localStorage.setItem(PRODUCT_LIST_RETURN_KEY, backTarget);
+        window.location.assign(`/products/${next.id}`);
+      } else {
+        setAutoNextNotice('没有下一个待确认图片与 A+ 的商品了');
+      }
+    } catch {
+      setAutoNextNotice(afterConfirmation
+        ? '当前商品已确认，获取下一个待确认商品失败，请稍后重试'
+        : '获取下一个待确认商品失败，请稍后重试');
+    } finally {
+      setNextConfirmationLoading(false);
+    }
+  };
+
   const runWorkflowAction = async (action?: string | null) => {
     if (!action) return;
+    setAutoNextNotice('');
     const definition = getProductWorkflowAction(action);
     if (!definition) {
       await dispatchProductWorkflowAction(action, { productId: product.id, navigate });
@@ -1534,6 +1632,9 @@ const ProductDetail: React.FC = () => {
         if (result.status !== 'handled') return;
         message.success(workflow?.primary_action_label ? `已提交：${workflow.primary_action_label}` : '已提交处理');
         await fetchDetail();
+        if (action === 'confirm_product' && autoNextConfirmation) {
+          await openNextConfirmation(true);
+        }
       },
       {
         errorFallback: '操作失败',
@@ -1557,6 +1658,7 @@ const ProductDetail: React.FC = () => {
         type={primary ? 'primary' : 'default'}
         icon={icon}
         loading={pipelineRetryLoading}
+        disabled={nextConfirmationLoading}
         onClick={() => runWorkflowAction(action)}
       >
         {label || definition.default_label}
@@ -3570,6 +3672,8 @@ const ProductDetail: React.FC = () => {
               <Space direction="vertical" style={{ width: '100%' }} size={16}>
                 {aplusModules.map(({ script, generated, references, plan, hasScript }) => {
                   const moduleStatus = moduleRegenerationStatus(generated);
+                  const moduleIsRunning = ['queued', 'running'].includes(generated?.regeneration_status || '');
+                  const moduleNeedsRetry = generated?.status === 'failed' || !generated?.path;
                   const generationTime = moduleGenerationTime(generated, aplus?.generated_at);
                   const conversionGoal = script.conversion_goal || plan.conversion_goal;
                   const buyerObjection = script.buyer_objection || plan.buyer_objection;
@@ -3591,7 +3695,7 @@ const ProductDetail: React.FC = () => {
                         <Button
                           size="small"
                           icon={<ReloadOutlined />}
-                          disabled={!hasScript}
+                          disabled={!hasScript || moduleIsRunning || isAplusRegenerating}
                           onClick={() => {
                             setRegenTarget(script);
                             setRegenReason('');
@@ -3685,14 +3789,17 @@ const ProductDetail: React.FC = () => {
                             <Button
                               size="small"
                               icon={<ReloadOutlined />}
-                              disabled={!hasScript}
+                              disabled={!hasScript || moduleIsRunning || isAplusRegenerating}
                               onClick={() => {
                                 setRegenTarget(script);
-                                setRegenReason('');
+                                setRegenReason(moduleNeedsRetry
+                                  ? '上次图片生成失败或未完成，请保持商品结构和当前模块的内容要求，重新生成符合脚本目标尺寸的图片。'
+                                  : '');
                               }}
                             >
                               重新生成
                             </Button>
+                            <Tag color={moduleStatus.color}>{moduleStatus.text}</Tag>
                           </Space>
 	                        <div>
 	                          {generated?.path ? (
@@ -3913,7 +4020,27 @@ const ProductDetail: React.FC = () => {
         <Title level={4} style={{ margin: 0, flex: 1 }}>
           商品 #{product.id}
         </Title>
-        <Space>
+        <Space wrap>
+          <Space>
+            <Switch
+              aria-label="确认后自动打开下一个待确认商品"
+              checked={autoNextConfirmation}
+              disabled={pipelineRetryLoading || nextConfirmationLoading}
+              onChange={(checked) => {
+                setAutoNextConfirmation(checked);
+                window.localStorage.setItem(AUTO_NEXT_CONFIRMATION_KEY, String(checked));
+              }}
+            />
+            <Text>确认后自动打开下一个待确认商品</Text>
+            {autoNextNotice && <Text type="warning" role="status">{autoNextNotice}</Text>}
+          </Space>
+          <Button
+            loading={nextConfirmationLoading}
+            disabled={pipelineRetryLoading}
+            onClick={() => openNextConfirmation()}
+          >
+            下一个待确认
+          </Button>
           <Button icon={<ReloadOutlined />} onClick={() => fetchDetail(activeTabKey === 'files' || activeTabKey === 'aplus')}>刷新</Button>
           {hasWorkflow && renderWorkflowActionButton(workflow?.primary_action, workflow?.primary_action_label, true)}
           {hasWorkflow && workflowSecondaryActions.map((action: string) => (
@@ -4066,18 +4193,52 @@ const ProductDetail: React.FC = () => {
               <Button icon={<RedoOutlined />} loading={restartLoading}>重新开始流程</Button>
             </Popconfirm>
           )}
+          {product.blacklisted_at ? <Tag color="red">永久黑名单 · 禁止删除</Tag> : (
+            <Popconfirm
+              title="永久加入黑名单？"
+              description="加入后无法移出、无法删除商品，商品列表不再显示。"
+              okText="永久加入"
+              cancelText="取消"
+              onConfirm={handleBlacklist}
+            >
+              <Button danger loading={blacklisting}>加入黑名单</Button>
+            </Popconfirm>
+          )}
           <Popconfirm
             title="确定删除此商品？"
             okText="删除"
             cancelText="取消"
             onConfirm={handleDelete}
           >
-            <Button danger icon={<DeleteOutlined />} loading={deleting}>
+            <Button danger icon={<DeleteOutlined />} loading={deleting} disabled={Boolean(product.blacklisted_at)}>
               删除
             </Button>
           </Popconfirm>
         </Space>
       </div>
+
+      {product.sales_channel === 'amazon' && (
+        <Card size="small" style={{ marginBottom: 16 }}>
+          <Space style={{ width: '100%', justifyContent: 'space-between' }} wrap>
+            <Text strong>图片与 A+ 确认进度（当前数据源）</Text>
+            {confirmationProgress ? (
+              <Space>
+                <Text>已确认 {confirmationProgress.confirmed} 件</Text>
+                <Text strong>剩余待确认 {confirmationProgress.pending} 件</Text>
+              </Space>
+            ) : <Text type="secondary">{confirmationProgressError ? '确认进度暂时无法加载' : '正在获取确认进度'}</Text>}
+          </Space>
+          {confirmationProgress && (
+            <Progress
+              percent={confirmationProgress.confirmed + confirmationProgress.pending > 0
+                ? Math.round(confirmationProgress.confirmed / (confirmationProgress.confirmed + confirmationProgress.pending) * 100)
+                : 0}
+              status={confirmationProgress.pending === 0 && confirmationProgress.confirmed > 0 ? 'success' : 'normal'}
+              style={{ marginBottom: 0 }}
+            />
+          )}
+        </Card>
+      )}
 
       {/* Pipeline 进度条 */}
       <Card size="small" style={{ marginBottom: 16 }}>

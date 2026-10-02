@@ -49,6 +49,7 @@ from app.task_runtime.constants import (
     STEP_STATUS_READY,
     STEP_STATUS_RUNNING,
     STEP_STATUS_SUCCEEDED,
+    STEP_STATUS_WAITING_EXTERNAL,
 )
 from app.task_runtime.actions import action_for
 from app.task_runtime.catalog_export_status import (
@@ -69,6 +70,7 @@ from app.task_runtime.catalog_export_status import (
 from app.task_runtime.display import compute_task_run_display
 from app.task_runtime.events import emit_event
 from app.task_runtime.scheduler import kick_task_runtime, recover_task_runtime, retry_failed_steps, retry_step
+from app.task_runtime.aplus_image_poller import cancel_aplus_jobs_for_run
 
 
 router = APIRouter(prefix="/api/task-runs", tags=["task-runs"])
@@ -120,6 +122,7 @@ DISPLAY_STATUS_LABELS = {
     "waiting_dependency": "等待前置步骤",
     "queued": "排队中",
     "running": "执行中",
+    "waiting_external": "等待外部生图",
     "stale_running": "疑似卡住",
     "failed": "失败",
     "partial_failed": "部分失败",
@@ -230,6 +233,8 @@ def _step_display(step: TaskStep, *, superseded: bool = False) -> dict:
         status, reason, actions = "queued", "已就绪，等待执行器领取", []
     elif step.status == STEP_STATUS_RUNNING:
         status, reason, actions = "running", f"正在执行：{_step_label(step) or 'step'}", []
+    elif step.status == STEP_STATUS_WAITING_EXTERNAL:
+        status, reason, actions = "waiting_external", "生图请求已提交，等待外部服务返回", []
     elif step.status == STEP_STATUS_PENDING:
         status, reason, actions = "waiting_dependency", "等待前置步骤完成", []
     elif step.status == STEP_STATUS_FAILED:
@@ -477,7 +482,7 @@ def _display_status_sql_condition(
         return superseded
     if display_status == "cancel_requested":
         return and_(not_(superseded), TaskRun.cancel_requested_at.is_not(None), TaskRun.status.in_((RUN_STATUS_PENDING, RUN_STATUS_RUNNING)))
-    if display_status in {"stale_running", "waiting_dependency", "planned"}:
+    if display_status in {"stale_running", "waiting_dependency", "waiting_external", "planned"}:
         raise HTTPException(400, "该状态仅在详情诊断中展示，当前列表不支持筛选")
     if display_status == "running":
         return and_(not_(superseded), TaskRun.cancel_requested_at.is_(None), TaskRun.status == RUN_STATUS_RUNNING)
@@ -655,9 +660,10 @@ def _decorate_detail_response(
     for group_response, group in zip(response.groups, run.groups, strict=False):
         step_statuses = [_step_display(step, superseded=superseded) for step in group.steps]
         failed = next((item for item in step_statuses if item["display_status"] in {"failed", "interrupted", "stale_running"}), None)
+        waiting_external = next((item for item in step_statuses if item["display_status"] == "waiting_external"), None)
         queued = next((item for item in step_statuses if item["display_status"] == "queued"), None)
         running = next((item for item in step_statuses if item["display_status"] == "running"), None)
-        chosen = failed or running or queued or (step_statuses[0] if step_statuses else None)
+        chosen = failed or running or waiting_external or queued or (step_statuses[0] if step_statuses else None)
         if chosen:
             group_response.display_status = "superseded" if superseded else chosen["display_status"]
             group_response.display_status_label = DISPLAY_STATUS_LABELS.get(group_response.display_status, group_response.display_status)
@@ -1047,7 +1053,10 @@ async def cancel_task_run(run_id: int, body: dict = Body(default_factory=dict), 
         raise HTTPException(400, f"当前任务状态不能取消: {response.display_status_label}")
     now = datetime.now()
     reason = str(body.get("reason") or "用户取消")
-    running_steps = [step for step in run.steps if step.status == STEP_STATUS_RUNNING]
+    running_steps = [
+        step for step in run.steps
+        if step.status in {STEP_STATUS_RUNNING, STEP_STATUS_WAITING_EXTERNAL}
+    ]
     run.cancel_requested_at = now
     run.cancel_requested_by = "user"
     run.cancel_reason = reason
@@ -1074,6 +1083,8 @@ async def cancel_task_run(run_id: int, body: dict = Body(default_factory=dict), 
         await _emit_task_run_event(db, run, step=run.steps[0] if run.steps else None, event_type="action", message=f"用户取消任务：{reason}")
     run.updated_at = now
     await db.commit()
+    if any(step.status == STEP_STATUS_WAITING_EXTERNAL for step in running_steps):
+        await cancel_aplus_jobs_for_run(run_id)
     return await _decorate_detail_response_with_catalog_step(db, await _load_run(db, run_id))
 
 

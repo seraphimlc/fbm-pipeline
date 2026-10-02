@@ -21,6 +21,7 @@ RUN_STATUS_CANCELED = "canceled"
 STEP_STATUS_PENDING = "pending"
 STEP_STATUS_READY = "ready"
 STEP_STATUS_RUNNING = "running"
+STEP_STATUS_WAITING_EXTERNAL = "waiting_external"
 STEP_STATUS_SUCCEEDED = "succeeded"
 STEP_STATUS_FAILED = "failed"
 STEP_STATUS_PARTIAL_FAILED = "partial_failed"
@@ -48,6 +49,7 @@ DISPLAY_STATUS_LABELS = {
     "waiting_dependency": "等待前置步骤",
     "queued": "排队中",
     "running": "执行中",
+    "waiting_external": "等待外部生图",
     "stale_running": "疑似卡住",
     "failed": "失败",
     "partial_failed": "部分失败",
@@ -169,9 +171,10 @@ def compute_task_run_display(
     now = datetime.now()
     failed_step = next((step for step in steps if step.status in {STEP_STATUS_FAILED, STEP_STATUS_INTERRUPTED}), None)
     running_step = next((step for step in steps if step.status == STEP_STATUS_RUNNING), None)
+    waiting_external_step = next((step for step in steps if step.status == STEP_STATUS_WAITING_EXTERNAL), None)
     ready_step = next((step for step in steps if step.status == STEP_STATUS_READY), None)
     pending_step = next((step for step in steps if step.status == STEP_STATUS_PENDING), None)
-    current_step = running_step or ready_step or failed_step or pending_step or (steps[-1] if steps else None)
+    current_step = running_step or waiting_external_step or ready_step or failed_step or pending_step or (steps[-1] if steps else None)
     error_summary = (
         _compact_error(effective_error_summary)
         or _compact_error(failed_step.error_message if failed_step else None)
@@ -231,6 +234,10 @@ def compute_task_run_display(
     elif running_step:
         status = "running"
         reason = f"正在执行：{step_label(running_step) or 'step'}"
+        actions = ["view_detail", "refresh", "cancel"]
+    elif waiting_external_step:
+        status = "waiting_external"
+        reason = "生图请求已提交，等待外部服务返回"
         actions = ["view_detail", "refresh", "cancel"]
     elif ready_step:
         status = "queued"

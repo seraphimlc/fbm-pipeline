@@ -1716,6 +1716,8 @@ async def diagnose_aplus_regeneration_feedback(product_id: int, module_position:
         if not product or not product.data:
             raise ValueError(f"Product {product_id} not found or no data")
 
+        await hydrate_product_sections(db, product, ("source", "listing", "image_analysis", "image_selection", "aplus_plan", "aplus_script", "aplus_assets"))
+
         pd = product.data
         pa = product.aplus
         if not pa or not pa.aplus_plan or not pa.aplus_scripts:
@@ -1818,6 +1820,8 @@ async def regenerate_aplus_module_script(product_id: int, module_position: int, 
         product = result.scalar_one_or_none()
         if not product or not product.data:
             raise ValueError(f"Product {product_id} not found or no data")
+
+        await hydrate_product_sections(db, product, ("source", "listing", "image_analysis", "image_selection", "aplus_plan", "aplus_script"))
 
         pd = product.data
         pa = product.aplus

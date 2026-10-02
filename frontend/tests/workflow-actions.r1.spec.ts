@@ -6,6 +6,50 @@ import type { Page } from '@playwright/test';
 
 import { ProductWorkflowUnknownAction } from '../src/workflow/ProductWorkflowUnknownAction';
 
+for (const outcome of ['success', 'failed', 'already-blacklisted'] as const) {
+  test(`blacklist detail permanent confirmation and error retention: ${outcome}`, async ({ page }) => {
+    page.on('pageerror', (error) => { throw error; });
+    let mutations = 0;
+    await page.route('**/api/**', async (route) => {
+      const request = route.request();
+      const path = new URL(request.url()).pathname;
+      if (!path.startsWith('/api/')) return route.continue();
+      const reply = (body: unknown, status = 200) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
+      if (path === '/api/products/42/blacklist') {
+        mutations++;
+        return outcome === 'failed' ? reply({ detail: '黑名单提交失败测试' }, 400)
+          : reply({ status: 'blacklisted', product_id: 42, blacklisted_at: '2026-10-02T13:00:00' });
+      }
+      if (path === '/api/products/42') return reply({ ...productFixture('confirm_product'), id: 42,
+        blacklisted_at: outcome === 'already-blacklisted' ? '2026-10-02T13:00:00' : null,
+        data: null, images: null, aplus: null, generated_files: [],
+        video_folder: null, aplus_folder: null, amazon_export_preview: null });
+      if (path === '/api/products') return reply({ items: [], total: 0 });
+      return reply({ items: [], data: null, loaded: true, state: 'absent', has_content: false });
+    });
+    await page.goto('/products/42');
+    await expect(page.getByRole('heading', { name: '商品 #42' })).toBeVisible();
+    if (outcome === 'already-blacklisted') {
+      await expect(page.getByText('永久黑名单 · 禁止删除')).toBeVisible();
+      await expect(page.getByRole('button', { name: /删除$/ })).toBeDisabled();
+      await expect(page.getByRole('button', { name: '加入黑名单', exact: true })).toHaveCount(0);
+      expect(mutations).toBe(0);
+      return;
+    }
+    const button = page.getByRole('button', { name: /加入黑名单$/ });
+    await button.click();
+    await expect(page.getByText('加入后无法移出、无法删除商品，商品列表不再显示。')).toBeVisible();
+    expect(mutations).toBe(0);
+    await page.getByRole('button', { name: '永久加入', exact: true }).click();
+    if (outcome === 'failed') {
+      await expect(page.getByText('黑名单提交失败测试')).toBeVisible();
+      await expect(button).toBeEnabled();
+      await expect(page).toHaveURL(/\/products\/42$/);
+    } else await expect(page).toHaveURL(/\/products$/);
+    expect(mutations).toBe(1);
+  });
+}
+
 
 type WorkflowManifestDefinition = {
   action: string;
@@ -351,3 +395,72 @@ test('actual ProductDetail surface disables an injected unknown action with zero
   await page.waitForTimeout(100);
   expect(mutationRequests).toEqual([]);
 });
+
+for (const scenario of ['next', 'busy-next', 'disabled', 'empty', 'query-failed', 'confirm-failed', 'manual-next', 'manual-empty', 'manual-query-failed'] as const) {
+  test(`detail auto next confirmation: ${scenario}`, async ({ page }) => {
+    const manual = scenario.startsWith('manual-');
+    const mutations: string[] = [];
+    let queueReads = 0;
+    let confirmed = false;
+    await page.route('**/api/**', async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (!url.pathname.startsWith('/api/')) return route.continue();
+      const reply = (body: unknown, status = 200) => route.fulfill({
+        status, contentType: 'application/json', body: JSON.stringify(body),
+      });
+      if (request.method() === 'POST') {
+        mutations.push(url.pathname);
+        if (scenario === 'confirm-failed') return reply({ detail: '确认失败测试' }, 400);
+        confirmed = true;
+        return reply(productFixture('confirm_product'));
+      }
+      if (url.pathname === '/api/products') {
+        queueReads++;
+        expect(confirmed).toBe(!manual);
+        expect(url.searchParams.get('work_status')).toBe('confirm_images_aplus');
+        if (scenario.endsWith('query-failed')) return reply({ detail: 'test unavailable' }, 500);
+        if (scenario === 'busy-next') {
+          return reply({ items: url.searchParams.get('page') === '1'
+            ? [{ id: 42 }, { id: 44, aplus_status: 'regen_image_running' }]
+            : [{ id: 43, aplus_status: 'done' }], total: 3 });
+        }
+        return reply({ items: scenario.endsWith('empty') ? [] : [{ id: 42 }, { id: 43 }], total: 2 });
+      }
+      if (/^\/api\/products\/\d+$/.test(url.pathname)) {
+        const id = Number(url.pathname.split('/').pop());
+        const product = productFixture('confirm_product');
+        return reply({ ...product, id, data: null, images: null, aplus: null,
+          generated_files: [], video_folder: null, aplus_folder: null, amazon_export_preview: null,
+          workflow: { ...product.workflow, stage: 'confirm_images_aplus', stage_status: 'pending',
+            work_status: 'confirm_images_aplus', primary_action_label: '确认图片与 A+' } });
+      }
+      return reply({ items: [], data: null, loaded: true, state: 'absent', has_content: false });
+    });
+    await page.goto('/products/42');
+    const toggle = page.getByRole('switch', { name: '确认后自动打开下一个待确认商品' });
+    await expect(toggle).not.toBeChecked();
+    if (!manual && scenario !== 'disabled') await toggle.click();
+    await page.getByRole('button', manual
+      ? { name: '下一个待确认', exact: true }
+      : { name: /确认图片与 A\+$/ }).click();
+    if (scenario === 'next' || scenario === 'busy-next' || scenario === 'manual-next') {
+      await expect(page).toHaveURL(/\/products\/43$/);
+      await expect(page.getByRole('heading', { name: '商品 #43' })).toBeVisible();
+      if (manual) await expect(toggle).not.toBeChecked();
+      else await expect(toggle).toBeChecked();
+    } else {
+      await expect(page.getByRole('button', { name: /确认图片与 A\+$/ })).toBeEnabled();
+      await expect(page).toHaveURL(/\/products\/42$/);
+      if (scenario.endsWith('empty') || scenario.endsWith('query-failed')) {
+        await expect(page.getByRole('status')).toHaveText(scenario.endsWith('empty')
+          ? '没有下一个待确认图片与 A+ 的商品了'
+          : manual ? '获取下一个待确认商品失败，请稍后重试'
+          : '当前商品已确认，获取下一个待确认商品失败，请稍后重试');
+      }
+    }
+    await expect.poll(() => mutations.length).toBe(manual ? 0 : 1);
+    await expect.poll(() => queueReads).toBe(['disabled', 'confirm-failed'].includes(scenario) ? 0 : scenario === 'busy-next' ? 2 : 1);
+    expect(mutations).toEqual(manual ? [] : ['/api/products/42/confirm']);
+  });
+}

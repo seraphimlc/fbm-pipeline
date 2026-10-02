@@ -141,3 +141,5 @@
 - Detail read contract: `backend/app/api/products.py` returns section metadata in the product summary. Full content is read only from `sections/source`, `sections/mindset`, `sections/listing`, `sections/images?part=...`, `sections/aplus?part=...`, and `sections/export-artifact`.
 - The 用户心智 tab is read-only: loading it must only GET `sections/mindset`; generation and retry remain explicit workflow mutations.
 - Mindset freshness checks must hydrate canonical `source` and `source_snapshot` together with `mindset` before recomputing the input fingerprint; any `ProductData` refresh must re-project those sections before readiness or downstream checks.
+
+- 永久黑名单：仅详情页点击确认后调用 `POST /api/products/{id}/blacklist`，记录于 `product_blacklist`；普通列表、工作台进度与下一件待确认排除该记录，商品保留且禁止删除，无解除入口。SQLite 建表时安装永久记录保护触发器；回归 `scripts/test_product_blacklist.py`。

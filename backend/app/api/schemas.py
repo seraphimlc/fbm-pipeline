@@ -928,6 +928,7 @@ class ProductMaterialAssetResponse(BaseModel):
 
 class ProductDetail(ProductResponse):
     """完整商品详情（含子表数据）"""
+    blacklisted_at: datetime | None = None
     data: "ProductDataResponse | None" = None
     images: "ProductImageResponse | None" = None
     aplus: "ProductAplusResponse | None" = None

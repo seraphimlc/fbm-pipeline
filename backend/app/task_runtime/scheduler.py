@@ -29,9 +29,10 @@ from app.task_runtime.constants import (
     STEP_STATUS_READY,
     STEP_STATUS_RUNNING,
     STEP_STATUS_SUCCEEDED,
+    STEP_STATUS_WAITING_EXTERNAL,
 )
 from app.task_runtime.events import emit_event
-from app.task_runtime.exceptions import TaskStepCanceled, TaskStepInterrupted
+from app.task_runtime.exceptions import TaskStepCanceled, TaskStepInterrupted, TaskStepWaitingExternal
 from app.task_runtime.json_utils import json_dumps
 from app.task_runtime.json_utils import json_loads
 from app.task_runtime.registry import (
@@ -191,16 +192,30 @@ async def _refresh_group_and_run(db: AsyncSession, run_id: int) -> None:
         failed = sum(1 for step in steps if step.status == STEP_STATUS_FAILED)
         interrupted = sum(1 for step in steps if step.status == STEP_STATUS_INTERRUPTED)
         running = sum(1 for step in steps if step.status == STEP_STATUS_RUNNING)
+        waiting_external = sum(1 for step in steps if step.status == STEP_STATUS_WAITING_EXTERNAL)
         ready = sum(1 for step in steps if step.status == STEP_STATUS_READY)
         pending = sum(1 for step in steps if step.status == STEP_STATUS_PENDING)
         allow_partial_success = group.failure_policy == "allow_partial_success"
-        group.progress_current = succeeded
-        group.progress_total = total
+        # A runtime group may contain a single step that reports several
+        # meaningful business phases (for example keyword -> pricing ->
+        # category). Preserve that step's real progress instead of replacing
+        # it with the structural number of succeeded steps.
+        progress_total = 0
+        progress_current = 0
+        for step in steps:
+            step_total = max(1, int(step.progress_total or 0))
+            step_current = min(step_total, max(0, int(step.progress_current or 0)))
+            if step.status == STEP_STATUS_SUCCEEDED:
+                step_current = step_total
+            progress_total += step_total
+            progress_current += step_current
+        group.progress_current = progress_current
+        group.progress_total = progress_total
         group.updated_at = now
         if total and succeeded == total:
             group.status = RUN_STATUS_SUCCEEDED
             group.finished_at = group.finished_at or now
-        elif allow_partial_success and (failed or interrupted) and pending and not (running or ready):
+        elif allow_partial_success and (failed or interrupted or waiting_external) and pending and not (running or ready):
             next_step = next((step for step in steps if step.status == STEP_STATUS_PENDING), None)
             if next_step:
                 next_step.status = STEP_STATUS_READY
@@ -211,20 +226,20 @@ async def _refresh_group_and_run(db: AsyncSession, run_id: int) -> None:
         elif allow_partial_success and total and (succeeded + failed + interrupted) == total and (failed or interrupted):
             group.status = RUN_STATUS_PARTIAL_FAILED if succeeded else RUN_STATUS_FAILED
             group.finished_at = group.finished_at or now
-        elif failed:
+        elif failed and not (running or ready or waiting_external):
             group.status = RUN_STATUS_FAILED
             group.finished_at = group.finished_at or now
-        elif interrupted:
+        elif interrupted and not (running or ready or waiting_external):
             group.status = RUN_STATUS_INTERRUPTED
             group.finished_at = group.finished_at or now
-        elif running or ready:
+        elif running or ready or waiting_external:
             group.status = RUN_STATUS_RUNNING
             group.started_at = group.started_at or now
             group.finished_at = None
         elif pending:
             group.status = RUN_STATUS_PENDING
             group.finished_at = None
-        if was_started and pending and not (failed or interrupted or running or ready):
+        if was_started and pending and not (failed or interrupted or running or ready or waiting_external):
             next_step = next((step for step in steps if step.status == STEP_STATUS_PENDING), None)
             if next_step:
                 next_step.status = STEP_STATUS_READY
@@ -235,11 +250,15 @@ async def _refresh_group_and_run(db: AsyncSession, run_id: int) -> None:
 
     run = await db.get(TaskRun, run_id)
     if run and run.cancel_requested_at:
-        has_running = any(step.status == STEP_STATUS_RUNNING for group in groups for step in group.steps)
+        has_running = any(
+            step.status in (STEP_STATUS_RUNNING, STEP_STATUS_WAITING_EXTERNAL)
+            for group in groups
+            for step in group.steps
+        )
         if not has_running:
             for group in groups:
                 for step in group.steps:
-                    if step.status in (STEP_STATUS_PENDING, STEP_STATUS_READY):
+                    if step.status in (STEP_STATUS_PENDING, STEP_STATUS_READY, STEP_STATUS_WAITING_EXTERNAL):
                         step.status = STEP_STATUS_CANCELED
                         step.finished_at = now
                         step.updated_at = now
@@ -430,6 +449,24 @@ async def _execute_step(step_id: int, worker_id: str) -> bool:
             await emit_event(db, step=step, event_type="status", message="step 执行成功", data=result_payload or {})
             await db.commit()
             success_payload = result_payload or {}
+        except TaskStepWaitingExternal as exc:
+            now = datetime.now()
+            step.status = STEP_STATUS_WAITING_EXTERNAL
+            step.result_json = json_dumps(exc.payload)
+            step.error_message = None
+            step.locked_by = None
+            step.locked_until = None
+            step.heartbeat_at = now
+            step.finished_at = None
+            step.updated_at = now
+            await emit_event(
+                db,
+                step=step,
+                event_type="external_wait",
+                message=str(exc) or "等待外部任务完成",
+                data=exc.payload,
+            )
+            await db.commit()
         except TaskStepCanceled as exc:
             now = datetime.now()
             step.status = STEP_STATUS_CANCELED
@@ -822,7 +859,7 @@ async def recover_cancel_requested_task_runtime() -> int:
         result = await db.execute(
             select(TaskStep)
             .join(TaskRun, TaskRun.id == TaskStep.task_run_id)
-            .where(TaskStep.status == STEP_STATUS_RUNNING)
+            .where(TaskStep.status.in_((STEP_STATUS_RUNNING, STEP_STATUS_WAITING_EXTERNAL)))
             .where(TaskRun.cancel_requested_at.is_not(None))
         )
         steps = result.scalars().all()
@@ -953,10 +990,20 @@ async def retry_step(step_id: int, *, auto_start: bool = True) -> TaskStep:
         step = await db.get(TaskStep, step_id)
         if not step:
             raise ValueError("step 不存在")
-        if step.status not in RETRYABLE_STEP_STATUSES:
+        run = await db.get(TaskRun, step.task_run_id)
+        retrying_canceled_ready = bool(
+            step.status == STEP_STATUS_READY
+            and run
+            and run.cancel_requested_at
+        )
+        if step.status not in RETRYABLE_STEP_STATUSES and not retrying_canceled_ready:
             raise ValueError(f"当前 step 状态不可重跑: {step.status}")
+        previous_attempt_count = step.attempt_count
+        # ``max_attempts`` bounds automatic infrastructure retries. An explicit
+        # operator retry starts a fresh attempt budget so a transient outage can
+        # be retried after that automatic budget has been exhausted.
         if step.max_attempts and step.attempt_count >= step.max_attempts:
-            raise ValueError(f"当前 step 已达到最大重试次数: {step.attempt_count}/{step.max_attempts}")
+            step.attempt_count = 0
         now = datetime.now()
         step.status = STEP_STATUS_READY
         step.error_message = None
@@ -965,16 +1012,24 @@ async def retry_step(step_id: int, *, auto_start: bool = True) -> TaskStep:
         step.finished_at = None
         step.updated_at = now
         group = await db.get(TaskGroup, step.task_group_id)
-        run = await db.get(TaskRun, step.task_run_id)
         if group:
             group.status = RUN_STATUS_RUNNING
             group.finished_at = None
             group.updated_at = now
         if run:
             run.status = RUN_STATUS_RUNNING
+            run.cancel_requested_at = None
+            run.cancel_requested_by = None
+            run.cancel_reason = None
             run.finished_at = None
             run.updated_at = now
-        await emit_event(db, step=step, event_type="status", message="已提交 step 重跑")
+        retry_message = "已提交 step 重跑"
+        if step.max_attempts and previous_attempt_count >= step.max_attempts:
+            retry_message = (
+                "人工重试已重置尝试次数: "
+                f"{previous_attempt_count}/{step.max_attempts} -> 0/{step.max_attempts}"
+            )
+        await emit_event(db, step=step, event_type="status", message=retry_message)
         await db.commit()
         await db.refresh(step)
     if auto_start:

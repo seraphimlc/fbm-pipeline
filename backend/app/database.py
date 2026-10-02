@@ -53,6 +53,10 @@ async def init_db():
         async with engine.begin() as conn:
             await conn.execute(text("PRAGMA journal_mode=WAL"))
             await conn.run_sync(Base.metadata.create_all)
+            # Permanent blacklist rows cannot be removed or reassigned, even
+            # by a direct SQL cleanup. RESTRICT also retains the product row.
+            await conn.execute(text("CREATE TRIGGER IF NOT EXISTS product_blacklist_no_delete BEFORE DELETE ON product_blacklist BEGIN SELECT RAISE(ABORT, 'product blacklist is permanent'); END"))
+            await conn.execute(text("CREATE TRIGGER IF NOT EXISTS product_blacklist_no_update BEFORE UPDATE ON product_blacklist BEGIN SELECT RAISE(ABORT, 'product blacklist is permanent'); END"))
         return
 
     async with engine.begin() as conn:

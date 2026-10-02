@@ -79,23 +79,25 @@ async def _set_module_regen_metadata(
             images = []
         if not isinstance(images, list):
             images = []
-        found = False
-        for image in images:
-            if not isinstance(image, dict) or int(image.get("position") or 0) != module_position:
-                continue
-            image["regeneration_status"] = _module_regen_status(status)
-            if requested_at is not None:
-                image["regeneration_requested_at"] = requested_at.isoformat(timespec="seconds")
-            if finished_at is not None:
-                image["regeneration_completed_at"] = finished_at.isoformat(timespec="seconds")
-            found = True
-            break
-        if found:
-            if await large_field_storage_enabled(db):
-                await write_section(db, product_id=product_id, section="aplus_assets", payload=images, generated_at=finished_at or requested_at or datetime.now(), extras={"asset_count": sum(1 for item in images if isinstance(item, dict) and item.get("status") == "done")})
-            else:
-                aplus.aplus_images = json.dumps(images, ensure_ascii=False)
-            await db.commit()
+        image = next((item for item in images if isinstance(item, dict)
+                      and int(item.get("position") or 0) == module_position), None)
+        if image is None:
+            # A failed initial generation may have no asset row at all.
+            # Persist a placeholder so its retry still has a visible lifecycle.
+            image = {"position": module_position, "module_position": module_position, "status": "pending"}
+            images.append(image)
+        image["regeneration_status"] = _module_regen_status(status)
+        if status in {"failed", "interrupted"} and image.get("status") != "done":
+            image["status"] = "failed"
+        if requested_at is not None:
+            image["regeneration_requested_at"] = requested_at.isoformat(timespec="seconds")
+        if finished_at is not None:
+            image["regeneration_completed_at"] = finished_at.isoformat(timespec="seconds")
+        if await large_field_storage_enabled(db):
+            await write_section(db, product_id=product_id, section="aplus_assets", payload=images, generated_at=finished_at or requested_at or datetime.now(), extras={"asset_count": sum(1 for item in images if isinstance(item, dict) and item.get("status") == "done")})
+        else:
+            aplus.aplus_images = json.dumps(images, ensure_ascii=False)
+        await db.commit()
 
 
 async def _set_product_regen_status(product_id: int, status: str) -> None:
@@ -108,9 +110,27 @@ async def _set_product_regen_status(product_id: int, status: str) -> None:
         product = result.scalar_one_or_none()
         if product and product.aplus:
             now = datetime.now()
-            product.aplus.aplus_status = _regen_aplus_status(status)
+            aggregate_status = _regen_aplus_status(status)
             if status in FINAL_STATUSES:
+                active_result = await db.execute(select(AplusRegenerateTask.status).where(
+                    AplusRegenerateTask.product_id == product_id,
+                    AplusRegenerateTask.status.in_(ACTIVE_STATUSES),
+                ))
+                active = set(active_result.scalars().all())
+                if active:
+                    aggregate_status = _regen_aplus_status(next(
+                        state for state in ("image_running", "script_running", "queued") if state in active
+                    ))
+                else:
+                    await hydrate_product_sections(db, product, ("aplus_assets",))
+                    images = json.loads(product.aplus.aplus_images or "[]")
+                    complete = isinstance(images, list) and len(images) == 5 and all(
+                        isinstance(image, dict) and image.get("status") == "done"
+                        for image in images
+                    )
+                    aggregate_status = "regen_done" if complete else ("regen_interrupted" if status == "interrupted" else "regen_failed")
                 product.aplus.generated_at = now
+            product.aplus.aplus_status = aggregate_status
             product.updated_at = now
             await db.commit()
 

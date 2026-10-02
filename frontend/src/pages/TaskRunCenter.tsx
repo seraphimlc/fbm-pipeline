@@ -24,6 +24,7 @@ const statusLabel = (status: string) => {
     queued: { color: 'processing', label: '已入队' },
     ready: { color: 'processing', label: '待领取' },
     running: { color: 'processing', label: '执行中' },
+    waiting_external: { color: 'processing', label: '等待外部生图' },
     succeeded: { color: 'success', label: '已完成' },
     done: { color: 'success', label: '已完成' },
     failed: { color: 'error', label: '失败' },
@@ -44,6 +45,7 @@ const displayStatusTag = (record: { display_status?: string | null; display_stat
     waiting_dependency: 'default',
     queued: 'processing',
     running: 'processing',
+    waiting_external: 'processing',
     stale_running: 'warning',
     failed: 'error',
     partial_failed: 'warning',
@@ -287,7 +289,7 @@ const TaskRunCenter: React.FC = () => {
   const [expandedRowKeys, setExpandedRowKeys] = useState<React.Key[]>([]);
   const detailsRef = useRef<Record<number, TaskRunDetail>>({});
 
-  const hasActiveRun = useMemo(() => items.some((item) => ['planned', 'waiting_dependency', 'queued', 'running', 'stale_running', 'cancel_requested'].includes(item.display_status || item.status)), [items]);
+  const hasActiveRun = useMemo(() => items.some((item) => ['planned', 'waiting_dependency', 'waiting_external', 'queued', 'running', 'stale_running', 'cancel_requested'].includes(item.display_status || item.status)), [items]);
 
   const fetchRuns = useCallback(async (silent = false, targetPage = page, targetPageSize = pageSize) => {
     if (!silent) setLoading(true);

@@ -18,11 +18,12 @@ from app.models.status import (
 from app.product_tasks.workflow import set_product_workflow
 from app.pipeline.step7_aplus_plan import run_aplus_plan
 from app.pipeline.step8_aplus_script import run_aplus_script
-from app.pipeline.step9_aplus_image import run_aplus_image
 from app.services.product_payloads import invalidate_sections, large_field_storage_enabled, load_section, parse_payload
 from app.task_runtime.events import update_step_progress
 from app.task_runtime.json_utils import json_dumps, json_loads
 from app.task_runtime.registry import TaskContext, register_worker
+from app.task_runtime.exceptions import TaskStepWaitingExternal
+from app.task_runtime.aplus_image_poller import submit_aplus_generation_jobs
 
 
 def _payload(ctx: TaskContext) -> dict[str, Any]:
@@ -221,22 +222,18 @@ async def aplus_generate_product(ctx: TaskContext) -> dict[str, Any]:
         )
 
         await _set_aplus_status(product_id, "imaging")
-        try:
-            image_result = await run_aplus_image(product_id)
-        except Exception as image_exc:
-            # A provider transport can close while Step 9 is exiting its HTTP
-            # client after it has already committed all five validated images.
-            # Treat that verifiable completed state as success instead of
-            # rerunning paid image generation or overwriting it as failed.
-            if not await _has_verified_complete_aplus_images(product_id):
-                raise
-            image_result = {
-                "total": 5,
-                "success": 5,
-                "generated": 0,
-                "recovered_after_image_transport_error": f"{type(image_exc).__name__}: {image_exc}",
-            }
+        submission = await submit_aplus_generation_jobs(ctx.step.id, product_id)
+        if submission.get("state") == "waiting_external":
+            raise TaskStepWaitingExternal(
+                f"A+ 生图任务已提交 {submission.get('submitted', 0)}/{submission.get('total', 0)}，等待外部服务返回",
+                submission,
+            )
+        if submission.get("state") == "failed":
+            raise RuntimeError(str(submission.get("error") or "A+ provider job 提交失败"))
+        image_result = submission["image_result"]
         await _set_aplus_status(product_id, "done")
+    except TaskStepWaitingExternal:
+        raise
     except Exception as exc:
         error = f"A+生成失败: {type(exc).__name__}: {exc}"
         await _set_aplus_status(product_id, "failed", error=error)

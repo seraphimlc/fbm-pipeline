@@ -11,6 +11,14 @@ export interface MutationOwnerContract {
 }
 
 export const mutationOwnerContract = {
+  'blacklistProduct|frontend/src/pages/ProductDetail.tsx|handleBlacklist': {
+    owner_component: 'ProductDetail',
+    owner_state: 'product, activeTabKey and unsaved detail edits',
+    loading_state: 'blacklisting',
+    catch_policy: 'runMutationWithUX apiErrorMessage -> message.error; preserve detail and edits',
+    finally_policy: 'runMutationWithUX clearLoading resets blacklisting',
+    playwright_case: 'runtime case: blacklist detail permanent confirmation and error retention',
+  },
   'confirmProduct|frontend/src/pages/ProductDetail.tsx|runWorkflowAction': {
     owner_component: 'ProductDetail',
     owner_state: 'product, activeTabKey, listingTitleInput, selectedCategoryKey, listingImageDraftPaths, and regenReason',

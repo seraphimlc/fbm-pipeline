@@ -17,12 +17,14 @@ from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse
 from openpyxl import Workbook, load_workbook
 from sqlalchemy import case, delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import load_only, selectinload
 from datetime import datetime
 
 from app.database import get_db
 from app.config import settings
 from app.models import (
+    ProductBlacklist,
     AplusRegenerateTask,
     AplusUploadBatch,
     AplusUploadItem,
@@ -2944,6 +2946,7 @@ async def get_workbench_overview(
         count_rows = (
             await db.execute(
                 select(classification.c.channel_status, func.count(classification.c.product_id))
+                .where(classification.c.product_id.not_in(select(ProductBlacklist.product_id)))
                 .group_by(classification.c.channel_status)
             )
         ).all()
@@ -2987,6 +2990,7 @@ async def get_workbench_overview(
             ProductData.listing_title,
         ),
     )
+    product_query = product_query.where(Product.id.not_in(select(ProductBlacklist.product_id)))
     if data_source_id:
         product_query = product_query.where(_product_data_source_filter(data_source_id))
     product_result = await db.execute(product_query)
@@ -3002,7 +3006,8 @@ async def get_workbench_overview(
         )
         .select_from(Product)
         .join(CatalogProduct, CatalogProduct.source_product_id == Product.id, isouter=True)
-        .where(Product.status == COMPLETED, CatalogProduct.confirmed_at.is_not(None))
+        .where(Product.status == COMPLETED, CatalogProduct.confirmed_at.is_not(None),
+               Product.id.not_in(select(ProductBlacklist.product_id)))
     )
     if data_source_id:
         export_ready_query = export_ready_query.where(_product_data_source_filter(data_source_id))
@@ -3176,6 +3181,8 @@ async def list_products(
         )
     )
     count_query = select(func.count(Product.id))
+    query = query.where(Product.id.not_in(select(ProductBlacklist.product_id)))
+    count_query = count_query.where(Product.id.not_in(select(ProductBlacklist.product_id)))
     classification = None
     if is_tiktok_context:
         classification = build_tiktok_classification_cte(data_source_id=data_source_id)
@@ -5515,6 +5522,8 @@ async def get_product(
         await _ensure_product_detail_gallery_order(db, product, detail)
     catalog_exported = bool(product.catalog_item and (product.catalog_item.exported_at or product.catalog_item.export_task_id))
     detail.workflow = _workflow_state(product, catalog_exported=catalog_exported)
+    blacklist = await db.get(ProductBlacklist, product_id)
+    detail.blacklisted_at = blacklist.created_at if blacklist else None
     if storage_enabled:
         # The compact product response is deliberately only a hot-field summary.
         # Clients fetch each content body through the explicit section endpoints.
@@ -6172,6 +6181,25 @@ async def retry_product_keyword_research(product_id: int, db: AsyncSession = Dep
     return queued_product
 
 
+@router.post("/{product_id}/blacklist")
+async def blacklist_product(product_id: int, db: AsyncSession = Depends(get_db)):
+    """永久加入黑名单：保留商品，不提供解除或删除入口。"""
+    if not await db.get(Product, product_id):
+        raise HTTPException(404, "Product not found")
+    record = await db.get(ProductBlacklist, product_id)
+    if record is None:
+        record = ProductBlacklist(product_id=product_id)
+        db.add(record)
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            record = await db.get(ProductBlacklist, product_id)
+            if record is None:
+                raise
+    return {"status": "blacklisted", "product_id": product_id, "blacklisted_at": record.created_at}
+
+
 @router.delete("/{product_id}", status_code=204)
 async def delete_product(product_id: int, db: AsyncSession = Depends(get_db)):
     """删除商品任务"""
@@ -6179,6 +6207,8 @@ async def delete_product(product_id: int, db: AsyncSession = Depends(get_db)):
     product = result.scalar_one_or_none()
     if not product:
         raise HTTPException(404, "Product not found")
+    if await db.get(ProductBlacklist, product_id):
+        raise HTTPException(409, "商品已永久加入黑名单，禁止删除")
     cancel_pipeline(product_id)
     catalog_id = product.catalog_item.id if product.catalog_item else None
     await db.execute(delete(AplusRegenerateTask).where(AplusRegenerateTask.product_id == product_id))
@@ -6721,6 +6751,7 @@ async def regenerate_aplus_module(product_id: int, body: AplusRegenerateRequest,
     product = result.scalar_one_or_none()
     if not product:
         raise HTTPException(404, "Product not found")
+    await hydrate_product_sections(db, product, ("aplus_plan", "aplus_script"))
     if not product.aplus or not product.aplus.aplus_plan or not product.aplus.aplus_scripts:
         raise HTTPException(400, "未找到A+规划/脚本，请先执行Step7/Step8")
     try:
@@ -6751,6 +6782,7 @@ async def retry_aplus_regenerate_tasks(product_id: int, db: AsyncSession = Depen
     product = result.scalar_one_or_none()
     if not product:
         raise HTTPException(404, "Product not found")
+    await hydrate_product_sections(db, product, ("aplus_script",))
     if not product.aplus or not product.aplus.aplus_scripts:
         raise HTTPException(400, "未找到A+脚本，不能重试重新生图")
 

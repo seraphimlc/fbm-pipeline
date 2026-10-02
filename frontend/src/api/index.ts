@@ -254,6 +254,7 @@ export interface ProductAplus {
 }
 
 export interface ProductDetail extends Product {
+  blacklisted_at?: string | null;
   data: ProductData | null;
   images: ProductImage | null;
   aplus: ProductAplus | null;
@@ -1754,6 +1755,9 @@ export const confirmProduct = (id: number, metadata?: MutationMetadataConfig) =>
 
 export const deleteProduct = (id: number, metadata?: MutationMetadataConfig) =>
   api.delete(`/products/${id}`, mutationRequestConfig(metadata));
+
+export const blacklistProduct = (id: number, metadata?: MutationMetadataConfig) =>
+  api.post<{ status: string; product_id: number; blacklisted_at: string }>(`/products/${id}/blacklist`, null, mutationRequestConfig(metadata));
 
 export const refreshProductFromGiga = (id: number, data?: { data_source_id?: number | null; item_code?: string | null; sku_codes?: string[] }, metadata?: MutationMetadataConfig) =>
   api.post<Product>(`/products/${id}/refresh-giga`, data || {}, mutationRequestConfig(metadata));

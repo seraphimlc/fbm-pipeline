@@ -7,7 +7,7 @@
 
 当前默认交付目标为 1940x1200、97:60，分别由 `APLUS_IMAGE_WIDTH`、
 `APLUS_IMAGE_HEIGHT`、`APLUS_IMAGE_ASPECT_RATIO` 控制。T8Star 的 generations 通道按比例
-生成大母图（当前实测为 3104x1920），再本地等比缩小为交付图。供应商原图宽高不得低于
+生成 1.6 倍母图（默认显式 size=3104x1920，按 16 像素向上取整），再本地裁切/缩小为交付图。供应商原图宽高不得低于
 交付目标，禁止把小图放大伪装成可用 A+ 图片；合格结果会在必要时裁切并转为 JPEG/压缩，
 文件最大 2,000,000 bytes；初始 JPEG quality 默认 88，最低默认 55，事实源
 为 `APLUS_IMAGE_MAX_BYTES`、`APLUS_IMAGE_JPEG_QUALITY`、
@@ -781,6 +781,22 @@ def _decode_data_image_url(url: str) -> bytes | None:
     return base64.b64decode(encoded)
 
 
+def _provider_task_id(result: dict) -> str | None:
+    task_id = result.get("task_id") or result.get("id")
+    data = result.get("data")
+    if isinstance(data, dict):
+        task_id = task_id or data.get("task_id") or data.get("id")
+    return str(task_id) if task_id else None
+
+
+def _provider_result_failed(result: dict) -> bool:
+    status = str(result.get("status") or "").strip().lower()
+    data = result.get("data")
+    if isinstance(data, dict):
+        status = str(data.get("status") or status).strip().lower()
+    return status in {"failed", "error", "cancelled", "canceled"}
+
+
 async def _poll_image_task(client: httpx.AsyncClient, task_id: str) -> dict:
     task_url = f"{settings.resolved_gpt_image_api_base.rstrip('/')}/images/tasks/{task_id}"
     for _ in range(90):
@@ -797,10 +813,7 @@ async def _poll_image_task(client: httpx.AsyncClient, task_id: str) -> dict:
 
 
 async def _image_payload_from_result(client: httpx.AsyncClient, result: dict) -> dict:
-    task_id = result.get("task_id") or result.get("id")
-    data = result.get("data")
-    if isinstance(data, dict):
-        task_id = task_id or data.get("task_id") or data.get("id")
+    task_id = _provider_task_id(result)
     if task_id and not (_extract_image_urls(result) or _extract_b64_images(result)):
         result = await _poll_image_task(client, task_id)
 
@@ -832,13 +845,137 @@ async def _image_payload_from_result(client: httpx.AsyncClient, result: dict) ->
     raise RuntimeError(f"图片接口未返回图片: {json.dumps(result, ensure_ascii=False)[:800]}")
 
 
-async def _submit_reference_generations(prompt: str, ref_sources: list[str], quality: str = "high") -> dict:
+async def _image_payload_from_completed_result(client: httpx.AsyncClient, result: dict) -> dict:
+    """Decode a completed provider response without starting an internal poll loop."""
+    if _provider_result_failed(result):
+        raise RuntimeError(f"图片任务失败: {json.dumps(result, ensure_ascii=False)[:800]}")
+    b64_images = _extract_b64_images(result)
+    if b64_images:
+        return {"bytes": base64.b64decode(b64_images[0]), "provider_source": "b64_json"}
+    urls = _extract_image_urls(result)
+    if not urls:
+        raise RuntimeError(f"图片任务尚未返回图片: {json.dumps(result, ensure_ascii=False)[:800]}")
+    data_url_image = _decode_data_image_url(urls[0])
+    if data_url_image:
+        return {"bytes": data_url_image, "provider_source": "data_url"}
+    image_response = await client.get(urls[0])
+    image_response.raise_for_status()
+    return {
+        "bytes": image_response.content,
+        "provider_url": urls[0],
+        "provider_url_accessible": True,
+        "provider_source": "url",
+        "provider_content_type": image_response.headers.get("content-type"),
+    }
+
+
+async def submit_aplus_image_generation(
+    script: dict,
+    *,
+    brand: str | None,
+    idempotency_key: str,
+) -> dict:
+    """Submit one generation and return immediately when the provider gives a task id."""
+    width = int(script.get("target_width") or script.get("width") or settings.APLUS_IMAGE_WIDTH)
+    height = int(script.get("target_height") or script.get("height") or settings.APLUS_IMAGE_HEIGHT)
+    ref_sources = _reference_image_sources(script)
+    missing = [source for source in ref_sources if not _is_remote_url(source) and not Path(source).expanduser().is_file()]
+    if missing:
+        raise FileNotFoundError("参考图不存在: " + "; ".join(missing))
+    if not ref_sources:
+        raise ValueError("A+生图缺少 reference_images，停止纯文字生图；请先重新执行 Step8 生成带参考图的脚本")
+    prompt = _sanitize_generation_prompt(script.get("prompt", ""), brand, script.get("negative_prompt"), width, height)
+    payload = {
+        "model": _resolved_gpt_image_model(),
+        "prompt": prompt,
+        "aspect_ratio": settings.APLUS_IMAGE_ASPECT_RATIO,
+        "quality": _generation_quality_attempts()[0],
+        "size": _generation_provider_size(width, height),
+        "n": 1,
+        "response_format": "url",
+        "image": [_reference_image_generation_input(source) for source in ref_sources],
+    }
+    url = f"{settings.resolved_gpt_image_api_base.rstrip('/')}/images/generations"
+    headers = {
+        "Authorization": f"Bearer {settings.resolved_gpt_image_api_key}",
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotency_key,
+    }
+    async with httpx.AsyncClient(
+        timeout=settings.APLUS_IMAGE_SUBMIT_TIMEOUT_SECONDS,
+        verify=settings.external_http_verify,
+    ) as client:
+        try:
+            response = await client.post(url, headers=headers, json=payload)
+        except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.RemoteProtocolError) as exc:
+            return {
+                "state": "failed",
+                "provider_task_id": None,
+                "provider_result": {
+                    "error_code": "submit_outcome_unknown",
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "idempotency_key": idempotency_key,
+                },
+            }
+        if response.status_code >= 400:
+            error_result = {
+                "http_status": response.status_code,
+                "body": response.text[:1000],
+            }
+            if response.status_code not in {408, 425, 429} and response.status_code < 500:
+                return {"state": "failed", "provider_task_id": None, "provider_result": error_result}
+            raise RuntimeError(f"图片接口请求失败 {response.status_code}: {response.text[:1000]}")
+        provider_result = response.json()
+        task_id = _provider_task_id(provider_result)
+        if _extract_image_urls(provider_result) or _extract_b64_images(provider_result):
+            image_payload = await _image_payload_from_completed_result(client, provider_result)
+            return {"state": "completed", "provider_task_id": task_id, "image_payload": image_payload}
+        if not task_id:
+            raise RuntimeError(f"图片接口未返回 task_id 或图片: {json.dumps(provider_result, ensure_ascii=False)[:800]}")
+        return {"state": "submitted", "provider_task_id": task_id, "provider_result": provider_result}
+
+
+async def poll_aplus_image_generation(provider_task_id: str) -> dict:
+    """Poll one provider task once; callers own persistence and backoff."""
+    url = f"{settings.resolved_gpt_image_api_base.rstrip('/')}/images/tasks/{provider_task_id}"
+    headers = {"Authorization": f"Bearer {settings.resolved_gpt_image_api_key}"}
+    async with httpx.AsyncClient(
+        timeout=settings.APLUS_IMAGE_SUBMIT_TIMEOUT_SECONDS,
+        verify=settings.external_http_verify,
+    ) as client:
+        response = await client.get(url, headers=headers)
+        response.raise_for_status()
+        provider_result = response.json()
+        if _provider_result_failed(provider_result):
+            return {"state": "failed", "provider_result": provider_result}
+        if _extract_image_urls(provider_result) or _extract_b64_images(provider_result):
+            image_payload = await _image_payload_from_completed_result(client, provider_result)
+            return {"state": "completed", "provider_result": provider_result, "image_payload": image_payload}
+        return {"state": "pending", "provider_result": provider_result}
+
+
+def _generation_provider_size(width: int, height: int) -> str:
+    """Request a larger mother image, then downsample to the delivery size."""
+    if width <= 0 or height <= 0:
+        raise ValueError("生图尺寸必须大于零")
+    scale = settings.APLUS_IMAGE_PROVIDER_SCALE
+    if not math.isfinite(scale) or scale < 1:
+        raise ValueError("生图母图比例必须至少为 1")
+    width = math.ceil(width * scale / 16) * 16
+    height = math.ceil(height * scale / 16) * 16
+    if max(width, height) > 3840 or max(width, height) / min(width, height) > 3:
+        raise ValueError(f"生图尺寸超出供应商限制: {width}x{height}")
+    return f"{width}x{height}"
+
+
+async def _submit_reference_generations(prompt: str, ref_sources: list[str], quality: str = "high", *, width: int | None = None, height: int | None = None) -> dict:
     generation_quality = quality if quality in {"high", "auto"} else _generation_quality()
     payload = {
         "model": _resolved_gpt_image_model(),
         "prompt": prompt,
         "aspect_ratio": settings.APLUS_IMAGE_ASPECT_RATIO,
         "quality": generation_quality,
+        "size": _generation_provider_size(width or settings.APLUS_IMAGE_WIDTH, height or settings.APLUS_IMAGE_HEIGHT),
         "n": 1,
         "response_format": "url",
         "image": [_reference_image_generation_input(source) for source in ref_sources],
@@ -860,7 +997,7 @@ async def _submit_reference_generations(prompt: str, ref_sources: list[str], qua
                     f"[Step9] 提交A+参考图生图: model={_resolved_gpt_image_model()}, "
                     f"provider={settings.gpt_image_api_provider}, "
                     f"endpoint=images/generations, aspect_ratio={payload['aspect_ratio']}, "
-                    f"quality={payload['quality']}, references={len(ref_sources)}, attempt={attempt}/{retries}"
+                    f"quality={payload['quality']}, size={payload['size']}, references={len(ref_sources)}, attempt={attempt}/{retries}"
                 )
                 response = await http.post(url, headers=headers, json=payload)
                 if response.status_code >= 400:
@@ -965,7 +1102,7 @@ async def _submit_reference_generation(prompt: str, ref_sources: list[str], widt
     # 的无声降级，以免用小图冒充 A+ 成图。
     quality = _generation_quality_attempts()[0]
     return _ensure_provider_image_large_enough(
-        await _submit_reference_generations(prompt, ref_sources, quality),
+        await _submit_reference_generations(prompt, ref_sources, quality, width=width, height=height),
         width,
         height,
         f"generations/{quality}",
@@ -1057,6 +1194,78 @@ def _apply_aplus_compliance(script: dict, output_path: Path, oss_info: dict) -> 
             downloaded.unlink(missing_ok=True)
         result["compliance_status"] = "oss_round_trip_verified"
     return result
+
+
+def finalize_aplus_image_payload(
+    script: dict,
+    image_payload: dict,
+    *,
+    output_path: Path,
+    product_key: str,
+    brand: str | None,
+) -> dict:
+    """Validate and persist one completed provider image without submitting another request."""
+    width = int(script.get("target_width") or script.get("width") or settings.APLUS_IMAGE_WIDTH)
+    height = int(script.get("target_height") or script.get("height") or settings.APLUS_IMAGE_HEIGHT)
+    prompt = _sanitize_generation_prompt(script.get("prompt", ""), brand, script.get("negative_prompt"), width, height)
+    position = int(script.get("module_position") or script.get("position") or 0)
+    ref_sources = _reference_image_sources(script)
+    asset_key = f"aplus_{_safe_asset_name(script.get('asset_slot_id'))}" if script.get("asset_slot_id") else None
+    img_bytes = image_payload["bytes"]
+    _ensure_provider_image_large_enough(image_payload, width, height, "generations")
+    raw_path = output_path.with_name(f"{output_path.stem}_raw{_image_extension(img_bytes)}")
+    size_info = _save_exact_size_image(img_bytes, raw_path, output_path, width, height)
+    if bool(script.get("contains_person")):
+        ensure_synthetic_performer_subject(output_path)
+    oss_info = _upload_generated_image_to_oss(output_path, product_key, position, asset_key)
+    compliance = _apply_aplus_compliance(script, output_path, oss_info)
+    display_url = oss_info.get("oss_url")
+    if not display_url:
+        raise RuntimeError("A+生成图已上传OSS，但未返回可用URL")
+    result_item = {
+        "position": position,
+        "status": "done",
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "path": str(output_path),
+        "url": display_url,
+        "display_url": display_url,
+        "provider_url": image_payload.get("provider_url"),
+        "provider_url_accessible": image_payload.get("provider_url_accessible"),
+        "provider_source": image_payload.get("provider_source"),
+        "provider_content_type": image_payload.get("provider_content_type"),
+        "size": output_path.stat().st_size,
+        "model": _resolved_gpt_image_model(),
+        "generation_quality": _generation_quality(),
+        "target_width": width,
+        "target_height": height,
+        "reference_count": len(ref_sources),
+        "reference_paths": ref_sources,
+        **_image_result_metadata(script),
+        **oss_info,
+        **size_info,
+        **_provider_image_metadata(image_payload, size_info),
+        "image_compliance": compliance,
+    }
+    result_item.update(_write_image_metadata_sidecar(
+        output_path,
+        raw_path=raw_path,
+        evidence={
+            "status": "done",
+            "product_key": product_key,
+            "module_position": position,
+            "asset_slot_id": script.get("asset_slot_id"),
+            "model": _resolved_gpt_image_model(),
+            "provider": settings.gpt_image_api_provider,
+            "api_mode": _api_mode(),
+            "generation_quality": _generation_quality(),
+            "script_prompt": script.get("prompt"),
+            "generation_prompt": prompt,
+            "negative_prompt": script.get("negative_prompt"),
+            "reference_images": ref_sources,
+            "result": result_item,
+        },
+    ))
+    return result_item
 
 
 async def _generate_single_image(
@@ -1227,6 +1436,58 @@ def _sanitize_generation_prompt(
         if avoid and avoid not in cleaned:
             cleaned = f"{cleaned}\n\nAvoid: {avoid}"
     return cleaned.strip()
+
+
+async def prepare_aplus_image_work(product_id: int) -> dict:
+    """Load and validate the durable inputs required to submit every A+ image slot."""
+    async with async_session() as db:
+        result = await db.execute(
+            select(Product)
+            .options(selectinload(Product.data), selectinload(Product.aplus))
+            .where(Product.id == product_id)
+        )
+        product = result.scalar_one_or_none()
+        if not product or not product.data:
+            raise ValueError(f"Product {product_id} not found or no data")
+        await hydrate_product_sections(db, product, ("aplus_script", "aplus_assets"))
+        if not product.aplus or not product.aplus.aplus_scripts:
+            raise ValueError("未找到A+脚本，请先执行Step8")
+        try:
+            scripts_data = json.loads(product.aplus.aplus_scripts)
+        except json.JSONDecodeError as exc:
+            raise ValueError("A+脚本数据损坏") from exc
+        material_dir = Path(product.data.material_dir) if product.data.material_dir else Path("/tmp/fbm_unknown")
+        output_dir = material_dir / "new aplus image"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        if _is_enhanced_scripts_data(scripts_data):
+            scripts = [
+                _with_script_source_metadata(scripts_data, item)
+                for item in enhanced_image_slot_work_items(scripts_data)
+            ]
+            work_items = [
+                {"script": item, "output_path": str(_slot_output_path(output_dir, item))}
+                for item in scripts
+            ]
+        else:
+            scripts = [
+                _with_script_source_metadata(scripts_data, item)
+                for item in _validate_standard_scripts(scripts_data.get("scripts", []))
+            ]
+            work_items = [
+                {
+                    "script": item,
+                    "output_path": str(_module_output_path(output_dir, int(item.get("module_position") or 0))),
+                }
+                for item in scripts
+            ]
+        return {
+            "product_id": product_id,
+            "product_key": product.data.item_code or f"product-{product.id}",
+            "brand": product.brand or settings.DEFAULT_BRAND,
+            "output_dir": str(output_dir),
+            "expected_count": len(work_items),
+            "work_items": work_items,
+        }
 
 
 async def run_aplus_image(product_id: int) -> dict:
@@ -1435,6 +1696,8 @@ async def regenerate_aplus_module_image(product_id: int, module_position: int) -
         product = result.scalar_one_or_none()
         if not product or not product.data:
             raise ValueError(f"Product {product_id} not found or no data")
+
+        await hydrate_product_sections(db, product, ("source", "aplus_script", "aplus_assets"))
 
         pd = product.data
         pa = product.aplus

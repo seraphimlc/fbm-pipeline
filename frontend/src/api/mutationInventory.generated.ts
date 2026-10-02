@@ -12,6 +12,7 @@ export interface MutationCallsite {
 }
 
 export type MutationCallsiteId =
+  | "blacklistProduct|frontend/src/pages/ProductDetail.tsx|handleBlacklist"
   | "cancelTaskRun|frontend/src/pages/TaskRunCenter.tsx|cancelRun"
   | "confirmProduct|frontend/src/pages/ProductDetail.tsx|runWorkflowAction"
   | "confirmProduct|frontend/src/pages/ProductList.tsx|runProductWorkflowAction"
@@ -80,6 +81,15 @@ export type MutationCallsiteId =
   | "wakeTaskRun|frontend/src/pages/TaskRunCenter.tsx|wakeRun";
 
 export const mutationInventory = [
+  {
+    "id": "blacklistProduct|frontend/src/pages/ProductDetail.tsx|handleBlacklist",
+    "client": "blacklistProduct",
+    "endpoint": "`/products/${id}/blacklist`",
+    "method": "post",
+    "source": "frontend/src/pages/ProductDetail.tsx",
+    "handler": "handleBlacklist",
+    "via": "direct"
+  },
   {
     "id": "cancelTaskRun|frontend/src/pages/TaskRunCenter.tsx|cancelRun",
     "client": "cancelTaskRun",
