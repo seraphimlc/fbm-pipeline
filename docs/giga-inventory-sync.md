@@ -316,7 +316,9 @@ GET /api/giga/price/alerts?site=US&batch_id=20260602-us-price
 - `POST /api/products/catalog/inventory-template/export`
 - `POST /api/products/catalog/export` 中的数量覆盖
 
-不再依赖 `catalog_products.stock` 作为导出库存来源。
+普通 Amazon 导入表只使用匹配店铺、站点、SKU 的最新已完成 GIGA 库存快照，不回退到 `catalog_products.stock` 或商品最初采集的库存。缺 SKU、缺快照、快照数量为空或为负数、模板没有 Quantity 字段时，逐商品停止导出并写入报告。数量为 0 可导出。
+
+首次 GIGA 拉品也会抓取库存，拉品批次完成后形成可用快照；手动“同步库存”再次请求 GIGA，成功返回的 SKU 会写入新的库存快照。同步失败的 SKU 不会生成新快照，按 SKU 查询最新已完成数据时可能仍查到历史快照。普通导出报告会记录所用快照批次、采集时间和来源（首次拉品、最近一次库存同步或历史快照），用户应先检查本次同步任务的失败数。
 
 库存口径只在导出执行时影响 Quantity，不阻断商品拉取、商品处理、选竞品、生成 Listing 或进入待导出。若最新库存为 0，Amazon 首次导入表继续导出并写入 Quantity `0`；若最新库存快照缺少目标 SKU 或出现负库存，任务 `result_json.rows` 和导出报告应记录跳过/失败原因。这不是永久运营结论，后续补货后可由用户人工新建导出任务。
 

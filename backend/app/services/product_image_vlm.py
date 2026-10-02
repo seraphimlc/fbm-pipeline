@@ -352,8 +352,7 @@ async def analyze_contact_sheet(
                             ],
                         },
                     ],
-                    max_tokens=4000,
-                    temperature=0.2,
+                    **settings.chat_completion_options(model=image_analysis_model, max_tokens=4000, temperature=0.2, vision=True),
                 ),
                 timeout=timeout_seconds + 15,
             )
@@ -453,8 +452,7 @@ async def analyze_image_url_batch(
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": content},
                     ],
-                    max_tokens=4000,
-                    temperature=0.2,
+                    **settings.chat_completion_options(model=image_analysis_model, max_tokens=4000, temperature=0.2, vision=True),
                 ),
                 timeout=timeout_seconds + 15,
             )
@@ -505,8 +503,7 @@ async def detect_person_in_image(source: str) -> dict:
                 {"type": "text", "text": "Does this image visibly contain any person, human model, face, body, hand, or human silhouette? Return exactly {\"contains_person\": true|false, \"confidence\": \"high|medium|low\"}."},
             ]},
         ],
-        max_tokens=80,
-        temperature=0,
+        **settings.chat_completion_options(model=settings.VLM_MODEL, max_tokens=80, temperature=0, vision=True),
     )
     content = response.choices[0].message.content if response and response.choices else ""
     try:

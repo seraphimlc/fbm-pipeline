@@ -135,8 +135,7 @@ async def _analyze_direct_url_reviews(product: Product, source_image_url: str, r
                     },
                     {"role": "user", "content": content},
                 ],
-                max_tokens=4000,
-                temperature=0.1,
+                **settings.chat_completion_options(model=settings.VLM_MODEL, max_tokens=4000, temperature=0.1, vision=True),
             ),
             timeout=110,
         )

@@ -36,6 +36,7 @@
 
 - 导出中心：`CatalogList.tsx` -> 商品 API/导出任务 -> 任务中心。
 - Amazon 导出：planner -> worker -> `backend/app/pipeline/amazon_export/`。
+- 普通导入表 Quantity：`backend/app/api/products.py` 的 `build_catalog_export_zip()` 按店铺、站点、SKU 读取最新已完成 `giga_inventory`；缺快照或无数量字段逐商品阻断，报告记录库存批次与采集时间。现场生成的 Step 10 单品模板通过 `stock_override` 使用同一快照数量。
 - 导出 outcome：`backend/app/services/offline_tasks.py` canonicalizer -> `backend/app/task_runtime/catalog_export_workers.py` envelope -> `backend/app/task_runtime/scheduler.py` 单事务终态投影 -> Task Center / Export Center API。
 - Seller SKU 持久化：`backend/app/pipeline/amazon_export/listing_fill.py` 的 `amazon_seller_sku_for_export()` 与导出 worker 的成功写库路径同源，后续 Lingxing Listing sync 只能以该 seller SKU/MSKU exact match 作为 ASIN 主匹配依据。
 - 领星 A+ 草稿保存 T3：`POST /api/task-runs/lingxing-aplus-publish` -> `backend/app/task_planners/lingxing_aplus_publish.py` -> `backend/app/task_runtime/lingxing_aplus_publish_workers.py`，只写 A+ 发布状态/证据，不生成或修改导出文件。

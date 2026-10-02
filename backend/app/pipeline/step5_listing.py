@@ -589,8 +589,7 @@ async def _request_listing_json(request_client, messages: list[dict], *, purpose
             response = await request_client.chat.completions.create(
                 model=settings.LLM_MODEL,
                 messages=messages,
-                temperature=settings.STEP5_LLM_TEMPERATURE,
-                max_tokens=settings.STEP5_LLM_MAX_TOKENS,
+                **settings.chat_completion_options(model=settings.LLM_MODEL, max_tokens=settings.STEP5_LLM_MAX_TOKENS, temperature=settings.STEP5_LLM_TEMPERATURE),
                 response_format={"type": "json_object"},
             )
             break

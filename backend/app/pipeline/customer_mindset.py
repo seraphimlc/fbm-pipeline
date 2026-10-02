@@ -1596,8 +1596,7 @@ async def _llm_json(*, system_prompt: str, user_prompt: str, max_tokens: int, te
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
-                temperature=temperature,
-                max_tokens=max_tokens,
+                **settings.chat_completion_options(model=settings.LLM_MODEL, max_tokens=max_tokens, temperature=temperature),
                 response_format={"type": "json_object"},
             )
             break

@@ -1490,8 +1490,7 @@ async def ensure_amazon_template_semantic_fields(product: Product, pd: ProductDa
                 {"role": "system", "content": "You choose Amazon template dropdown values from evidence. Return JSON only."},
                 {"role": "user", "content": _semantic_dropdown_prompt(product, pd, options)},
             ],
-            temperature=0,
-            max_tokens=1200,
+            **settings.chat_completion_options(model=settings.LLM_MODEL, max_tokens=1200, temperature=0),
             response_format={"type": "json_object"},
         )
         content = response.choices[0].message.content or "{}"
@@ -2338,7 +2337,9 @@ async def _ensure_listing_person_detections(product: Product, mapping: dict) -> 
         product.images.image_analysis = json.dumps(payload, ensure_ascii=False)
 
 
-async def run_amazon_template_in_session(db: AsyncSession, product: Product) -> dict:
+async def run_amazon_template_in_session(
+    db: AsyncSession, product: Product, *, stock_override: int | None = None
+) -> dict:
     """Generate and persist template metadata without committing or rolling back ``db``."""
 
     if not product or not product.data:
@@ -2378,6 +2379,8 @@ async def run_amazon_template_in_session(db: AsyncSession, product: Product) -> 
 
         product_snapshot = _snapshot_model(product)
         product_snapshot.data = _snapshot_model(product.data)
+        if stock_override is not None:
+            product_snapshot.data.stock = stock_override
         product_snapshot.images = _snapshot_model(product.images)
         product_snapshot.aplus = _snapshot_model(product.aplus)
         try:

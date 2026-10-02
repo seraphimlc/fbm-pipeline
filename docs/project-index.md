@@ -42,6 +42,7 @@ Fill or update with stable routes only:
 - TikTok channel status/UI: `backend/app/services/tiktok_status.py`, `backend/app/api/products.py`, `backend/app/api/tiktok.py`, `scripts/test_stability_repair_r1_tiktok.py`, `scripts/test_stability_repair_r1_tiktok_frontend.py`
 - Remote dev write guard: `scripts/start.sh`, `scripts/read_startup_env.py`, `frontend/dev-api-write-guard.ts`, `frontend/vite.config.ts`, `backend/app/main.py`, `scripts/test_stability_repair_r1_remote_guard.py`
 - Local environment configuration UI/API: `frontend/src/pages/SystemConfigurationPage.tsx`, `frontend/src/components/LocalEnvConfigTable.tsx`, `backend/app/api/config_api.py`
+- LLM/VLM model and reasoning: `backend/app/config.py` (`gpt-6.1-sol`, `medium`, `chat_completion_options`); `GET /api/config` exposes both reasoning settings; `scripts/test_llm_model_configuration.py` validates request compatibility and coverage without external calls.
 - Product keyword task: `backend/app/task_planners/product_keyword_research.py`, `backend/app/product_tasks/actions.py`, `backend/app/pipeline/step3_keywords.py`
 - Product customer-mindset task: `backend/app/pipeline/customer_mindset.py`, `backend/app/task_planners/product_customer_mindset.py`, `backend/app/product_tasks/actions.py`, `scripts/test_customer_mindset.py`, `scripts/test_image_analysis_listing_e5.py`
 - Product Listing short-copy contracts: `backend/app/pipeline/step5_listing.py`, `scripts/test_listing_title_highlights.py`

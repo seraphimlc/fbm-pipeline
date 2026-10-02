@@ -16,6 +16,10 @@ Backend runtime configuration is defined by `backend/app/config.py` and loaded f
 
 `backend/.env.example` is the committed template. `backend/.env` is local-only and ignored by Git.
 
+文本与图片理解默认使用 `gpt-6.1-sol`，`LLM_REASONING_EFFORT` 和 `VLM_REASONING_EFFORT` 均为 `medium`。GPT-6 Chat Completions 请求由 `Settings.chat_completion_options()` 统一生成，不发送 `temperature`；`max_completion_tokens` 为原输出预算加 `REASONING_TOKEN_RESERVE`（默认 8192），该值为最大预算，不代表每次消耗。已有其他模型仍使用原来的采样与输出参数。图片生成仍由 `GPT_IMAGE_MODEL` 独立控制。
+
+模型与思考强度可以从 `GET /api/config` 查看；修改 `.env` 后下次后端启动生效。迁移参数验证：`backend/.venv/bin/python scripts/test_llm_model_configuration.py`，使用模拟 HTTP 请求验证 12 个调用点，不调用外部服务。
+
 在“系统配置”菜单中，“本地环境变量”标签页会按 `backend/.env` 中已有的分类注释分组，可查看变量名和非敏感值、逐项更新配置，或导入整份 `KEY=value` 配置文件。API Key、Token、Secret、Password 和数据库连接串始终只显示为已配置状态，不能通过页面读取原始值；如需变更，重新输入并保存。导入会原子替换本地 `backend/.env`，保存或导入后均需重启服务。
 
 Relative paths in `backend/.env` are resolved relative to the `backend/` directory. For example:

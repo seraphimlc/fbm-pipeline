@@ -1416,8 +1416,7 @@ async def run_aplus_plan(product_id: int) -> dict:
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": prompt},
                     ],
-                    temperature=0.8,
-                    max_tokens=3000,
+                    **settings.chat_completion_options(model=settings.LLM_MODEL, max_tokens=3000, temperature=0.8),
                     response_format={"type": "json_object"},
                 )
                 break

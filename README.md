@@ -58,7 +58,7 @@ make frontend-build
 
 - **后端**: FastAPI + SQLAlchemy (async) + MySQL / 本地 SQLite（配置切换）
 - **前端**: React + TypeScript + Ant Design + Vite
-- **AI**: GPT-5.5 (LLM/VLM) + GPT Image
+- **AI**: GPT-6.1 Sol / medium (LLM/VLM) + GPT Image
 
 ## 当前主链路
 

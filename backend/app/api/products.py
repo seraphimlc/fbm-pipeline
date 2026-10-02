@@ -2264,19 +2264,16 @@ def _apply_catalog_export_row_overrides(ws, row_number: int, product: Product, p
         ws.cell(row_number, column).value = value
 
 
-def _catalog_stock_export_override(ws, mapping: dict, catalog: CatalogProduct | None, stock: int | None = None) -> tuple[int, int] | None:
-    stock_value = stock if stock is not None else (catalog.stock if catalog else None)
-    if stock_value is None:
-        return None
-    if stock_value < 0:
-        raise ValueError(f"最新 GIGA 库存为 {stock_value}，不能导出负数库存。")
+def _catalog_stock_export_override(ws, mapping: dict, stock: int) -> tuple[int, int]:
+    if stock < 0:
+        raise ValueError(f"最新 GIGA 库存为 {stock}，不能导出负数库存。")
     quantity_attr = (mapping.get("dynamic_fields") or {}).get("quantity")
     if not quantity_attr:
-        return None
+        raise ValueError("模板映射缺少 Amazon 数量字段，无法写入最新 GIGA 库存。")
     quantity_col = _template_attribute_columns(ws).get(str(quantity_attr))
     if not quantity_col:
         raise ValueError("模板未找到 Amazon 数量字段，无法写入最新 GIGA 库存。")
-    return quantity_col, stock_value
+    return quantity_col, stock
 
 
 def _summary_workbook(rows: list[dict]) -> bytes:
@@ -4482,6 +4479,37 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
         await hydrate_product_sections(db, product)
     catalog_by_source_id = {item.source_product_id: item for item in catalog_items}
     latest_inventory_by_catalog_id = await _latest_giga_inventory_by_catalog_id(db, catalog_items)
+    inventory_batch_ids = {row.batch_id for row in latest_inventory_by_catalog_id.values()}
+    inventory_batches = {}
+    if inventory_batch_ids:
+        batch_result = await db.execute(
+            select(GigaSyncBatch).where(GigaSyncBatch.batch_id.in_(inventory_batch_ids))
+        )
+        inventory_batches = {
+            (batch.batch_id, batch.site, batch.data_source_id): batch
+            for batch in batch_result.scalars().all()
+        }
+    store_contexts = {_catalog_store_context(item) for item in catalog_items}
+    latest_sync_by_store = {}
+    if store_contexts:
+        source_ids = {source_id for _, source_id in store_contexts if source_id is not None}
+        source_filter = GigaSyncBatch.data_source_id.in_(source_ids)
+        if any(source_id is None for _, source_id in store_contexts):
+            source_filter = or_(source_filter, GigaSyncBatch.data_source_id.is_(None))
+        sync_result = await db.execute(
+            select(GigaSyncBatch)
+            .where(
+                GigaSyncBatch.current_category == "inventory_snapshot",
+                GigaSyncBatch.status.in_(("done", "failed")),
+                GigaSyncBatch.site.in_({site for site, _ in store_contexts}),
+                source_filter,
+            )
+            .order_by(GigaSyncBatch.started_at.desc(), GigaSyncBatch.id.desc())
+        )
+        for batch in sync_result.scalars():
+            key = (batch.site, batch.data_source_id)
+            if key in store_contexts and key not in latest_sync_by_store:
+                latest_sync_by_store[key] = batch
 
     grouped: dict[str, dict] = {}
     report_rows: list[dict] = []
@@ -4626,17 +4654,20 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                                 raise CatalogExportRowBusinessError("商品资料不存在", status="跳过")
                             sku = _catalog_price_quantity_sku(catalog) if catalog else ""
                             latest_inventory = latest_inventory_by_catalog_id.get(catalog.id) if catalog else None
-                            if sku and not latest_inventory:
+                            if not sku:
+                                raise CatalogExportRowBusinessError("商品缺少 GIGA SKU，无法匹配最新库存快照", status="跳过")
+                            if not latest_inventory:
                                 raise CatalogExportRowBusinessError(
                                     f"最新 GIGA 库存快照未找到 SKU {sku}，已停止导出",
                                     status="跳过",
                                 )
+                            if latest_inventory.stock_qty is None:
+                                raise CatalogExportRowBusinessError(f"SKU {sku} 的最新 GIGA 库存快照没有库存数量")
                             try:
                                 stock_override = _catalog_stock_export_override(
                                     ws,
                                     mapping,
-                                    catalog,
-                                    latest_inventory.stock_qty if latest_inventory else None,
+                                    latest_inventory.stock_qty,
                                 )
                             except ValueError as exc:
                                 raise CatalogExportRowBusinessError(str(exc)) from exc
@@ -4646,7 +4677,9 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                             template_result = None
                             if not source_path:
                                 try:
-                                    template_result = await run_amazon_template_in_session(db, product)
+                                    template_result = await run_amazon_template_in_session(
+                                        db, product, stock_override=stock_override[1]
+                                    )
                                 except AmazonTemplateBusinessError as exc:
                                     raise CatalogExportRowBusinessError(str(exc)) from exc
                                 source_path = Path(template_result["path"]).expanduser()
@@ -4666,9 +4699,8 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                                 _apply_catalog_export_row_overrides(ws, row_number, product, pd, mapping)
                             except ValueError as exc:
                                 raise CatalogExportRowBusinessError(str(exc)) from exc
-                            if stock_override:
-                                quantity_col, stock_quantity = stock_override
-                                ws.cell(row_number, quantity_col).value = stock_quantity
+                            quantity_col, stock_quantity = stock_override
+                            ws.cell(row_number, quantity_col).value = stock_quantity
                     except CatalogExportRowBusinessError as exc:
                         report_rows.append({
                             **report_base,
@@ -4689,11 +4721,21 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                         # through another connection.
                         await db.commit()
                         exported_in_workbook += 1
+                        snapshot_batch = inventory_batches.get(
+                            (latest_inventory.batch_id, latest_inventory.site, latest_inventory.data_source_id)
+                        )
+                        latest_sync = latest_sync_by_store.get(_catalog_store_context(catalog))
+                        snapshot_origin = "首次拉品快照"
+                        if snapshot_batch and snapshot_batch.current_category == "inventory_snapshot":
+                            snapshot_origin = "最近一次库存同步" if latest_sync and latest_sync.batch_id == snapshot_batch.batch_id else "历史库存同步快照（最近一次同步未覆盖此 SKU）"
+                        elif latest_sync and latest_sync.started_at and latest_sync.started_at > latest_inventory.pulled_at:
+                            snapshot_origin = "历史拉品快照（最近一次库存同步未覆盖此 SKU）"
                         report_rows.append({
                             **report_base,
                             "状态": "已导出",
                             "原因": ("使用已生成表格" if template_result is None else "现场重新生成表格")
-                            + (f"，数量按最新 GIGA 库存 {stock_override[1]} 覆盖" if stock_override else ""),
+                            + f"，数量按最新 GIGA 库存 {stock_override[1]} 覆盖"
+                            + f"（{snapshot_origin}，批次 {latest_inventory.batch_id}，采集时间 {latest_inventory.pulled_at}）",
                         })
 
                 if exported_in_workbook:

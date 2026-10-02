@@ -1635,8 +1635,7 @@ async def run_aplus_script(product_id: int) -> dict:
                         {"role": "system", "content": SYSTEM_PROMPT},
                         {"role": "user", "content": prompt},
                     ],
-                    temperature=0.7,
-                    max_tokens=4000,
+                    **settings.chat_completion_options(model=settings.LLM_MODEL, max_tokens=4000, temperature=0.7),
                     response_format={"type": "json_object"},
                 )
                 break
@@ -1768,8 +1767,7 @@ async def diagnose_aplus_regeneration_feedback(product_id: int, module_position:
             {"role": "system", "content": "You diagnose Amazon A+ image regeneration feedback and choose reference images from analyzed candidates. Return valid JSON only."},
             {"role": "user", "content": prompt},
         ],
-        temperature=0.2,
-        max_tokens=1600,
+        **settings.chat_completion_options(model=settings.LLM_MODEL, max_tokens=1600, temperature=0.2),
         response_format={"type": "json_object"},
     )
     content = response.choices[0].message.content
@@ -1880,8 +1878,7 @@ async def regenerate_aplus_module_script(product_id: int, module_position: int, 
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.7,
-            max_tokens=2200,
+            **settings.chat_completion_options(model=settings.LLM_MODEL, max_tokens=2200, temperature=0.7),
             response_format={"type": "json_object"},
         )
 

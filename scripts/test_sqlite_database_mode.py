@@ -48,7 +48,8 @@ async def main() -> None:
         from sqlalchemy import select, update
         from sqlalchemy.orm import selectinload
 
-        from app.api.products import _latest_giga_inventory_by_catalog_id
+        from app.api.products import _catalog_stock_export_override, _latest_giga_inventory_by_catalog_id
+        from openpyxl import Workbook
         from app.models import (
             CatalogProduct,
             GigaInventory,
@@ -63,6 +64,20 @@ async def main() -> None:
             TaskStep,
         )
         from app.task_runtime.events import update_step_progress
+
+        quantity_attr = "fulfillment_availability#1.quantity"
+        ws = Workbook().active
+        ws.cell(5, 2).value = quantity_attr
+        mapping = {"dynamic_fields": {"quantity": quantity_attr}}
+        assert _catalog_stock_export_override(ws, mapping, 0) == (2, 0)
+        assert _catalog_stock_export_override(ws, mapping, 17) == (2, 17)
+        for invalid_mapping, stock in ((mapping, -1), ({"dynamic_fields": {}}, 3)):
+            try:
+                _catalog_stock_export_override(ws, invalid_mapping, stock)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("缺失数量字段或负库存必须阻止导出")
 
         now = datetime.now()
         async with async_session() as db:

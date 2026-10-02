@@ -42,6 +42,8 @@
 
 ## 关键入口
 
+- 文本/视觉模型与思考强度：`backend/app/config.py` 的 `chat_completion_options()`，默认 GPT-6.1 Sol / medium；配置说明 `docs/configuration.md`，参数与调用点验证 `scripts/test_llm_model_configuration.py`。
+
 - 商品列表：`frontend/src/pages/ProductList.tsx`
 - Amazon 详情：`frontend/src/pages/ProductDetail.tsx`
 - TikTok 详情：`frontend/src/pages/TikTokProductDetail.tsx`

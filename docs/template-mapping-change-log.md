@@ -516,3 +516,20 @@
 - 主要行为：Step 6 保存逐图人物判断；Step 10 对含人物的本地或远程 URL 生成受管投放副本、写入并校验 XMP、上传 OSS 后下载回读并验证哈希，再将受管 URL 填入模板。任何识别、写标、上传或回读失败会阻止该商品导出。
 - 验证：`cd backend && .venv/bin/python ../scripts/test_amazon_image_compliance_oss.py`；当前环境会在 OSS 或 ExifTool 未配置时明确输出 `SKIPPED`，不得作为通过。
 - 后续注意：生产工作节点必须安装 ExifTool；首次启用前在已配置 OSS 的环境执行上述实测门槛。
+### Amazon 首次导入表库存快照来源收紧
+
+- 日期：2026-10-02
+- 改动文件：`backend/app/api/products.py`、`backend/app/pipeline/step10_amazon_template.py`、`docs/giga-inventory-sync.md`、`docs/domain-index/export-flow.md`。
+- 涉及类目/模板：所有普通 Amazon 首次导入模板的 Quantity 字段；未修改映射 JSON 或模板文件。
+- 变更原因：避免缺失最新 GIGA 快照时回退到商品旧库存；现场生成 Step 10 模板也需使用导出时选中的快照数量。
+- 验证：`backend/.venv/bin/python scripts/test_sqlite_database_mode.py` 通过；`make validate-template-mappings` 通过（6 个映射文件、0 警告）；`python3 scripts/testing/run_with_r1_sqlite.py -- make test-project-rules` 通过（81 项）；`backend/.venv/bin/python -m py_compile backend/app/api/products.py backend/app/pipeline/step10_amazon_template.py scripts/test_sqlite_database_mode.py` 通过。
+- 后续注意：同步失败的 SKU 可能保留历史成功快照；导出报告会标明快照来源、批次和采集时间，操作时先查看库存同步任务结果。已生成文件不会自动更新。
+
+### Step 10 语义字段请求切换 GPT-6.1 Sol medium
+
+- 日期：2026-10-02
+- 改动文件：`backend/app/config.py`、`backend/app/pipeline/step10_amazon_template.py`；关联文本/视觉调用点、`.env.example`、配置 API 和配置文档同步维护。
+- 涉及类目/模板：所有会调用模型补齐语义下拉字段的 Step 10 模板；映射 JSON、XLSM 和数量来源规则不变。
+- 变更原因：文本与图片理解切换为 `gpt-6.1-sol` / `medium`；GPT-6 推理请求不能传 `temperature`，需要使用包含推理预算的 `max_completion_tokens`。
+- 验证：`backend/.venv/bin/python scripts/test_llm_model_configuration.py`、`backend/.venv/bin/python scripts/test_listing_title_highlights.py`、`backend/.venv/bin/python scripts/test_customer_mindset.py` 通过；`python3 scripts/testing/run_with_r1_sqlite.py -- make test-project-rules` 通过（81 项）；第三方接口文本与合成蓝色图片小请求均成功返回 `gpt-6.1-sol`。
+- 后续注意：配置在后端下次启动生效；最大预算不等于实际费用。真实批量商品效果仍需在使用中核查，已有商品内容不自动重生成。

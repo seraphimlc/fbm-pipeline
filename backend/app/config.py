@@ -86,12 +86,16 @@ class Settings(BaseSettings):
     # LLM API (sub2api — Listing/A+规划/A+脚本)
     LLM_API_BASE: str = "https://sub2api.127space.com/v1"
     LLM_API_KEY: str = ""
-    LLM_MODEL: str = "gpt-5.5"
+    LLM_MODEL: str = "gpt-6.1-sol"
+    LLM_REASONING_EFFORT: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    # Chat Completions 的推理 token 与可见输出共用上限；保留原输出预算并额外留出推理空间。
+    REASONING_TOKEN_RESERVE: int = 8192
 
-    # VLM API (默认复用 LLM API 的 GPT-5.5 多模态能力做主图分析)
+    # VLM API (默认复用 LLM API 的 GPT-6.1 Sol 多模态能力做主图分析)
     VLM_API_BASE: str = "https://sub2api.127space.com/v1"
     VLM_API_KEY: str = ""
-    VLM_MODEL: str = "gpt-5.5"
+    VLM_MODEL: str = "gpt-6.1-sol"
+    VLM_REASONING_EFFORT: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
     VLM_USE_LLM_API: bool = True  # True 时使用 LLM_API_BASE/LLM_API_KEY 跑图片分析
     # Step6 会同时处理本地 To B 素材和远程供应商图片。高分辨率图片一次塞太多会让
     # OpenAI-compatible 网关在默认 60 秒内超时，因此限制每批图片数并给真实视觉
@@ -268,6 +272,17 @@ class Settings(BaseSettings):
         return self.DATABASE_URL
 
     model_config = {"env_file": BACKEND_DIR / ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
+
+    def chat_completion_options(
+        self, *, model: str, max_tokens: int, temperature: float, vision: bool = False
+    ) -> dict:
+        """保持旧模型参数兼容，GPT-6 请求显式传推理强度且不传采样参数。"""
+        if model.startswith("gpt-6"):
+            return {
+                "reasoning_effort": self.VLM_REASONING_EFFORT if vision else self.LLM_REASONING_EFFORT,
+                "max_completion_tokens": max_tokens + max(0, self.REASONING_TOKEN_RESERVE),
+            }
+        return {"max_tokens": max_tokens, "temperature": temperature}
 
     def get_llm_client(self) -> AsyncOpenAI:
         """创建LLM OpenAI客户端。"""

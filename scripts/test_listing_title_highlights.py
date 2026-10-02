@@ -196,6 +196,7 @@ async def _run_listing_case(responses: list[dict]):
     fake_settings = SimpleNamespace(
         DEFAULT_BRAND="Vindhvisk",
         LLM_MODEL="test-model",
+        chat_completion_options=step5_listing.settings.chat_completion_options,
         STEP5_LLM_TEMPERATURE=0.0,
         STEP5_LLM_MAX_TOKENS=4000,
         STEP5_LLM_TIMEOUT_SECONDS=120,

@@ -1245,11 +1245,13 @@ def test_inventory_update_template_exports_stock_only_by_sku() -> None:
     assert_true('"/catalog/inventory-template/export"' in text, "必须提供库存同步模板导出接口")
     assert_true("缺少真实 ASIN" in text, "库存同步模板导出必须只允许已有真实 ASIN 的商品")
     assert_true("按 SKU 写入库存；价格列留空，不更新价格" in text, "库存同步模板只能写 SKU 和库存，不能更新价格")
+    stock_override_section = text.split("def _catalog_stock_export_override", 1)[1].split("def _summary_workbook", 1)[0]
     assert_true(
-        "stock_value < 0" in text
-        and "stock_value <= 0" not in text
+        "stock < 0" in stock_override_section
+        and "stock <= 0" not in stock_override_section
+        and "catalog.stock" not in stock_override_section
         and "数量按最新 GIGA 库存" in text,
-        "Amazon 首次导入表必须允许库存 0 写入 Quantity=0，只禁止负库存",
+        "Amazon 首次导入表必须使用快照库存，允许 Quantity=0，只禁止负库存",
     )
     assert_true(
         "assert_gigab2b_logged_in_for_inventory" in text,
@@ -1983,7 +1985,8 @@ def test_amazon_export_binds_upc_after_prechecks_and_keeps_caller_transaction() 
         "async def _export_catalog_items", 1
     )[0]
     assert_true(
-        "await run_amazon_template_in_session(db, product)" in catalog_builder_section
+        "template_result = await run_amazon_template_in_session(" in catalog_builder_section
+        and "db, product, stock_override=stock_override[1]" in catalog_builder_section
         and "await run_amazon_template(product.id)" not in catalog_builder_section
         and "await db.commit()" in catalog_builder_section
         and "await db.rollback()" not in catalog_builder_section,
@@ -5627,6 +5630,7 @@ async def exercise_step8_fallback():
         APLUS_IMAGE_WIDTH=1940,
         APLUS_IMAGE_HEIGHT=1200,
         LLM_MODEL="fake-llm",
+        chat_completion_options=step8.settings.chat_completion_options,
         DEFAULT_BRAND="Brand",
         get_llm_client=lambda: client,
     )
