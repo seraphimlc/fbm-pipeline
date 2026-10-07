@@ -582,3 +582,12 @@
 - 缓存复用补修：刷新时保留已核验AI属性，并修复2款仅在展示行保留的缓存值；原文和枚举再次验证，修复过程0模型调用。11项安全/复用回归通过，最终24个持久化AI属性逐一复核通过。
 
 - 提交快照验收（2026-10-07）：隔离检出本轮暂存代码，11项补充回归、15项属性规则、6映射0 warnings、80项项目规则、A+ A1/A2确认回归及前端build/contracts/mutation检查通过。确认回归验证既有A+确认调用补充服务，不增加独立确认节点；商品DB、素材和导出文件不纳入代码提交。
+
+
+## 2026-10-07 童车 Included Components 缺口修复
+
+- 文件：`amazon_export/attribute_rules.py`、`template_mappings/ride_on_toy.json`、`scripts/test_template_attribute_rules.py`、`docs/template-mapping-spec.md`。
+- 类目/模板：RIDE_ON_TOY / RIDE_ON_TOY.xlsm；供应商明确的整车身份可作为随附组件；当前SKU明确with/W/Parents Remote Control才补遥控器，不借用其他变体。未知组件继续留空；电池/充电器包含关系限制为相邻明确措辞，避免将not included误作包含。
+- 原因：Amazon预览显示三款Included Components必填，但此前本地必填表漏项。新增条件必填并允许供应商明确组件描述，空值拦截catalog导出；不猜配件或调用模型。
+- 验证：`backend/.venv/bin/python scripts/test_template_attribute_rules.py` 18项通过；`scripts/test_product_data_supplement.py` 11项通过；`scripts/validate_template_mappings.py` 6映射0 warnings。隔离真实导出5/5、0阻塞、0模型调用；正式任务#1393 succeeded，5/5最终组件单元格核对通过。证据：`data/exports/ride-on-components-20261007/production-verification.json`；在线备份：同目录`before.db`。
+- 注意：新文件用于替代#1386旧童车批次；历史文件保留。未执行Amazon上传，平台是否接受仍以新文件预览为准。

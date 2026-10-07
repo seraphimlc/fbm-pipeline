@@ -113,3 +113,8 @@ Amazon 首次导入表用于新建 listing。已有真实 Amazon ASIN 的商品�
 ### A+确认前明确数据补充
 
 `listing_check.data_supplement`保存规则/AI/人工结果及来源、原文和输入指纹。规则和已核对SKU证据优先；AI只处理原文出现了模板允许值的剩余字段，必须提供可逐字核对的原文，禁止推测。输入不变时缓存复用。既有候选关键词为空时复用安全同义词，并排除Listing已明确删除的候选；没有可靠候选时保持空值。默认产地China作为用户政策存储，不冒充源事实。认证、尺寸、承重、轮胎结构、涂层工艺等不得由AI推断。导出不再临时调用模型补属性。
+
+
+### 童车随附组件（2026-10-07）
+
+RIDE_ON_TOY的Included Components纳入条件必填，catalog最终行缺值则拒绝导出。供应商标题明确Go Kart或Ride on Car/UTV/Truck/ATV时可填写整车本身；遥控器仅依据当前商品明确的with/W/Parents Remote Control，不使用其他变体或生成文案。禁止假设充电器、说明书或电池随附。此字段允许明确组件名称描述，保留来源，不冒充Amazon审核通过。
