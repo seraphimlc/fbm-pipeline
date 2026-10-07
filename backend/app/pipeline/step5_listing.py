@@ -16,7 +16,7 @@ from app.database import async_session
 from app.models import Product, ProductData
 from app.pipeline.customer_mindset import customer_mindset_context, customer_mindset_matches_product
 from app.pipeline.step6_image import refresh_listing_image_alignment
-from app.pipeline.search_terms import SEARCH_TERMS_MAX_KEYWORDS, normalize_search_terms
+from app.pipeline.search_terms import SEARCH_TERMS_MAX_KEYWORDS, normalize_search_terms, supplement_search_terms
 from app.services.product_payloads import hydrate_product_sections, large_field_storage_enabled, write_section
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -834,6 +834,13 @@ async def run_listing(product_id: int) -> dict:
             product.brand,
         )
         listing = _normalize_listing(listing, pd.color, mindset_context, product.brand)
+
+        listing["search_terms"], _ = supplement_search_terms(listing.get("search_terms"),
+            candidates=pd.keywords_top, supplier_title=pd.title or "",
+            removed_terms=listing.get("removed_keywords"),
+            visible_copy=" ".join([listing["title"], *listing["product_highlights"], *listing["bullets"], listing.get("description") or ""]),
+            max_bytes=settings.STEP5_SEARCH_TERMS_MAX_BYTES)
+
 
         if await large_field_storage_enabled(db):
             await write_section(

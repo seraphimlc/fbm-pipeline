@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.config import settings
 from app.pipeline.amazon_export.context import AmazonExportContext
-from app.pipeline.search_terms import normalize_search_terms
+from app.pipeline.search_terms import supplement_search_terms
 
 
 def amazon_seller_sku_for_export(product, product_data) -> str | None:
@@ -35,9 +35,12 @@ def apply_listing_fill(ctx: AmazonExportContext) -> None:
         fields["model_name"]: pd.item_code,
         fields["manufacturer"]: product.brand,
         fields["description"]: legacy._description(pd),
-        fields["search_terms"]: normalize_search_terms(
+        fields["search_terms"]: supplement_search_terms(
             pd.listing_search_terms,
-            visible_copy=" ".join([pd.listing_title or "", *highlights, *ctx.bullets]),
+            candidates=pd.keywords_top,
+            removed_terms=pd.listing_removed_keywords,
+            supplier_title=pd.title or "",
+            visible_copy=" ".join([pd.listing_title or "", *highlights, *ctx.bullets, pd.listing_description or ""]),
             max_bytes=settings.STEP5_SEARCH_TERMS_MAX_BYTES,
         )[0],
     })

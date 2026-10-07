@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Iterable, TypeAlias
 
-from sqlalchemy import inspect as sa_inspect, literal, select, text, union_all
+from sqlalchemy import inspect as sa_inspect, literal, select, text, union_all, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
@@ -101,7 +101,7 @@ def section_summary(record: Any | None) -> dict[str, Any]:
     return {
         "loaded": False,
         "state": record.status,
-        "has_content": bool(record.payload_json),
+        "has_content": record.status == "ready" and bool(record.payload_json),
         "revision": record.content_revision,
         "updated_at": record.updated_at,
         "content_bytes": record.content_bytes,
@@ -111,7 +111,7 @@ def section_summary(record: Any | None) -> dict[str, Any]:
 def section_response(record: Any | None) -> dict[str, Any]:
     summary = section_summary(record)
     summary["loaded"] = True
-    summary["data"] = parse_payload(record.payload_json) if record and record.payload_json else None
+    summary["data"] = parse_payload(record.payload_json) if record and record.status == "ready" and record.payload_json else None
     if record and record.error_code:
         summary["error_code"] = record.error_code
     return summary
@@ -196,7 +196,8 @@ def apply_section_projection(product: Any, section: str, payload: Any) -> None:
     data = product.__dict__.get("data")
     images = product.__dict__.get("images")
     aplus = product.__dict__.get("aplus")
-    if section == "source" and data and isinstance(payload, dict):
+    if section == "source" and data:
+        payload = payload if isinstance(payload, dict) else {}
         for field in ("packages", "features", "description", "variants"):
             value = payload.get(field)
             set_committed_value(data, field, value if field == "description" else _json_text(value))
@@ -204,9 +205,12 @@ def apply_section_projection(product: Any, section: str, payload: Any) -> None:
         set_committed_value(data, "gigab2b_raw_snapshot", _json_text(payload))
     elif section == "mindset" and data:
         set_committed_value(data, "customer_mindset", _json_text(payload))
-    elif section == "listing" and data and isinstance(payload, dict):
+    elif section == "listing" and data:
+        payload = payload if isinstance(payload, dict) else {}
         scalar_fields = {"listing_title", "listing_search_terms", "listing_title_zh", "listing_description", "listing_description_zh", "listing_search_terms_zh", "listing_primary_keyword"}
-        for field, value in payload.items():
+        fields = scalar_fields | {"listing_bullets", "listing_product_highlights", "listing_bullets_zh", "listing_product_highlights_zh", "listing_check", "listing_removed_keywords"}
+        for field in fields:
+            value = payload.get(field)
             if hasattr(data, field):
                 set_committed_value(data, field, value if field in scalar_fields else _json_text(value))
     elif section == "image_analysis" and images:
@@ -223,7 +227,8 @@ def apply_section_projection(product: Any, section: str, payload: Any) -> None:
         set_committed_value(aplus, "aplus_scripts", _json_text(payload))
     elif section == "aplus_assets" and aplus:
         set_committed_value(aplus, "aplus_images", _json_text(payload))
-    elif section == "export_artifact" and data and isinstance(payload, dict):
+    elif section == "export_artifact" and data:
+        payload = payload if isinstance(payload, dict) else {}
         for field in ("amazon_template_path", "amazon_template_warnings", "amazon_template_fill_summary"):
             value = payload.get(field)
             set_committed_value(data, field, value if field == "amazon_template_path" else _json_text(value))
@@ -244,6 +249,9 @@ async def hydrate_product_sections(
             payload = parse_payload(record.payload_json)
             apply_section_projection(product, section, payload)
             loaded[section] = payload
+        else:
+            # Frozen migration columns are backups, never current facts.
+            apply_section_projection(product, section, None)
     return loaded
 
 
@@ -392,7 +400,7 @@ async def write_section(
     digest, size, serialized = payload_hash(payload)
     record = await load_section(db, product_id, section)
     now = datetime.now()
-    if record is not None and expected_revision is not None and record.content_revision != expected_revision:
+    if expected_revision is not None and (record.content_revision if record else 0) != expected_revision:
         raise RuntimeError(f"stale {section} payload revision for product {product_id}")
     if record is None:
         record = spec.model(
@@ -407,23 +415,47 @@ async def write_section(
             generated_at=generated_at or now,
             **(extras or {}),
         )
-        db.add(record)
+        from sqlalchemy.exc import IntegrityError
+        try:
+            async with db.begin_nested():
+                db.add(record)
+                await db.flush([record])
+        except IntegrityError as exc:
+            raise RuntimeError(f"concurrent {section} creation for product {product_id}") from exc
         return record
 
-    if record.content_sha256 == digest and record.status == status:
+    values = dict(extras or {})
+    if input_fingerprint is not None:
+        values["input_fingerprint"] = input_fingerprint
+    if source_task_run_id is not None:
+        values["source_task_run_id"] = source_task_run_id
+    if generated_at is not None:
+        values["generated_at"] = generated_at
+    content_changed = record.content_sha256 != digest or record.status != status
+    metadata_changed = any(getattr(record, key) != value for key, value in values.items())
+    if not content_changed and not metadata_changed:
+        result = await db.execute(update(spec.model).where(spec.model.product_id == product_id,
+                                  spec.model.content_revision == record.content_revision).values(
+                                  content_revision=record.content_revision).execution_options(synchronize_session=False))
+        if result.rowcount != 1:
+            raise RuntimeError(f"stale {section} payload revision for product {product_id}")
         return record
-    record.payload_json = serialized
-    record.schema_version = spec.schema_version
-    record.content_sha256 = digest
-    record.content_bytes = size
-    record.status = status
-    record.input_fingerprint = input_fingerprint
-    record.source_task_run_id = source_task_run_id
-    record.generated_at = generated_at or now
-    record.error_code = None
-    record.content_revision += 1
-    for name, value in (extras or {}).items():
-        setattr(record, name, value)
+    revision = record.content_revision
+    values.update(payload_json=serialized, schema_version=spec.schema_version,
+                  content_sha256=digest, content_bytes=size, status=status,
+                  error_code=None, updated_at=now, generated_at=generated_at or record.generated_at or now,
+                  content_revision=revision + 1)
+    # Compare-and-swap also protects writers that did not supply an explicit
+    # revision: a stale identity-map row must not overwrite a newer completion.
+    with db.no_autoflush:
+        result = await db.execute(update(spec.model).where(
+            spec.model.product_id == product_id,
+            spec.model.content_revision == revision,
+        ).values(**values).execution_options(synchronize_session=False))
+    if result.rowcount != 1:
+        raise RuntimeError(f"stale {section} payload revision for product {product_id}")
+    for key, value in values.items():
+        set_committed_value(record, key, value)
     return record
 
 

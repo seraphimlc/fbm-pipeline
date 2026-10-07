@@ -112,3 +112,6 @@ Keep entries short and path-oriented.
 - A+ 生图尺寸契约：`APLUS_IMAGE_PROVIDER_SCALE=1.6`（默认请求 `3104x1920`，交付 `1940x1200`）；`scripts/test_aplus_provider_dimensions.py` 验证显式 size、目标尺寸、拒绝小图及失败时不上传。
 - 永久商品黑名单：`POST /api/products/{id}/blacklist`、`product_blacklist`、`scripts/test_product_blacklist.py`；普通列表/进度排除，禁止移出及删除，详情显示 `blacklisted_at`。
 cd backend && .venv/bin/python ../scripts/test_aplus_async_image_jobs.py
+
+- Amazon 床架/自行车/收纳/童车确定性属性规则与条件必填：`backend/app/pipeline/amazon_export/attribute_rules.py`、`reviewed_supplier_attributes.json`；`scripts/test_template_attribute_rules.py`；`scripts/audit_template_attribute_rules.py`（只读 DB + ZIP）；详见 `docs/template-mapping-spec.md`。
+- A+确认前AI数据补充：`services/product_data_supplement.py`、`GET/POST /api/products/{id}/data-supplement`、详情`AI补充数据`标签；`scripts/test_product_data_supplement.py`及`backfill_product_data_supplement.py`；存储契约见`docs/domain-index/product-flow.md`。

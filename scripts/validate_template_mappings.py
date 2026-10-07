@@ -157,6 +157,20 @@ def validate_mapping(path: Path, mapping: dict[str, Any], pipeline_dir: Path) ->
         for key in ("sku", "title", "brand", "price", "shipping_template"):
             if key not in dynamic_fields:
                 findings.append(Finding("WARN", rel, f"`dynamic_fields` 未设置常用字段 `{key}`"))
+        requirements = mapping.get("required_by_product_type", {})
+        if not isinstance(requirements, dict):
+            findings.append(Finding("ERROR", rel, "`required_by_product_type` 类型应为 dict"))
+        else:
+            for product_type, keys in requirements.items():
+                if not isinstance(keys, list) or not keys:
+                    findings.append(Finding("ERROR", rel, f"`required_by_product_type.{product_type}` 应为非空 list"))
+                    continue
+                for key in keys:
+                    if not isinstance(key, str) or not dynamic_fields.get(key):
+                        findings.append(Finding("ERROR", rel, f"条件必填字段没有 dynamic_fields 映射: {product_type}/{key}"))
+        text_fields = mapping.get("supplier_text_fields", [])
+        if not isinstance(text_fields, list) or any(not isinstance(key, str) or not dynamic_fields.get(key) for key in text_fields):
+            findings.append(Finding("ERROR", rel, "`supplier_text_fields` 必须引用已有 dynamic_fields 键"))
 
     return findings
 

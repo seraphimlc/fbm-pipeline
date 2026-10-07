@@ -243,6 +243,11 @@ class OfflineTaskCatalogExportRequest(BaseModel):
     catalog_product_ids: list[int] = Field(..., min_length=1, max_length=1000)
 
 
+class ProductDataSupplementRequest(BaseModel):
+    force: bool = False
+    overrides: dict[str, list[str]] = Field(default_factory=dict)
+
+
 class OfflineTaskQueuedResponse(BaseModel):
     task: OfflineTaskResponse
     steps: list[OfflineTaskStepResponse] = Field(default_factory=list)

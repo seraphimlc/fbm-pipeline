@@ -128,3 +128,32 @@ test('summary polling refreshes a loaded section when its revision changes', asy
   expect(summaryRequests).toBeGreaterThanOrEqual(2);
   expect(browserErrors).toEqual([]);
 });
+
+
+test('data supplement failure preserves manual choice and tab', async ({ page }) => {
+  await page.route('**/api/products/1/sections/listing', async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    const check = typeof body.data.listing_check === 'string' ? JSON.parse(body.data.listing_check) : (body.data.listing_check || {});
+    check.data_supplement = { status: 'completed', rows: [{ key: 'mounting_type', label: '安装方式', value: ['Floor Mount'], source: 'user_confirmation', status: 'filled', allowed_values: ['Floor Mount', 'Wall Mount'], reason: '明确的人工选择' }] };
+    body.data.listing_check = check;
+    await route.fulfill({ response, json: body });
+  });
+  await page.route('**/api/products/1/data-supplement', async (route) => {
+    expect(route.request().method()).toBe('POST');
+    expect(route.request().postDataJSON().overrides).toEqual({ mounting_type: ['Wall Mount'] });
+    await route.fulfill({ status: 409, json: { detail: '商品输入版本已变化' } });
+  });
+  await page.goto('/products/1');
+  await page.getByRole('tab', { name: /AI补充数据/ }).click();
+  await expect(page.getByText('明确的人工选择')).toBeVisible();
+  await page.getByRole('button', { name: /修\s*改/ }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByText('Floor Mount', { exact: true }).click();
+  await page.getByTitle('Wall Mount', { exact: true }).click();
+  await dialog.getByRole('button', { name: /确.*定/ }).click();
+  await expect(page.getByText('商品输入版本已变化', { exact: true })).toBeVisible();
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText('Wall Mount', { exact: true })).toBeVisible();
+  await expect(page.getByRole('tab', { name: /AI补充数据/ })).toHaveAttribute('aria-selected', 'true');
+});

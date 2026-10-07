@@ -28,7 +28,14 @@
     "pesticide_marking[marketplace_id=ATVPDKIKX0DER]#1.marking_type": "EPA Establishment Number",
     "pesticide_marking[marketplace_id=ATVPDKIKX0DER]#1.registration_status": "Product is not a pesticide or pesticide device, as defined under the U.S. Federal Insecticide, Fungicide, and Rodenticide Act."
   },
+  "supplier_origin_default": "China",
+  "supplier_text_fields": [
+    "material",
+    "included_components"
+  ],
   "dynamic_fields": {
+    "import_designation": "import_designation[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "tire_type": "tire[marketplace_id=ATVPDKIKX0DER]#1.tire_type[language_tag=en_US]#1.value",
     "sku": "contribution_sku#1.value",
     "title": "item_name[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
     "brand": "brand[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
@@ -180,26 +187,251 @@
     "brake_style[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value"
   ],
   "browse_category_options": [
-    {"product_type": "BICYCLE", "node": "childrens-bicycles", "path": "玩具和游戏 > 童车、助步、轮滑 > 儿童自行车", "markers": ["kids' bikes", "kids bikes", "kid bike", "kids bicycle", "children bike", "children bicycle", "children's bicycle", "girls bike", "boys bike", "childrens-bicycles", "儿童自行车"]},
-    {"product_type": "BICYCLE", "node": "childrens-mountain-bicycles", "path": "玩具和游戏 > 童车、助步、轮滑 > 儿童自行车 > 儿童山地自行车", "markers": ["kids mountain bike", "kids mountain bicycle", "children mountain bike", "boys mountain bike", "girls mountain bike", "儿童山地自行车"]},
-    {"product_type": "BICYCLE", "node": "childrens-road-bicycles", "path": "玩具和游戏 > 童车、助步、轮滑 > 儿童自行车 > 儿童公路自行车", "markers": ["kids road bike", "children road bike", "儿童公路自行车"]},
-    {"product_type": "BICYCLE", "node": "childrens-balance-bikes", "path": "玩具和游戏 > 童车、助步、轮滑 > 助步车", "markers": ["balance bike", "balance bicycle", "助步车"]},
-    {"product_type": "BICYCLE", "node": "mountain-bicycles", "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 山地自行车", "markers": ["mountain bikes", "mountain bike", "mtb", "mountain bicycle", "山地自行车"]},
-    {"product_type": "BICYCLE", "node": "road-bicycles", "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 公路自行车", "markers": ["road bikes", "road bike", "road bicycle", "公路自行车"]},
-    {"product_type": "BICYCLE", "node": "cruiser-bicycles", "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 城市自行车", "markers": ["cruiser bikes", "cruiser bike", "city bike", "commuter bike", "comfort bike", "step-through bike", "城市自行车"]},
-    {"product_type": "BICYCLE", "node": "folding-bicycles", "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 折叠自行车", "markers": ["folding bikes", "folding bike", "foldable bike", "folding bicycle", "折叠自行车"]},
-    {"product_type": "BICYCLE", "node": "electric-bicycles", "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 电动自行车", "markers": ["electric bicycles", "electric bicycle", "electric bike", "e-bike", "ebike", "电动自行车"]},
-    {"product_type": "BICYCLE", "node": "bmx-bicycles", "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > BMX小轮车", "markers": ["bmx bike", "bmx bicycle", "bmx小轮车"]},
-    {"product_type": "BICYCLE", "node": "freestyle-bmx-bicycles", "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > BMX小轮车 > 自由式BMX", "markers": ["freestyle bike", "freestyle bmx", "freestyle bicycle", "自由式BMX"]},
-    {"product_type": "BICYCLE", "node": "racing-bmx-bicycles", "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > BMX小轮车 > 竞速式BMX", "markers": ["racing bmx", "bmx racing", "竞速式BMX"]},
-    {"product_type": "BICYCLE", "node": "fat-bicycles", "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 胖胎自行车", "markers": ["fat bike", "fat tire bike", "fat tyre bike", "胖胎自行车"]},
-    {"product_type": "BICYCLE", "node": "comfort-bicycles", "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 舒适自行车", "markers": ["comfort bikes", "comfort bike", "舒适自行车"]},
-    {"product_type": "BICYCLE", "node": "hybrid-bicycles", "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 混合自行车", "markers": ["hybrid bikes", "hybrid bike", "混合自行车"]},
-    {"product_type": "BICYCLE", "node": "fixed-gear-bicycles", "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 固定齿轮自行车", "markers": ["fixed gear", "fixie", "single speed fixed", "固定齿轮自行车"]},
-    {"product_type": "BICYCLE", "node": "tandem-bicycles", "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 双人自行车(协力车)", "markers": ["tandem bike", "tandem bicycle", "双人自行车", "协力车"]},
-    {"product_type": "BICYCLE", "node": "triathlon-bicycles", "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 铁人三项自行车", "markers": ["triathlon bike", "triathlon bicycle", "铁人三项自行车"]},
-    {"product_type": "BICYCLE", "node": "recumbent-cycles", "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 卧式自行车", "markers": ["recumbent bike", "recumbent cycle", "卧式自行车"]},
-    {"product_type": "BICYCLE", "node": "jump-and-dirt-bmx-bicycles", "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > BMX小轮车 > 跳跃越野BMX", "markers": ["dirt jump bike", "jump bmx", "跳跃越野BMX"]},
-    {"product_type": "BICYCLE", "node": "cyclocross-bicycles", "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 公路越野自行车", "markers": ["cyclocross bike", "cyclocross bicycle", "公路越野自行车"]}
-  ]
+    {
+      "product_type": "BICYCLE",
+      "node": "childrens-bicycles",
+      "path": "玩具和游戏 > 童车、助步、轮滑 > 儿童自行车",
+      "markers": [
+        "kids' bikes",
+        "kids bikes",
+        "kid bike",
+        "kids bicycle",
+        "children bike",
+        "children bicycle",
+        "children's bicycle",
+        "girls bike",
+        "boys bike",
+        "childrens-bicycles",
+        "儿童自行车"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "childrens-mountain-bicycles",
+      "path": "玩具和游戏 > 童车、助步、轮滑 > 儿童自行车 > 儿童山地自行车",
+      "markers": [
+        "kids mountain bike",
+        "kids mountain bicycle",
+        "children mountain bike",
+        "boys mountain bike",
+        "girls mountain bike",
+        "儿童山地自行车"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "childrens-road-bicycles",
+      "path": "玩具和游戏 > 童车、助步、轮滑 > 儿童自行车 > 儿童公路自行车",
+      "markers": [
+        "kids road bike",
+        "children road bike",
+        "儿童公路自行车"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "childrens-balance-bikes",
+      "path": "玩具和游戏 > 童车、助步、轮滑 > 助步车",
+      "markers": [
+        "balance bike",
+        "balance bicycle",
+        "助步车"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "mountain-bicycles",
+      "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 山地自行车",
+      "markers": [
+        "mountain bikes",
+        "mountain bike",
+        "mtb",
+        "mountain bicycle",
+        "山地自行车"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "road-bicycles",
+      "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 公路自行车",
+      "markers": [
+        "road bikes",
+        "road bike",
+        "road bicycle",
+        "公路自行车"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "cruiser-bicycles",
+      "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 城市自行车",
+      "markers": [
+        "cruiser bikes",
+        "cruiser bike",
+        "city bike",
+        "commuter bike",
+        "comfort bike",
+        "step-through bike",
+        "城市自行车"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "folding-bicycles",
+      "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 折叠自行车",
+      "markers": [
+        "folding bikes",
+        "folding bike",
+        "foldable bike",
+        "folding bicycle",
+        "折叠自行车"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "electric-bicycles",
+      "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 电动自行车",
+      "markers": [
+        "electric bicycles",
+        "electric bicycle",
+        "electric bike",
+        "e-bike",
+        "ebike",
+        "电动自行车"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "bmx-bicycles",
+      "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > BMX小轮车",
+      "markers": [
+        "bmx bike",
+        "bmx bicycle",
+        "bmx小轮车"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "freestyle-bmx-bicycles",
+      "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > BMX小轮车 > 自由式BMX",
+      "markers": [
+        "freestyle bike",
+        "freestyle bmx",
+        "freestyle bicycle",
+        "自由式BMX"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "racing-bmx-bicycles",
+      "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > BMX小轮车 > 竞速式BMX",
+      "markers": [
+        "racing bmx",
+        "bmx racing",
+        "竞速式BMX"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "fat-bicycles",
+      "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 胖胎自行车",
+      "markers": [
+        "fat bike",
+        "fat tire bike",
+        "fat tyre bike",
+        "胖胎自行车"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "comfort-bicycles",
+      "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 舒适自行车",
+      "markers": [
+        "comfort bikes",
+        "comfort bike",
+        "舒适自行车"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "hybrid-bicycles",
+      "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 混合自行车",
+      "markers": [
+        "hybrid bikes",
+        "hybrid bike",
+        "混合自行车"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "fixed-gear-bicycles",
+      "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 固定齿轮自行车",
+      "markers": [
+        "fixed gear",
+        "fixie",
+        "single speed fixed",
+        "固定齿轮自行车"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "tandem-bicycles",
+      "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 双人自行车(协力车)",
+      "markers": [
+        "tandem bike",
+        "tandem bicycle",
+        "双人自行车",
+        "协力车"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "triathlon-bicycles",
+      "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 铁人三项自行车",
+      "markers": [
+        "triathlon bike",
+        "triathlon bicycle",
+        "铁人三项自行车"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "recumbent-cycles",
+      "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 卧式自行车",
+      "markers": [
+        "recumbent bike",
+        "recumbent cycle",
+        "卧式自行车"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "jump-and-dirt-bmx-bicycles",
+      "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > BMX小轮车 > 跳跃越野BMX",
+      "markers": [
+        "dirt jump bike",
+        "jump bmx",
+        "跳跃越野BMX"
+      ]
+    },
+    {
+      "product_type": "BICYCLE",
+      "node": "cyclocross-bicycles",
+      "path": "运动户外休闲 > 户外休闲 > 骑自行车 > 自行车 > 公路越野自行车",
+      "markers": [
+        "cyclocross bike",
+        "cyclocross bicycle",
+        "公路越野自行车"
+      ]
+    }
+  ],
+  "required_by_product_type": {
+    "BICYCLE": [
+      "material",
+      "included_components",
+      "age_range_description",
+      "tire_type",
+      "import_designation"
+    ]
+  }
 }

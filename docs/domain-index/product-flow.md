@@ -143,3 +143,10 @@
 - Mindset freshness checks must hydrate canonical `source` and `source_snapshot` together with `mindset` before recomputing the input fingerprint; any `ProductData` refresh must re-project those sections before readiness or downstream checks.
 
 - 永久黑名单：仅详情页点击确认后调用 `POST /api/products/{id}/blacklist`，记录于 `product_blacklist`；普通列表、工作台进度与下一件待确认排除该记录，商品保留且禁止删除，无解除入口。SQLite 建表时安装永久记录保护触发器；回归 `scripts/test_product_blacklist.py`。
+
+## A+确认前数据补充
+
+- 服务：`backend/app/services/product_data_supplement.py`，规则优先，仅原文明确枚举允许AI提取。结果、原文、来源和输入指纹持久保存于canonical Listing的`listing_check.data_supplement`；不改写原始供应商资料或重建素材。
+- A+ worker自动执行补充轮；旧商品首次确认时补核查。`GET/POST /api/products/{id}/data-supplement`用于只读报告/补充或人工枚举指定。
+- 详情`AI补充数据`标签位于Listing和A+之间；使用Listing分段加载，展示原值、结果、来源、依据、状态及枚举修改。
+- 验证：`scripts/test_product_data_supplement.py`；`scripts/backfill_product_data_supplement.py --apply --output <dir>`先在线备份，再按输入围栏保存当前活跃商品；生产备份及报告放`data/exports/data-supplement-20261007/`。

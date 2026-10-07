@@ -10,7 +10,7 @@ import {
   PictureOutlined, EyeOutlined, VideoCameraOutlined,
   FilePdfOutlined, FileTextOutlined,
 } from '@ant-design/icons';
-import { blacklistProduct, getWorkbenchOverview, listProducts, getProduct, getProductSection, getProductImageSection, getProductAplusSection, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, generateProductAplus, runProductFromStep, runPipelineStep, updateProduct, updateProductListingImages, listCategoryOptions, getProductMaterialSpreadsheetPreview, productMaterialPreviewUrl } from '../api';
+import { supplementProductData, blacklistProduct, getWorkbenchOverview, listProducts, getProduct, getProductSection, getProductImageSection, getProductAplusSection, restartPipeline, retryStep, resumePipeline, pausePipeline, deleteProduct, openProductFile, extractProductZip, regenerateAplusModule, retryAplusRegeneration, generateProductAplus, runProductFromStep, runPipelineStep, updateProduct, updateProductListingImages, listCategoryOptions, getProductMaterialSpreadsheetPreview, productMaterialPreviewUrl } from '../api';
 import type { CategoryOption, ProductDetail, ProductMaterialAsset, ProductMaterialSpreadsheetPreview, ProductSectionResponse } from '../api';
 import type { MutationCallsiteId } from '../api/mutationInventory.generated.ts';
 import { runMutationWithUX } from '../api/mutationRunner.ts';
@@ -412,6 +412,9 @@ const ProductDetail: React.FC = () => {
   const [aplusGenerateLoading, setAplusGenerateLoading] = useState(false);
   const [listingRegenerateLoading, setListingRegenerateLoading] = useState(false);
   const [pipelineRetryLoading, setPipelineRetryLoading] = useState(false);
+  const [supplementLoading, setSupplementLoading] = useState(false);
+  const [supplementEdit, setSupplementEdit] = useState<any | null>(null);
+  const [supplementValues, setSupplementValues] = useState<string[]>([]);
   const [restartLoading, setRestartLoading] = useState(false);
   const [activeTabKey, setActiveTabKey] = useState('basic');
   const [fullDetailProductId, setFullDetailProductId] = useState<number | null>(null);
@@ -561,6 +564,7 @@ const ProductDetail: React.FC = () => {
       basic: ['source'],
       mindset: ['mindset'],
       listing: ['listing'],
+      supplement: ['source', 'listing'],
       images: ['image_analysis', 'image_selection', 'image_compliance'],
       aplus: ['aplus_plan', 'aplus_script', 'aplus_assets'],
       files: ['export_artifact'],
@@ -981,6 +985,23 @@ const ProductDetail: React.FC = () => {
     };
   });
   const listingCheck = parseJson(data?.listing_check, {});
+  const supplementReport = listingCheck?.data_supplement || {};
+  const supplementSourceLabels = { supplier_rule: '供应商资料／规则', supplier_reviewed_evidence: '已核对的供应商证据', user_policy: '用户默认', user_confirmation: '人工指定', ai_evidence: 'AI提取明确原文', keyword_rule: '关键词规则', existing: '已有数据', no_supported_candidates: '无有效候选' };
+  const supplementValueText = (value: any) => value == null || value === '' || (Array.isArray(value) && !value.length) ? '—' : (Array.isArray(value) ? value.map((v) => typeof v === 'object' ? JSON.stringify(v) : String(v)).join('；') : String(value));
+  const handleDataSupplement = async (force = false, overrides?: Record<string, string[]>) => {
+    setSupplementLoading(true);
+    await runMutationWithUX(
+      'supplementProductData|frontend/src/pages/ProductDetail.tsx|handleDataSupplement',
+      async (metadata) => {
+        const response = await supplementProductData(product.id, { force, overrides }, metadata);
+        await loadSection('listing', true);
+        if (response.data.status === 'failed') message.warning('已保存规则结果，AI提取失败；请查看原因后重试');
+        else message.success('补充数据与来源已保存');
+        setSupplementEdit(null);
+      },
+      { errorFallback: '补充数据失败', onError: (errorMessage) => message.error(errorMessage), clearLoading: () => setSupplementLoading(false) },
+    ).catch(() => undefined);
+  };
   const keywordPlan = listingCheck?.keyword_plan || {};
   const positioning = listingCheck?.positioning || {};
   const removedKeywords = parseJson(data?.listing_removed_keywords, []);
@@ -2388,7 +2409,7 @@ const ProductDetail: React.FC = () => {
                 <Descriptions.Item label="组装尺寸">{data ? `${numberText(data.dimension_length)} × ${numberText(data.dimension_width)} × ${numberText(data.dimension_height)} 英寸` : '-'}</Descriptions.Item>
                 <Descriptions.Item label="产品重量">{numberText(data?.weight, ' 磅')}</Descriptions.Item>
                 <Descriptions.Item label="供应商">{data?.seller || '-'}</Descriptions.Item>
-                <Descriptions.Item label="产地">{data?.origin || '-'}</Descriptions.Item>
+                <Descriptions.Item label="产地">{data?.origin || 'China（用户默认）'}</Descriptions.Item>
                 <Descriptions.Item label="Listing图片">{listingImageCount ?? '-'}</Descriptions.Item>
                 <Descriptions.Item label="采集时间">{data?.collected_at ? new Date(data.collected_at).toLocaleString('zh-CN') : '-'}</Descriptions.Item>
                 <Descriptions.Item label="素材目录">
@@ -3545,6 +3566,43 @@ const ProductDetail: React.FC = () => {
       ),
     },
     {
+      key: 'supplement',
+      label: '🧾 AI补充数据',
+      children: (
+        <div>
+          {sectionStatus(['source', 'listing'])}
+          <Card title="AI补充数据" extra={<Space>
+            <Button loading={supplementLoading} onClick={() => handleDataSupplement(false)}>补充剩余缺口</Button>
+            <Button disabled={supplementLoading} onClick={() => handleDataSupplement(true)}>重新核查</Button>
+          </Space>}>
+            <Alert type="info" showIcon message="先用规则补齐，AI只提取资料中明确写出的数据；没有依据就保留为空。补充结果和来源保存后复用，A+确认前核查。" style={{ marginBottom: 16 }} />
+            <Space wrap style={{ marginBottom: 16 }}>
+              <Tag color={supplementReport.status === 'completed' ? 'green' : supplementReport.status === 'failed' ? 'error' : 'default'}>{supplementReport.status === 'completed' ? '已核查并保存' : supplementReport.status === 'failed' ? 'AI提取失败' : '尚未补充'}</Tag>
+              {supplementReport.updated_at && <Text type="secondary">保存时间：{supplementReport.updated_at.replace('T', ' ').split('.')[0]}</Text>}
+              <Text type="secondary">待确认／适配字段：{(supplementReport.rows || []).filter((r) => ['unconfirmed', 'needs_mapping'].includes(r.status)).length}</Text>
+            </Space>
+            {supplementReport.error && <Alert type="warning" message={supplementReport.error} style={{ marginBottom: 16 }} />}
+            {!!supplementReport.blocking_fields?.length && <Alert type="warning" message={`必需数据待确认：${supplementReport.blocking_fields.join('、')}`} style={{ marginBottom: 16 }} />}
+            <Table rowKey="key" size="small" dataSource={supplementReport.rows || []} pagination={{ pageSize: 20 }} scroll={{ x: 1100 }}
+              columns={[
+                { title: '字段', dataIndex: 'label', width: 150 },
+                { title: '原始／已有值', dataIndex: 'original', width: 180, render: supplementValueText },
+                { title: '补充结果', dataIndex: 'value', width: 220, render: supplementValueText },
+                { title: '来源', dataIndex: 'source', width: 150, render: (v) => supplementSourceLabels[v] || v || '—' },
+                { title: '依据／原因', width: 280, render: (_, row) => <div>{row.reason === 'Supplier properties/text and category geometry rules' ? '由供应商参数或已验证规则提取' : row.reason === 'Supplier evidence has no supported template value' ? '资料中没有可匹配的明确值' : row.reason}<div><Text type="secondary">{(row.evidence || []).map((e) => e.quote || e.path || e.source).filter(Boolean).join('；')}</Text></div></div> },
+                { title: '状态', dataIndex: 'status', width: 100, render: (v) => <Tag color={v === 'filled' ? 'green' : v === 'optional_empty' ? 'default' : 'warning'}>{v === 'filled' ? '有明确值' : v === 'optional_empty' ? '可选留空' : v === 'needs_mapping' ? '待适配' : '待确认'}</Tag> },
+                { title: '操作', width: 80, render: (_, row) => row.allowed_values?.length ? <Button size="small" onClick={() => { setSupplementEdit(row); setSupplementValues(Array.isArray(row.value) ? row.value.map(String) : []); }}>修改</Button> : null },
+              ]} locale={{ emptyText: '尚未补充数据；点击“补充剩余缺口”进行核查并保存' }} />
+          </Card>
+          <Modal title={`人工指定：${supplementEdit?.label || ''}`} open={Boolean(supplementEdit)} confirmLoading={supplementLoading}
+            onCancel={() => setSupplementEdit(null)} onOk={() => supplementValues.length && handleDataSupplement(false, { [supplementEdit.key]: supplementValues })} okButtonProps={{ disabled: !supplementValues.length }}>
+            <Select style={{ width: '100%' }} value={supplementValues[0]} options={(supplementEdit?.allowed_values || []).map((value) => ({ value, label: value }))} onChange={(value) => setSupplementValues([value])} />
+            <Text type="secondary">保存后标记为人工指定，不记为供应商已确认。</Text>
+          </Modal>
+        </div>
+      ),
+    },
+    {
       key: 'aplus',
       label: '🎨 A+内容',
       children: (
@@ -4005,7 +4063,7 @@ const ProductDetail: React.FC = () => {
       ),
     },
   ];
-  const tabOrder = ['basic', 'competitor', 'images', 'mindset', 'listing', 'aplus', 'files'];
+  const tabOrder = ['basic', 'competitor', 'images', 'mindset', 'listing', 'supplement', 'aplus', 'files'];
   const orderedTabItems = tabOrder
     .map((key) => tabItems.find((item) => item.key === key))
     .filter(Boolean);

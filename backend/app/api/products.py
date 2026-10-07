@@ -372,6 +372,18 @@ def _customer_mindset_ready(product: Product) -> bool:
         return False
 
 
+async def _rebase_customer_mindset_for_manual_confirmation(
+    db: AsyncSession,
+    product: Product,
+) -> bool:
+    """A confirmation cannot prove that an obsolete brief matches new inputs.
+
+    Historical version upgrades belong to the evidence-based repair tool.
+    Keep this compatibility helper read-only for existing callers.
+    """
+    return _customer_mindset_ready(product)
+
+
 def _listing_content_ready(product: Product) -> bool:
     data = product.data
     title = str(data.listing_title or "").strip() if data else ""
@@ -2233,7 +2245,12 @@ def _apply_catalog_export_row_overrides(ws, row_number: int, product: Product, p
         _set_import_row_attr(ws, row_number, PRODUCT_ID_VALUE_ATTR, product.upc)
 
     dynamic_fields = mapping.get("dynamic_fields") if isinstance(mapping.get("dynamic_fields"), dict) else {}
-    for key in SEMANTIC_DROPDOWN_FIELD_KEYS:
+    configured_keys = mapping.get("semantic_fields")
+    semantic_keys = (
+        configured_keys if isinstance(configured_keys, list) and configured_keys
+        else SEMANTIC_DROPDOWN_FIELD_KEYS
+    )
+    for key in semantic_keys:
         attrs = _flatten_template_field_values(dynamic_fields.get(key))
         if key == "target_audience":
             for field_key, field_value in dynamic_fields.items():
@@ -2264,6 +2281,22 @@ def _apply_catalog_export_row_overrides(ws, row_number: int, product: Product, p
         ws.cell(row_number, column).value = None
     for column, value in zip(fabric_columns, _catalog_export_fabric_type_values(pd)):
         ws.cell(row_number, column).value = value
+
+    # Apply the same supplier rules to cached and fresh workbooks. Catalog
+    # merging must neither erase strategy values nor resurrect stale LLM data.
+    from app.pipeline.amazon_export.attribute_rules import resolve_attributes, uses_attribute_rules
+    if uses_attribute_rules(mapping):
+        product_type = str(ws.cell(row_number, columns["product_type#1.value"]).value or "")
+        decisions = resolve_attributes(pd, mapping, Path(mapping["template_path"]), product_type)
+        for key, decision in decisions.items():
+            attrs = _flatten_template_field_values(dynamic_fields.get(key))
+            if key == "target_audience": attrs += [v for k,v in dynamic_fields.items() if k.startswith("target_audience_")]
+            if key == "theme": attrs += _flatten_template_field_values(dynamic_fields.get("theme_1"))
+            targets = [columns[attr] for attr in attrs if attr in columns]
+            for column in targets:
+                ws.cell(row_number, column).value = None
+            for column, value in zip(targets, decision["values"]):
+                ws.cell(row_number, column).value = value
 
 
 def _catalog_stock_export_override(ws, mapping: dict, stock: int) -> tuple[int, int]:
@@ -4704,6 +4737,18 @@ async def build_catalog_export_zip(catalog_items: list[CatalogProduct], db: Asyn
                             try:
                                 _copy_import_data_row(source_path, ws, row_number, data_row=data_row)
                                 _apply_catalog_export_row_overrides(ws, row_number, product, pd, mapping)
+                                # Check conditional requirements on the final merged
+                                # row, including cached workbooks. At least one value
+                                # is required for multi-slot fields, not every slot.
+                                final_columns = _template_attribute_columns(ws)
+                                final_type = ws.cell(row_number, final_columns["product_type#1.value"]).value
+                                missing = []
+                                for key in mapping.get("required_by_product_type", {}).get(final_type, []):
+                                    attrs = _flatten_template_field_values(mapping["dynamic_fields"].get(key))
+                                    if not any(attr in final_columns and ws.cell(row_number, final_columns[attr]).value not in (None, "") for attr in attrs):
+                                        missing.append(key)
+                                if missing:
+                                    raise CatalogExportRowBusinessError("供应商属性待补充，不能提交 Amazon：" + ", ".join(missing))
                             except ValueError as exc:
                                 raise CatalogExportRowBusinessError(str(exc)) from exc
                             quantity_col, stock_quantity = stock_override
@@ -5302,6 +5347,29 @@ async def get_aplus_upload_batch(batch_id: int, db: AsyncSession = Depends(get_d
     return batch
 
 
+from app.api.schemas import ProductDataSupplementRequest
+
+
+@router.get("/{product_id}/data-supplement")
+async def get_product_data_supplement(product_id: int, db: AsyncSession = Depends(get_db)):
+    product = await db.scalar(select(Product).where(Product.id == product_id).options(selectinload(Product.data)))
+    if not product or not product.data:
+        raise HTTPException(404, "商品不存在")
+    await hydrate_product_sections(db, product, ("listing",))
+    return _json_loads(product.data.listing_check, {}).get("data_supplement", {"status": "not_started", "rows": []})
+
+
+@router.post("/{product_id}/data-supplement")
+async def supplement_product_data(product_id: int, body: ProductDataSupplementRequest):
+    from app.services.product_data_supplement import run_data_supplement
+    try:
+        return await run_data_supplement(product_id, force=body.force, overrides=body.overrides)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
 @router.post("/{product_id}/confirm", response_model=ProductResponse)
 async def confirm_product(product_id: int, db: AsyncSession = Depends(get_db)):
     """确认 Listing 图片与完整 A+ 后，才同步进入待导出列表。"""
@@ -5329,10 +5397,11 @@ async def confirm_product(product_id: int, db: AsyncSession = Depends(get_db)):
     )
     if is_running(product.id):
         raise HTTPException(400, "任务还在运行中，完成后再确认")
-    if product.workflow_node != WORKFLOW_NODE_CONFIRM_IMAGES_APLUS or product.workflow_status != WORKFLOW_STATUS_PENDING:
+    previously_confirmed = bool(product.catalog_item and product.catalog_item.confirmed_at)
+    review_pending = product.workflow_node == WORKFLOW_NODE_CONFIRM_IMAGES_APLUS and product.workflow_status == WORKFLOW_STATUS_PENDING
+    current_confirmation = previously_confirmed and product.workflow_node == WORKFLOW_NODE_FLOW_DONE
+    if not (review_pending or current_confirmation):
         raise HTTPException(400, "A+ 图片尚未完成，暂不能确认进入待导出")
-    if not _customer_mindset_ready(product):
-        raise HTTPException(400, "用户心智梳理还没有完成，不能确认进入待导出")
     if not _listing_content_ready(product):
         raise HTTPException(400, "Listing 标题、商品亮点和五点还没有完整生成")
     if not product.images or not str(product.images.main_image_path or "").strip() or not str(product.images.image_analysis or "").strip():
@@ -5343,6 +5412,22 @@ async def confirm_product(product_id: int, db: AsyncSession = Depends(get_db)):
         or not _aplus_images_complete(product)
     ):
         raise HTTPException(400, "A+ 图片未完整生成，不能确认进入待导出")
+    if not _customer_mindset_ready(product):
+        if not await _rebase_customer_mindset_for_manual_confirmation(db, product):
+            raise HTTPException(400, "用户心智梳理还没有完成，不能确认进入待导出")
+
+    # Legacy products also receive the supplement round before their first approval.
+    # The service commits outside this session and fences stale provider results.
+    if review_pending:
+        await db.commit()
+        from app.services.product_data_supplement import run_data_supplement
+        supplement = await run_data_supplement(product_id)
+        await db.refresh(product, attribute_names=["data"])
+        await hydrate_product_sections(db, product, ("listing",))
+        if supplement.get("status") == "failed":
+            raise HTTPException(400, "AI补充数据失败，请在AI补充数据页重试后确认")
+        if supplement.get("blocking_fields"):
+            raise HTTPException(400, "必需数据尚未确认，请查看AI补充数据页：" + ", ".join(supplement["blocking_fields"]))
 
     product.status = COMPLETED
     product.current_step = 6

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+from fastapi import HTTPException
+
 import argparse
 import asyncio
 from datetime import datetime
@@ -563,18 +566,43 @@ async def _test_aplus_done_requires_user_confirmation_before_export_ready() -> N
         original_running = product_api.is_running
         original_customer_mindset_ready = product_api._customer_mindset_ready
         original_listing_content_ready = product_api._listing_content_ready
+        original_rebase_mindset = product_api._rebase_customer_mindset_for_manual_confirmation
         product_api.is_running = lambda _product_id: False
         product_api._customer_mindset_ready = lambda _product: True
         product_api._listing_content_ready = lambda _product: True
+        async def rebase_mindset(_db, _product):
+            return True
+        product_api._rebase_customer_mindset_for_manual_confirmation = rebase_mindset
         try:
-            await product_api.confirm_product(product_id, db=session)
+            # This workflow fixture has no supplier/template inputs. Verify the
+            # integrated supplement call without performing external extraction.
+            with patch('app.services.product_data_supplement.run_data_supplement',
+                       new_callable=AsyncMock, return_value={"status": "completed", "blocking_fields": []}) as supplement:
+                await product_api.confirm_product(product_id, db=session)
+                supplement.assert_awaited_once_with(product_id)
         finally:
             product_api.is_running = original_running
             product_api._customer_mindset_ready = original_customer_mindset_ready
             product_api._listing_content_ready = original_listing_content_ready
+            product_api._rebase_customer_mindset_for_manual_confirmation = original_rebase_mindset
 
         confirmed = await _product_state(session, product_id)
         assert confirmed.status == COMPLETED, confirmed.status
+        assert confirmed.workflow_node == WORKFLOW_NODE_FLOW_DONE, confirmed.workflow_node
+        assert confirmed.workflow_status == WORKFLOW_STATUS_SUCCEEDED, confirmed.workflow_status
+        assert confirmed.catalog_item.confirmed_at is not None, confirmed.catalog_item.confirmed_at
+
+        # Repeated confirmation validates the same current generation gates.
+        with patch.object(product_api, "_customer_mindset_ready", return_value=True), patch.object(product_api, "_listing_content_ready", return_value=True), patch.object(product_api, "is_running", return_value=False):
+            await product_api.confirm_product(product_id, db=session)
+        with patch.object(product_api, "_customer_mindset_ready", return_value=False), patch.object(product_api, "_listing_content_ready", return_value=True), patch.object(product_api, "is_running", return_value=False):
+            try:
+                await product_api.confirm_product(product_id, db=session)
+            except HTTPException as exc:
+                assert exc.status_code == 400
+            else:
+                raise AssertionError("historical confirmation bypassed invalid current brief")
+        await session.refresh(confirmed)
         assert confirmed.workflow_node == WORKFLOW_NODE_FLOW_DONE, confirmed.workflow_node
         assert confirmed.workflow_status == WORKFLOW_STATUS_SUCCEEDED, confirmed.workflow_status
         assert confirmed.catalog_item.confirmed_at is not None, confirmed.catalog_item.confirmed_at

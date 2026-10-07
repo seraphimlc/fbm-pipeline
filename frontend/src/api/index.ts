@@ -1693,7 +1693,10 @@ export const getProduct = (id: number, params?: { compact?: boolean }) =>
   api.get<ProductDetail>(`/products/${id}`, { params });
 
 export const getProductSection = (id: number, section: string) =>
-  api.get<ProductSectionResponse>(`/products/${id}/sections/${section}`);
+    api.get<ProductSectionResponse>(`/products/${id}/sections/${section}`);
+
+export const supplementProductData = (id: number, body: { force?: boolean; overrides?: Record<string, string[]> } = {}, metadata?: MutationMetadataConfig) =>
+  api.post(`/products/${id}/data-supplement`, body, mutationRequestConfig(metadata, { timeout: 180000 }));
 
 export const getProductImageSection = (id: number, part: 'analysis' | 'selection' | 'compliance') =>
   api.get<ProductSectionResponse>(`/products/${id}/sections/images`, { params: { part } });
@@ -1751,7 +1754,7 @@ export const retryProductKeywordResearch = (id: number, metadata?: MutationMetad
   api.post<Product>(`/products/${id}/keyword-research/retry`, null, mutationRequestConfig(metadata));
 
 export const confirmProduct = (id: number, metadata?: MutationMetadataConfig) =>
-  api.post<Product>(`/products/${id}/confirm`, null, mutationRequestConfig(metadata));
+  api.post<Product>(`/products/${id}/confirm`, null, mutationRequestConfig(metadata, { timeout: 180000 }));
 
 export const deleteProduct = (id: number, metadata?: MutationMetadataConfig) =>
   api.delete(`/products/${id}`, mutationRequestConfig(metadata));

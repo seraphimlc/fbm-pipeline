@@ -69,6 +69,7 @@ export type MutationCallsiteId =
   | "runPipelineStep|frontend/src/pages/ProductDetail.tsx|generateCustomerMindset"
   | "runProductFromStep|frontend/src/pages/ProductDetail.tsx|regenerateListing"
   | "runProductFromStep|frontend/src/pages/ProductDetail.tsx|retryInterruptedPipeline"
+  | "supplementProductData|frontend/src/pages/ProductDetail.tsx|handleDataSupplement"
   | "updateCatalogTemplateFileStatus|frontend/src/pages/CatalogList.tsx|toggleTemplateFile"
   | "updateConfig|frontend/src/pages/ConfigPage.tsx|saveConfig"
   | "updateLocalEnvValue|frontend/src/components/LocalEnvConfigTable.tsx|saveValue"
@@ -592,6 +593,15 @@ export const mutationInventory = [
     "method": "post",
     "source": "frontend/src/pages/ProductDetail.tsx",
     "handler": "retryInterruptedPipeline",
+    "via": "direct"
+  },
+  {
+    "id": "supplementProductData|frontend/src/pages/ProductDetail.tsx|handleDataSupplement",
+    "client": "supplementProductData",
+    "endpoint": "`/products/${id}/data-supplement`",
+    "method": "post",
+    "source": "frontend/src/pages/ProductDetail.tsx",
+    "handler": "handleDataSupplement",
     "via": "direct"
   },
   {

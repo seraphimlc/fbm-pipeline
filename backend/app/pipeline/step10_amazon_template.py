@@ -162,6 +162,14 @@ def _is_standard_bed_frame_category(category_text: str) -> bool:
 def _load_template_mapping(product: Product, pd: ProductData) -> dict:
     key = (product.brand or "", pd.leaf_category or "")
     mapping_path = BRAND_TEMPLATE_MAPPINGS.get(key)
+    # Supplier product identity outranks stale competitor-derived leaf labels.
+    # This changes export routing only; manual/source category records stay intact.
+    own_title = str(pd.title or "").lower()
+    own_type = str(pd.product_type or "").lower()
+    if re.search(r"\b(?:go[- ]?kart|ride[- ]on (?:models? )?(?:car|truck)|electric atv)\b", own_title):
+        mapping_path = RIDE_ON_TOY_MAPPING
+    elif (product.brand or "") == "Vindhvisk" and "bike" in own_type and re.search(r"\b(?:bike|bicycle)\b", own_title):
+        mapping_path = BICYCLE_MAPPING
     category_text = " ".join(
         str(item or "")
         for item in (
@@ -286,6 +294,22 @@ def _defined_name_suffix_for_attr(attr: str) -> str:
     return re.sub(r"[\[\]=#]", "", attr)
 
 
+from functools import lru_cache
+
+
+@lru_cache(maxsize=2)
+def _dropdown_workbook(template_path: str, template_sha256: str):
+    workbook = load_workbook(template_path, keep_vba=True, data_only=False, read_only=False)
+    workbook.close()
+    return workbook
+
+
+@lru_cache(maxsize=256)
+def _dropdown_values(template_path: str, template_sha256: str, expected_name: str) -> tuple[str, ...]:
+    workbook = _dropdown_workbook(template_path, template_sha256)
+    return tuple(dict.fromkeys(_defined_name_values(workbook, expected_name)))
+
+
 def _allowed_values_for_template_attr(template_path: Path, product_type: str | None, attr: str) -> list[str]:
     if not product_type:
         return []
@@ -293,12 +317,8 @@ def _allowed_values_for_template_attr(template_path: Path, product_type: str | N
     if prefix[:1].isdigit():
         prefix = "_" + prefix
     expected_name = prefix + _defined_name_suffix_for_attr(attr)
-    wb = load_workbook(template_path, keep_vba=True, data_only=False, read_only=False)
-    values: list[str] = []
-    for value in _defined_name_values(wb, expected_name):
-        if value not in values:
-            values.append(value)
-    return values
+    resolved = template_path.expanduser().resolve()
+    return list(_dropdown_values(str(resolved), sha256_file(resolved), expected_name))
 
 
 def _information_workbook_values(pd: ProductData) -> dict[str, Any]:
@@ -512,11 +532,17 @@ def _filled_field_names(fill: dict[str, Any], columns: dict[str, str]) -> set[st
 
 
 def _missing_required_fields(mapping: dict, fill: dict[str, Any], columns: dict[str, str]) -> list[str]:
-    return [
+    missing = [
         attr
         for attr in _critical_template_fields(mapping)
         if attr in columns and not _nonempty(fill.get(attr))
     ]
+    fields = mapping.get("dynamic_fields", {})
+    for key in mapping.get("required_by_product_type", {}).get(fill.get("product_type#1.value"), []):
+        attrs = _flatten_mapping_values(fields.get(key))
+        if not attrs or not any(attr in columns and _nonempty(fill.get(attr)) for attr in attrs):
+            missing.append(attrs[0] if attrs else key)
+    return list(dict.fromkeys(missing))
 
 
 def _listing_template_warnings(pd: ProductData, mapping: dict | None = None) -> list[str]:
@@ -1329,6 +1355,12 @@ def _select_general_category_option(mapping: dict, pd: ProductData) -> dict[str,
     if not isinstance(options, list):
         return None
 
+    from app.pipeline.amazon_export.attribute_rules import reviewed_attributes
+    identity_type = reviewed_attributes(pd).get("product_type", {}).get("values", [])
+    if identity_type:
+        option = next((item for item in options if item.get("product_type") == identity_type[0]), None)
+        if option: return option
+
     best: tuple[int, int, dict[str, Any]] | None = None
     for index, option in enumerate(options):
         if not isinstance(option, dict):
@@ -1469,6 +1501,11 @@ Compact product facts (supplier/GIGA first; do not use unstated assumptions):
 
 async def ensure_amazon_template_semantic_fields(product: Product, pd: ProductData, mapping: dict, template_path: Path) -> None:
     product_type = _template_product_type_for_semantic_fields(mapping, pd)
+    from app.pipeline.amazon_export.attribute_rules import resolve_attributes, uses_attribute_rules
+    if uses_attribute_rules(mapping):
+        for key, decision in resolve_attributes(pd, mapping, template_path, product_type or "").items():
+            _set_listing_check_template_field(pd, _template_field_key(key), decision)
+        return
     options = _semantic_dropdown_options(mapping, template_path, product_type)
     if not options:
         return
@@ -1476,54 +1513,19 @@ async def ensure_amazon_template_semantic_fields(product: Product, pd: ProductDa
     existing = _listing_check_dict(pd).get("amazon_template_fields")
     if isinstance(existing, dict) and all(
         isinstance(existing.get(_template_field_key(key)), dict)
+        and existing[_template_field_key(key)].get("source") != "llm_error"
         and isinstance(existing[_template_field_key(key)].get("values"), list)
         and all(str(value) in allowed_values for value in existing[_template_field_key(key)].get("values", []))
         for key, allowed_values in options.items()
     ):
         return
 
-    try:
-        client = settings.get_llm_client()
-        response = await client.chat.completions.create(
-            model=settings.LLM_MODEL,
-            messages=[
-                {"role": "system", "content": "You choose Amazon template dropdown values from evidence. Return JSON only."},
-                {"role": "user", "content": _semantic_dropdown_prompt(product, pd, options)},
-            ],
-            **settings.chat_completion_options(model=settings.LLM_MODEL, max_tokens=1200, temperature=0),
-            response_format={"type": "json_object"},
-        )
-        content = response.choices[0].message.content or "{}"
-        payload = json.loads(content)
-    except Exception as exc:
-        logger.warning("[Step10] 模板语义下拉字段模型分析失败 product_id=%s: %s", product.id, exc)
-        for key, allowed_values in options.items():
-            _set_listing_check_template_field(pd, _template_field_key(key), {
-                "values": [],
-                "reason": f"Model analysis failed: {type(exc).__name__}: {exc}",
-                "source": "llm_error",
-                "allowed_values": allowed_values,
-                "product_type": product_type,
-            })
-        return
-
-    fields_payload = payload.get("fields") if isinstance(payload, dict) else {}
-    fields_payload = fields_payload if isinstance(fields_payload, dict) else {}
+    # Enrichment happens before A+ approval, not during export. Unknown fields
+    # stay empty; their allowed values and reason remain visible in the report.
     for key, allowed_values in options.items():
-        item = fields_payload.get(key)
-        item = item if isinstance(item, dict) else {}
-        values = item.get("values")
-        values = values if isinstance(values, list) else []
-        selected_values: list[str] = []
-        for value in values:
-            text = str(value or "").strip()
-            if text in allowed_values and text not in selected_values:
-                selected_values.append(text)
         _set_listing_check_template_field(pd, _template_field_key(key), {
-            "values": selected_values[:5],
-            "reason": _compact_template_text(item.get("reason") or "", 600),
-            "source": "llm",
-            "allowed_values": allowed_values,
+            "values": [], "reason": "请先完成AI补充数据；导出不临时调用模型猜测属性",
+            "source": "pending_supplement", "allowed_values": allowed_values,
             "product_type": product_type,
         })
 

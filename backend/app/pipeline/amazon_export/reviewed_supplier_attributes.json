@@ -1,0 +1,352 @@
+{
+  "W808P389333": {
+    "identity": "a0a5f2307ad553055b171581e5aaf2969a3ecd9b45b0675a8ff73fb6ceb49a86",
+    "fields": {
+      "door_style": {
+        "values": [
+          "Recessed Panel"
+        ],
+        "reason": "Supplier photo shows recessed door center surrounded by a rectangular raised border.",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W808P389333/image analysis/contact_sheets/auto_selection_20260803_105423/W808P389333_sheet_01.jpg",
+            "sha256": "b8457ad731730f2c22d9197b9be72a0f9e1f74f1798a3c5c061d74318b3e0fc4"
+          }
+        ]
+      }
+    }
+  },
+  "W808P420585": {
+    "identity": "28fb95deec41c82d9a919f55eb18af04a6a95451918c2b67418136092a7adecd",
+    "fields": {
+      "door_style": {
+        "values": [
+          "Recessed Panel"
+        ],
+        "reason": "Supplier photo shows recessed door center surrounded by a rectangular raised border.",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W808P420585/image analysis/contact_sheets/auto_selection_20260910_091658/W808P420585_sheet_01.jpg",
+            "sha256": "4fccadc55447f23d0a7aa9b20d0d092d4adf412d611cb1d8ce711f2ed611fd62"
+          }
+        ]
+      }
+    }
+  },
+  "W808P410990": {
+    "identity": "023fdb1c3ac7e90e10daa1728360f904ca2cd1625384e4e4272b4e7aed78fe83",
+    "fields": {
+      "door_style": {
+        "values": [
+          "Recessed Panel"
+        ],
+        "reason": "Supplier photo shows recessed door center surrounded by a rectangular raised border.",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W808P410990/image analysis/contact_sheets/auto_selection_20260910_092703/W808P410990_sheet_01.jpg",
+            "sha256": "342b28462a1b04072332e9f34ac1c4e0dc24ee4aa31a9fe56b585b8e9991802f"
+          }
+        ]
+      }
+    }
+  },
+  "W808P389338": {
+    "identity": "0689093bdc3d30c8eddc5861c98790bdc34986c06fbb822a8530072b1b996fd7",
+    "fields": {
+      "door_style": {
+        "values": [
+          "Recessed Panel"
+        ],
+        "reason": "Supplier photo shows recessed door center surrounded by a rectangular raised border.",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W808P389338/image analysis/contact_sheets/auto_selection_20260910_100346/W808P389338_sheet_01.jpg",
+            "sha256": "9ca03958bf6ffb89ebde5a21e4521c696d54e5c7b3e480434a4316221d71af24"
+          }
+        ]
+      }
+    }
+  },
+  "W808P175911": {
+    "identity": "179bca859f71e9e0a9246878211aff251b5877bd60c54bda6caa840100379b71",
+    "fields": {
+      "door_style": {
+        "values": [
+          "Recessed Panel"
+        ],
+        "reason": "Supplier photo shows recessed door center surrounded by a rectangular raised border.",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W808P175911/image analysis/contact_sheets/auto_selection_20260909_025536/W808P175911_sheet_01.jpg",
+            "sha256": "1b52cdfcd71939ee5348f56b0784dde57fbf987d90d3a214e32dcd4587cd6009"
+          }
+        ]
+      }
+    }
+  },
+  "W808P306292": {
+    "identity": "9b63da089213d4a4ffdb893af1839cac2fc64f1121cc80e2c3e8dd1e3143e1a2",
+    "fields": {
+      "door_style": {
+        "values": [
+          "Recessed Panel"
+        ],
+        "reason": "Supplier photo shows recessed door center surrounded by a rectangular raised border.",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W808P306292/image analysis/contact_sheets/auto_selection_20260909_061752/W808P306292_sheet_01.jpg",
+            "sha256": "6f76928ae52cc5c09a59a1f1cd4adaf387bc89320992de67d707fe24388591cb"
+          }
+        ]
+      }
+    }
+  },
+  "W808P174804": {
+    "identity": "344ee4eae7050db233faa2334575fce7caa582f4da9c4279d32bc7e2d2634f82",
+    "fields": {
+      "door_style": {
+        "values": [
+          "Recessed Panel"
+        ],
+        "reason": "Supplier actual photo #07 shows recessed panel door.",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W808P174804/image analysis/contact_sheets/auto_selection_20260909_024550/W808P174804_sheet_02.jpg",
+            "sha256": "05d1139ac445ef0f51d6cbfdb0ee579ca302fe7c45e4b9c1015d8f15b317412e"
+          }
+        ]
+      }
+    }
+  },
+  "W808P389332": {
+    "identity": "84da24a720759cf7df5e67a872ab84e68aed85e2fcb73a6ff458a0a8dc8a42c4",
+    "fields": {
+      "door_style": {
+        "values": [
+          "Recessed Panel"
+        ],
+        "reason": "Supplier actual cabinet photograph shows framed recessed panel with diagonal decorative rails.",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W808P389332/image analysis/contact_sheets/auto_selection_20260910_103947/W808P389332_sheet_01.jpg",
+            "sha256": "3216f0bbb5ec3664e14f01aa4a87950917cc46e69d912499131ae0cedc58cd26"
+          }
+        ]
+      }
+    }
+  },
+  "W808P440630": {
+    "identity": "061a0ad803186a084e7d6623ceb04c04bd6e9b659eb7e56eb48115602a47c26e",
+    "fields": {
+      "door_style": {
+        "values": [
+          "Recessed Panel"
+        ],
+        "reason": "Supplier actual cabinet photograph shows framed recessed panel with diagonal decorative rails.",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W808P440630/image analysis/contact_sheets/auto_selection_20260906_202039/W808P440630_sheet_02.jpg",
+            "sha256": "361b90d29d9d0d866f2e3b5bf479633b2c193c87fa5bfc391963b488c15f8587"
+          }
+        ]
+      },
+      "origin": {
+        "values": [
+          "China"
+        ],
+        "reason": "一次核查供应商原始尺寸图／标签／产品报告中的明确数据；未做猜测。",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W808P440630/image analysis/contact_sheets/auto_selection_20260910_223125/W808P440630_sheet_02.jpg",
+            "sha256": "361b90d29d9d0d866f2e3b5bf479633b2c193c87fa5bfc391963b488c15f8587"
+          }
+        ]
+      }
+    }
+  },
+  "W808P390791": {
+    "identity": "c84dd982e58d258cae2fdfe2f59971e554c44dcf31a73f2f21f5938d6e9fc102",
+    "fields": {
+      "product_type": {
+        "values": [
+          "DRESSER"
+        ],
+        "reason": "Supplier actual photographs show four drawers, no cabinet doors; export as DRESSER without changing manual category.",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W808P390791/image analysis/contact_sheets/auto_selection_20260803_111842/W808P390791_sheet_01.jpg",
+            "sha256": "df25cd04771aeade83bb572c0bcfa72455c7c34b8bd0de1855b542654f3f669f"
+          }
+        ]
+      }
+    }
+  },
+  "W808P346014": {
+    "identity": "45ce7050b41bb7cff8bae4854d4a15e97386bc19bc235dbbafd0f76af57fd399",
+    "fields": {
+      "number_of_drawers": {
+        "values": [
+          0
+        ],
+        "reason": "Supplier actual vanity photo shows open side shelves and no drawers.",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W808P346014/image analysis/contact_sheets/auto_selection_20260910_125523/W808P346014_sheet_01.jpg",
+            "sha256": "35aeb36ce29d0439b97b12f775212913242660e18a8b5c093f249e6aad1be982"
+          }
+        ]
+      }
+    }
+  },
+  "W808P252779": {
+    "identity": "b95abaa9ff06e034205aa97f1a79d4dc5e31a923da6695bdf06543d005838dcf",
+    "fields": {
+      "required_product_compliance_certificate": {
+        "values": [
+          "California Air Review Board (CARB)"
+        ],
+        "reason": "Supplier original product label explicitly states TPC#: CARB TPC 47 and TSCA Title VI compliance. This is a label declaration, not an independently verified certificate document.",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W808P252779/原始素材/解压文件/To_B/W808_W808P252779_image+file_20260908/Additional Images/7c02643e3c4428b0075456ca601e873.jpg",
+            "sha256": "7d792ccc099b4e705709991cf93e572d2736a157e402966bd6d1fc60128e8ce5"
+          }
+        ]
+      }
+    }
+  },
+  "W808P439645": {
+    "identity": "0ac50093bddf76e17b664f3ea0a3430fc9c722660185cb6620a7fffc8b9a3c21",
+    "fields": {
+      "required_product_compliance_certificate": {
+        "values": [
+          "California Air Review Board (CARB)"
+        ],
+        "reason": "Supplier original product label explicitly states TPC#: CARB TPC 47 and TSCA Title VI compliance. This is a label declaration, not an independently verified certificate document.",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W808P439645/原始素材/解压文件/To_B/W808_W808P439645_image+file_20260908/Additional Images/99990818F99482AB1D00D7CA05A36FB9.jpg",
+            "sha256": "ad87b621389e88a4b8c2807df03d8cd15bce4ed9257491c9bdd1819bcbcb2f51"
+          }
+        ]
+      }
+    }
+  },
+  "W808P337367": {
+    "identity": "a2a116a71e569acf6275e525b00d66d95d6805116c2ea11dda6ee7912dbc4a7a",
+    "fields": {
+      "door_style": {
+        "values": [
+          "Slab"
+        ],
+        "reason": "Actual supplier photo shows flat unframed sliding door panels. Sliding describes operation; Slab describes the panel style.",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W808P337367/image analysis/contact_sheets/auto_selection_20260909_072230/W808P337367_sheet_01.jpg",
+            "sha256": "fdfe968d13e60dbcd6721d66ae35a22dd26c89297fc89b3ea78d4fd86d1d1bc9"
+          }
+        ]
+      }
+    }
+  },
+  "W808P264664": {
+    "identity": "0c340df49040be3b8d7a3ace94deb7ab132afb430f996035fd65a8da0266802c",
+    "fields": {
+      "finish_type": {
+        "values": [
+          "Multicolor Finish"
+        ],
+        "reason": "Supplier color Colorful and actual photo #01/#06 show multicolor exterior surfaces; describes appearance without asserting an unsupported coating process.",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W808P264664/image analysis/contact_sheets/auto_selection_20260909_043339/W808P264664_sheet_01.jpg",
+            "sha256": "992299b6aa235ba3e2c4d87ca9b585dcf0e84d14e9d321a8692e62b459072f22"
+          }
+        ]
+      }
+    }
+  },
+  "W2563P385794": {
+    "identity": "01d07c048adb3f0e78bf458123f7fe7bfee9208faa707514e90405abc582bb1d",
+    "fields": {
+      "tire_type": {
+        "values": [
+          "Clincher"
+        ],
+        "source": "user_confirmation",
+        "reason": "User explicitly selected Clincher for the two blocked products on 2026-10-07. This is a manual selection, not supplier-confirmed evidence.",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W2563P385794/amazon import/user-confirmations/tire-type-20261007.json",
+            "sha256": "606436f22ce7372693f5afc70cacdaa5e13c1a7fcd67aabaac613ebf542056e6"
+          }
+        ]
+      }
+    }
+  },
+  "N726P248345Y": {
+    "identity": "67fe6983361818b96577321ce3096a0febbe0b02b8d42f209605a34b78f35592",
+    "fields": {
+      "tire_type": {
+        "values": [
+          "Clincher"
+        ],
+        "source": "user_confirmation",
+        "reason": "User explicitly selected Clincher for the two blocked products on 2026-10-07. This is a manual selection, not supplier-confirmed evidence.",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/N726P248345Y/amazon import/user-confirmations/tire-type-20261007.json",
+            "sha256": "fe8626de33971184fd62dbdfc635a9193f5f90c8f782ea4ba343544c8f5538bc"
+          }
+        ]
+      }
+    }
+  },
+  "W808P176725": {
+    "identity": "31cf2eac3346fd49b74a182c34cdc2b102e6fed5c730be0c9e7325f99cbf028e",
+    "fields": {
+      "origin": {
+        "values": [
+          "China"
+        ],
+        "reason": "一次核查供应商原始尺寸图／标签／产品报告中的明确数据；未做猜测。",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W808P176725/image analysis/contact_sheets/auto_selection_20260909_030341/W808P176725_sheet_01.jpg",
+            "sha256": "2fedaf4c7dab1db80296ddadf63144b519a9bab266193424180e819fc1a6a42b"
+          }
+        ]
+      },
+      "component_dimensions": {
+        "values": [
+          "大桌：直径27.56英寸/70cm，高17.72英寸/45cm",
+          "小桌：直径19.69英寸/50cm，高15.75英寸/40cm"
+        ],
+        "reason": "一次核查供应商原始尺寸图／标签／产品报告中的明确数据；未做猜测。",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W808P176725/image analysis/contact_sheets/auto_selection_20260909_030341/W808P176725_sheet_02.jpg",
+            "sha256": "6b98049f0569e6a483cd74dc5e58dfccff15eeb61c999c50d13db78563f9eea6"
+          }
+        ]
+      }
+    }
+  },
+  "W80891668": {
+    "identity": "d045498810e77f02729a305311b717d706057196061896a55d513fd794d54fe0",
+    "fields": {
+      "origin": {
+        "values": [
+          "China"
+        ],
+        "reason": "一次核查供应商原始尺寸图／标签／产品报告中的明确数据；未做猜测。",
+        "sources": [
+          {
+            "path": "data/products/GIGA/US/W80891668/原始素材/解压文件/To_B/W808_W80891668_image+file_20260908/file/CPSIA Compliant(1).pdf",
+            "sha256": "576ae47922dba9af9544edb8721bd2d97e950f74b12695b9bcc540ebcce66ff4"
+          }
+        ]
+      }
+    }
+  }
+}

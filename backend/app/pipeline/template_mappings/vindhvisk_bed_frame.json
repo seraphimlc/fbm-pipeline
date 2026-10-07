@@ -23,6 +23,9 @@
     "supplier_declared_dg_hz_regulation[marketplace_id=ATVPDKIKX0DER]#1.value": "Not Applicable",
     "has_multiple_battery_powered_components[marketplace_id=ATVPDKIKX0DER]#1.value": "No"
   },
+  "supplier_text_fields": [
+    "finish_type"
+  ],
   "dynamic_fields": {
     "sku": "contribution_sku#1.value",
     "title": "item_name[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
@@ -87,11 +90,11 @@
     "handling_time": "fulfillment_availability#1.lead_time_to_ship_max_days",
     "price": "purchasable_offer[marketplace_id=ATVPDKIKX0DER][audience=ALL]#1.our_price#1.schedule#1.value_with_tax",
     "country_of_origin": "country_of_origin[marketplace_id=ATVPDKIKX0DER]#1.value",
-    "shipping_template": "merchant_shipping_group[marketplace_id=ATVPDKIKX0DER]#1.value"
-    ,"part_number": "part_number[marketplace_id=ATVPDKIKX0DER]#1.value"
-    ,"item_shape": "item_shape[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value"
-    ,"finish_type": "finish_type[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value"
-    ,"is_fragile": "is_fragile[marketplace_id=ATVPDKIKX0DER]#1.value"
+    "shipping_template": "merchant_shipping_group[marketplace_id=ATVPDKIKX0DER]#1.value",
+    "part_number": "part_number[marketplace_id=ATVPDKIKX0DER]#1.value",
+    "item_shape": "item_shape[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "finish_type": "finish_type[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
+    "is_fragile": "is_fragile[marketplace_id=ATVPDKIKX0DER]#1.value"
   },
   "bullet_fields": [
     "bullet_point[marketplace_id=ATVPDKIKX0DER][language_tag=en_US]#1.value",
@@ -128,7 +131,11 @@
       "product_type": "BED_FRAME",
       "node": "bed-frames",
       "path": "Home & Kitchen > Furniture > Bedroom Furniture > Beds, Frames & Bases > Bed Frames",
-      "markers": ["bed frames", "bed frame", "platform bed"]
+      "markers": [
+        "bed frames",
+        "bed frame",
+        "platform bed"
+      ]
     }
   ],
   "required_fields": [
@@ -147,5 +154,14 @@
     "item_package_weight[marketplace_id=ATVPDKIKX0DER]#1.value",
     "country_of_origin[marketplace_id=ATVPDKIKX0DER]#1.value"
   ],
-  "semantic_fields": ["item_shape", "finish_type", "is_fragile"]
+  "semantic_fields": [
+    "item_shape",
+    "finish_type",
+    "is_fragile"
+  ],
+  "required_by_product_type": {
+    "BED_FRAME": [
+      "finish_type"
+    ]
+  }
 }

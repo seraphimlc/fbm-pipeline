@@ -16,6 +16,7 @@ from app.models.status import (
     WORKFLOW_STATUS_PROCESSING,
 )
 from app.product_tasks.workflow import set_product_workflow
+from app.services.product_generation_guard import generation_task_run_id, generation_task_identity, capture_generation_input
 from app.pipeline.step7_aplus_plan import run_aplus_plan
 from app.pipeline.step8_aplus_script import run_aplus_script
 from app.services.product_payloads import invalidate_sections, large_field_storage_enabled, load_section, parse_payload
@@ -169,7 +170,17 @@ async def aplus_generate_product(ctx: TaskContext) -> dict[str, Any]:
         raise RuntimeError("A+生成 step 缺少 product_id")
 
     try:
-        await _set_aplus_status(product_id, "planning", clear_outputs=force)
+        from app.services.product_data_supplement import run_data_supplement
+        await update_step_progress(ctx.db, ctx.step, current=0, total=3,
+            message="A+生成前核查并补充明确数据", data={"product_id": product_id, "item_code": item_code})
+        token = generation_task_run_id.set(ctx.run.id)
+        identity_token = generation_task_identity.set({"step_id": ctx.step.id, "attempt_count": ctx.step.attempt_count})
+        try:
+            await run_data_supplement(product_id)
+        finally:
+            generation_task_run_id.reset(token)
+            generation_task_identity.reset(identity_token)
+        await _set_aplus_status(product_id, "planning", clear_outputs=force and ctx.step.attempt_count <= 1)
         await update_step_progress(
             ctx.db,
             ctx.step,

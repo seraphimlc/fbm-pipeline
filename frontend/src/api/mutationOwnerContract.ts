@@ -11,6 +11,14 @@ export interface MutationOwnerContract {
 }
 
 export const mutationOwnerContract = {
+  'supplementProductData|frontend/src/pages/ProductDetail.tsx|handleDataSupplement': {
+    owner_component: 'ProductDetail',
+    owner_state: 'product, activeTabKey, supplementEdit and supplementValues',
+    loading_state: 'supplementLoading',
+    catch_policy: 'runMutationWithUX apiErrorMessage -> message.error; preserve edits and loaded sections',
+    finally_policy: 'runMutationWithUX clearLoading resets supplementLoading',
+    playwright_case: 'runtime case: data supplement failure preserves manual value and detail tab',
+  },
   'blacklistProduct|frontend/src/pages/ProductDetail.tsx|handleBlacklist': {
     owner_component: 'ProductDetail',
     owner_state: 'product, activeTabKey and unsaved detail edits',

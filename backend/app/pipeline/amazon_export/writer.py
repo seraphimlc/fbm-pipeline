@@ -69,6 +69,8 @@ def build_amazon_template_file(product: Product, pd: ProductData, mapping: dict[
     apply_listing_fill(ctx)
     apply_offer_fill(ctx)
     get_strategy(mapping)(ctx)
+    from app.pipeline.amazon_export.attribute_rules import apply_attribute_rules
+    apply_attribute_rules(ctx)
     apply_image_fill(ctx)
     apply_package_fill(ctx)
     apply_bullet_fill(ctx)

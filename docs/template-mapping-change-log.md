@@ -533,3 +533,52 @@
 - 变更原因：文本与图片理解切换为 `gpt-6.1-sol` / `medium`；GPT-6 推理请求不能传 `temperature`，需要使用包含推理预算的 `max_completion_tokens`。
 - 验证：`backend/.venv/bin/python scripts/test_llm_model_configuration.py`、`backend/.venv/bin/python scripts/test_listing_title_highlights.py`、`backend/.venv/bin/python scripts/test_customer_mindset.py` 通过；`python3 scripts/testing/run_with_r1_sqlite.py -- make test-project-rules` 通过（81 项）；第三方接口文本与合成蓝色图片小请求均成功返回 `gpt-6.1-sol`。
 - 后续注意：配置在后端下次启动生效；最大预算不等于实际费用。真实批量商品效果仍需在使用中核查，已有商品内容不自动重生成。
+
+## 2026-10-07 导出属性确定性规则与合并覆盖修复
+
+- 文件：`api/products.py`、`step10_amazon_template.py`、`amazon_export/writer.py`、新增 `amazon_export/attribute_rules.py`；`vindhvisk_bicycle.json`、`andy_storage_furniture.json`；`scripts/test_template_attribute_rules.py`、`scripts/test_bed_frame_template.py`、`scripts/audit_template_attribute_rules.py`。
+- 类目/模板：BED_FRAME、BICYCLE_CYCLING、DRESSER_STORAGE_DRAWER_STORAGE_BOX_CABINET_STEP_STOOL；供应商明确为电动童车时使用已有 RIDE_ON_TOY 映射。
+- 原因：合并行通用语义覆盖清空床架 Special Features；自行车 Tire Type、收纳 Special Features/Closure Type 无映射；钢材别名和 Full/Dual 悬挂不匹配模板；竞品来源叶子类目会将自行车错配为 CABINET。
+- 行为：床架/自行车/收纳导出改用共享供应商规则，无模型调用；属性从规范化供应商属性、描述/特征、类目与尺寸推导，并过滤真实模板枚举。不使用生成 Listing 作为属性证据。单商品 writer 和合并行执行同一规则；合并语义覆盖遵从 mapping.semantic_fields。自行车/电动童车按明确供应商身份路由，不覆盖 DB 的人工类目。
+- 验证：`make validate-template-mappings`、`backend/.venv/bin/python scripts/test_template_attribute_rules.py`、`backend/.venv/bin/python scripts/test_bed_frame_template.py`、`python3 scripts/testing/run_with_r1_sqlite.py -- make test-project-rules`（81 项）通过。真实 57 商品只读审计命令：`scripts/audit_template_attribute_rules.py --output data/exports/attribute_rules_validation_20261007.json <三个原导出ZIP>`，最终逐字段结果见该报告；未写正式 DB/旧 ZIP。
+- 后续：空属性继续显式提示数据缺口；床架 Finish Type 不从颜色或亚麻材质猜测。CABINET 无抽屉数量只在明确门/搁板/挂杆配置且供应商无抽屉描述时按 0 归类。类目改道的旧文件需要重新导出，不能只改 product_type 单元格。真实 Amazon 上传校验仍需平台复核。
+
+- 最终收口：新增属性回归 7 项、床架实际 XLSM/合并行检查、模板映射与 registry 检查、81 项隔离 SQLite project rules、catalog export 完整专项均通过。57 商品只读审计识别 6 个类目改道；其余 51 商品同口径字段空缺 146 → 13（无模型调用）。13 项是未取得支持值的供应商资料缺口，不宣称 Amazon 校验全部通过。后端已重启，`/api/health` 和 DB-backed `/api/products/4` 均 HTTP 200；旧 ZIP 保留，重新导出才应用修复。
+
+## 2026-10-07 Amazon 上传预览属性补漏 v2
+
+- 文件：`amazon_export/attribute_rules.py`、`reviewed_supplier_attributes.json`、`validators.py`；`step10_amazon_template.py`、`api/products.py`；床架/自行车/收纳/童车四个 mapping JSON；spec/project-index；属性测试、只读 audit 和 `verify_supplier_attribute_exports.py`。
+- 类目/模板：BED_FRAME、BICYCLE、CABINET/DRESSER/STORAGE_BOX/STEP_STOOL/MAKEUP_VANITY、RIDE_ON_TOY。
+- 原因：前次只检查部分字段，漏掉截图中的进口标识、结构/门样式/易碎、踏凳高度与证书、童车材料/主题/人群等；供应商 description 为空时 canonical HTML 已有原始事实；推荐下拉不能迫使钢材改为 Aluminum。
+- 变更：共享 v2 规则读取已提取原文，过滤售后；补材料、进口、外观、人群/主题、结构等映射。一次核对的供应商图片/标签声明以身份和文件哈希绑定，支持门板样式、零抽屉、具体踏凳 CARB 声明；只含四抽屉的实物导出 DRESSER。`required_by_product_type` 在最终合并行校验，缺失商品失败隔离；单商品 Step10 保留草稿/风险提示。闭合枚举保持严格；自定义描述型开放字段明确配置，不能宣称 Amazon 已接受。
+- 验证：`make validate-template-mappings`（6 映射、0 warnings）、属性回归 13 项、床架实际文件及 registry 检查通过；catalog export、project rules 与隔离真实文件验收结果在本节收口追加。
+- 后续：不为轮胎、产地、涂层工艺等缺口猜值；CARB 标签声明不替代独立证书审核。Maximum Height 为供应商整件组装高度，不是站台高度。原文/图片身份变化会使复用证据失效。修复后的文件还需重新上传 Amazon 校验。
+- 真实文件收口：隔离在线 DB 快照，对本批 57 商品重建四个 ZIP，逐格检查条件必填和规则值：55 商品通过、2 商品按缺失轮胎/产地属性失败隔离，模型调用 0。详见 `data/exports/supplier-repair-20261007/verified/verification-report.json`。catalog export 完整专项与 81 项隔离 project rules 均通过。
+- 用户后续明确授权这类商品缺失原产国按中国：自行车映射增加 `supplier_origin_default=China`，Import Designation 缺失源事实时标记 `source=user_policy` 并填 Imported；有原始产地时优先原始值。Tire Type 模板枚举只有 Clincher/Tubeless/Tubular，没有 Plastic，不能将 Material 的 Plastic 当作该字段可选值。两款轮胎结构仍缺确认，继续隔离，不伪装成功。映射校验新增条件必填/开放文字键引用检查。
+
+- 运行时补修：批次生成中输入/配置发生变化导致整事务 rollback，后续 ORM 对象过期会抛 MissingGreenlet。新增异步刷新 helper，重新加载后续商品、库存和任务对象；新增真实 worker 两商品回归证明首行输入变化失败后第二行仍可导出、任务投影为 partial_failed。14 项属性回归含中国用户默认政策；完整 catalog 专项结果见收口报告。
+- 正式收口：后端重启并通过 health + DB-backed product 读取；正式任务 #1383 床架 1/1、#1384 自行车 24/26（轮胎结构缺失 2 款）、#1385 收纳 25/25、#1386 童车 5/5。正式 ZIP 共 55 商品的截图字段逐格一致，见 `data/exports/supplier-repair-20261007/production-verification.json`；#1384 已明确 partial_failed，缺少轮胎的商品未进入导入工作簿。原产国已按用户默认补齐。14 项属性回归、完整 catalog 专项（含新 rollback 隔离回归）、6 映射校验和 81 项 project rules 通过。已替换的旧四批 #1378–1381 按此前用户清理要求归档，完整 DB 备份/清单位于 `data/exports/.archive/replaced-by-attribute-repair-20261007-202322/`；保留 #1382 和四个新批次，未删除商品或素材。未执行 Amazon 上传，不宣称平台已通过。
+
+## 2026-10-07 两款轮胎类型人工确认
+
+- 文件：`amazon_export/attribute_rules.py`、`reviewed_supplier_attributes.json`、`scripts/test_template_attribute_rules.py`、`docs/template-mapping-spec.md`。
+- 类目/模板：BICYCLE / BICYCLE_CYCLING.xlsm；仅 W2563P385794、N726P248345Y。
+- 原因：用户明确选择 Clincher，解除两款轮胎枚举缺失；保存人工确认来源，避免误记供应商证据或全库默认。
+- 验证：15 项属性回归通过；6 映射校验 0 warnings；隔离在线快照生成真实 ZIP，两款均接受、0 blocked、0 模型调用，最终字段逐格通过（`data/exports/tire-confirmation-20261007/verified/verification-report.json`）。
+- 注意：SKU/身份/记录哈希绑定继续生效；不能把此选择推广到其他商品；未执行 Amazon 上传。正式任务收口结果后续追加。
+- 正式收口：补充任务 #1387 succeeded，2/2 导出，最终 ZIP 两款 Tire Type 均为 Clincher，持久化来源均为 user_confirmation，manifest/工作簿校验通过；证据 `data/exports/tire-confirmation-20261007/production-verification.json`。另15属性回归、81项目规则、6映射校验通过；保留之前104款导出。
+
+## 2026-10-07 A+确认前数据补充及关键词空值回填
+
+- 文件：`services/product_data_supplement.py`、`amazon_export/attribute_rules.py`、`reviewed_supplier_attributes.json`、`amazon_export/listing_fill.py`、`pipeline/search_terms.py`、`step5_listing.py`、`step10_amazon_template.py`、A+ worker 与商品确认入口。
+- 范围：全部既有Amazon映射；产地缺失统一China并记录user_policy；关键词空值从既有安全候选和保守同义词补充，排除曾明确移除的候选。原始供应商资料不改写。
+- 原因：空字段应区分源缺失与提取遗漏；模型只提取原文明确值，不允许猜测；补充结果需要在A+确认前可见、可修改、可追溯，并持久复用。
+- 变更：结果保存到canonical Listing的listing_check.data_supplement，附源身份/输入指纹/理由/原文。只对原文中出现的允许枚举提交AI；后端拒绝不存在的引文、没有明确值的引文、否定/不确定表述、越界枚举。保留原始数据、人工选择和现有A+图片；导出阶段取消临时属性模型调用。
+- 验证：规则/安全提取回归、108款隔离规则回填、前端构建通过；正式回填与真实浏览器验收结果在本节追加。
+- 注意：未确认字段保留为空；AI轮完成不代表所有字段已齐全。认证、承重、涂层工艺和轮胎结构不交给AI猜测；原始源文件/身份变化使核对证据失效。原有导出文件不自动覆盖。
+- 正式回填收口：108款活跃商品全部保存；产地均为China（92款供应商字段、3款已核查原件、13款用户默认）；27款搜索词空值补齐、2款无可靠候选保留空；41款保存供应商卖点组合描述；24个属性值通过明确枚举与原文校验。源payload/快照、Listing标题/亮点/五点/描述及A+ assets与在线备份逐项相等。未确认可选字段保留空值；实际数据必填阻塞0。108款隔离缓存复用验证实际模型调用0；15属性回归、9安全补充回归、81项目规则、catalog专项、A+自动触发专项、前端构建及人工修改失败状态保留Playwright通过。证据：`data/exports/data-supplement-20261007/acceptance.json`，备份：`before.db`与`production/before-backfill.db`。
+- 最终抽样：5款真实商品在隔离DB按生产引擎重新导出，5/5成功、0阻塞、0模型调用，最终条件字段一致；含已人工指定Clincher两款、700C公路车、关键词补齐童车及PDF产地儿童桌椅。报告：`data/exports/data-supplement-20261007/export-verified/verification-report.json`。
+- 明确性收口：10项安全补充回归通过，已保存的24个AI字段逐一通过原文、枚举、否定/缩写否定和不确定表述复核；后端重启后health及数据补充只读API均HTTP200。
+- 缓存复用补修：刷新时保留已核验AI属性，并修复2款仅在展示行保留的缓存值；原文和枚举再次验证，修复过程0模型调用。11项安全/复用回归通过，最终24个持久化AI属性逐一复核通过。
+
+- 提交快照验收（2026-10-07）：隔离检出本轮暂存代码，11项补充回归、15项属性规则、6映射0 warnings、80项项目规则、A+ A1/A2确认回归及前端build/contracts/mutation检查通过。确认回归验证既有A+确认调用补充服务，不增加独立确认节点；商品DB、素材和导出文件不纳入代码提交。

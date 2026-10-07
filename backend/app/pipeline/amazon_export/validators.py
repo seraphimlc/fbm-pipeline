@@ -72,6 +72,16 @@ def _should_skip_dropdown_validation(attr: str, value: Any, allowed_values: list
 
 
 def _value_allowed_for_dropdown(ctx: AmazonExportContext, attr: str, value: Any) -> bool:
+    # Explicit supplier descriptions for open string fields must not be erased
+    # merely because the workbook's suggested dropdown omits them (e.g. steel
+    # bicycle material or upholstered exterior finish). Keep closed fields strict.
+    fields = ctx.mapping.get("dynamic_fields", {})
+    from app.pipeline.step10_amazon_template import _flatten_mapping_values
+    if value not in (None, "") and any(
+        attr in _flatten_mapping_values(fields.get(key))
+        for key in ctx.mapping.get("supplier_text_fields", [])
+    ):
+        return True
     column = ctx.columns.get(attr)
     if not column:
         return True
@@ -110,6 +120,9 @@ def finalize_warnings(ctx: AmazonExportContext, missing_columns: list[str]) -> N
     ctx.warnings.extend(legacy._inventory_template_warnings(ctx.product_data))
     ctx.warnings.extend(legacy._aplus_template_warnings(ctx.product))
     ctx.warnings.extend(legacy._step6_main_image_warnings(ctx.product))
+    missing = legacy._missing_required_fields(ctx.mapping, ctx.fill, ctx.columns)
+    if missing:
+        ctx.warnings.append("Amazon 必填属性待补充: " + ", ".join(missing))
     ctx.warnings = list(dict.fromkeys(ctx.warnings))
 
 

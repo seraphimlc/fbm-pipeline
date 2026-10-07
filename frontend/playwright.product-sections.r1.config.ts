@@ -16,6 +16,7 @@ export default defineConfig({
   use: {
     baseURL,
     browserName: 'chromium',
+    channel: process.env.R1_BROWSER_CHANNEL || undefined,
     headless: true,
   },
   reporter: [['list']],
