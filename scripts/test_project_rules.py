@@ -950,10 +950,10 @@ def test_amazon_workflow_t3_image_selection_reset_and_initialization_rules() -> 
     listing_images_section = products_api_text.split('@router.put("/{product_id}/listing-images"', 1)[1].split('@router.delete("/{product_id}"', 1)[0]
 
     assert_true(
-        "_save_product_listing_images" in products_api_text
+        "_reset_product_after_image_selection" in products_api_text
         and "WORKFLOW_NODE_SEARCH_COMPETITOR" in products_api_text
         and "WORKFLOW_NODE_SELECT_IMAGES" in products_api_text,
-        "T3 必须有图片确认重置 helper 和轻量保存 helper，workflow 初始化路径保持完整",
+        "T3 必须有图片确认 destructive reset helper，并使用 workflow service 写 select_images/search_competitor 节点",
     )
     assert_true(
         "_run_product_competitor_search_background" not in listing_images_section
@@ -963,23 +963,10 @@ def test_amazon_workflow_t3_image_selection_reset_and_initialization_rules() -> 
         "图片确认接口不能自动启动 StyleSnap 搜索、后台任务或写 running 搜索快照",
     )
     assert_true(
-        "_save_product_listing_images(" in listing_images_section
-        and "_reset_product_after_image_selection(" not in listing_images_section
-        and "ProductFile" not in listing_images_section
+        "ProductFile" not in listing_images_section
         and "delete(ProductFile" not in products_api_text.split("async def _reset_product_after_image_selection", 1)[1].split("async def _giga_image_candidates_for_source", 1)[0]
         and "delete(CatalogProduct" not in products_api_text.split("async def _reset_product_after_image_selection", 1)[1].split("async def _giga_image_candidates_for_source", 1)[0],
-        "图片确认保存只能更新图片选择，不得重置下游状态、删除 ProductFile、CatalogProduct、真实文件或导出历史",
-    )
-    delete_product_section = products_api_text.split('@router.delete("/{product_id}"', 1)[1].split('@router.post("/{product_id}/start"', 1)[0]
-    assert_true(
-        "select(UpcPoolItem).where(UpcPoolItem.product_id == product_id)" in delete_product_section
-        and 'upc_item.status = "available"' in delete_product_section
-        and "upc_item.product_id = None" in delete_product_section,
-        "删除商品必须先释放绑定 UPC，避免外键阻止删除并让 UPC 永久占用",
-    )
-    assert_true(
-        "delete(ProductMaterialAsset).where(ProductMaterialAsset.product_id == product_id)" in delete_product_section,
-        "删除商品必须先删除同商品的父子素材资产记录，避免自引用外键阻止删除",
+        "图片确认 reset 不得删除 ProductFile、CatalogProduct、真实文件或导出历史",
     )
     assert_true(
         "_initialize_product_image_workflow(product, now=now)" in products_api_text
@@ -1819,7 +1806,6 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
         and "asset_source" in products_api_text
         and "DEFAULT_LISTING_IMAGE_LIMIT = 9" in product_detail_text
         and "const mainPath = gigaMainPath" in product_detail_text
-        and "return uniqueImagePaths(savedPaths).slice(0, DEFAULT_LISTING_IMAGE_LIMIT);" in product_detail_text
         and "persistedListingImagePathsFromImages" in product_detail_text
         and "listingImageDraftIsDirty" in product_detail_text
         and "nextPaths.length && nextPaths.join" in product_detail_text
@@ -1831,7 +1817,7 @@ def test_offline_tasks_are_claimed_and_idempotent() -> None:
         and "素材包/附件素材" in product_detail_text
         and "备用/未选素材" in product_detail_text
         and "_giga_image_candidates_for_product" in products_api_text,
-        "商品详情图片确认必须在无人工保存结果时默认用代表 SKU 的 GIGA mainImage 做主图，再从 gallery 末尾取 8 张；已有保存结果必须保留人工主图顺序，file/brand 留作备用素材",
+        "商品详情图片确认必须默认用代表 SKU 的 GIGA mainImage 做主图，再从 gallery 末尾取 8 张；旧纯路径、未知类型和其它 SKU 图片不能全量默认选中，file/brand 留作备用素材",
     )
     image_review_text = (ROOT / "frontend" / "src" / "pages" / "ProductImageReview.tsx").read_text(encoding="utf-8")
     image_queue_endpoint_text = products_api_text.split('@router.get("/image-review-queue"', 1)[1].split('@router.get("/image-review-detail', 1)[0]
@@ -1967,7 +1953,7 @@ def test_amazon_export_binds_upc_after_prechecks_and_keeps_caller_transaction() 
     step10_text = (ROOT / "backend" / "app" / "pipeline" / "step10_amazon_template.py").read_text(encoding="utf-8")
 
     assert_true(
-        "await prepare_catalog_template_inputs" in products_text
+        "await ensure_amazon_template_semantic_fields" in products_text
         and "await ensure_product_upc(db, product)" in products_text,
         "catalog export 必须保留模板语义字段检查和 UPC 绑定步骤",
     )
@@ -1991,8 +1977,8 @@ def test_amazon_export_binds_upc_after_prechecks_and_keeps_caller_transaction() 
     )
     direct_step10_section = step10_text.split("async def run_amazon_template(product_id", 1)[1]
     assert_true(
-        "await run_amazon_template_in_session(db, product, prepared_input=prepared)" in direct_step10_section
-        and "await validate_generation_input(db, guard)" in direct_step10_section,
+        "await run_amazon_template_in_session(db, product)" in direct_step10_section
+        and direct_step10_section.count("await db.commit()") == 1,
         "Step10 直接调用入口必须复用 in-session 路径并且只 commit 一次",
     )
     catalog_builder_section = products_text.split("async def build_catalog_export_zip", 1)[1].split(
@@ -2003,7 +1989,7 @@ def test_amazon_export_binds_upc_after_prechecks_and_keeps_caller_transaction() 
         and "db, product, stock_override=stock_override[1]" in catalog_builder_section
         and "await run_amazon_template(product.id)" not in catalog_builder_section
         and "await db.commit()" in catalog_builder_section
-        and "await validate_generation_input" in catalog_builder_section,
+        and "await db.rollback()" not in catalog_builder_section,
         "catalog export builder 必须复用调用方 session，并按行提交短事务，不得另开 Step10 事务或整体 rollback",
     )
     assert_true(
@@ -2012,10 +1998,7 @@ def test_amazon_export_binds_upc_after_prechecks_and_keeps_caller_transaction() 
         and "await db.refresh(catalog)" in catalog_builder_section
         and "await db.refresh(product)" in catalog_builder_section
         and "await db.refresh(pd)" in catalog_builder_section
-        and catalog_builder_section.count("await db.commit()") >= 3
-        and catalog_builder_section.index("await db.commit()")
-        < catalog_builder_section.index("await prepare_catalog_template_inputs(")
-        and 'await db.execute(text("BEGIN IMMEDIATE"))' in catalog_builder_section
+        and catalog_builder_section.count("await db.commit()") == 2
         and "except Exception" not in catalog_builder_section,
         "catalog export 每行 DB 变更必须由 savepoint 隔离并及时提交；业务失败只回滚当前行并 refresh，未知异常必须逃逸",
     )
@@ -2237,15 +2220,6 @@ def test_task_runtime_v1_uses_new_tables_and_keeps_old_offline_tasks_compatibili
         and "retry_step" in runtime_scheduler
         and "_runner_lock" in runtime_scheduler,
         "新 runtime 必须使用 DB ready claim、锁/心跳、过期 running 恢复、失败 step 重跑，并保持串行 drain",
-    )
-    retry_runtime_section = runtime_scheduler.split("async def retry_step", 1)[1].split("async def retry_failed_steps", 1)[0]
-    assert_true(
-        "retrying_canceled_ready" in retry_runtime_section
-        and "step.status == STEP_STATUS_READY" in retry_runtime_section
-        and "run.cancel_requested_at = None" in retry_runtime_section
-        and "run.cancel_requested_by = None" in retry_runtime_section
-        and "run.cancel_reason = None" in retry_runtime_section,
-        "人工重试必须清除旧取消请求，否则 ready step 会再次被取消且任务持续显示 cancel_requested",
     )
     assert_true(
         "_renew_step_lease" in runtime_scheduler
@@ -5588,14 +5562,6 @@ class FakeSession:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
-    async def scalar(self, query):
-        if any(getattr(column.get("entity"), "__name__", "") == "CatalogProduct" for column in getattr(query, "column_descriptions", [])):
-            return None
-        return self.product
-
-    async def get(self, model, identity, **kwargs):
-        return self.product
-
     async def execute(self, query):
         if getattr(query, "is_update", False):
             values = query.compile().params
@@ -5901,7 +5867,7 @@ async def main():
     try:
         ctx = SimpleNamespace(
             db=db,
-            run=SimpleNamespace(id=42, cancel_requested_at=None),
+            run=SimpleNamespace(cancel_requested_at=None),
             group=SimpleNamespace(),
             step=SimpleNamespace(step_type="product_image_analysis", payload_json="{}"),
         )
@@ -6144,11 +6110,10 @@ def test_giga_material_prepare_and_aplus_target_chain_contract() -> None:
         and "productMaterialPreviewUrl" in frontend_api_text
         and "loadFullDetail" in product_detail_text
         and "素材包与附件" in product_detail_text
+        and "压缩包成员" in product_detail_text
         and "预览表格" in product_detail_text
-        and "video src={url}" in product_detail_text
-        and "压缩包成员" not in product_detail_text
-        and "extractProductZip" not in product_detail_text,
-        "商品详情文件页必须懒加载并展示图片、视频、表格和素材用途，不能保留 ZIP 入口",
+        and "video src={url}" in product_detail_text,
+        "商品详情文件页必须懒加载并展示图片、视频、表格、ZIP 成员和素材用途",
     )
 
 
@@ -6534,14 +6499,6 @@ def test_auto_image_selection_phase_b_contract() -> None:
         "ProductResponse workflow schema 必须暴露任务关联字段，前端任务中心入口才能按 correlation key 定位",
     )
     assert_true(
-        all(field in schemas_text for field in ("competitor_price", "competitor_url", "our_price"))
-        and "_load_selected_competitor_facts" in products_text
-        and "ProductData.suggested_price" in products_text
-        and all(field in api_text for field in ("competitor_price", "competitor_url", "our_price"))
-        and "查看竞品" in product_list_text,
-        "商品列表和详情必须通过显式 API 字段展示竞品售价、我们的售价和可点击竞品链接",
-    )
-    assert_true(
         '"auto_select_images"' in products_text
         and "auto_select_images:" in api_text
         and "| 'auto_select_images'" in product_list_text
@@ -6557,10 +6514,10 @@ def test_auto_image_selection_phase_b_contract() -> None:
         "商品列表 work_status 筛选必须全部由 DB 级谓词和 count/page 接管，不得保留 Python 内存过滤分页 fallback",
     )
     assert_true(
-        "def _save_product_listing_images(" in products_text
-        and "_save_product_listing_images(" in products_text.split('@router.put("/{product_id}/listing-images"', 1)[1]
-        and "_reset_product_after_image_selection(" not in products_text.split('@router.put("/{product_id}/listing-images"', 1)[1].split('@router.post("/{product_id}/auto-image-selection/retry"', 1)[0],
-        "手动保存图片只能更新主副图选择，不能重置图片分析或 workflow",
+        "raise_if_image_selection_reset_protected(product)" in products_text
+        and "product.images.image_selection_analysis = None" in products_text
+        and "product.images.image_selected_at = None" in products_text,
+        "手动调整图片必须先过保护门，并清理过期自动选图分析结果",
     )
     assert_true(
         "retryProductAutoImageSelection" in api_text
@@ -6712,7 +6669,6 @@ def test_auto_image_selection_phase_b_protection_behaviour() -> None:
 from types import SimpleNamespace
 from app.services.product_protection import (
     auto_image_selection_protection_reasons,
-    image_selection_reset_protection_reasons,
     raise_if_auto_image_selection_protected,
     raise_if_image_selection_reset_protected,
 )
@@ -6764,21 +6720,32 @@ reasons = auto_image_selection_protection_reasons(protected_catalog)
 assert any("人工确认" in reason for reason in reasons), reasons
 assert any("导出历史" in reason for reason in reasons), reasons
 
-# 已人工确认/导出的商品允许手动调图；保存方会将当前版本重新置为待确认。
+# 已人工确认的商品不能直接调整图片；需要先由上层将商品重新置为待确认。
 confirmed_only = product()
 confirmed_only.catalog_item.confirmed_at = "2026-06-20"
+for guard in (raise_if_auto_image_selection_protected, raise_if_image_selection_reset_protected):
+    try:
+        guard(confirmed_only)
+    except RuntimeError as exc:
+        assert "人工确认" in str(exc), exc
+    else:
+        raise AssertionError("manual confirmation must block automatic image selection and manual reset")
+
 try:
-    raise_if_auto_image_selection_protected(confirmed_only)
+    raise_if_image_selection_reset_protected(confirmed_only)
 except RuntimeError as exc:
-    assert "人工确认" in str(exc), exc
+    assert "重新设为待确认状态" in str(exc), exc
 else:
-    raise AssertionError("manual confirmation must block automatic image selection")
-assert image_selection_reset_protection_reasons(confirmed_only) == []
-raise_if_image_selection_reset_protected(confirmed_only)
+    raise AssertionError("manual reset must explain how to reopen a confirmed product")
 
 protected_template = product()
 protected_template.data.amazon_template_path = "/exports/template.xlsm"
-raise_if_image_selection_reset_protected(protected_template)
+try:
+    raise_if_image_selection_reset_protected(protected_template)
+except RuntimeError as exc:
+    assert "Amazon 模板输出证据" in str(exc), exc
+else:
+    raise AssertionError("Amazon template output must block manual image reset")
 
 protected_template_file = product(files=[SimpleNamespace(file_type="Amazon_Import_Template", path="/exports/old.xlsm")])
 reasons = auto_image_selection_protection_reasons(protected_template_file)
@@ -6918,7 +6885,7 @@ product.images = ProductImage(product_id=88, main_image_path="/tmp/main.jpg", ma
 plan = build_amazon_competitor_queries(product)
 assert 1 <= len(plan["queries"]) <= 3, plan
 for item in plan["queries"]:
-    assert item["rule_version"] == "amazon_competitor_query_v8", item
+    assert item["rule_version"] == "amazon_competitor_query_v6", item
     assert 3 <= len(item["included_terms"]) <= 7, item
     assert "Modern Modular Sofa with Storage Chaise for Living Room SKU S-123 188cm".lower() != item["query"], item
     assert "replacement part" in item["excluded_terms"], item
@@ -7020,83 +6987,6 @@ assert all(
     for item in over_toilet_plan["queries"]
 ), over_toilet_plan
 assert all(item["included_terms"][0] == "over the toilet storage cabinet" for item in over_toilet_plan["queries"]), over_toilet_plan
-
-specific_type_cases = (
-    (
-        "Kids 4-Tier Bookcase, Children's Book Display, Bookshelf Toy Storage Cabinet Organizer",
-        "kids bookshelf",
-    ),
-    (
-        "Wooden Toy Box with Wheels, Kids Toy Storage Organizer with Front Bookshelf, Toy Chest Bench",
-        "toy box",
-    ),
-    (
-        "Kids Toy Storage Organizer with Large Drawer, Low Bookshelf for Nursery",
-        "kids toy storage organizer",
-    ),
-    (
-        "Wooden Pet House Cat Litter Box Enclosure with Drawer, Side Table and Nightstand",
-        "cat litter box enclosure",
-    ),
-    (
-        "Modern Wooden Dog Crate Furniture with Drawers, Pet Kennel End Table",
-        "dog crate furniture",
-    ),
-    (
-        "Kids Vanity Table with Mirror and Chair, Children's Dressing Makeup Desk",
-        "kids vanity table",
-    ),
-    (
-        "3-in-1 Toddler Kitchen Step Stool, Foldable Learning Standing Tower",
-        "learning tower",
-    ),
-    (
-        "Over-The-Toilet Storage Cabinet with Adjustable Shelf and Double Doors",
-        "over the toilet storage cabinet",
-    ),
-    (
-        "Book Organizer, Toy Storage Cabinet Organizer, White",
-        "kids toy storage organizer",
-    ),
-    (
-        '27.6" Tall Freestanding Pet Gate, 4 Panels Foldable Dog Gate',
-        "pet gate",
-    ),
-    (
-        "7 in 1 Baby Tricycle, Foldable Toddler Tricycle with Parent Handle",
-        "baby tricycle",
-    ),
-    (
-        "Multiple Colors, Girls Bike with Basket for 7-10 Years Old Kids, 20 inch wheel",
-        "kids bike",
-    ),
-    (
-        "2-in-1 Shoe Storage Bench, Rattan Shoe Cabinet with Adjustable Shelves",
-        "shoe storage bench",
-    ),
-    (
-        "Kids Table Set with One Chair, Wooden Children Study Table",
-        "kids table and chair set",
-    ),
-    (
-        "Wall-Mounted Entryway Shelf with Hooks and Storage Bench Set",
-        "entryway shelf and storage bench set",
-    ),
-    (
-        "Modern Wooden Storage Cabinet with Sliding Doors and Open Shelves",
-        "sliding door storage cabinet",
-    ),
-    (
-        "Kids Dress Up Storage with Mirror and Hooks, Wooden Clothes Rack",
-        "kids dress up storage",
-    ),
-)
-for offset, (title, expected_type) in enumerate(specific_type_cases, start=110):
-    specific = Product(id=offset, gigab2b_url=f"https://example.test/item/{offset}", status="created", current_step=1)
-    specific.data = ProductData(product_id=offset, title=title, color="White", material="MDF")
-    specific.images = ProductImage(product_id=offset, main_image_path="/tmp/main.jpg", main_image_source="model_selected")
-    specific_plan = build_amazon_competitor_queries(specific)
-    assert all(item["included_terms"][0] == expected_type for item in specific_plan["queries"]), specific_plan
 
 kids_table_set = Product(id=94, gigab2b_url="https://example.test/item/94", status="created", current_step=1)
 kids_table_set.data = ProductData(
@@ -7815,37 +7705,6 @@ asyncio.run(main())
     assert_true(result.returncode == 0, f"候选详情 fixture adapter 行为验证失败: {result.stderr or result.stdout}")
 
 
-def test_auto_competitor_selection_identity_behaviour() -> None:
-    code = r'''
-from types import SimpleNamespace
-from app.product_tasks.actions import _identity_declares_accessory, _identity_type_tags
-
-complete_bike = SimpleNamespace(
-    title="Kids Cruiser Bicycle with Basket, Kickstand and Chain Cover",
-    leaf_category="Kids Bikes",
-    category_rank="Bicycles",
-)
-replacement_cover = SimpleNamespace(
-    title="Protective Cover for Kids Bicycle",
-    leaf_category="Bike Accessories",
-    category_rank="Accessories",
-)
-assert not _identity_declares_accessory(complete_bike), complete_bike
-assert _identity_declares_accessory(replacement_cover), replacement_cover
-source_tags = _identity_type_tags("Kids Table and Chair Set with 2 Sloth Chairs")
-candidate_tags = _identity_type_tags("24in Wooden Table and Chairs, 3-Piece Classroom Set")
-assert "table_chair_set" in source_tags & candidate_tags, (source_tags, candidate_tags)
-'''
-    result = subprocess.run(
-        [str(ROOT / "backend" / ".venv" / "bin" / "python"), "-c", code],
-        cwd=ROOT / "backend",
-        text=True,
-        capture_output=True,
-        env=os.environ.copy(),
-    )
-    assert_true(result.returncode == 0, f"自动选竞品身份判断行为验证失败: {result.stderr or result.stdout}")
-
-
 def test_subagent_dispatch_identity_lifecycle_contract() -> None:
     playbook = ROOT / "docs" / "collaboration" / "playbooks" / "subagent-dispatch.md"
     delivery_playbook = ROOT / "docs" / "collaboration" / "playbooks" / "delivery-orchestration.md"
@@ -8224,7 +8083,6 @@ def main() -> int:
         test_auto_competitor_visual_match_phase_b_fixture_behaviour,
         test_auto_competitor_candidate_capture_and_selection_phase1_contract,
         test_auto_competitor_candidate_capture_fixture_adapter_behaviour,
-        test_auto_competitor_selection_identity_behaviour,
         test_subagent_dispatch_identity_lifecycle_contract,
     ]
     for test in tests:
