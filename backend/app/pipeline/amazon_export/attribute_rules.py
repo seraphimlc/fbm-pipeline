@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-RULE_VERSION = "supplier-attributes-2026-10-07-v2"
+RULE_VERSION = "supplier-attributes-2026-10-07-v3"
 RULE_FAMILIES = {"bed_frame", "bicycle", "home_storage_furniture", "ride_on_toy"}
 
 
@@ -118,8 +118,8 @@ def rule_candidates(pd: Any, product_type: str) -> dict[str, list[Any]]:
         (r"assembly instructions|installation manual|detailed instructions", "Installation Manual"),
         (r"all hardware|hardware (?:bag|included)|hardware and", "Hardware Bag"),
         (r"training wheels?", "Training Wheel"), (r"kickstand", "Kickstand"),
-        (r"battery included|included.*battery|battery.*included", "Battery"),
-        (r"charger included|included.*charger", "Charger"),
+        (r"\bbattery (?:is )?included\b|\b(?:includes?|included)(?:\s+(?:a|the|one|rechargeable)){0,3}\s+battery\b", "Battery"),
+        (r"\bcharger (?:is )?included\b|\b(?:includes?|included)(?:\s+(?:a|the|one)){0,3}\s+charger\b", "Charger"),
         (r"anti[- ]tip (?:device|kit)|anti[- ]tipping", "Anti-Tip Device"),
         (r"\bheadboard\b", "Headboard"), (r"\bslats?\b", "Slat"),
         (r"\bdrawers?\b", "Drawers"), (r"\bdoors?\b", "Doors"),
@@ -135,6 +135,23 @@ def rule_candidates(pd: Any, product_type: str) -> dict[str, list[Any]]:
                        "STEP_STOOL": "Step Stool", "MAKEUP_VANITY": "Vanity"}[product_type]]
     if product_type == "BED_FRAME":
         components = [v for v in ("Headboard", "Installation Manual", "Slat") if v in components]
+    if product_type == "RIDE_ON_TOY":
+        # The supplied vehicle itself is a component. Require its explicit
+        # supplier identity; do not default an unknown toy to a vehicle, and
+        # do not borrow accessories from other variants or generated copy.
+        title = str(getattr(pd, "title", None) or "").lower()
+        current_source = " ".join([title, str(getattr(pd, "features", None) or ""),
+                                   str(getattr(pd, "description", None) or ""),
+                                   *supplier_material_texts(pd)]).lower()
+        vehicle = (
+            "Go Kart" if _matches(title, r"\bgo[- ]?kart\b") else
+            "Ride-On Car" if _matches(title, r"\bride[- ]on (?:car|utv|truck|atv)\b") else None
+        )
+        if vehicle:
+            components.insert(0, vehicle)
+        if _matches(current_source, r"(?:\bwith\s+|\bw/\s*)(?:parents?\s+)?(?:wireless\s+)?remote control"):
+            components.append("Remote Control")
+        components = list(dict.fromkeys(components))
     set_values("included_components", components)
     features = []
     for pattern, label in (

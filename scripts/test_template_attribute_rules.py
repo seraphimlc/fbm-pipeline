@@ -31,6 +31,32 @@ def product_data(**values):
 
 
 class AttributeRuleTests(unittest.TestCase):
+    def test_ride_on_components_use_current_supplier_identity(self):
+        for title, expected in [
+            ("12V electric Kids Pedal Go Kart", ["Go Kart"]),
+            ("24V Kids Ride on Car UTV W/Parents Remote Control", ["Ride-On Car", "Remote Control"]),
+            ("Kids Electric Go Kart", ["Go Kart"]),
+        ]:
+            pd = product_data(title=title)
+            d = self.resolve(pd, "ride_on_toy.json", "RIDE_ON_TOY")
+            self.assertEqual(d["included_components"]["values"], expected)
+
+    def test_ride_on_does_not_guess_accessories_or_copy_other_variant(self):
+        pd = product_data(title="Kids Go Kart", description="Battery and charger not included. With remote control not included.",
+                          variants='[{"title": "Ride on car with remote control"}]')
+        d = self.resolve(pd, "ride_on_toy.json", "RIDE_ON_TOY")
+        self.assertEqual(d["included_components"]["values"], ["Go Kart"])
+        self.assertEqual(self.resolve(product_data(title="Unknown Toy"), "ride_on_toy.json", "RIDE_ON_TOY")["included_components"]["values"], [])
+
+    def test_ride_on_components_are_required(self):
+        from app.pipeline.step10_amazon_template import _missing_required_fields
+        m = mapping("ride_on_toy.json")
+        attr = m["dynamic_fields"]["included_components"][0]
+        fill = {"product_type#1.value": "RIDE_ON_TOY"}
+        self.assertIn(attr, _missing_required_fields(m, fill, {attr: "BV"}))
+        fill[attr] = "Go Kart"
+        self.assertNotIn(attr, _missing_required_fields(m, fill, {attr: "BV"}))
+
     def resolve(self, pd, name, typ):
         m = mapping(name)
         return resolve_attributes(pd, m, Path(m["template_path"]), typ)
